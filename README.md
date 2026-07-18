@@ -1,28 +1,43 @@
-# GopherAI
+# MESGuard
 
-## 项目结构
+MESGuard 正在从 GopherAI 教学 Demo 重构为面向 MES 诊断的 Go 后端。默认可执行程序是
+`cmd/mesguard-api`：它以 PostgreSQL 为诊断状态与事件的系统记录，以 Redis 提供短期基础设施能力，
+并通过显式依赖装配隔离 HTTP、数据库和 Eino。
+
+旧 GopherAI 模块仍保留在根目录，入口迁至 `cmd/legacy-api`，仅用于迁移对照，不再扩展功能。
+
+## 当前结构
 
 ```text
 .
-├── common/          # AI 模型、RAG、MCP、数据库及基础组件
-├── config/          # 本地与 Docker 环境配置
-├── controller/      # Gin HTTP 控制器
-├── dao/             # PostgreSQL 数据访问层
-├── middleware/      # JWT 等中间件
-├── model/           # GORM 数据模型
-├── router/          # API 路由注册
-├── service/         # 用户、会话、文件与图片业务逻辑
-├── utils/           # 通用工具和 JWT 工具
-├── vue-frontend/    # Vue 3 前端
-├── main.go          # 后端程序入口
+├── cmd/mesguard-api/        # 默认 API 入口与显式装配
+├── cmd/legacy-api/          # 保留的旧 Demo 入口
+├── internal/diagnosis/      # Run、Event、用例与业务端口
+├── internal/adapter/        # PostgreSQL、Eino 等外部实现
+├── internal/platform/       # 配置、连接和版本化迁移
+├── internal/transport/http/ # Gin Handler、DTO、SSE
+├── config/mesguard*.toml    # 新服务本地/Docker 配置
+├── docs/decisions/          # 架构决策记录
 └── docker-compose.yml
 ```
+
+本地从仓库根目录运行 `go run ./cmd/mesguard-api`；`.env` 提供
+`MESGUARD_POSTGRES_PASSWORD`。Docker 默认构建并启动这个新入口。
+
+当前已提供：
+
+- `GET /healthz`
+- `POST /api/v1/diagnostic-runs`
+- `GET /api/v1/diagnostic-runs/:runID`
+- `GET /api/v1/diagnostic-runs/:runID/events`（持久化事件的 SSE 回放）
 
 Docker Compose 的启动和配置说明见 [`README.compose.md`](README.compose.md)。
 
 后续架构升级、四周排期与进度记录见 [`ROADMAP.md`](ROADMAP.md)。
 
-## 项目介绍
+架构取舍见 [ADR 002](docs/decisions/002-modular-monolith-architecture.md)。
+
+## Legacy GopherAI
 
 在上次在[知识星球](https://programmercarl.com/other/kstar.htm)里推出 C++ AI应用服务平台项目之后，很多录友反馈有没有Go版本的，因为市面上Go相关的AI项目也很少。
 
@@ -201,6 +216,5 @@ Docker Compose 的启动和配置说明见 [`README.compose.md`](README.compose.
 ![](https://file1.kamacoder.com/i/web/2025-09-29_10-07-44.jpg)
 
 加入[知识星球](https://programmercarl.com/other/kstar.htm)后如果不满意，三天内（72h）可全额退款！
-
 
 

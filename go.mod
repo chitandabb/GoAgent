@@ -1,8 +1,8 @@
 module GopherAI
 
-go 1.24.0
+go 1.25.0
 
-toolchain go1.24.10
+toolchain go1.25.3
 
 require (
 	github.com/BurntSushi/toml v0.3.1

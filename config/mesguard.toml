@@ -1,0 +1,32 @@
+[http]
+host = "0.0.0.0"
+port = 9090
+
+[postgres]
+host = "127.0.0.1"
+port = 5432
+user = "mesguard"
+database = "mesguard"
+passwordEnv = "MESGUARD_POSTGRES_PASSWORD"
+sslMode = "disable"
+maxIdleConns = 10
+maxOpenConns = 100
+
+[redis]
+host = "127.0.0.1"
+port = 6379
+password = ""
+database = 0
+
+[sqlserver]
+host = "127.0.0.1"
+port = 1433
+user = "sa"
+database = "MESGuard"
+passwordEnv = "MESGUARD_SQLSERVER_SA_PASSWORD"
+encrypt = false
+
+[llm]
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen-turbo"
+apiKeyEnv = "OPENAI_API_KEY"

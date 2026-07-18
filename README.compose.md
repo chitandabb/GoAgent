@@ -14,8 +14,9 @@ The default Compose environment is the target MESGuard foundation:
 - `redis`: short-lived run state, semantic cache, rate limits, and locks. It
   is not the long-term Agent system of record.
 
-The existing user, session, and message persistence path now uses PostgreSQL.
-The next Agent module will use the same system of record, while SQL Server
+The default `mesguard-api` also starts from this Compose file. It applies
+versioned MESGuard migrations, persists diagnostic runs and events in
+PostgreSQL, and exposes `/healthz` plus `/api/v1/diagnostic-runs`. SQL Server
 remains isolated as the database being diagnosed.
 
 ## Start
@@ -50,15 +51,16 @@ to discard all local PostgreSQL, SQL Server, and Redis data.
 
 ## Legacy GopherAI Environment
 
-MySQL, RabbitMQ, and the weather MCP server are retained only for legacy
-experiments. The backend no longer starts them or relies on them for session and
-message persistence. They stay behind a Compose profile:
+MySQL, RabbitMQ, and the weather MCP server are retained only for inspecting
+legacy modules. The default backend is still `mesguard-api`; the old Vue and
+chat routes are not a supported runtime combination with it. These services
+stay behind a Compose profile:
 
 ```powershell
 docker compose --profile legacy up -d --build
 ```
 
-This profile adds the legacy MySQL, RabbitMQ, MCP demo, and Vue frontend to the
-default target infrastructure. The image-recognition route is disabled in the
-default build and requires the explicit `onnx` build tag, the ONNX Runtime
-library, and model files; it is not part of the MESGuard baseline.
+This profile adds the legacy MySQL, RabbitMQ, MCP demo, and Vue frontend for
+source-level comparison. The image-recognition route is disabled in the default
+build and requires the explicit `onnx` build tag, the ONNX Runtime library, and
+model files; it is not part of the MESGuard baseline.
