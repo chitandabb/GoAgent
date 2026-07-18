@@ -1,4 +1,28 @@
-# Go项目推荐：AI应用服务平台（GopherAI）
+# GopherAI
+
+## 项目结构
+
+```text
+.
+├── common/          # AI 模型、RAG、MCP、数据库及基础组件
+├── config/          # 本地与 Docker 环境配置
+├── controller/      # Gin HTTP 控制器
+├── dao/             # PostgreSQL 数据访问层
+├── middleware/      # JWT 等中间件
+├── model/           # GORM 数据模型
+├── router/          # API 路由注册
+├── service/         # 用户、会话、文件与图片业务逻辑
+├── utils/           # 通用工具和 JWT 工具
+├── vue-frontend/    # Vue 3 前端
+├── main.go          # 后端程序入口
+└── docker-compose.yml
+```
+
+Docker Compose 的启动和配置说明见 [`README.compose.md`](README.compose.md)。
+
+后续架构升级、四周排期与进度记录见 [`ROADMAP.md`](ROADMAP.md)。
+
+## 项目介绍
 
 在上次在[知识星球](https://programmercarl.com/other/kstar.htm)里推出 C++ AI应用服务平台项目之后，很多录友反馈有没有Go版本的，因为市面上Go相关的AI项目也很少。
 
@@ -177,7 +201,6 @@
 ![](https://file1.kamacoder.com/i/web/2025-09-29_10-07-44.jpg)
 
 加入[知识星球](https://programmercarl.com/other/kstar.htm)后如果不满意，三天内（72h）可全额退款！
-
 
 
 
