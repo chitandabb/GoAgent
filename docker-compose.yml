@@ -1,0 +1,188 @@
+name: mesguard
+
+# The default profile is the MESGuard development foundation. The old GopherAI
+# application is retained behind the `legacy` profile until its modules are
+# migrated or intentionally removed.
+services:
+  postgres:
+    image: ${MESGUARD_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    container_name: mesguard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${MESGUARD_POSTGRES_USER:-mesguard}
+      POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      POSTGRES_DB: ${MESGUARD_POSTGRES_DB:-mesguard}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MESGUARD_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ${MESGUARD_POSTGRES_DATA:-mesguard_postgres-data}:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  sqlserver:
+    image: ${MESGUARD_SQLSERVER_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}
+    container_name: mesguard-sqlserver
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MESGUARD_SQLSERVER_SA_PASSWORD:-MESGuard_Dev!2026}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MESGUARD_SQLSERVER_PORT:-1433}:1433"
+    volumes:
+      - ${MESGUARD_SQLSERVER_DATA:-mesguard_sqlserver-data}:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  sqlserver-seed:
+    image: ${MESGUARD_SQLSERVER_TOOLS_IMAGE:-mcr.microsoft.com/mssql-tools:latest}
+    container_name: mesguard-sqlserver-seed
+    restart: "no"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MESGUARD_SQLSERVER_SA_PASSWORD:-MESGuard_Dev!2026}
+    volumes:
+      - ./infra/sqlserver/init:/seed:ro
+    command:
+      - /bin/bash
+      - -ec
+      - >-
+        /opt/mssql-tools/bin/sqlcmd -C -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD"
+        -i /seed/001_mes_demo.sql
+
+  redis:
+    image: ${MESGUARD_REDIS_IMAGE:-redis:7-alpine}
+    container_name: mesguard-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "${MESGUARD_REDIS_PORT:-6379}:6379"
+    volumes:
+      - ${MESGUARD_REDIS_DATA:-mesguard_redis-data}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mysql:
+    profiles: ["legacy"]
+    image: ${GOPHERAI_MYSQL_IMAGE:-mysql:8.0}
+    container_name: gopherai-mysql
+    restart: unless-stopped
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: GopherAI
+      MYSQL_ROOT_HOST: "%"
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - ${GOPHERAI_MYSQL_DATA:-gopherai_mysql-data}:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  rabbitmq:
+    profiles: ["legacy"]
+    image: ${GOPHERAI_RABBITMQ_IMAGE:-rabbitmq:3.13-management}
+    container_name: gopherai-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: root
+      RABBITMQ_DEFAULT_PASS: 123456
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - ${GOPHERAI_RABBITMQ_DATA:-gopherai_rabbitmq-data}:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  mcp:
+    profiles: ["legacy"]
+    build:
+      context: ./common/mcp
+      dockerfile: Dockerfile
+    container_name: gopherai-mcp
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "8081:8081"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: gopherai-backend
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      CONFIG_FILE: /app/config/config.docker.toml
+      MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL_NAME: ${OPENAI_MODEL_NAME:-qwen-turbo}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MCP_BASE_URL: http://mcp:8081/mcp
+      IMAGE_MODEL_PATH: ${IMAGE_MODEL_PATH:-/app/models/mobilenetv2/mobilenetv2-7.onnx}
+      IMAGE_LABEL_PATH: ${IMAGE_LABEL_PATH:-/app/models/imagenet_classes.txt}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config:/app/config:ro
+      - ${GOPHERAI_UPLOADS:-gopherai_uploads-data}:/app/uploads
+      - ${GOPHERAI_DOCS:-gopherai_docs-data}:/app/docs
+
+  frontend:
+    profiles: ["legacy"]
+    build:
+      context: ./vue-frontend
+      dockerfile: Dockerfile
+    container_name: gopherai-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8080:80"
+
+volumes:
+  mesguard_postgres-data:
+  mesguard_sqlserver-data:
+  mesguard_redis-data:
+  gopherai_mysql-data:
+  gopherai_rabbitmq-data:
+  gopherai_uploads-data:
+  gopherai_docs-data:
