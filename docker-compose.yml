@@ -141,18 +141,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: gopherai-backend
+    container_name: mesguard-api
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
-      CONFIG_FILE: /app/config/config.docker.toml
+      MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
       MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      MESGUARD_SQLSERVER_SA_PASSWORD: ${MESGUARD_SQLSERVER_SA_PASSWORD:-MESGuard_Dev!2026}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL_NAME: ${OPENAI_MODEL_NAME:-qwen-turbo}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
-      MCP_BASE_URL: http://mcp:8081/mcp
-      IMAGE_MODEL_PATH: ${IMAGE_MODEL_PATH:-/app/models/mobilenetv2/mobilenetv2-7.onnx}
-      IMAGE_LABEL_PATH: ${IMAGE_LABEL_PATH:-/app/models/imagenet_classes.txt}
     depends_on:
       postgres:
         condition: service_healthy
@@ -162,8 +160,6 @@ services:
       - "9090:9090"
     volumes:
       - ./config:/app/config:ro
-      - ${GOPHERAI_UPLOADS:-gopherai_uploads-data}:/app/uploads
-      - ${GOPHERAI_DOCS:-gopherai_docs-data}:/app/docs
 
   frontend:
     profiles: ["legacy"]

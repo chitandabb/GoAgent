@@ -1,5 +1,6 @@
 /.idea/
 /.env
+/.firecrawl/
 /vue-frontend/node_modules/
 /vue-frontend/dist/
 /uploads/
