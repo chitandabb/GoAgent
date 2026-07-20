@@ -12,6 +12,8 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// Open 创建 PostgreSQL 连接，并返回用于优雅关闭连接的函数。
+// 数据库密码只从配置指定的环境变量读取，不从 TOML 明文读取。
 func Open(ctx context.Context, cfg config.PostgresConfig) (*gorm.DB, func() error, error) {
 	password, err := cfg.Password()
 	if err != nil {

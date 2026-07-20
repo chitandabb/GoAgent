@@ -9,6 +9,7 @@ import (
 	rediscli "github.com/redis/go-redis/v9"
 )
 
+// Open 创建 Redis 客户端，并在返回前执行一次 Ping 检查连接是否可用。
 func Open(ctx context.Context, cfg config.RedisConfig) (*rediscli.Client, error) {
 	client := rediscli.NewClient(&rediscli.Options{
 		Addr:     cfg.Address(),

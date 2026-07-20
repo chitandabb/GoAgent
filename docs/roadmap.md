@@ -1,51 +1,30 @@
 # MESGuard Roadmap
 
-## Product Goal
+## Current Stage: Web Foundation
 
-MESGuard helps MES implementation, support, and quality engineers turn a ticket
-into a traceable diagnosis: collect read-only evidence, reason over it, expose
-uncertainty, and produce an actionable report. The repository uses synthetic
-MES data only.
+- [x] `cmd/internal` project layout.
+- [x] Typed TOML and `.env` configuration.
+- [x] Manual dependency injection in `bootstrap`.
+- [x] Gin Router and `/healthz` endpoint.
+- [x] Application error-code enum and standard error type.
+- [x] Unified success/error response structure.
+- [x] Global request ID, error handling, panic recovery, and 404/405 responses.
+- [x] Graceful HTTP, PostgreSQL, and Redis shutdown.
 
-## Completed Foundation
+## Before Business Code
 
-- [x] PostgreSQL + pgvector, SQL Server 2022 Developer, and Redis Compose stack.
-- [x] `cmd/internal` modular-monolith layout with explicit dependency wiring.
-- [x] PostgreSQL-backed diagnostic Run and ordered Event persistence.
-- [x] Versioned SQL migration ledger and durable SSE event replay.
-- [x] Eino OpenAI-compatible adapter boundary.
-- [x] Go 1.25.3 toolchain and Docker build alignment.
+- [ ] Request DTO binding and validation conventions.
+- [ ] Structured application logging and request-context fields.
+- [ ] Configuration tests and startup failure tests.
+- [ ] Decide authentication requirements for the diagnostic workbench.
+- [ ] Define database migration command and transaction conventions.
 
-## Next: Safe Evidence Collection
+## Business Work, Deliberately Deferred
 
-- [ ] Implement a SQL Server read-only `MESReader` adapter.
-- [ ] Whitelist diagnostic query templates and validate parameters.
-- [ ] Record query duration, row limits, and execution-plan evidence as events.
-- [ ] Add synthetic ticket cases for delayed work orders, interface failures,
-  and slow queries.
+- Diagnostic Run, Step, ToolCall, and Event models.
+- SQL Server read-only evidence collection.
+- Eino Agent execution and controlled tool calling.
+- Retrieval, evaluation, and the diagnostic workbench UI.
 
-## Then: Agent Execution
-
-- [ ] Add Run, Step, ToolCall, and Event state transitions.
-- [ ] Execute one Eino-backed diagnostic loop with timeout and cancellation.
-- [ ] Persist every model/tool decision before publishing the corresponding SSE
-  event.
-- [ ] Return a structured diagnosis with evidence, confidence, and next steps.
-
-## Later: Knowledge and Evaluation
-
-- [ ] Add PostgreSQL full-text and vector retrieval for product documents and
-  confirmed cases.
-- [ ] Build a small offline evaluation set from synthetic MES cases.
-- [ ] Add trace timing, prompt/version metadata, and regression checks.
-- [ ] Build a dedicated MES diagnostic workbench after the API workflow is
-  stable.
-
-## Explicit Non-goals
-
-- No general-purpose assistant, media-processing, or unrelated integration
-  features.
-- No write-capable SQL tools, DDL, stored procedure execution, or automatic
-  remediation.
-- No multi-agent collaboration before the single-agent diagnostic loop is
-  observable, safe, and evaluated.
+These capabilities will be introduced one vertical slice at a time after the
+Web foundation is understood and reviewed.

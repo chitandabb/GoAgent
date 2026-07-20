@@ -2,26 +2,42 @@ package httptransport
 
 import (
 	"context"
-	"net/http"
 
-	"github.com/chitandabb/GoAgent/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/apperror"
 
 	"github.com/gin-gonic/gin"
 )
 
+// HealthCheck 定义健康检查函数，Router 不需要知道数据库和 Redis 的具体类型。
 type HealthCheck func(context.Context) error
 
-func NewRouter(diagnosisService *diagnosis.Service, health HealthCheck) *gin.Engine {
+// NewRouter 创建并配置 Gin Engine。
+// 所有全局中间件和基础路由都集中在这里注册。
+func NewRouter(health HealthCheck) *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.HandleMethodNotAllowed = true
+
+	// 中间件按照注册顺序进入，按照相反顺序退出。
+	router.Use(RequestID())
+	router.Use(gin.Logger())
+	router.Use(Recovery())
+	router.Use(ErrorHandler())
+
 	router.GET("/healthz", func(c *gin.Context) {
 		if err := health(c.Request.Context()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "error": err.Error()})
+			AbortWithError(c, apperror.Wrap(apperror.CodeDependencyUnavailable, err))
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		WriteSuccess(c, gin.H{"status": "ok"})
 	})
 
-	NewDiagnosisHandler(diagnosisService).Register(router.Group("/api/v1"))
+	// 未匹配的路由和请求方法也必须使用统一响应格式。
+	router.NoRoute(func(c *gin.Context) {
+		WriteError(c, apperror.New(apperror.CodeNotFound))
+	})
+	router.NoMethod(func(c *gin.Context) {
+		WriteError(c, apperror.New(apperror.CodeMethodNotAllowed))
+	})
+
 	return router
 }

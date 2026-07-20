@@ -26,12 +26,8 @@ docker compose ps
 Invoke-RestMethod http://127.0.0.1:9090/healthz
 ```
 
-The backend applies embedded, versioned MESGuard migrations at startup. Inspect
-the migration ledger with:
-
-```powershell
-docker compose exec postgres psql -U mesguard -d mesguard -c "SELECT version, applied_at FROM mesguard_schema_migrations ORDER BY version;"
-```
+The current Web shell connects to PostgreSQL and Redis during startup so that
+`/healthz` can verify both dependencies. It does not apply business migrations.
 
 Stop the stack with `docker compose down`. Do not add `-v` unless the local
 PostgreSQL, SQL Server, and Redis data should be discarded deliberately.
