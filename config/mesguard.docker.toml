@@ -17,16 +17,3 @@ host = "redis"
 port = 6379
 password = ""
 database = 0
-
-[sqlserver]
-host = "sqlserver"
-port = 1433
-user = "sa"
-database = "MESGuard"
-passwordEnv = "MESGUARD_SQLSERVER_SA_PASSWORD"
-encrypt = false
-
-[llm]
-baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "qwen-turbo"
-apiKeyEnv = "OPENAI_API_KEY"

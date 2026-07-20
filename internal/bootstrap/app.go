@@ -7,10 +7,7 @@ import (
 	stdhttp "net/http"
 	"time"
 
-	postgresdiagnosis "github.com/chitandabb/GoAgent/internal/adapter/postgres/diagnosis"
-	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
-	"github.com/chitandabb/GoAgent/internal/platform/migrate"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
 	httptransport "github.com/chitandabb/GoAgent/internal/transport/http"
@@ -27,13 +24,11 @@ type App struct {
 	shutdownWait time.Duration
 }
 
+// New 是项目的手动依赖装配入口，作用类似 Spring Boot 的 Bean 配置类。
+// 这里负责创建基础设施客户端、Router 和 HTTP Server。
 func New(ctx context.Context, cfg config.Config) (*App, error) {
 	db, closeDB, err := platformpostgres.Open(ctx, cfg.Postgres)
 	if err != nil {
-		return nil, err
-	}
-	if err := migrate.Apply(ctx, db); err != nil {
-		_ = closeDB()
 		return nil, err
 	}
 	redis, err := platformredis.Open(ctx, cfg.Redis)
@@ -42,8 +37,6 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	runStore := postgresdiagnosis.NewRunStore(db)
-	diagnosisService := diagnosis.NewService(runStore)
 	app := &App{
 		db:           db,
 		dbClose:      closeDB,
@@ -52,12 +45,13 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 	app.server = &stdhttp.Server{
 		Addr:              cfg.HTTP.Address(),
-		Handler:           httptransport.NewRouter(diagnosisService, app.health),
+		Handler:           httptransport.NewRouter(app.health),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return app, nil
 }
 
+// Run 启动 HTTP Server，并在进程收到退出信号后执行优雅关闭。
 func (a *App) Run(ctx context.Context) error {
 	errs := make(chan error, 1)
 	go func() {
@@ -76,6 +70,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
+// Close 按顺序关闭 HTTP、Redis 和 PostgreSQL 连接。
 func (a *App) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownWait)
 	defer cancel()
@@ -85,6 +80,7 @@ func (a *App) Close() error {
 	return errors.Join(shutdownErr, redisErr, dbErr)
 }
 
+// health 检查当前 Web 壳依赖的 PostgreSQL 和 Redis 是否可用。
 func (a *App) health(ctx context.Context) error {
 	sqlDB, err := a.db.DB()
 	if err != nil {

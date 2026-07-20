@@ -88,8 +88,6 @@ services:
       TZ: Asia/Shanghai
       MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
       MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
-      MESGUARD_SQLSERVER_SA_PASSWORD: ${MESGUARD_SQLSERVER_SA_PASSWORD:-MESGuard_Dev!2026}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

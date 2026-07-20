@@ -1,20 +1,29 @@
 # MESGuard
 
-MESGuard is a Go service for evidence-based MES ticket diagnosis. It treats the
-MES database as a read-only evidence source and stores diagnostic runs and
-ordered execution events in PostgreSQL.
+MESGuard will become a Go service for evidence-based MES ticket diagnosis. The
+project is currently at the Web foundation stage so that each Go engineering
+concept can be introduced and reviewed independently.
 
 ## Current Status
 
-The first vertical slice is available:
+The current API exposes only:
 
 - `GET /healthz`
-- `POST /api/v1/diagnostic-runs`
-- `GET /api/v1/diagnostic-runs/:runID`
-- `GET /api/v1/diagnostic-runs/:runID/events`
 
-Creating a run atomically persists the run and its first `run.created` event.
-SQL Server evidence collection and Agent execution are the next milestones.
+The Web shell already provides request IDs, unified success/error responses,
+application error codes, global error handling, panic recovery, and graceful
+shutdown. No MES business API is registered yet.
+
+Successful responses use this shape:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {},
+  "requestId": "..."
+}
+```
 
 ## Quick Start
 
@@ -32,7 +41,7 @@ Run the test suite with `go test ./...`.
 
 All project documentation is indexed from [docs/README.md](docs/README.md):
 
-- architecture and directory responsibilities;
+- Web request flow, dependency injection, and directory responsibilities;
 - local development and Docker operation;
 - product roadmap;
 - architecture decision records.
