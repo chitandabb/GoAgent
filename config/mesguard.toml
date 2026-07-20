@@ -2,6 +2,17 @@
 host = "0.0.0.0"
 port = 9090
 
+[log]
+level = "debug"
+format = "console"
+environment = "development"
+enableFile = true
+outputDir = "logs"
+maxSizeMB = 100
+maxAgeDays = 30
+maxBackups = 10
+compress = true
+
 [postgres]
 host = "127.0.0.1"
 port = 5432

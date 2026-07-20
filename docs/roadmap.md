@@ -9,12 +9,12 @@
 - [x] Application error-code enum and standard error type.
 - [x] Unified success/error response structure.
 - [x] Global request ID, error handling, panic recovery, and 404/405 responses.
+- [x] Structured Zap logging, request-context fields, and optional file rotation.
 - [x] Graceful HTTP, PostgreSQL, and Redis shutdown.
 
 ## Before Business Code
 
 - [ ] Request DTO binding and validation conventions.
-- [ ] Structured application logging and request-context fields.
 - [ ] Configuration tests and startup failure tests.
 - [ ] Decide authentication requirements for the diagnostic workbench.
 - [ ] Define database migration command and transaction conventions.
