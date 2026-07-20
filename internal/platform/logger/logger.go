@@ -22,6 +22,21 @@ import (
 
 type contextKey struct{}
 
+// NewBootstrap 创建不依赖 TOML 的启动日志器。
+// 它只负责记录“配置无法加载”或“正式 Logger 无法创建”这类最早期错误。
+func NewBootstrap() *zap.Logger {
+	encoder, _ := newEncoder("console")
+	return zap.New(
+		zapcore.NewCore(encoder, zapcore.Lock(os.Stderr), zap.DebugLevel),
+		zap.AddCaller(),
+		zap.AddStacktrace(zap.ErrorLevel),
+		zap.Fields(
+			zap.String("service", "mesguard-api"),
+			zap.String("phase", "bootstrap"),
+		),
+	)
+}
+
 // New 根据类型化配置创建 Logger。
 // 控制台是容器和本地开发的主要输出；文件输出开启后使用 Lumberjack 自动轮转。
 func New(cfg config.LogConfig) (*zap.Logger, func() error, error) {

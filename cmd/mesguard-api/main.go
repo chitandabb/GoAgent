@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +14,10 @@ import (
 )
 
 func main() {
+	// 启动 Logger 不依赖配置文件，确保配置加载失败也能输出统一的结构化日志。
+	bootstrapLogger := platformlogger.NewBootstrap()
+	defer platformlogger.Sync(bootstrapLogger)
+
 	// 统一监听 Ctrl+C 和容器终止信号，传递给 App 做优雅关闭。
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -28,13 +31,17 @@ func main() {
 	// 配置只加载一次，再由 bootstrap 显式传递给需要的组件。
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load MESGuard config: %v", err)
+		bootstrapLogger.Error("load application config failed", zap.Error(err))
+		platformlogger.Sync(bootstrapLogger)
+		os.Exit(1)
 	}
 
 	// Logger 是第一个被创建的基础设施依赖，后续组件都复用同一个实例。
 	appLogger, closeLogger, err := platformlogger.New(cfg.Log)
 	if err != nil {
-		log.Fatalf("build MESGuard logger: %v", err)
+		bootstrapLogger.Error("build application logger failed", zap.Error(err))
+		platformlogger.Sync(bootstrapLogger)
+		os.Exit(1)
 	}
 	defer func() { _ = closeLogger() }()
 	// 把仍使用标准库 log 的第三方组件也统一转发到 Zap。
