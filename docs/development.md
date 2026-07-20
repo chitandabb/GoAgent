@@ -1,4 +1,4 @@
-# MESGuard Development Environment
+# Local Development
 
 The local development stack contains only MESGuard dependencies:
 
@@ -11,7 +11,7 @@ The local development stack contains only MESGuard dependencies:
 
 ## Start
 
-1. Copy [`.env.compose.example`](.env.compose.example) to `.env` if local values
+1. Copy [`../.env.compose.example`](../.env.compose.example) to `.env` if local values
    need to be overridden.
 2. Start the stack:
 
