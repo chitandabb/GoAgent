@@ -1,9 +1,7 @@
 .git
 .gitignore
 .idea
-node_modules
-vue-frontend/node_modules
-vue-frontend/dist
-uploads
-docs
+.env
+.firecrawl
 *.exe
+*.test

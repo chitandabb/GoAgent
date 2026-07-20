@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"GopherAI/internal/diagnosis"
-	"GopherAI/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"

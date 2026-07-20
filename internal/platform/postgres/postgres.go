@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"GopherAI/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

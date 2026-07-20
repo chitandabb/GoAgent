@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"GopherAI/internal/bootstrap"
-	"GopherAI/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/bootstrap"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
 )
 
 func main() {

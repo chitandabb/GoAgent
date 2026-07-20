@@ -20,8 +20,6 @@ WORKDIR /app
 COPY --from=builder /out/mesguard-api /app/mesguard-api
 COPY config /app/config
 
-RUN mkdir -p /app/uploads /app/docs
-
 EXPOSE 9090
 
 CMD ["./mesguard-api"]

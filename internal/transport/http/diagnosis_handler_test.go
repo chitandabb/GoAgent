@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"GopherAI/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 )
 
 type testRunStore struct {

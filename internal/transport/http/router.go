@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"GopherAI/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
 	"github.com/gin-gonic/gin"
 )

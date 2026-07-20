@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"GopherAI/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	rediscli "github.com/redis/go-redis/v9"
 )

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"GopherAI/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
 	"gorm.io/gorm"
 )
