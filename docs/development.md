@@ -29,6 +29,13 @@ Invoke-RestMethod http://127.0.0.1:9090/healthz
 The current Web shell connects to PostgreSQL and Redis during startup so that
 `/healthz` can verify both dependencies. It does not apply business migrations.
 
+## Logging
+
+Local configuration writes readable console logs and rotated JSON files under
+`logs/`. Docker configuration writes JSON to stdout so the container runtime can
+collect and rotate it. Every HTTP completion log includes `request_id`, method,
+route, status, latency, response size, client IP, and error count.
+
 Stop the stack with `docker compose down`. Do not add `-v` unless the local
 PostgreSQL, SQL Server, and Redis data should be discarded deliberately.
 

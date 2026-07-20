@@ -11,10 +11,16 @@ import (
 	"github.com/chitandabb/GoAgent/internal/apperror"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
+func newTestRouter(health HealthCheck) *gin.Engine {
+	return NewRouter(zap.NewNop(), health)
+}
+
 func TestHealthReturnsUnifiedSuccessResponse(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 
@@ -32,7 +38,7 @@ func TestHealthReturnsUnifiedSuccessResponse(t *testing.T) {
 }
 
 func TestHealthReturnsDependencyError(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return errors.New("postgres down") })
+	router := newTestRouter(func(context.Context) error { return errors.New("postgres down") })
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 
@@ -50,7 +56,7 @@ func TestHealthReturnsDependencyError(t *testing.T) {
 }
 
 func TestGlobalErrorMiddlewareConvertsApplicationError(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	router.GET("/test-error", func(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeInvalidArgument))
 	})
@@ -68,7 +74,7 @@ func TestGlobalErrorMiddlewareConvertsApplicationError(t *testing.T) {
 }
 
 func TestInternalErrorDoesNotLeakCustomMessage(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	router.GET("/test-internal-error", func(c *gin.Context) {
 		AbortWithError(c, apperror.NewWithMessage(apperror.CodeInternal, "database password leaked"))
 	})
@@ -89,7 +95,7 @@ func TestInternalErrorDoesNotLeakCustomMessage(t *testing.T) {
 }
 
 func TestRecoveryReturnsInternalError(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	router.GET("/test-panic", func(*gin.Context) {
 		panic("unexpected")
 	})
@@ -107,7 +113,7 @@ func TestRecoveryReturnsInternalError(t *testing.T) {
 }
 
 func TestUnknownRouteUsesUnifiedResponse(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	request := httptest.NewRequest(http.MethodGet, "/unknown", nil)
 	response := httptest.NewRecorder()
 
@@ -122,7 +128,7 @@ func TestUnknownRouteUsesUnifiedResponse(t *testing.T) {
 }
 
 func TestUnsupportedMethodUsesUnifiedResponse(t *testing.T) {
-	router := NewRouter(func(context.Context) error { return nil })
+	router := newTestRouter(func(context.Context) error { return nil })
 	request := httptest.NewRequest(http.MethodPost, "/healthz", nil)
 	response := httptest.NewRecorder()
 
@@ -133,5 +139,30 @@ func TestUnsupportedMethodUsesUnifiedResponse(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"code":40501`) {
 		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
+func TestRequestLoggerIncludesRequestContextFields(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	router := NewRouter(zap.New(core), func(context.Context) error { return nil })
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set(requestIDHeader, "request-for-test")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	entries := observed.FilterMessage("HTTP request completed").All()
+	if len(entries) != 1 {
+		t.Fatalf("request log count = %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if fields["request_id"] != "request-for-test" {
+		t.Fatalf("request_id = %v", fields["request_id"])
+	}
+	if fields["method"] != http.MethodGet || fields["path"] != "/healthz" {
+		t.Fatalf("request fields = %#v", fields)
+	}
+	if fields["status"] != int64(http.StatusOK) {
+		t.Fatalf("status = %v", fields["status"])
 	}
 }

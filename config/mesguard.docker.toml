@@ -2,6 +2,17 @@
 host = "0.0.0.0"
 port = 9090
 
+[log]
+level = "info"
+format = "json"
+environment = "production"
+enableFile = false
+outputDir = "logs"
+maxSizeMB = 100
+maxAgeDays = 30
+maxBackups = 10
+compress = true
+
 [postgres]
 host = "postgres"
 port = 5432

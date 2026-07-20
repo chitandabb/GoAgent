@@ -11,8 +11,8 @@ The current API exposes only:
 - `GET /healthz`
 
 The Web shell already provides request IDs, unified success/error responses,
-application error codes, global error handling, panic recovery, and graceful
-shutdown. No MES business API is registered yet.
+application error codes, structured Zap logging, global error handling, panic
+recovery, and graceful shutdown. No MES business API is registered yet.
 
 Successful responses use this shape:
 

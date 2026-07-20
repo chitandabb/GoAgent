@@ -15,7 +15,7 @@ internal/bootstrap/app.go          manual dependency injection
 Gin Router
         |
         +-- RequestID middleware
-        +-- Logger middleware
+        +-- Structured request logger
         +-- Recovery middleware
         +-- ErrorHandler middleware
         |
@@ -34,6 +34,7 @@ unified JSON Response
 | `@Configuration` / `@Bean` | `internal/bootstrap/app.go` |
 | `@ConfigurationProperties` | `internal/platform/config/config.go` |
 | `@RestControllerAdvice` | `internal/transport/http/middleware.go` |
+| SLF4J/Logback configuration | `internal/platform/logger` and `[log]` TOML configuration |
 | Common response object | `internal/transport/http/response.go` |
 | Business exception and error enum | `internal/apperror` |
 | Controller and route registration | `internal/transport/http/router.go` |
@@ -53,6 +54,7 @@ unified JSON Response
 |   |-- bootstrap/                    manual dependency construction
 |   |-- platform/
 |   |   |-- config/                   typed configuration loading
+|   |   |-- logger/                   Zap construction and request context
 |   |   |-- postgres/                 PostgreSQL connection lifecycle
 |   |   `-- redis/                    Redis connection lifecycle
 |   `-- transport/http/
@@ -67,9 +69,10 @@ unified JSON Response
 
 ## Dependency Rules
 
-1. `main` only loads configuration, asks `bootstrap` to construct the app, and
-   starts it.
-2. `bootstrap` is the only manual dependency-injection location.
+1. `main` loads configuration, creates the process-wide Logger, asks `bootstrap`
+   to construct the app, and starts it.
+2. `main` creates the shared Logger first; `bootstrap` explicitly injects it
+   into HTTP and database infrastructure.
 3. Handlers report errors with `c.Error`; the global middleware writes the
    response.
 4. Application errors do not import Gin or `net/http`.

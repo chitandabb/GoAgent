@@ -3,5 +3,6 @@
 /.firecrawl/
 /docs/evidence/
 /docs/demos/
+/logs/
 *.exe
 *.test
