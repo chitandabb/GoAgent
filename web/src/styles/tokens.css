@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/*
+ * MESGuard 设计 token —— 唯一落点。
+ * 来源:docs/design/DESIGN-apple.md。组件内只引用 token 类,不写裸 hex。
+ * 状态色(ok/warn/danger)是对规范 Known Gaps 的补充,只表达状态语义,
+ * 交互色仍然只有 primary 一个蓝。
+ */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+    "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+
+  /* interactive —— 单一强调色 */
+  --color-primary: #0066cc;
+  --color-primary-focus: #0071e3;
+  --color-primary-on-dark: #2997ff;
+
+  /* ink */
+  --color-ink: #1d1d1f;
+  --color-ink-80: #333333;
+  --color-ink-48: #7a7a7a;
+
+  /* surfaces */
+  --color-canvas: #ffffff;
+  --color-parchment: #f5f5f7;
+  --color-pearl: #fafafc;
+  --color-tile: #272729;
+  --color-nav: #000000;
+
+  /* hairlines */
+  --color-hairline: #e0e0e0;
+  --color-divider: #f0f0f0;
+
+  /* status(语义补充,非交互色) */
+  --color-ok: #248a3d;
+  --color-ok-soft: #e8f5ec;
+  --color-warn: #c93400;
+  --color-warn-soft: #fdf0e7;
+  --color-danger: #d70015;
+  --color-danger-soft: #fdebec;
+  --color-info-soft: #e8f1fb;
+
+  /* radius 语法:pill=操作,card=18,utility=8,capsule=11 */
+  --radius-card: 18px;
+  --radius-capsule: 11px;
+  --radius-utility: 8px;
+}
+
+@layer base {
+  html {
+    background-color: var(--color-parchment);
+  }
+  body {
+    @apply bg-parchment text-ink text-[14px] leading-[1.5] antialiased;
+  }
+  button {
+    cursor: pointer;
+  }
+  ::placeholder {
+    color: var(--color-ink-48);
+    opacity: 0.7;
+  }
+}
+
+@layer components {
+  /* 毛玻璃(sub-nav / sticky bar) */
+  .frosted {
+    background-color: rgb(245 245 247 / 0.8);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+  /* 全系统统一按压微交互 */
+  .press {
+    transition: transform 0.15s ease, background-color 0.15s ease,
+      color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  }
+  .press:active {
+    transform: scale(0.95);
+  }
+  .focus-ring {
+    @apply focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-focus;
+  }
+  /* 报告正文阅读态:17px 是规范定义的“阅读节奏” */
+  .reading {
+    @apply text-[17px] leading-[1.47] text-ink;
+  }
+}
+
+/* 打印:报告是交付物。白底、卡片不跨页断裂、链接回归正文色。 */
+@media print {
+  body {
+    background: #ffffff;
+  }
+  .rounded-card {
+    break-inside: avoid;
+  }
+  a {
+    color: inherit !important;
+  }
+}
+
+/* 尊重系统减弱动态偏好:按压缩放、呼吸点、流式光标全部静止 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
