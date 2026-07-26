@@ -1,4 +1,8 @@
-# MESGuard Roadmap
+# MESGuard Current Progress
+
+This file tracks the repository's current implementation state. Target
+milestones, dependencies, and acceptance criteria are defined in
+[`design/delivery-plan.md`](design/delivery-plan.md).
 
 ## Current Stage: Web Foundation
 
@@ -11,20 +15,23 @@
 - [x] Global request ID, error handling, panic recovery, and 404/405 responses.
 - [x] Structured Zap logging, request-context fields, and optional file rotation.
 - [x] Graceful HTTP, PostgreSQL, and Redis shutdown.
+- [x] React workbench prototype in `web/` running on local mock data only; see
+      [`design/frontend.md`](design/frontend.md). No backend business API is
+      implemented yet.
 
-## Before Business Code
+## M0: Before Business Code
 
 - [ ] Request DTO binding and validation conventions.
 - [ ] Configuration tests and startup failure tests.
-- [ ] Decide authentication requirements for the diagnostic workbench.
+- [ ] Add the local-account authentication skeleton and analyst/admin roles.
 - [ ] Define database migration command and transaction conventions.
 
-## Business Work, Deliberately Deferred
+## Target Milestones, Not Yet Implemented
 
-- Diagnostic Run, Step, ToolCall, and Event models.
-- SQL Server read-only evidence collection.
-- Eino Agent execution and controlled tool calling.
-- Retrieval, evaluation, and the diagnostic workbench UI.
+- M1: evidence-based ticket diagnosis;
+- M2: knowledge assistant, RAG, and mixed-document ingestion;
+- M3: restricted code investigation;
+- M4: isolated SQL performance laboratory.
 
-These capabilities will be introduced one vertical slice at a time after the
-Web foundation is understood and reviewed.
+Do not mark a target milestone as complete here until its acceptance criteria
+in the delivery plan have been verified.
