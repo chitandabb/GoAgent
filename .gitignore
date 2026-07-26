@@ -1,6 +1,7 @@
 /.idea/
 /.env
 /.firecrawl/
+/.claude/settings.local.json
 /docs/evidence/
 /docs/demos/
 /logs/
