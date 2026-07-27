@@ -16,6 +16,7 @@ This directory is the single location for project documentation.
 | [API Design](design/api.md) | HTTP resources, authentication, authorization, idempotency, errors, and SSE contracts |
 | [Frontend Design](design/frontend.md) | React workbench structure, design-token decisions, state-machine-to-UI mapping, and mock replacement |
 | [ADR 001](decisions/001-modular-monolith-architecture.md) | Why MESGuard uses a modular monolith and manual dependency injection |
+| [ADR 002](decisions/002-prefer-open-source-components.md) | Prefer mature open-source components; hand-write only thin contract glue |
 
 Documentation rules:
 

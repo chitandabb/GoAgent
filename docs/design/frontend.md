@@ -18,7 +18,7 @@
 | 服务端状态 | TanStack Query | 缓存失效、轮询降级、分页均为内置能力 |
 | 客户端状态 | React Context(仅认证) | 除当前用户与 CSRF 外无全局客户端状态 |
 | 样式 | Tailwind CSS v4 + CSS 变量 token | token 唯一落点 `src/styles/tokens.css` |
-| 组件 | 自建薄层(无重型组件库) | 保证设计语言可控;可访问性骨架按需引入 Radix |
+| 组件 | shadcn/ui + Radix + TanStack Table | 组件库负责行为与可访问性;Apple token 负责外观 |
 | API 类型 | 手写(临时) | OpenAPI 建立后由 openapi-typescript 生成替换 |
 
 ## 目录结构与依赖规则
