@@ -20,6 +20,10 @@ const (
 	CodeNotFound         Code = 40401
 	CodeMethodNotAllowed Code = 40501
 	CodeConflict         Code = 40901
+	// CodeValidationFailed 表示请求格式正确但业务校验失败。
+	// 与 CodeInvalidArgument 的分界：40001 由绑定层产生（格式、类型、基础规则），
+	// 42201 由 Service 层产生（需要业务数据才能判断，例如附件不属于当前用户）。
+	CodeValidationFailed Code = 42201
 
 	// 5xxxx 表示服务端或外部依赖发生问题。
 	CodeInternal              Code = 50000
@@ -34,6 +38,7 @@ var messages = map[Code]string{
 	CodeNotFound:              "请求的资源不存在",
 	CodeMethodNotAllowed:      "请求方法不支持",
 	CodeConflict:              "资源状态冲突",
+	CodeValidationFailed:      "业务参数校验失败",
 	CodeInternal:              "服务器内部错误",
 	CodeDependencyUnavailable: "外部依赖暂时不可用",
 }

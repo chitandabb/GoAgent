@@ -21,7 +21,7 @@ milestones, dependencies, and acceptance criteria are defined in
 
 ## M0: Before Business Code
 
-- [ ] Request DTO binding and validation conventions.
+- [x] Request DTO binding and validation conventions.
 - [ ] Configuration tests and startup failure tests.
 - [ ] Add the local-account authentication skeleton and analyst/admin roles.
 - [ ] Define database migration command and transaction conventions.

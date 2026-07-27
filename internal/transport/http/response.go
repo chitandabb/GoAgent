@@ -43,9 +43,15 @@ func WriteError(c *gin.Context, err error) {
 	if status >= http.StatusInternalServerError {
 		message = appErr.Code.Message()
 	}
+	// 字段级校验错误通过 data.fields 返回，前端据此逐字段提示（api.md 错误信封）。
+	var data any
+	if status < http.StatusInternalServerError && len(appErr.Fields) > 0 {
+		data = gin.H{"fields": appErr.Fields}
+	}
 	c.JSON(status, Response{
 		Code:      appErr.Code,
 		Message:   message,
+		Data:      data,
 		RequestID: RequestIDFromContext(c),
 	})
 }
@@ -65,6 +71,8 @@ func httpStatus(code apperror.Code) int {
 		return http.StatusMethodNotAllowed
 	case apperror.CodeConflict:
 		return http.StatusConflict
+	case apperror.CodeValidationFailed:
+		return http.StatusUnprocessableEntity
 	case apperror.CodeDependencyUnavailable:
 		return http.StatusServiceUnavailable
 	default:
