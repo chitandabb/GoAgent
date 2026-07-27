@@ -8,6 +8,7 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-api ./cmd/mesguard-api
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-migrate ./cmd/mesguard-migrate
 
 FROM debian:bookworm-slim
 
@@ -18,6 +19,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /out/mesguard-api /app/mesguard-api
+COPY --from=builder /out/mesguard-migrate /app/mesguard-migrate
 COPY config /app/config
 
 EXPOSE 9090

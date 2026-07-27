@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/migration"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
 	httptransport "github.com/chitandabb/GoAgent/internal/transport/http"
@@ -32,6 +33,15 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	db, closeDB, err := platformpostgres.Open(ctx, cfg.Postgres, log.Named("postgres"))
 	if err != nil {
 		return nil, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		_ = closeDB()
+		return nil, fmt.Errorf("get postgres sql db: %w", err)
+	}
+	if err := migration.CheckCurrent(ctx, sqlDB); err != nil {
+		_ = closeDB()
+		return nil, fmt.Errorf("check database migration version: %w", err)
 	}
 	redis, err := platformredis.Open(ctx, cfg.Redis)
 	if err != nil {

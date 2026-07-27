@@ -25,13 +25,18 @@ type contextKey struct{}
 // NewBootstrap 创建不依赖 TOML 的启动日志器。
 // 它只负责记录“配置无法加载”或“正式 Logger 无法创建”这类最早期错误。
 func NewBootstrap() *zap.Logger {
+	return NewBootstrapFor("mesguard-api")
+}
+
+// NewBootstrapFor 为独立运行角色创建带正确 service 字段的启动日志器。
+func NewBootstrapFor(service string) *zap.Logger {
 	encoder, _ := newEncoder("console")
 	return zap.New(
 		zapcore.NewCore(encoder, zapcore.Lock(os.Stderr), zap.DebugLevel),
 		zap.AddCaller(),
 		zap.AddStacktrace(zap.ErrorLevel),
 		zap.Fields(
-			zap.String("service", "mesguard-api"),
+			zap.String("service", service),
 			zap.String("phase", "bootstrap"),
 		),
 	)

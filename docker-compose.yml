@@ -16,7 +16,6 @@ services:
       - "${MESGUARD_POSTGRES_PORT:-5432}:5432"
     volumes:
       - ${MESGUARD_POSTGRES_DATA:-mesguard_postgres-data}:/var/lib/postgresql/data
-      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -78,6 +77,23 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: mesguard-migrate
+    restart: "no"
+    command: ["./mesguard-migrate", "up"]
+    environment:
+      TZ: Asia/Shanghai
+      MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
+      MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+
   backend:
     build:
       context: .
@@ -91,6 +107,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     ports:

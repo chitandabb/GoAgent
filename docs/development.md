@@ -20,6 +20,15 @@ docker compose up -d --build
 docker compose ps
 ```
 
+The one-shot `migrate` service applies pending Goose migrations before the API
+starts. For a direct Go/GoLand run, start PostgreSQL and apply migrations first:
+
+```powershell
+go run ./cmd/mesguard-migrate status
+go run ./cmd/mesguard-migrate up
+go run ./cmd/mesguard-migrate check
+```
+
 3. Verify the API:
 
 ```powershell
@@ -27,7 +36,8 @@ Invoke-RestMethod http://127.0.0.1:9090/healthz
 ```
 
 The current Web shell connects to PostgreSQL and Redis during startup so that
-`/healthz` can verify both dependencies. It does not apply business migrations.
+`/healthz` can verify both dependencies. The API checks the required database
+version at startup but never applies migrations itself.
 
 ## Logging
 

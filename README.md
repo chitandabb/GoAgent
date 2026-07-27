@@ -32,10 +32,15 @@ the repository root:
 
 ```powershell
 docker compose up -d postgres sqlserver sqlserver-seed redis
+go run ./cmd/mesguard-migrate up
 go run ./cmd/mesguard-api
 ```
 
-Run the test suite with `go test ./...`.
+Run the Go test suite with:
+
+```powershell
+go test ./cmd/... ./db/... ./internal/...
+```
 
 ## Documentation
 
