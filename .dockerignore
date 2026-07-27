@@ -3,5 +3,8 @@
 .idea
 .env
 .firecrawl
+logs
+web/dist
+web/node_modules
 *.exe
 *.test
