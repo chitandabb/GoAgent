@@ -12,6 +12,8 @@ The current foundation uses:
 - `cmd/mesguard-api` as the executable entry;
 - `internal/bootstrap` as the manual dependency-injection location;
 - `internal/apperror` for framework-independent error semantics;
+- `internal/repository` for framework-independent transaction and persistence
+  error contracts;
 - `internal/transport/http` for Gin, middleware, and response formatting;
 - `internal/platform` for configuration and infrastructure clients.
 
