@@ -17,10 +17,17 @@ type Token struct {
 	Hash []byte
 }
 
+// TokenIssuer 隔离随机令牌生成实现，认证用例可以在测试中注入可预测结果。
+type TokenIssuer interface {
+	Generate() (Token, error)
+}
+
 // TokenGenerator 生成 Session Cookie 和 CSRF 使用的高熵随机令牌。
 type TokenGenerator struct {
 	random io.Reader
 }
+
+var _ TokenIssuer = (*TokenGenerator)(nil)
 
 // NewTokenGenerator 使用操作系统安全随机源创建令牌生成器。
 func NewTokenGenerator() *TokenGenerator {
