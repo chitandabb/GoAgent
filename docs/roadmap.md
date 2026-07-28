@@ -24,7 +24,7 @@ milestones, dependencies, and acceptance criteria are defined in
 - [x] Request DTO binding and validation conventions.
 - [ ] Configuration tests and startup failure tests.
 - [ ] Add the local-account authentication skeleton and analyst/admin roles.
-- [ ] Define database migration command and transaction conventions.
+- [x] Define database migration command and transaction conventions.
 
 ## Target Milestones, Not Yet Implemented
 
