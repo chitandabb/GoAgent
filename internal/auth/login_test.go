@@ -163,10 +163,16 @@ type stubUserRepository struct {
 	user        *User
 	findErr     error
 	gotUsername string
+	createdUser *User
 }
 
-func (*stubUserRepository) Create(context.Context, *User) error {
+func (r *stubUserRepository) Create(_ context.Context, user *User) error {
+	r.createdUser = user
 	return nil
+}
+
+func (r *stubUserRepository) FindByID(context.Context, uuid.UUID) (*User, error) {
+	return r.user, r.findErr
 }
 
 func (r *stubUserRepository) FindByNormalizedUsername(_ context.Context, username string) (*User, error) {
@@ -175,8 +181,14 @@ func (r *stubUserRepository) FindByNormalizedUsername(_ context.Context, usernam
 }
 
 type stubSessionRepository struct {
-	created   *Session
-	createErr error
+	created          *Session
+	createErr        error
+	active           *Session
+	findErr          error
+	gotTokenHash     []byte
+	refreshed        bool
+	refreshIdleUntil time.Time
+	revokedID        uuid.UUID
 }
 
 func (r *stubSessionRepository) Create(_ context.Context, session *Session) error {
@@ -184,11 +196,22 @@ func (r *stubSessionRepository) Create(_ context.Context, session *Session) erro
 	return r.createErr
 }
 
-func (*stubSessionRepository) FindActiveByTokenHash(context.Context, []byte, time.Time) (*Session, error) {
-	return nil, repository.ErrNotFound
+func (r *stubSessionRepository) FindActiveByTokenHash(_ context.Context, tokenHash []byte, _ time.Time) (*Session, error) {
+	r.gotTokenHash = tokenHash
+	if r.active == nil && r.findErr == nil {
+		return nil, repository.ErrNotFound
+	}
+	return r.active, r.findErr
 }
 
-func (*stubSessionRepository) Revoke(context.Context, uuid.UUID, time.Time) error {
+func (r *stubSessionRepository) RefreshActivity(_ context.Context, _ uuid.UUID, _, _ time.Time, idleExpiresAt time.Time) error {
+	r.refreshed = true
+	r.refreshIdleUntil = idleExpiresAt
+	return nil
+}
+
+func (r *stubSessionRepository) Revoke(_ context.Context, sessionID uuid.UUID, _ time.Time) error {
+	r.revokedID = sessionID
 	return nil
 }
 

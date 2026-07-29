@@ -30,6 +30,15 @@ func (r *UserRepository) Create(ctx context.Context, user *auth.User) error {
 	return nil
 }
 
+// FindByID 根据主键查询用户，用于从 Session 恢复当前身份。
+func (r *UserRepository) FindByID(ctx context.Context, userID uuid.UUID) (*auth.User, error) {
+	var record userRecord
+	if err := ResolveDB(ctx, r.db).Where("id = ?", userID).Take(&record).Error; err != nil {
+		return nil, TranslateError(err)
+	}
+	return record.toDomain(), nil
+}
+
 // FindByNormalizedUsername 根据已规范化的用户名查询用户。
 // 调用方负责先调用 auth.NormalizeUsername，避免仓储层悄悄改变查询语义。
 func (r *UserRepository) FindByNormalizedUsername(ctx context.Context, username string) (*auth.User, error) {
@@ -126,6 +135,25 @@ func (r *SessionRepository) FindActiveByTokenHash(ctx context.Context, tokenHash
 		return nil, TranslateError(err)
 	}
 	return record.toDomain(), nil
+}
+
+// RefreshActivity 延长空闲有效期。条件更新限制同一 Session 最多每个刷新窗口写一次。
+func (r *SessionRepository) RefreshActivity(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	lastSeenBefore, lastSeenAt, idleExpiresAt time.Time,
+) error {
+	err := ResolveDB(ctx, r.db).
+		Model(&sessionRecord{}).
+		Where("id = ?", sessionID).
+		Where("revoked_at IS NULL").
+		Where("last_seen_at <= ?", lastSeenBefore).
+		Where("absolute_expires_at > ?", lastSeenAt).
+		Updates(map[string]any{
+			"last_seen_at":    lastSeenAt,
+			"idle_expires_at": idleExpiresAt,
+		}).Error
+	return TranslateError(err)
 }
 
 // Revoke 撤销单个会话。已经撤销或不存在时保持幂等，不泄露会话是否存在。
