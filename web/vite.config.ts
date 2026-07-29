@@ -5,6 +5,19 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('@radix-ui') || id.includes('lucide-react') || id.includes('sonner')) {
+            return 'ui-vendor'
+          }
+          if (id.includes('@tanstack')) return 'tanstack-vendor'
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -13,11 +26,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    // 接入真实后端后启用代理并删除 src/mocks:
-    // proxy: {
-    //   '/api': 'http://127.0.0.1:9090',
-    //   '/livez': 'http://127.0.0.1:9090',
-    //   '/readyz': 'http://127.0.0.1:9090',
-    // },
+    proxy: {
+      '/api': 'http://127.0.0.1:9090',
+      '/healthz': 'http://127.0.0.1:9090',
+    },
   },
 })

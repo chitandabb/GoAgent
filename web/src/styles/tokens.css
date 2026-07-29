@@ -26,6 +26,7 @@
   --color-pearl: #fafafc;
   --color-tile: #272729;
   --color-nav: #000000;
+  --color-code: #c9c9ce;
 
   /* hairlines */
   --color-hairline: #e0e0e0;
@@ -39,11 +40,58 @@
   --color-danger: #d70015;
   --color-danger-soft: #fdebec;
   --color-info-soft: #e8f1fb;
+  --color-neutral-soft: #efeff1;
+  --color-neutral-muted: #6e6e73;
 
   /* radius 语法:pill=操作,card=18,utility=8,capsule=11 */
   --radius-card: 18px;
   --radius-capsule: 11px;
   --radius-utility: 8px;
+}
+
+:root {
+  --background: #f5f5f7;
+  --foreground: #1d1d1f;
+  --card: #ffffff;
+  --card-foreground: #1d1d1f;
+  --popover: #ffffff;
+  --popover-foreground: #1d1d1f;
+  --primary: #0066cc;
+  --primary-foreground: #ffffff;
+  --secondary: #fafafc;
+  --secondary-foreground: #333333;
+  --muted: #f5f5f7;
+  --muted-foreground: #7a7a7a;
+  --accent: #fafafc;
+  --accent-foreground: #1d1d1f;
+  --destructive: #d70015;
+  --border: #e0e0e0;
+  --input: #e0e0e0;
+  --ring: #0071e3;
+  --radius: 18px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 10px);
+  --radius-md: calc(var(--radius) - 7px);
+  --radius-lg: var(--radius);
 }
 
 @layer base {

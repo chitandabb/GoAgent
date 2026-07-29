@@ -1,7 +1,7 @@
 # 前端组件库迁移设计:shadcn/ui + Apple 设计语言
 
 - 日期:2026-07-27
-- 状态:已批准(待实施)
+- 状态:已实施
 - 关联文档:[ADR 002](../../decisions/002-prefer-open-source-components.md)、
   [frontend.md](../../design/frontend.md)、[DESIGN-apple.md](../../design/DESIGN-apple.md)
 
@@ -10,6 +10,13 @@
 把 `web/src/shared/ui/` 的手写组件层整体迁移到 shadcn/ui 体系:
 库负责行为与可访问性(焦点管理、键盘导航、ARIA、Portal),
 DESIGN-apple.md 的 token 负责全部外观。一次性迁移,不留双轨。
+
+## 实施结果
+
+- `shared/ui` 的交互组件已迁移到 Radix、CVA、TanStack Table 和 sonner;
+- `lucide-react` 统一提供组件图标,纯展示型项目组件继续保留;
+- `components.json` 指向 `shared/ui` 与现有 `tokens.css`,不引入默认主题;
+- 页面仍通过原有 `shared/ui` 边界访问组件,业务路由和 mock 契约未改变。
 
 ## 决策
 

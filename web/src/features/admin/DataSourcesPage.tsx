@@ -88,7 +88,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
           disabled={!editable || toggleQueryable.isPending}
           onClick={() => editable && toggleQueryable.mutate(e)}
           className={`press focus-ring inline-flex h-7 items-center rounded-full px-3 text-[12px] font-semibold ${
-            e.queryable ? 'bg-ok-soft text-ok' : 'bg-[#efeff1] text-[#6e6e73]'
+            e.queryable ? 'bg-ok-soft text-ok' : 'bg-neutral-soft text-neutral-muted'
           } ${editable ? '' : 'cursor-default opacity-80'}`}
           title={editable ? '点击切换白名单（仅 draft 可编辑）' : '仅 draft 版本可编辑'}
         >
