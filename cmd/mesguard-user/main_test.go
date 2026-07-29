@@ -17,6 +17,9 @@ func TestParseOptions(t *testing.T) {
 	if options.passwordEnv != defaultPasswordEnv {
 		t.Fatalf("passwordEnv = %q, want %q", options.passwordEnv, defaultPasswordEnv)
 	}
+	if !options.mustChangePassword {
+		t.Fatal("mustChangePassword = false, want true by default")
+	}
 }
 
 func TestParseOptionsRejectsMissingRequiredFlags(t *testing.T) {
