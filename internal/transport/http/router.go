@@ -12,9 +12,13 @@ import (
 // HealthCheck 定义健康检查函数，Router 不需要知道数据库和 Redis 的具体类型。
 type HealthCheck func(context.Context) error
 
+type RouteRegistrar interface {
+	Register(api *gin.RouterGroup)
+}
+
 // NewRouter 创建并配置 Gin Engine。
 // 所有全局中间件和基础路由都集中在这里注册。
-func NewRouter(log *zap.Logger, health HealthCheck, authRoutes ...*AuthRoutes) *gin.Engine {
+func NewRouter(log *zap.Logger, health HealthCheck, routes ...RouteRegistrar) *gin.Engine {
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 
@@ -32,8 +36,11 @@ func NewRouter(log *zap.Logger, health HealthCheck, authRoutes ...*AuthRoutes) *
 		WriteSuccess(c, gin.H{"status": "ok"})
 	})
 
-	if len(authRoutes) > 0 && authRoutes[0] != nil {
-		authRoutes[0].Register(router.Group("/api/v1"))
+	api := router.Group("/api/v1")
+	for _, route := range routes {
+		if route != nil {
+			route.Register(api)
+		}
 	}
 
 	// 未匹配的路由和请求方法也必须使用统一响应格式。

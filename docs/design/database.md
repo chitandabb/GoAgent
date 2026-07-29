@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库仍处于 Web 基础骨架阶段；下列表、约束和迁移尚未全部实现。
+- 当前仓库已实现用户、Session、数据源与外部工单身份表；快照、任务、消息、知识库等后续表尚未全部实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -900,4 +900,4 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ## 后续工作
 
-数据库、消息和API设计审阅通过后进入M0代码，先用goose实现用户、Session和基础迁移，再按纵向切片实现M1表与接口。
+用户、Session、DataSource和ExternalCase身份迁移已经落地；后续按`docs/roadmap.md`的纵向切片继续实现快照、任务、事件与Outbox。

@@ -35,3 +35,83 @@ host = "redis"
 port = 6379
 password = ""
 database = 0
+
+[sqlserver]
+enabled = true
+id = "8d5c67dc-4c09-4ee5-9e80-4d822303dc35"
+code = "erp-support-demo"
+name = "公司 ERP 工单库（演示）"
+environment = "demo"
+host = "sqlserver"
+port = 1433
+user = "mesguard_case_reader"
+database = "SUPPORT_DEMO"
+passwordEnv = "MESGUARD_SQLSERVER_PASSWORD"
+encrypt = "disable"
+trustServerCertificate = true
+maxIdleConns = 5
+maxOpenConns = 10
+queryTimeoutMillis = 3000
+maxTextBytes = 65536
+maxResultBytes = 524288
+
+[sqlserver.caseMapping]
+relation = "dbo.v_MESGuardExternalCases"
+
+[sqlserver.caseMapping.fields]
+externalCaseKey = "TicketID"
+caseType = "CaseType"
+title = "Title"
+description = "Description"
+category = "Category"
+module = "Module"
+status = "Status"
+priority = "Priority"
+occurredAt = "OccurredAt"
+reportedAt = "ReportedAt"
+sourceUpdatedAt = "SourceUpdatedAt"
+customerCode = "CustomerCode"
+customerName = "CustomerName"
+productCode = "ProductCode"
+productName = "ProductName"
+productVersion = "ProductVersion"
+workOrderNo = "WorkOrderNo"
+workpieceNo = "WorkpieceNo"
+materialCode = "MaterialCode"
+batchNo = "BatchNo"
+serialNo = "SerialNo"
+factoryCode = "FactoryCode"
+workshopCode = "WorkshopCode"
+productionLineCode = "ProductionLineCode"
+workstationCode = "WorkstationCode"
+equipmentCode = "EquipmentCode"
+sourceSystem = "SourceSystem"
+deploymentEnvironment = "DeploymentEnvironment"
+businessDatabaseAlias = "BusinessDatabaseAlias"
+
+[sqlserver.caseMapping.attributes]
+reporterDepartment = "ReporterDepartment"
+impactScope = "ImpactScope"
+
+[sqlserver.caseMapping.statusValues]
+New = "open"
+Investigating = "processing"
+Resolved = "closed"
+
+[sqlserver.caseMapping.priorityValues]
+Urgent = "high"
+Normal = "medium"
+Low = "low"
+
+[sqlserver.attachmentMapping]
+relation = "dbo.v_MESGuardExternalCaseAttachments"
+
+[sqlserver.attachmentMapping.fields]
+externalCaseKey = "TicketID"
+externalAttachmentKey = "AttachmentID"
+fileName = "FileName"
+mediaType = "MediaType"
+sizeBytes = "SizeBytes"
+objectKey = "ObjectKey"
+contentHash = "ContentHash"
+sourceUpdatedAt = "SourceUpdatedAt"

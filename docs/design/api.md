@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库只实现 `/healthz` Web 基础骨架；本文中的认证、工单、附件、诊断、报告和管理接口尚未实现。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现以及外部工单列表/详情；附件上传、诊断、报告和管理接口仍是后续目标。当前机器可读契约见 `api/openapi.yaml`。
 - M2 知识助手、个人知识库和文档入库只保留版本空间，不在本文提前固定具体接口。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
@@ -795,4 +795,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-本文审阅通过后停止继续铺设主设计文档，进入 M0 代码：数据库迁移命令、用户与 Session、Argon2id、CSRF、Repository/事务约定和认证接口。具体 Handler 开始实现时同步建立 `api/openapi.yaml`。
+M0 与 M1-A1 后端已实现。下一步按 `docs/roadmap.md` 进入 M1-A2；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
