@@ -7,6 +7,7 @@ import (
 	stdhttp "net/http"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/platform/migration"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
@@ -48,6 +49,55 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		_ = closeDB()
 		return nil, err
 	}
+	closeDependencies := func() {
+		_ = redis.Close()
+		_ = closeDB()
+	}
+
+	userRepository := platformpostgres.NewUserRepository(db)
+	sessionRepository := platformpostgres.NewSessionRepository(db)
+	passwordHasher, err := auth.NewArgon2idHasher(auth.DefaultArgon2idParams())
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build password hasher: %w", err)
+	}
+	sessionPolicy, err := auth.NewSessionPolicy(
+		time.Duration(cfg.Auth.SessionIdleMinutes)*time.Minute,
+		time.Duration(cfg.Auth.SessionAbsoluteMinutes)*time.Minute,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build session policy: %w", err)
+	}
+	loginService, err := auth.NewLoginService(
+		userRepository,
+		sessionRepository,
+		passwordHasher,
+		auth.NewTokenGenerator(),
+		sessionPolicy,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build login service: %w", err)
+	}
+	sessionService, err := auth.NewSessionService(userRepository, sessionRepository, sessionPolicy)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build session service: %w", err)
+	}
+	authRoutes, err := httptransport.NewAuthRoutes(
+		loginService,
+		sessionService,
+		httptransport.CookieSettings{
+			Domain: cfg.Auth.CookieDomain,
+			Secure: cfg.Auth.CookieSecure,
+		},
+		cfg.Auth.AllowedOrigins,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build auth routes: %w", err)
+	}
 
 	app := &App{
 		db:           db,
@@ -58,7 +108,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 	app.server = &stdhttp.Server{
 		Addr:              cfg.HTTP.Address(),
-		Handler:           httptransport.NewRouter(log.Named("http"), app.health),
+		Handler:           httptransport.NewRouter(log.Named("http"), app.health, authRoutes),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return app, nil

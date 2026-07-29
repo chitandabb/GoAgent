@@ -33,4 +33,7 @@ func TestConnectionStringEscapesCredentials(t *testing.T) {
 	if got := parsed.Query().Get("sslmode"); got != "disable" {
 		t.Fatalf("sslmode = %q, want disable", got)
 	}
+	if got := parsed.Query().Get("TimeZone"); got != "" {
+		t.Fatalf("TimeZone = %q, want application-managed timezone", got)
+	}
 }

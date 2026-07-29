@@ -32,7 +32,6 @@ func ConnectionString(cfg config.PostgresConfig) (string, error) {
 	}
 	query := dsn.Query()
 	query.Set("sslmode", cfg.SSLMode)
-	query.Set("TimeZone", "Asia/Shanghai")
 	dsn.RawQuery = query.Encode()
 	return dsn.String(), nil
 }

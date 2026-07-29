@@ -11,6 +11,7 @@ import (
 // 接口放在领域包中，Service 只依赖它，不需要知道底层是 GORM 还是其他实现。
 type UserRepository interface {
 	Create(ctx context.Context, user *User) error
+	FindByID(ctx context.Context, userID uuid.UUID) (*User, error)
 	FindByNormalizedUsername(ctx context.Context, username string) (*User, error)
 }
 
@@ -33,6 +34,7 @@ type Session struct {
 type SessionRepository interface {
 	Create(ctx context.Context, session *Session) error
 	FindActiveByTokenHash(ctx context.Context, tokenHash []byte, now time.Time) (*Session, error)
+	RefreshActivity(ctx context.Context, sessionID uuid.UUID, lastSeenBefore, lastSeenAt, idleExpiresAt time.Time) error
 	Revoke(ctx context.Context, sessionID uuid.UUID, revokedAt time.Time) error
 	RevokeAllByUserID(ctx context.Context, userID uuid.UUID, revokedAt time.Time) error
 }

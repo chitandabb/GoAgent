@@ -193,6 +193,8 @@ Secure: true（启用 HTTPS 后强制）
 
 Cookie 只保存高熵随机令牌，PostgreSQL 只保存令牌哈希。默认空闲过期 2 小时、绝对过期 12 小时，均通过配置调整。
 
+CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`，因为浏览器端需要读取它并复制到 `X-CSRF-Token` 请求头；服务端仍只在 PostgreSQL 保存 CSRF Token 哈希。Session Cookie 与 CSRF Cookie 都使用 `SameSite=Lax`、`Path=/`，`Secure` 按部署配置决定。
+
 普通认证请求最多每 5 分钟刷新一次空闲过期时间。SSE 心跳不刷新 Session；连接最长不能超过 Session 绝对有效期。退出只撤销当前 Session；密码修改、密码重置、禁用账号或修改角色撤销该用户全部 Session。
 
 ### CSRF

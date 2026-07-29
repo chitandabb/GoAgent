@@ -66,6 +66,13 @@ func TestAuthRepositoriesAgainstPostgres(t *testing.T) {
 	if foundUser.ID != user.ID || foundUser.PasswordHash != user.PasswordHash {
 		t.Fatalf("found user = %+v, want persisted user", foundUser)
 	}
+	foundByID, err := userRepository.FindByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("FindByID(): %v", err)
+	}
+	if foundByID.Username != user.Username {
+		t.Fatalf("FindByID() username = %q, want %q", foundByID.Username, user.Username)
+	}
 
 	duplicate := *user
 	duplicate.ID = uuid.New()
@@ -92,6 +99,24 @@ func TestAuthRepositoriesAgainstPostgres(t *testing.T) {
 	}
 	if foundSession.ID != session.ID || foundSession.UserID != user.ID {
 		t.Fatalf("found session = %+v, want persisted session", foundSession)
+	}
+	refreshedAt := now.Add(6 * time.Minute)
+	refreshedIdleExpiry := now.Add(2 * time.Hour)
+	if err := sessionRepository.RefreshActivity(
+		ctx,
+		session.ID,
+		refreshedAt.Add(-5*time.Minute),
+		refreshedAt,
+		refreshedIdleExpiry,
+	); err != nil {
+		t.Fatalf("RefreshActivity(): %v", err)
+	}
+	foundSession, err = sessionRepository.FindActiveByTokenHash(ctx, session.TokenHash, refreshedAt)
+	if err != nil {
+		t.Fatalf("FindActiveByTokenHash(after refresh): %v", err)
+	}
+	if !foundSession.LastSeenAt.Equal(refreshedAt) || !foundSession.IdleExpiresAt.Equal(refreshedIdleExpiry) {
+		t.Fatalf("refreshed times = %v/%v, want %v/%v", foundSession.LastSeenAt, foundSession.IdleExpiresAt, refreshedAt, refreshedIdleExpiry)
 	}
 
 	if err := sessionRepository.Revoke(ctx, session.ID, now.Add(time.Minute)); err != nil {

@@ -29,6 +29,15 @@ go run ./cmd/mesguard-migrate up
 go run ./cmd/mesguard-migrate check
 ```
 
+创建本地开发账号时，密码只从环境变量读取，不放在命令行参数中：
+
+```powershell
+$env:MESGUARD_INITIAL_USER_PASSWORD = "change-this-locally"
+go run ./cmd/mesguard-user -username admin01 -display-name "系统管理员" -role admin
+```
+
+`mesguard-user` 会创建启用状态、首次登录必须改密的账号；密码不会写入日志或命令输出。登录接口为 `POST /api/v1/auth/login`，当前用户和退出接口分别为 `GET /api/v1/auth/me`、`POST /api/v1/auth/logout`。
+
 3. Verify the API:
 
 ```powershell

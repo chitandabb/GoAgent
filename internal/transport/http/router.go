@@ -14,7 +14,7 @@ type HealthCheck func(context.Context) error
 
 // NewRouter 创建并配置 Gin Engine。
 // 所有全局中间件和基础路由都集中在这里注册。
-func NewRouter(log *zap.Logger, health HealthCheck) *gin.Engine {
+func NewRouter(log *zap.Logger, health HealthCheck, authRoutes ...*AuthRoutes) *gin.Engine {
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 
@@ -31,6 +31,10 @@ func NewRouter(log *zap.Logger, health HealthCheck) *gin.Engine {
 		}
 		WriteSuccess(c, gin.H{"status": "ok"})
 	})
+
+	if len(authRoutes) > 0 && authRoutes[0] != nil {
+		authRoutes[0].Register(router.Group("/api/v1"))
+	}
 
 	// 未匹配的路由和请求方法也必须使用统一响应格式。
 	router.NoRoute(func(c *gin.Context) {

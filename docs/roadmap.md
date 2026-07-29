@@ -4,7 +4,7 @@ This file tracks the repository's current implementation state. Target
 milestones, dependencies, and acceptance criteria are defined in
 [`design/delivery-plan.md`](design/delivery-plan.md).
 
-## Current Stage: Web Foundation
+## Current Stage: M0 Authentication Vertical Slice
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -16,14 +16,14 @@ milestones, dependencies, and acceptance criteria are defined in
 - [x] Structured Zap logging, request-context fields, and optional file rotation.
 - [x] Graceful HTTP, PostgreSQL, and Redis shutdown.
 - [x] React workbench prototype in `web/` running on local mock data only; see
-      [`design/frontend.md`](design/frontend.md). No backend business API is
-      implemented yet.
+      [`design/frontend.md`](design/frontend.md). Authentication API is now
+      implemented; ticket and diagnosis APIs are still not implemented.
 
 ## M0: Before Business Code
 
 - [x] Request DTO binding and validation conventions.
-- [ ] Configuration tests and startup failure tests.
-- [ ] Add the local-account authentication skeleton and analyst/admin roles.
+- [ ] Configuration tests and startup failure tests (configuration validation is covered; startup wiring test remains).
+- [x] Add the local-account authentication skeleton and analyst/admin roles.
 - [x] Define database migration command and transaction conventions.
 
 ## Target Milestones, Not Yet Implemented

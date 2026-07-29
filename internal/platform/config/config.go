@@ -11,6 +11,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -23,9 +24,40 @@ import (
 // 每个字段对应 TOML 中的一个配置块（通过 toml tag 映射）。
 type Config struct {
 	HTTP     HTTPConfig     `toml:"http"`     // [http] 配置块：API 服务器监听地址
+	Auth     AuthConfig     `toml:"auth"`     // [auth] 配置块：Session、Cookie 与可信前端来源
 	Log      LogConfig      `toml:"log"`      // [log] 配置块：结构化日志和文件轮转
 	Postgres PostgresConfig `toml:"postgres"` // [postgres] 配置块：PostgreSQL 数据库连接配置
 	Redis    RedisConfig    `toml:"redis"`    // [redis] 配置块：Redis 缓存连接配置
+}
+
+// AuthConfig 定义本地账号认证的 Session 时长和浏览器安全边界。
+type AuthConfig struct {
+	AllowedOrigins         []string `toml:"allowedOrigins"`
+	CookieDomain           string   `toml:"cookieDomain"`
+	CookieSecure           bool     `toml:"cookieSecure"`
+	SessionIdleMinutes     int      `toml:"sessionIdleMinutes"`
+	SessionAbsoluteMinutes int      `toml:"sessionAbsoluteMinutes"`
+}
+
+// Validate 检查 Session 时长和可信 Origin。
+func (c AuthConfig) Validate() error {
+	if c.SessionIdleMinutes <= 0 || c.SessionAbsoluteMinutes <= 0 {
+		return errors.New("auth session idle and absolute minutes must be positive")
+	}
+	if c.SessionIdleMinutes > c.SessionAbsoluteMinutes {
+		return errors.New("auth session idle minutes cannot exceed absolute minutes")
+	}
+	if len(c.AllowedOrigins) == 0 {
+		return errors.New("auth allowedOrigins must not be empty")
+	}
+	for _, rawOrigin := range c.AllowedOrigins {
+		origin := strings.TrimSpace(rawOrigin)
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
+			return fmt.Errorf("invalid auth allowed origin %q", rawOrigin)
+		}
+	}
+	return nil
 }
 
 // ============================================================
@@ -157,6 +189,9 @@ func (c Config) Validate() error {
 	// 校验 HTTP 配置
 	if strings.TrimSpace(c.HTTP.Host) == "" || c.HTTP.Port <= 0 {
 		return errors.New("http host and port are required")
+	}
+	if err := c.Auth.Validate(); err != nil {
+		return err
 	}
 	if err := c.Log.Validate(); err != nil {
 		return err
