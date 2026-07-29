@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { RouterProvider } from 'react-router'
+import { RouterProvider } from 'react-router/dom'
 import { ToastProvider } from '@/shared/ui/Toast'
 import { AuthProvider } from './auth'
 import { router } from './router'

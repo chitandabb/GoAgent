@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useAuth } from '@/app/auth'
+import { ApiError } from '@/shared/api'
 import { Button } from '@/shared/ui/Button'
 import { FieldLabel, TextInput } from '@/shared/ui/Field'
 import { Wordmark } from '@/shared/ui/Wordmark'
@@ -23,8 +24,8 @@ export function LoginPage() {
     try {
       await login(username, password)
       navigate(from, { replace: true })
-    } catch {
-      setError('用户名或密码错误')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '暂时无法连接认证服务')
     } finally {
       setBusy(false)
     }
@@ -65,17 +66,9 @@ export function LoginPage() {
         <Button type="submit" className="w-full" disabled={busy || !username || !password}>
           {busy ? '登录中…' : '登录'}
         </Button>
-
-        <div className="mt-6 rounded-capsule bg-pearl px-4 py-3 text-[12px] leading-[1.7] text-ink-48">
-          演示账号（密码任意非空）：
-          <span className="mx-1 font-semibold text-ink-80">analyst01</span>（分析员）/
-          <span className="mx-1 font-semibold text-ink-80">admin01</span>（管理员）/
-          <span className="mx-1 font-semibold text-ink-80">analyst02</span>
-          （临时密码账号，登录后强制改密）。
-        </div>
       </form>
 
-      <p className="mt-10 text-[12px] text-ink-48">前端原型 · 本地模拟数据</p>
+      <p className="mt-10 text-[12px] text-ink-48">本地账号登录 · 会话由服务端安全管理</p>
     </div>
   )
 }

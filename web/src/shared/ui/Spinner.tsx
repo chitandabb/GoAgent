@@ -1,7 +1,10 @@
+import { LoaderCircle } from 'lucide-react'
+import { cn } from '@/shared/lib/utils'
+
 export function Spinner({ className = '' }: { className?: string }) {
   return (
-    <span
-      className={`inline-block size-5 animate-spin rounded-full border-2 border-hairline border-t-primary ${className}`}
+    <LoaderCircle
+      className={cn('size-5 animate-spin text-primary', className)}
       role="status"
       aria-label="加载中"
     />

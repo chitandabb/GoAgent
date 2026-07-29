@@ -1,9 +1,7 @@
-// API 边界：业务组件只允许从这里 import。
-//
-// 当前转发到 src/mocks（本地模拟实现）。接入真实后端后：
-//   1. 删除 src/mocks 目录；
-//   2. 把这里替换为基于 fetch 的实现（统一信封解包、CSRF 注入、
-//      SSE 用 EventSource + Last-Event-ID);
-//   3. 打开 vite.config.ts 中的 /api 代理。
+// API 边界：认证使用当前真实后端，其余尚未落地的业务接口继续使用 Mock。
+// 后端每完成一个业务域，就在这里将对应导出切换到真实适配器。
 export * from '@/mocks/api'
 export * from './types'
+export * from './errors'
+export { onUnauthorized } from './client'
+export { changePassword, login, logout, me } from './auth'

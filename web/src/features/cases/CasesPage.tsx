@@ -90,7 +90,7 @@ export function CasesPage() {
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <Select
           value={dataSourceId}
-          onChange={(e) => setDataSourceId(e.target.value)}
+          onValueChange={setDataSourceId}
           className="!w-56"
         >
           {(dataSources.data ?? []).map((d) => (

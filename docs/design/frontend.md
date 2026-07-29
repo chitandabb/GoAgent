@@ -3,9 +3,9 @@
 ## 文档状态
 
 - 本文描述 `web/` 目录中 React 工作台的结构、设计语言落地和与后端契约的对接方式。
-- 当前实现是**本地模拟数据原型**:所有页面可运行、可交互,但数据来自
-  `web/src/mocks/`,不访问真实后端。原型的作用是先验证信息架构、状态机
-  可视化和交互流程,后端 M0/M1 落地后按本文"Mock 替换"一节切换。
+- 当前实现采用**真实认证 + 业务 Mock**的渐进接入方式:`login/me/logout` 已连接
+  Go 后端,其余尚未落地的业务接口继续使用 `web/src/mocks/`。原型页面保持可运行,
+  后端每完成一个业务域就按本文"Mock 替换"一节切换该域。
 - 视觉规范来源是 [`DESIGN-apple.md`](DESIGN-apple.md);本文只记录落地决策,
   不重复 token 数值。
 
@@ -14,12 +14,16 @@
 | 关注点 | 选择 | 理由 |
 | --- | --- | --- |
 | 框架 | React 19 + TypeScript + Vite | Nginx 托管纯静态,无 SSR 需求 |
-| 路由 | React Router v7(library 模式) | 嵌套布局 + 受保护路由 |
+| 路由 | React Router v8(library 模式) | 嵌套布局 + 受保护路由 |
 | 服务端状态 | TanStack Query | 缓存失效、轮询降级、分页均为内置能力 |
 | 客户端状态 | React Context(仅认证) | 除当前用户与 CSRF 外无全局客户端状态 |
 | 样式 | Tailwind CSS v4 + CSS 变量 token | token 唯一落点 `src/styles/tokens.css` |
 | 组件 | shadcn/ui + Radix + TanStack Table | 组件库负责行为与可访问性;Apple token 负责外观 |
 | API 类型 | 手写(临时) | OpenAPI 建立后由 openapi-typescript 生成替换 |
+
+组件库迁移已于 2026-07-27 完成。`components.json` 将 shadcn 生成路径固定到
+`shared/ui`,现有页面不直接依赖 Radix 或 sonner;Apple token 仍是外观的唯一
+来源。
 
 ## 目录结构与依赖规则
 
@@ -121,19 +125,20 @@ DESIGN-apple.md 是营销站规范,工作台按以下决策"翻译":
 - `mustChangePassword=true` 时 `RequireAuth` 强制跳 `/change-password`,
   该页为独立布局(无工作台导航),只提供改密与退出。
 - 改密成功即视为服务端撤销全部 Session:前端清空本地状态并要求重新登录。
-- 全局 401 → 跳登录携带回跳地址(mock 阶段未模拟过期,接入后在 fetch 层
-  统一处理)。
+- 全局 401 由 fetch 层清除内存 CSRF 和当前用户,路由守卫跳转登录并携带回跳地址。
+- 后端当前尚未注册 `change-password`,因此临时密码账号仍不能完成真实改密闭环。
 
 ## Mock 层契约与替换步骤
 
-`src/mocks/` 是唯一的模拟落点(数据、诊断执行脚本、假 SSE、假流式生成)。
-接入真实后端时:
+`src/mocks/` 是尚未落地业务域的模拟落点(数据、诊断执行脚本、假 SSE、假流式生成)。
+`src/shared/api/client.ts` 已统一处理响应信封、Cookie、CSRF、字段错误和 401。
+后续按业务域渐进替换:
 
-1. 删除整个 `src/mocks/` 目录;
-2. 把 `src/shared/api/index.ts` 从转发 mocks 改为 fetch 实现(统一信封解
-   包、CSRF 注入、`ApiError` 语义保持不变,SSE 换 EventSource);
-3. 打开 `vite.config.ts` 中注释的 `/api` 代理;
-4. 用 openapi-typescript 生成的类型替换 `src/shared/api/types.ts`。
+1. 后端完成一个业务域后,在 `src/shared/api/` 增加对应真实适配器;
+2. 在 `src/shared/api/index.ts` 将该域导出从 Mock 切换到真实实现;
+3. 任务事件接口落地时使用 EventSource + Last-Event-ID 替换假 SSE;
+4. 全部业务域完成后删除 `src/mocks/`;
+5. 用 openapi-typescript 生成的类型替换 `src/shared/api/types.ts`。
 
 mock 保留了与 api.md 一致的错误语义(40101/40301/40401/40901/40921/
 40923/42201),前端按 code 分支的行为在切换后无需改动。
@@ -144,12 +149,12 @@ mock 保留了与 api.md 一致的错误语义(40101/40301/40401/40901/40921/
   预览、原图关联);失败文档的重新解析入口。
 - 响应式断点(规范 834px 折叠导航等):当前为桌面布局。
 - 真实附件上传(拖拽、进度、41301/41501 校验)、附件预览为占位渲染。
-- 全局 Session 过期模拟、OpenAPI 类型生成(等待后端 `api/openapi.yaml`)。
+- 修改密码真实接口、OpenAPI 类型生成(等待后端 `api/openapi.yaml`)。
 - mock 数据存于内存,整页刷新后运行期新建的数据会重置(预置演示数据保留)。
 
 ## 本地运行
 
 ```text
 npm --prefix web run dev    # http://localhost:5173
-演示账号(密码任意非空):analyst01 / admin01 / analyst02(强制改密演示)
+认证依赖 http://127.0.0.1:9090;本地账号使用 mesguard-user 命令初始化
 ```

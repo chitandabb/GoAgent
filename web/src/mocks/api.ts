@@ -27,6 +27,7 @@ import type {
   TaskEvent,
   ToolExecution,
 } from '@/shared/api/types'
+import { ApiError } from '@/shared/api/errors'
 import {
   iso,
   mockAccounts,
@@ -54,15 +55,6 @@ import {
 
 const sleep = (ms = 250) => new Promise((r) => setTimeout(r, ms))
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v))
-
-export class ApiError extends Error {
-  constructor(
-    public code: number,
-    message: string,
-  ) {
-    super(message)
-  }
-}
 
 // ---------------------------------------------------------------- 内存存储
 

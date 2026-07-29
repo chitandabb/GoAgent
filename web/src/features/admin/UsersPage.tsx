@@ -209,7 +209,7 @@ export function UsersPage() {
             <FieldLabel>角色</FieldLabel>
             <Select
               value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value as Role })}
+              onValueChange={(role) => setForm({ ...form, role: role as Role })}
             >
               <option value="analyst">analyst</option>
               <option value="admin">admin</option>
@@ -274,7 +274,7 @@ export function UsersPage() {
         }
       >
         <FieldLabel>新角色</FieldLabel>
-        <Select value={newRole} onChange={(e) => setNewRole(e.target.value as Role)}>
+        <Select value={newRole} onValueChange={(role) => setNewRole(role as Role)}>
           <option value="analyst">analyst</option>
           <option value="admin">admin</option>
         </Select>

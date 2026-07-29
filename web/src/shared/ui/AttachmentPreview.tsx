@@ -14,23 +14,23 @@ function isText(name: string): boolean {
 function ImagePlaceholder({ name }: { name: string }) {
   return (
     <svg viewBox="0 0 640 400" className="w-full rounded-utility border border-hairline">
-      <rect width="640" height="400" fill="#f5f5f7" />
-      <rect x="0" y="0" width="640" height="36" fill="#e8e8ed" />
-      <circle cx="18" cy="18" r="5" fill="#d2d2d7" />
-      <circle cx="36" cy="18" r="5" fill="#d2d2d7" />
-      <rect x="56" y="12" width="220" height="12" rx="6" fill="#d2d2d7" />
-      <rect x="24" y="60" width="592" height="52" rx="8" fill="#ffffff" />
-      <rect x="40" y="76" width="180" height="14" rx="7" fill="#e0e0e0" />
-      <rect x="24" y="128" width="360" height="180" rx="8" fill="#ffffff" />
-      <rect x="40" y="148" width="140" height="12" rx="6" fill="#e0e0e0" />
-      <rect x="40" y="172" width="300" height="10" rx="5" fill="#ececf0" />
-      <rect x="40" y="192" width="300" height="10" rx="5" fill="#ececf0" />
-      <rect x="40" y="212" width="220" height="10" rx="5" fill="#ececf0" />
-      <rect x="40" y="248" width="90" height="28" rx="14" fill="#0066cc" opacity="0.85" />
-      <rect x="400" y="128" width="216" height="180" rx="8" fill="#ffffff" />
-      <rect x="416" y="148" width="120" height="12" rx="6" fill="#e0e0e0" />
-      <rect x="416" y="172" width="184" height="88" rx="6" fill="#f0f0f0" />
-      <text x="320" y="370" textAnchor="middle" fontSize="13" fill="#7a7a7a">
+      <rect width="640" height="400" fill="var(--color-parchment)" />
+      <rect x="0" y="0" width="640" height="36" fill="var(--color-hairline)" />
+      <circle cx="18" cy="18" r="5" fill="var(--color-ink-48)" opacity="0.35" />
+      <circle cx="36" cy="18" r="5" fill="var(--color-ink-48)" opacity="0.35" />
+      <rect x="56" y="12" width="220" height="12" rx="6" fill="var(--color-ink-48)" opacity="0.35" />
+      <rect x="24" y="60" width="592" height="52" rx="8" fill="var(--color-canvas)" />
+      <rect x="40" y="76" width="180" height="14" rx="7" fill="var(--color-hairline)" />
+      <rect x="24" y="128" width="360" height="180" rx="8" fill="var(--color-canvas)" />
+      <rect x="40" y="148" width="140" height="12" rx="6" fill="var(--color-hairline)" />
+      <rect x="40" y="172" width="300" height="10" rx="5" fill="var(--color-divider)" />
+      <rect x="40" y="192" width="300" height="10" rx="5" fill="var(--color-divider)" />
+      <rect x="40" y="212" width="220" height="10" rx="5" fill="var(--color-divider)" />
+      <rect x="40" y="248" width="90" height="28" rx="14" fill="var(--color-primary)" opacity="0.85" />
+      <rect x="400" y="128" width="216" height="180" rx="8" fill="var(--color-canvas)" />
+      <rect x="416" y="148" width="120" height="12" rx="6" fill="var(--color-hairline)" />
+      <rect x="416" y="172" width="184" height="88" rx="6" fill="var(--color-divider)" />
+      <text x="320" y="370" textAnchor="middle" fontSize="13" fill="var(--color-ink-48)">
         {name}（演示占位截图）
       </text>
     </svg>
@@ -47,9 +47,9 @@ const demoLogLines = [
 
 function TextPlaceholder({ name }: { name: string }) {
   return (
-    <div className="rounded-utility border border-hairline bg-[#1d1d1f] p-4">
+    <div className="rounded-utility border border-hairline bg-tile p-4">
       <p className="mb-2 text-[11px] text-white/40">{name}（演示片段，已脱敏）</p>
-      <pre className="overflow-x-auto text-[11px] leading-[1.8] text-[#c9c9ce]">
+      <pre className="overflow-x-auto text-[11px] leading-[1.8] text-code">
         {demoLogLines.join('\n')}
       </pre>
     </div>
@@ -60,12 +60,12 @@ function PdfPlaceholder({ name }: { name: string }) {
   return (
     <div className="flex flex-col items-center gap-3 rounded-utility border border-hairline bg-pearl py-10">
       <svg viewBox="0 0 48 60" className="w-14">
-        <rect width="48" height="60" rx="4" fill="#ffffff" stroke="#e0e0e0" />
-        <rect x="8" y="10" width="32" height="4" rx="2" fill="#e0e0e0" />
-        <rect x="8" y="20" width="32" height="3" rx="1.5" fill="#ececf0" />
-        <rect x="8" y="27" width="32" height="3" rx="1.5" fill="#ececf0" />
-        <rect x="8" y="34" width="20" height="3" rx="1.5" fill="#ececf0" />
-        <text x="24" y="52" textAnchor="middle" fontSize="9" fill="#d70015">
+        <rect width="48" height="60" rx="4" fill="var(--color-canvas)" stroke="var(--color-hairline)" />
+        <rect x="8" y="10" width="32" height="4" rx="2" fill="var(--color-hairline)" />
+        <rect x="8" y="20" width="32" height="3" rx="1.5" fill="var(--color-divider)" />
+        <rect x="8" y="27" width="32" height="3" rx="1.5" fill="var(--color-divider)" />
+        <rect x="8" y="34" width="20" height="3" rx="1.5" fill="var(--color-divider)" />
+        <text x="24" y="52" textAnchor="middle" fontSize="9" fill="var(--color-danger)">
           PDF
         </text>
       </svg>

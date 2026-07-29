@@ -103,7 +103,7 @@ export function TasksPage() {
             {isAdmin && (
               <Select
                 value={createdBy}
-                onChange={(e) => setCreatedBy(e.target.value)}
+                onValueChange={setCreatedBy}
                 className="!w-40"
               >
                 <option value="all">全部发起人</option>

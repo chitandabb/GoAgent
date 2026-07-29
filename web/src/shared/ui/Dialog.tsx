@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
+import { X } from 'lucide-react'
+import { cn } from '@/shared/lib/utils'
 import { Button } from './Button'
 
-// 遮罩 + 白卡 18px：规范无投影，层次靠遮罩与 hairline。
 export function Dialog({
   open,
   title,
@@ -17,47 +18,36 @@ export function Dialog({
   footer?: React.ReactNode
   width?: string
 }) {
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
-  if (!open) return null
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-6"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        className={`max-h-[85dvh] ${width} max-w-full overflow-y-auto rounded-card border border-hairline bg-canvas`}
-      >
-        <div className="flex items-center justify-between gap-4 border-b border-divider px-6 py-4">
-          <h2 className="text-[16px] font-semibold text-ink">{title}</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="press focus-ring flex size-7 items-center justify-center rounded-full text-ink-48 hover:bg-pearl hover:text-ink"
-            aria-label="关闭"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="px-6 py-5">{children}</div>
-        {footer && (
-          <div className="flex items-center justify-end gap-3 border-t border-divider px-6 py-4">
-            {footer}
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-ink/30 data-[state=closed]:animate-out data-[state=open]:animate-in" />
+        <DialogPrimitive.Content
+          className={cn(
+            'fixed left-1/2 top-1/2 z-50 max-h-[85dvh] max-w-[calc(100%-3rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-card border border-hairline bg-canvas shadow-none focus:outline-none',
+            width,
+          )}
+        >
+          <div className="flex items-center justify-between gap-4 border-b border-divider px-6 py-4">
+            <DialogPrimitive.Title className="text-[16px] font-semibold text-ink">
+              {title}
+            </DialogPrimitive.Title>
+            <DialogPrimitive.Close
+              className="press focus-ring flex size-7 items-center justify-center rounded-full text-ink-48 hover:bg-pearl hover:text-ink"
+              aria-label="关闭"
+            >
+              <X className="size-4" />
+            </DialogPrimitive.Close>
           </div>
-        )}
-      </div>
-    </div>
+          <div className="px-6 py-5">{children}</div>
+          {footer && (
+            <div className="flex items-center justify-end gap-3 border-t border-divider px-6 py-4">
+              {footer}
+            </div>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   )
 }
 

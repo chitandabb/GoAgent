@@ -28,15 +28,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
-    // 对应真实实现的 GET /auth/me：刷新后恢复认证状态
-    api.me().then((u) => {
-      if (!cancelled) {
-        setUser(u)
-        setReady(true)
-      }
-    })
+    const unsubscribe = api.onUnauthorized(() => setUser(null))
+    api.me()
+      .then((u) => {
+        if (!cancelled) setUser(u)
+      })
+      .catch(() => {
+        if (!cancelled) setUser(null)
+      })
+      .finally(() => {
+        if (!cancelled) setReady(true)
+      })
     return () => {
       cancelled = true
+      unsubscribe()
     }
   }, [])
 

@@ -1,6 +1,7 @@
 /.idea/
 /.env
 /.firecrawl/
+/.playwright-cli/
 /.claude/settings.local.json
 /docs/evidence/
 /docs/demos/

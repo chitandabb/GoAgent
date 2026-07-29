@@ -1,26 +1,29 @@
-// 规范：白卡片 + 1px hairline + 18px 圆角，无投影。层次靠表面色，不靠阴影。
+import type { HTMLAttributes } from 'react'
+import { cn } from '@/shared/lib/utils'
+
 export function Card({
-  className = '',
-  children,
-}: {
-  className?: string
-  children: React.ReactNode
-}) {
+  className,
+  ...props
+}: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={`rounded-card border border-hairline bg-canvas ${className}`}>
-      {children}
-    </div>
+    <div
+      data-slot="card"
+      className={cn('rounded-card border border-hairline bg-canvas shadow-none', className)}
+      {...props}
+    />
   )
 }
 
 export function CardTitle({
   children,
-  className = '',
+  className,
 }: {
   children: React.ReactNode
   className?: string
 }) {
   return (
-    <h3 className={`text-[14px] font-semibold text-ink ${className}`}>{children}</h3>
+    <h3 data-slot="card-title" className={cn('text-[14px] font-semibold text-ink', className)}>
+      {children}
+    </h3>
   )
 }
