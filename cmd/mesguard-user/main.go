@@ -70,10 +70,11 @@ func run(ctx context.Context, args []string, output io.Writer, log *zap.Logger) 
 		return fmt.Errorf("build user provisioner: %w", err)
 	}
 	user, err := service.Create(ctx, auth.CreateUserInput{
-		Username:    options.username,
-		DisplayName: options.displayName,
-		Password:    password,
-		Role:        auth.Role(options.role),
+		Username:           options.username,
+		DisplayName:        options.displayName,
+		Password:           password,
+		Role:               auth.Role(options.role),
+		MustChangePassword: options.mustChangePassword,
 	})
 	if err != nil {
 		return err
@@ -83,10 +84,11 @@ func run(ctx context.Context, args []string, output io.Writer, log *zap.Logger) 
 }
 
 type commandOptions struct {
-	username    string
-	displayName string
-	role        string
-	passwordEnv string
+	username           string
+	displayName        string
+	role               string
+	passwordEnv        string
+	mustChangePassword bool
 }
 
 func parseOptions(args []string) (commandOptions, error) {
@@ -97,6 +99,7 @@ func parseOptions(args []string) (commandOptions, error) {
 	flags.StringVar(&options.displayName, "display-name", "", "display name")
 	flags.StringVar(&options.role, "role", string(auth.RoleAnalyst), "analyst or admin")
 	flags.StringVar(&options.passwordEnv, "password-env", defaultPasswordEnv, "environment variable containing initial password")
+	flags.BoolVar(&options.mustChangePassword, "must-change-password", true, "require password change after first login")
 	if err := flags.Parse(args); err != nil {
 		return commandOptions{}, fmt.Errorf("parse flags: %w", err)
 	}

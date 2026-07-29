@@ -11,10 +11,11 @@ import (
 
 // CreateUserInput 是本地账号创建命令与后续管理员用例共享的输入。
 type CreateUserInput struct {
-	Username    string
-	DisplayName string
-	Password    string
-	Role        Role
+	Username           string
+	DisplayName        string
+	Password           string
+	Role               Role
+	MustChangePassword bool
 }
 
 // UserProvisioner 创建使用 Argon2id 密码哈希的本地账号。
@@ -42,7 +43,7 @@ func newUserProvisioner(users UserRepository, password PasswordHasher, clock Clo
 	return &UserProvisioner{users: users, password: password, clock: clock}, nil
 }
 
-// Create 创建启用状态且首次登录必须改密的本地账号。
+// Create 创建启用状态的本地账号，是否首次登录改密由输入显式决定。
 func (s *UserProvisioner) Create(ctx context.Context, input CreateUserInput) (User, error) {
 	input.Username = NormalizeUsername(input.Username)
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
@@ -73,7 +74,7 @@ func (s *UserProvisioner) Create(ctx context.Context, input CreateUserInput) (Us
 		Username:           input.Username,
 		DisplayName:        input.DisplayName,
 		PasswordHash:       passwordHash,
-		MustChangePassword: true,
+		MustChangePassword: input.MustChangePassword,
 		Role:               input.Role,
 		Status:             UserStatusActive,
 		CreatedAt:          now,

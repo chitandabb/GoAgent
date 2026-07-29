@@ -16,10 +16,11 @@ func TestUserProvisionerCreatesNormalizedLocalUser(t *testing.T) {
 	}
 
 	user, err := service.Create(context.Background(), CreateUserInput{
-		Username:    "  Admin01  ",
-		DisplayName: "  系统管理员  ",
-		Password:    "password123",
-		Role:        RoleAdmin,
+		Username:           "  Admin01  ",
+		DisplayName:        "  系统管理员  ",
+		Password:           "password123",
+		Role:               RoleAdmin,
+		MustChangePassword: true,
 	})
 	if err != nil {
 		t.Fatalf("Create(): %v", err)
