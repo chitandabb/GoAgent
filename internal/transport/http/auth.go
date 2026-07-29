@@ -196,6 +196,11 @@ func (r *AuthRoutes) requireAuthentication() gin.HandlerFunc {
 	}
 }
 
+// RequireAuthentication 暴露给同一 HTTP 适配层中的其他业务路由复用。
+func (r *AuthRoutes) RequireAuthentication() gin.HandlerFunc {
+	return r.requireAuthentication()
+}
+
 func (r *AuthRoutes) requireTrustedOrigin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := strings.TrimSpace(c.GetHeader("Origin"))

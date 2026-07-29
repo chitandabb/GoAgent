@@ -52,13 +52,14 @@ services:
         condition: service_healthy
     environment:
       MSSQL_SA_PASSWORD: ${MESGUARD_SQLSERVER_SA_PASSWORD:-MESGuard_Dev!2026}
+      ReaderPassword: ${MESGUARD_SQLSERVER_PASSWORD:-MESGuard_Reader!2026}
     volumes:
       - ./infra/sqlserver/init:/seed:ro
     command:
       - /bin/bash
       - -ec
       - >-
-        /opt/mssql-tools/bin/sqlcmd -C -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD"
+        /opt/mssql-tools/bin/sqlcmd -b -C -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD"
         -i /seed/001_mes_demo.sql
 
   redis:
@@ -104,6 +105,7 @@ services:
       TZ: Asia/Shanghai
       MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
       MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      MESGUARD_SQLSERVER_PASSWORD: ${MESGUARD_SQLSERVER_PASSWORD:-MESGuard_Reader!2026}
     depends_on:
       postgres:
         condition: service_healthy

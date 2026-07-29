@@ -4,8 +4,8 @@ The local development stack contains only MESGuard dependencies:
 
 - PostgreSQL 16 with pgvector: diagnostic runs, events, knowledge metadata,
   evaluations, and long-term state.
-- SQL Server 2022 Developer: synthetic MES data queried by future read-only
-  diagnostic tools.
+- SQL Server 2022 Developer: synthetic company ERP tickets queried through the
+  dedicated `mesguard_case_reader` account.
 - Redis 7: short-lived state, locks, and cache. It is not the system of record.
 - `backend`: the `cmd/mesguard-api` executable.
 
@@ -44,9 +44,40 @@ go run ./cmd/mesguard-user -username admin01 -display-name "系统管理员" -ro
 Invoke-RestMethod http://127.0.0.1:9090/healthz
 ```
 
-The current Web shell connects to PostgreSQL and Redis during startup so that
-`/healthz` can verify both dependencies. The API checks the required database
-version at startup but never applies migrations itself.
+PostgreSQL is the critical fact store checked by `/healthz`. Redis and the ERP
+SQL Server are degradable dependencies: startup continues when either is down,
+and only the affected capability fails. The SQL Server connection pool retries
+on later requests, so recovery does not require an API restart. The API checks
+the required PostgreSQL migration version at startup but never applies
+migrations itself.
+
+## ERP SQL Server
+
+`sqlserver-seed` restores four deterministic ERP fault scenarios and creates a
+reader login that can select only the two MESGuard integration views. The API
+password is read from `MESGUARD_SQLSERVER_PASSWORD`; the `sa` password is used
+only by the seed container.
+
+Run the real SQL Server integration suite explicitly:
+
+```powershell
+$env:MESGUARD_TEST_SQLSERVER_DSN = "sqlserver://mesguard_case_reader:...@127.0.0.1:1433?database=SUPPORT_DEMO&encrypt=disable&TrustServerCertificate=true"
+go test -tags=integration ./internal/platform/sqlserver -count=1 -v
+```
+
+The suite verifies mapping and also proves that `INSERT`, `UPDATE`, `DELETE`,
+and `CREATE TABLE` are rejected by SQL Server. Default `go test ./...` does not
+require Docker.
+
+After login, discover the configured source before listing tickets:
+
+```text
+GET /api/v1/data-sources
+GET /api/v1/external-cases?dataSourceId=<id>&page=1&pageSize=20
+GET /api/v1/external-cases/<externalCaseId>
+```
+
+The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 
 ## Logging
 

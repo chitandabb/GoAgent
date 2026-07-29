@@ -1,18 +1,25 @@
 # MESGuard
 
-MESGuard will become a Go service for evidence-based MES ticket diagnosis. The
-project is currently at the Web foundation stage so that each Go engineering
-concept can be introduced and reviewed independently.
+MESGuard is a Go service under active development for evidence-based MES ticket
+diagnosis. The current backend includes local authentication and the first
+read-only ERP ticket vertical slice.
 
 ## Current Status
 
-The current API exposes only:
+The current API exposes:
 
 - `GET /healthz`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/data-sources`
+- `GET /api/v1/external-cases`
+- `GET /api/v1/external-cases/{externalCaseId}`
 
 The Web shell already provides request IDs, unified success/error responses,
 application error codes, structured Zap logging, global error handling, panic
-recovery, and graceful shutdown. No MES business API is registered yet.
+recovery, and graceful shutdown. External cases are mapped from a synthetic
+company ERP SQL Server through a dedicated database-level read-only account.
 
 Successful responses use this shape:
 
@@ -41,6 +48,8 @@ Run the Go test suite with:
 ```powershell
 go test ./cmd/... ./db/... ./internal/...
 ```
+
+The machine-readable implemented API contract is [`api/openapi.yaml`](api/openapi.yaml).
 
 ## Documentation
 

@@ -425,4 +425,4 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 ## 后续工作
 
-消息和API设计审阅通过后进入M0代码，先实现迁移、认证、Session、Repository和事务基础，再进入RabbitMQ与Worker实现。
+M0认证、Session、Repository和事务基础已完成；RabbitMQ与Worker仍在M1-B/M1-C按本文约束实现。

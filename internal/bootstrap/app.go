@@ -2,18 +2,20 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	stdhttp "net/http"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
-	"github.com/chitandabb/GoAgent/internal/platform/migration"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
-	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
+	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
 	httptransport "github.com/chitandabb/GoAgent/internal/transport/http"
 
+	"github.com/google/uuid"
 	rediscli "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -24,6 +26,7 @@ type App struct {
 	db           *gorm.DB
 	dbClose      func() error
 	redis        *rediscli.Client
+	sqlServer    *sql.DB
 	logger       *zap.Logger
 	shutdownWait time.Duration
 }
@@ -31,31 +34,14 @@ type App struct {
 // New 是项目的手动依赖装配入口，作用类似 Spring Boot 的 Bean 配置类。
 // 这里负责创建基础设施客户端、Router 和 HTTP Server。
 func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) {
-	db, closeDB, err := platformpostgres.Open(ctx, cfg.Postgres, log.Named("postgres"))
+	deps, err := openRuntimeDependencies(ctx, cfg, log, defaultDependencyOpeners())
 	if err != nil {
 		return nil, err
 	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		_ = closeDB()
-		return nil, fmt.Errorf("get postgres sql db: %w", err)
-	}
-	if err := migration.CheckCurrent(ctx, sqlDB); err != nil {
-		_ = closeDB()
-		return nil, fmt.Errorf("check database migration version: %w", err)
-	}
-	redis, err := platformredis.Open(ctx, cfg.Redis)
-	if err != nil {
-		_ = closeDB()
-		return nil, err
-	}
-	closeDependencies := func() {
-		_ = redis.Close()
-		_ = closeDB()
-	}
+	closeDependencies := func() { _ = deps.close() }
 
-	userRepository := platformpostgres.NewUserRepository(db)
-	sessionRepository := platformpostgres.NewSessionRepository(db)
+	userRepository := platformpostgres.NewUserRepository(deps.db)
+	sessionRepository := platformpostgres.NewSessionRepository(deps.db)
 	passwordHasher, err := auth.NewArgon2idHasher(auth.DefaultArgon2idParams())
 	if err != nil {
 		closeDependencies()
@@ -99,16 +85,60 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		return nil, fmt.Errorf("build auth routes: %w", err)
 	}
 
+	registrars := []httptransport.RouteRegistrar{authRoutes}
+	if cfg.SQLServer.Enabled {
+		dataSourceID, parseErr := uuid.Parse(cfg.SQLServer.ID)
+		if parseErr != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("parse SQL Server data source id: %w", parseErr)
+		}
+		externalCaseRepository := platformpostgres.NewExternalCaseRepository(deps.db)
+		if err := externalCaseRepository.EnsureCaseSource(
+			ctx, dataSourceID, cfg.SQLServer.Code, cfg.SQLServer.Name, cfg.SQLServer.Environment,
+		); err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("sync ERP case source: %w", err)
+		}
+		var reader externalcase.Reader
+		if deps.sqlServer == nil {
+			reader = externalcase.NewUnavailableReader(deps.sqlServerError)
+		} else {
+			reader, err = platformsqlserver.NewExternalCaseReader(deps.sqlServer, cfg.SQLServer, log.Named("sqlserver"))
+			if err != nil {
+				closeDependencies()
+				return nil, fmt.Errorf("build ERP external case reader: %w", err)
+			}
+		}
+		externalCaseService, err := externalcase.NewService(externalcase.DataSource{
+			ID: dataSourceID, Code: cfg.SQLServer.Code, Name: cfg.SQLServer.Name,
+			Type: "sqlserver", Role: "case_source", Environment: cfg.SQLServer.Environment,
+			SafetyMode: "read_only", Status: "active",
+		}, reader, externalCaseRepository)
+		if err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build external case service: %w", err)
+		}
+		externalCaseRoutes, err := httptransport.NewExternalCaseRoutes(
+			externalCaseService, authRoutes.RequireAuthentication(),
+		)
+		if err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build external case routes: %w", err)
+		}
+		registrars = append(registrars, externalCaseRoutes)
+	}
+
 	app := &App{
-		db:           db,
-		dbClose:      closeDB,
-		redis:        redis,
+		db:           deps.db,
+		dbClose:      deps.dbClose,
+		redis:        deps.redis,
+		sqlServer:    deps.sqlServer,
 		logger:       log,
 		shutdownWait: 10 * time.Second,
 	}
 	app.server = &stdhttp.Server{
 		Addr:              cfg.HTTP.Address(),
-		Handler:           httptransport.NewRouter(log.Named("http"), app.health, authRoutes),
+		Handler:           httptransport.NewRouter(log.Named("http"), app.health, registrars...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return app, nil
@@ -140,9 +170,15 @@ func (a *App) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownWait)
 	defer cancel()
 	shutdownErr := a.server.Shutdown(ctx)
-	redisErr := a.redis.Close()
+	var redisErr, sqlServerErr error
+	if a.redis != nil {
+		redisErr = a.redis.Close()
+	}
+	if a.sqlServer != nil {
+		sqlServerErr = a.sqlServer.Close()
+	}
 	dbErr := a.dbClose()
-	err := errors.Join(shutdownErr, redisErr, dbErr)
+	err := errors.Join(shutdownErr, redisErr, sqlServerErr, dbErr)
 	if err != nil {
 		a.logger.Error("application shutdown failed", zap.Error(err))
 		return err
@@ -151,14 +187,11 @@ func (a *App) Close() error {
 	return nil
 }
 
-// health 检查当前 Web 壳依赖的 PostgreSQL 和 Redis 是否可用。
+// health 只检查关键事实库。Redis 和外部业务依赖故障不能触发进程重启风暴。
 func (a *App) health(ctx context.Context) error {
 	sqlDB, err := a.db.DB()
 	if err != nil {
 		return err
 	}
-	if err := sqlDB.PingContext(ctx); err != nil {
-		return err
-	}
-	return a.redis.Ping(ctx).Err()
+	return sqlDB.PingContext(ctx)
 }

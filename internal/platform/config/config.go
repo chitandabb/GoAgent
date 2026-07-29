@@ -13,21 +13,187 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
 // Config 是 MESGuard 的顶层配置结构，对应 config/mesguard.toml 文件的顶层键。
 // 每个字段对应 TOML 中的一个配置块（通过 toml tag 映射）。
 type Config struct {
-	HTTP     HTTPConfig     `toml:"http"`     // [http] 配置块：API 服务器监听地址
-	Auth     AuthConfig     `toml:"auth"`     // [auth] 配置块：Session、Cookie 与可信前端来源
-	Log      LogConfig      `toml:"log"`      // [log] 配置块：结构化日志和文件轮转
-	Postgres PostgresConfig `toml:"postgres"` // [postgres] 配置块：PostgreSQL 数据库连接配置
-	Redis    RedisConfig    `toml:"redis"`    // [redis] 配置块：Redis 缓存连接配置
+	HTTP      HTTPConfig      `toml:"http"`      // [http] 配置块：API 服务器监听地址
+	Auth      AuthConfig      `toml:"auth"`      // [auth] 配置块：Session、Cookie 与可信前端来源
+	Log       LogConfig       `toml:"log"`       // [log] 配置块：结构化日志和文件轮转
+	Postgres  PostgresConfig  `toml:"postgres"`  // [postgres] 配置块：PostgreSQL 数据库连接配置
+	Redis     RedisConfig     `toml:"redis"`     // [redis] 配置块：Redis 缓存连接配置
+	SQLServer SQLServerConfig `toml:"sqlserver"` // [sqlserver] 公司 ERP 工单库（可降级依赖）
+}
+
+// SQLServerConfig 定义公司 ERP 工单库的只读连接和安全映射。
+// relation/fields 只接受标识符，不接受任意 SQL 片段。
+type SQLServerConfig struct {
+	Enabled                bool                   `toml:"enabled"`
+	ID                     string                 `toml:"id"`
+	Code                   string                 `toml:"code"`
+	Name                   string                 `toml:"name"`
+	Environment            string                 `toml:"environment"`
+	Host                   string                 `toml:"host"`
+	Port                   int                    `toml:"port"`
+	User                   string                 `toml:"user"`
+	Database               string                 `toml:"database"`
+	PasswordEnv            string                 `toml:"passwordEnv"`
+	Encrypt                string                 `toml:"encrypt"`
+	TrustServerCertificate bool                   `toml:"trustServerCertificate"`
+	MaxIdle                int                    `toml:"maxIdleConns"`
+	MaxOpen                int                    `toml:"maxOpenConns"`
+	QueryTimeoutMillis     int                    `toml:"queryTimeoutMillis"`
+	MaxTextBytes           int                    `toml:"maxTextBytes"`
+	MaxResultBytes         int                    `toml:"maxResultBytes"`
+	CaseMapping            SQLServerCaseMapping   `toml:"caseMapping"`
+	AttachmentMapping      SQLServerObjectMapping `toml:"attachmentMapping"`
+}
+
+type SQLServerCaseMapping struct {
+	Relation       string            `toml:"relation"`
+	Fields         map[string]string `toml:"fields"`
+	Attributes     map[string]string `toml:"attributes"`
+	StatusValues   map[string]string `toml:"statusValues"`
+	PriorityValues map[string]string `toml:"priorityValues"`
+}
+
+type SQLServerObjectMapping struct {
+	Relation string            `toml:"relation"`
+	Fields   map[string]string `toml:"fields"`
+}
+
+// Password 从显式声明的环境变量读取 SQL Server 密码。
+func (c SQLServerConfig) Password() (string, error) {
+	return requiredEnv(c.PasswordEnv)
+}
+
+var sqlIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var jsonAttributeName = regexp.MustCompile(`^[a-z][A-Za-z0-9]{0,63}$`)
+
+func validateRelation(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	return sqlIdentifier.MatchString(parts[0]) && sqlIdentifier.MatchString(parts[1])
+}
+
+func validateMapping(name string, mapping SQLServerObjectMapping, required []string, allowed map[string]struct{}) error {
+	if !validateRelation(strings.TrimSpace(mapping.Relation)) {
+		return fmt.Errorf("sqlserver %s relation must be schema.object", name)
+	}
+	for canonical, source := range mapping.Fields {
+		if _, ok := allowed[canonical]; !ok {
+			return fmt.Errorf("sqlserver %s contains unsupported field %q", name, canonical)
+		}
+		if !sqlIdentifier.MatchString(strings.TrimSpace(source)) {
+			return fmt.Errorf("sqlserver %s field %q has invalid source identifier", name, canonical)
+		}
+	}
+	for _, field := range required {
+		if strings.TrimSpace(mapping.Fields[field]) == "" {
+			return fmt.Errorf("sqlserver %s field %q is required", name, field)
+		}
+	}
+	return nil
+}
+
+func (c SQLServerConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if _, err := uuid.Parse(c.ID); err != nil {
+		return errors.New("sqlserver id must be a UUID")
+	}
+	if strings.TrimSpace(c.Code) == "" || strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Environment) == "" {
+		return errors.New("sqlserver code, name, and environment are required")
+	}
+	if strings.TrimSpace(c.Host) == "" || c.Port <= 0 || strings.TrimSpace(c.User) == "" ||
+		strings.TrimSpace(c.Database) == "" || strings.TrimSpace(c.PasswordEnv) == "" {
+		return errors.New("sqlserver host, port, user, database, and passwordEnv are required")
+	}
+	if c.MaxIdle < 0 || c.MaxOpen <= 0 || c.MaxIdle > c.MaxOpen {
+		return errors.New("sqlserver connection pool limits are invalid")
+	}
+	if c.QueryTimeoutMillis <= 0 || c.MaxTextBytes <= 0 || c.MaxResultBytes <= 0 {
+		return errors.New("sqlserver queryTimeoutMillis, maxTextBytes, and maxResultBytes must be positive")
+	}
+	if c.MaxTextBytes > c.MaxResultBytes {
+		return errors.New("sqlserver maxTextBytes cannot exceed maxResultBytes")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Encrypt)) {
+	case "disable", "false", "optional", "true", "mandatory", "strict":
+	default:
+		return errors.New("sqlserver encrypt mode is invalid")
+	}
+	allowedCaseFields := map[string]struct{}{
+		"externalCaseKey": {}, "caseType": {}, "title": {}, "description": {},
+		"category": {}, "module": {}, "status": {}, "priority": {},
+		"occurredAt": {}, "reportedAt": {}, "sourceUpdatedAt": {},
+		"customerCode": {}, "customerName": {}, "productCode": {},
+		"productName": {}, "productVersion": {}, "workOrderNo": {},
+		"workpieceNo": {}, "materialCode": {}, "batchNo": {}, "serialNo": {},
+		"factoryCode": {}, "workshopCode": {}, "productionLineCode": {},
+		"workstationCode": {}, "equipmentCode": {}, "sourceSystem": {},
+		"deploymentEnvironment": {}, "businessDatabaseAlias": {},
+	}
+	caseMapping := SQLServerObjectMapping{Relation: c.CaseMapping.Relation, Fields: c.CaseMapping.Fields}
+	if err := validateMapping("caseMapping", caseMapping,
+		[]string{"externalCaseKey", "title", "description", "status", "reportedAt", "sourceUpdatedAt"},
+		allowedCaseFields,
+	); err != nil {
+		return err
+	}
+	for attribute, source := range c.CaseMapping.Attributes {
+		if !jsonAttributeName.MatchString(attribute) {
+			return fmt.Errorf("sqlserver caseMapping attribute %q is invalid", attribute)
+		}
+		if _, reserved := allowedCaseFields[attribute]; reserved {
+			return fmt.Errorf("sqlserver caseMapping attribute %q duplicates a standard field", attribute)
+		}
+		if !sqlIdentifier.MatchString(strings.TrimSpace(source)) {
+			return fmt.Errorf("sqlserver caseMapping attribute %q has invalid source identifier", attribute)
+		}
+	}
+	allowedAttachmentFields := map[string]struct{}{
+		"externalCaseKey": {}, "externalAttachmentKey": {}, "fileName": {},
+		"mediaType": {}, "sizeBytes": {}, "objectKey": {}, "contentHash": {},
+		"sourceUpdatedAt": {},
+	}
+	if err := validateMapping("attachmentMapping", c.AttachmentMapping,
+		[]string{"externalCaseKey", "externalAttachmentKey", "fileName", "mediaType", "sizeBytes", "objectKey", "contentHash", "sourceUpdatedAt"},
+		allowedAttachmentFields,
+	); err != nil {
+		return err
+	}
+	for raw, normalized := range c.CaseMapping.StatusValues {
+		if strings.TrimSpace(raw) == "" || !contains([]string{"open", "processing", "closed"}, normalized) {
+			return fmt.Errorf("sqlserver status mapping %q is invalid", raw)
+		}
+	}
+	for raw, normalized := range c.CaseMapping.PriorityValues {
+		if strings.TrimSpace(raw) == "" || !contains([]string{"high", "medium", "low"}, normalized) {
+			return fmt.Errorf("sqlserver priority mapping %q is invalid", raw)
+		}
+	}
+	return nil
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // AuthConfig 定义本地账号认证的 Session 时长和浏览器安全边界。
@@ -207,6 +373,9 @@ func (c Config) Validate() error {
 	// 校验 Redis 配置
 	if strings.TrimSpace(c.Redis.Host) == "" || c.Redis.Port <= 0 {
 		return errors.New("redis host and port are required")
+	}
+	if err := c.SQLServer.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

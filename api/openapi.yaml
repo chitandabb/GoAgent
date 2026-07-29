@@ -1,0 +1,500 @@
+openapi: 3.1.0
+info:
+  title: MESGuard API
+  version: 0.1.0-m1a1
+  description: Current implemented backend contract for authentication and ERP external cases.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: http://127.0.0.1:9090
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: 检查 API 与关键 PostgreSQL 事实库
+      security: []
+      responses:
+        "200":
+          description: 服务可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+        "4XX":
+          description: 客户端请求错误
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      summary: 本地账号登录
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: 登录成功并设置 Session/CSRF Cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/auth/me:
+    get:
+      operationId: currentUser
+      summary: 使用 Session Cookie 恢复当前用户
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: 当前用户和 Session 到期时间
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      summary: 幂等退出并撤销 Session
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Origin"
+        - $ref: "#/components/parameters/CSRFToken"
+      responses:
+        "200":
+          description: 已退出
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/data-sources:
+    get:
+      operationId: listDataSources
+      summary: 返回当前启用的安全数据源元数据
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: 数据源列表；不包含 DSN、地址、账号或密码
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataSourceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/external-cases:
+    get:
+      operationId: listExternalCases
+      summary: 实时只读查询公司 ERP 工单
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: dataSourceId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: keyword
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/CaseStatus"
+        - name: priority
+          in: query
+          schema:
+            $ref: "#/components/schemas/CasePriority"
+        - name: caseType
+          in: query
+          description: ERP 工单类型，精确匹配
+          schema:
+            type: string
+            maxLength: 64
+        - name: reportedFrom
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: reportedTo
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [reportedAt, sourceUpdatedAt, externalCaseKey]
+            default: reportedAt
+        - name: sortOrder
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: 统一工单分页结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalCaseListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/external-cases/{externalCaseId}:
+    get:
+      operationId: getExternalCase
+      summary: 根据 MESGuard 稳定身份实时读取 ERP 工单详情
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: externalCaseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 工单详情和 ERP 附件安全元数据
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExternalCaseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: mesguard_session
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uri
+    CSRFToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: 请求格式或参数错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: 未登录或 Session 已失效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Origin、CSRF 或权限校验失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: 资源不存在或不可见
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    DependencyUnavailable:
+      description: PostgreSQL 或 ERP SQL Server 暂时不可用
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    CaseStatus:
+      type: string
+      enum: [open, processing, closed]
+    CasePriority:
+      type: string
+      enum: [high, medium, low]
+    EnvelopeBase:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        requestId:
+          type: string
+    ErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties: true
+    HealthResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  const: ok
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          maxLength: 64
+        password:
+          type: string
+          format: password
+          maxLength: 256
+    User:
+      type: object
+      required: [id, username, displayName, role, mustChangePassword]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [analyst, admin]
+        mustChangePassword:
+          type: boolean
+    AuthData:
+      type: object
+      required: [user, csrfToken, idleExpiresAt, absoluteExpiresAt]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        csrfToken:
+          type: string
+        idleExpiresAt:
+          type: string
+          format: date-time
+        absoluteExpiresAt:
+          type: string
+          format: date-time
+    AuthResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/AuthData"
+    LogoutResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [loggedOut]
+              properties:
+                loggedOut:
+                  type: boolean
+    DataSource:
+      type: object
+      required: [id, name, type, environment, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          const: sqlserver
+        environment:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+    DataSourceListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/DataSource"
+    ExternalAttachment:
+      type: object
+      required: [externalAttachmentKey, fileName, mediaType, sizeBytes, contentHash, sourceUpdatedAt]
+      properties:
+        externalAttachmentKey:
+          type: string
+        fileName:
+          type: string
+        mediaType:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        contentHash:
+          type: string
+        sourceUpdatedAt:
+          type: string
+          format: date-time
+    ExternalCase:
+      type: object
+      required:
+        - externalCaseId
+        - dataSourceId
+        - externalCaseKey
+        - title
+        - description
+        - status
+        - priority
+        - reportedAt
+        - sourceUpdatedAt
+        - sourceFingerprint
+        - attributes
+        - attributesSchemaVersion
+        - attachments
+        - truncated
+      properties:
+        externalCaseId: {type: string, format: uuid}
+        dataSourceId: {type: string, format: uuid}
+        externalCaseKey: {type: string}
+        caseType: {type: string}
+        title: {type: string}
+        description: {type: string}
+        category: {type: string}
+        module: {type: string}
+        status: {$ref: "#/components/schemas/CaseStatus"}
+        priority: {$ref: "#/components/schemas/CasePriority"}
+        occurredAt: {type: [string, "null"], format: date-time}
+        reportedAt: {type: string, format: date-time}
+        sourceUpdatedAt: {type: string, format: date-time}
+        customerCode: {type: string}
+        customerName: {type: string}
+        productCode: {type: string}
+        productName: {type: string}
+        productVersion: {type: string}
+        workOrderNo: {type: string}
+        workpieceNo: {type: string}
+        materialCode: {type: string}
+        batchNo: {type: string}
+        serialNo: {type: string}
+        factoryCode: {type: string}
+        workshopCode: {type: string}
+        productionLineCode: {type: string}
+        workstationCode: {type: string}
+        equipmentCode: {type: string}
+        sourceSystem: {type: string}
+        deploymentEnvironment: {type: string}
+        businessDatabaseAlias: {type: string}
+        attributes:
+          type: object
+          additionalProperties: true
+        attributesSchemaVersion:
+          type: integer
+          const: 1
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalAttachment"
+        sourceFingerprint: {type: string}
+        truncated: {type: boolean}
+    ExternalCaseResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ExternalCase"
+    ExternalCaseListData:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalCase"
+        page: {type: integer}
+        pageSize: {type: integer}
+        total: {type: integer}
+    ExternalCaseListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ExternalCaseListData"

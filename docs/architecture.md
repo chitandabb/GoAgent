@@ -1,7 +1,7 @@
 # Architecture
 
-MESGuard currently contains only the reusable Web foundation. Business modules
-will be added after the Web request lifecycle is understood and accepted.
+MESGuard currently contains the reusable Web/authentication foundation and the
+M1-A1 read-only ERP external-case module.
 
 ## Current Request Flow
 
@@ -20,10 +20,12 @@ Gin Router
         +-- ErrorHandler middleware
         |
         v
-GET /healthz
+GET /healthz or authenticated /api/v1/external-cases
         |
-        v
-unified JSON Response
+        +-- auth Session middleware
+        +-- externalcase Service
+        +-- PostgreSQL identity Registry
+        `-- SQL Server read-only Adapter
 ```
 
 ## Spring Boot Mapping
@@ -37,8 +39,11 @@ unified JSON Response
 | SLF4J/Logback configuration | `internal/platform/logger` and `[log]` TOML configuration |
 | Common response object | `internal/transport/http/response.go` |
 | Business exception and error enum | `internal/apperror` |
-| Controller and route registration | `internal/transport/http/router.go` |
-| DataSource/Redis client creation | `internal/platform/postgres` and `redis` |
+| Controller and route registration | `internal/transport/http` |
+| Service interface / use case | `internal/externalcase` |
+| Repository implementation | `internal/platform/postgres` |
+| External database adapter | `internal/platform/sqlserver` |
+| DataSource/Redis client creation | `internal/platform/postgres`, `sqlserver`, and `redis` |
 
 ## Repository Layout
 
@@ -52,15 +57,18 @@ unified JSON Response
 |-- internal/
 |   |-- apperror/                     error-code enum and application errors
 |   |-- bootstrap/                    manual dependency construction
+|   |-- externalcase/                 domain model, service, fingerprint
 |   |-- platform/
 |   |   |-- config/                   typed configuration loading
 |   |   |-- logger/                   Zap construction and request context
 |   |   |-- postgres/                 PostgreSQL connection lifecycle
-|   |   `-- redis/                    Redis connection lifecycle
+|   |   |-- redis/                    Redis connection lifecycle
+|   |   `-- sqlserver/                read-only ERP adapter
 |   `-- transport/http/
 |       |-- middleware.go             request ID, errors, panic recovery
 |       |-- response.go               unified JSON responses
-|       `-- router.go                 Gin creation and basic routes
+|       |-- external_case.go          data source and ticket handlers
+|       `-- router.go                 Gin creation and route registration
 |-- docker-compose.yml
 |-- Dockerfile.backend
 |-- go.mod
@@ -76,8 +84,8 @@ unified JSON Response
 3. Handlers report errors with `c.Error`; the global middleware writes the
    response.
 4. Application errors do not import Gin or `net/http`.
-5. Future business modules will live under `internal/<module>` and will not
-   import Gin, GORM, or concrete external clients directly.
+5. Business modules live under `internal/<module>` and do not import Gin, GORM,
+   or concrete external clients directly.
 
 The rationale is recorded in
 [ADR 001](decisions/001-modular-monolith-architecture.md).

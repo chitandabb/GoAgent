@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标系统架构和运行边界。
-- 当前仓库仍处于 Web 基础骨架阶段，仅实现 Go API、PostgreSQL、Redis、日志、中间件和健康检查等基础能力。
+- 当前仓库已完成 Web 基础、认证和 M1-A1 只读 ERP 工单后端；RabbitMQ、MinIO、Worker、Eino 与后续能力仍按里程碑实现。
 - React、Nginx、RabbitMQ、MinIO、Diagnosis Worker、Ingestion Worker、Eino 和模型接入均属于后续里程碑，不能作为当前已实现能力描述。
 - 本文定义组件职责和数据流，不展开数据库字段、RabbitMQ交换机、HTTP字段或Eino Graph节点。
 
@@ -541,9 +541,9 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | 能力 | 当前状态 | 目标里程碑 |
 | --- | --- | --- |
 | Gin API与统一响应 | 已实现基础骨架 | M1持续扩展 |
-| PostgreSQL与Redis连接 | 已实现 | M1调整健康与降级语义 |
+| PostgreSQL与Redis连接 | 已实现关键/降级依赖语义 | M1持续验证 |
 | Zap结构化日志 | 已实现 | M1增加任务和模型字段 |
-| SQL Server演示容器 | 已有初始化基础 | M1实现只读适配器 |
+| SQL Server演示容器与工单只读适配器 | M1-A1已实现并验证数据库拒写 | M1-D扩展受控诊断查询 |
 | RabbitMQ与Outbox | 未实现 | M1 |
 | MinIO与附件 | 未实现 | M1 |
 | Diagnosis Worker | 未实现 | M1 |
