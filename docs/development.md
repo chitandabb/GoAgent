@@ -7,6 +7,8 @@ The local development stack contains only MESGuard dependencies:
 - SQL Server 2022 Developer: synthetic company ERP tickets queried through the
   dedicated `mesguard_case_reader` account.
 - Redis 7: short-lived state, locks, and cache. It is not the system of record.
+- StepFun Step Plan: OpenAI-compatible `step-3.7-flash` ChatModel for Agent runs.
+- GitHub MCP: optional read-only code investigation tools.
 - `backend`: the `cmd/mesguard-api` executable.
 
 ## Start
@@ -44,12 +46,45 @@ go run ./cmd/mesguard-user -username admin01 -display-name "系统管理员" -ro
 Invoke-RestMethod http://127.0.0.1:9090/healthz
 ```
 
-PostgreSQL is the critical fact store checked by `/healthz`. Redis and the ERP
-SQL Server are degradable dependencies: startup continues when either is down,
-and only the affected capability fails. The SQL Server connection pool retries
-on later requests, so recovery does not require an API restart. The API checks
-the required PostgreSQL migration version at startup but never applies
-migrations itself.
+PostgreSQL is the critical fact store checked by `/healthz`. Redis, the ERP SQL
+Server, StepFun, and GitHub MCP are degradable dependencies: startup continues
+when one is down, and only the affected capability fails. The SQL Server
+connection pool retries on later requests, so recovery does not require an API
+restart. The API checks the required PostgreSQL migration version at startup
+but never applies migrations itself.
+
+## Agent providers
+
+The ChatModel uses Step Plan's OpenAI-compatible endpoint with model
+`step-3.7-flash`. Set `MESGUARD_STEPFUN_API_KEY` only in `.env`, GoLand run
+configuration, Docker environment, or a production secret store. Do not put the
+key in TOML or logs. When the key is absent, authentication and ticket APIs
+remain available while the Agent runtime is disabled.
+
+GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
+If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
+`code-investigation` is removed from the compiled Graph.
+
+After configuring the StepFun key, run the provider smoke test once:
+
+```powershell
+go run ./cmd/mesguard-model-smoke
+```
+
+The command asks the model to return one harmless Tool Call and prints only the
+model name, Tool name, and provider-reported Token usage. It does not execute
+database, GitHub, or write-capable tools.
+
+To verify the complete non-streaming ReAct loop and multi-call Token
+aggregation against a fixed synthetic ticket, run:
+
+```powershell
+go run ./cmd/mesguard-agent-smoke
+```
+
+This command executes only the local read-only `read_external_case` Tool. It
+does not connect to ERP, PostgreSQL, Redis, or GitHub and does not print the
+model's answer text.
 
 ## ERP SQL Server
 

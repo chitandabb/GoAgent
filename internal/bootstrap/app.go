@@ -23,6 +23,7 @@ import (
 
 type App struct {
 	server       *stdhttp.Server
+	agent        *agentRuntime
 	db           *gorm.DB
 	dbClose      func() error
 	redis        *rediscli.Client
@@ -86,6 +87,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	var externalCaseService *externalcase.Service
 	if cfg.SQLServer.Enabled {
 		dataSourceID, parseErr := uuid.Parse(cfg.SQLServer.ID)
 		if parseErr != nil {
@@ -109,7 +111,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 				return nil, fmt.Errorf("build ERP external case reader: %w", err)
 			}
 		}
-		externalCaseService, err := externalcase.NewService(externalcase.DataSource{
+		externalCaseService, err = externalcase.NewService(externalcase.DataSource{
 			ID: dataSourceID, Code: cfg.SQLServer.Code, Name: cfg.SQLServer.Name,
 			Type: "sqlserver", Role: "case_source", Environment: cfg.SQLServer.Environment,
 			SafetyMode: "read_only", Status: "active",
@@ -128,7 +130,16 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		registrars = append(registrars, externalCaseRoutes)
 	}
 
+	agentRuntime, err := buildAgentRuntime(
+		ctx, cfg, externalCaseService, log.Named("agent"), defaultAgentRuntimeBuilders(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, err
+	}
+
 	app := &App{
+		agent:        agentRuntime,
 		db:           deps.db,
 		dbClose:      deps.dbClose,
 		redis:        deps.redis,
@@ -170,7 +181,10 @@ func (a *App) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownWait)
 	defer cancel()
 	shutdownErr := a.server.Shutdown(ctx)
-	var redisErr, sqlServerErr error
+	var agentErr, redisErr, sqlServerErr error
+	if a.agent != nil {
+		agentErr = a.agent.close()
+	}
 	if a.redis != nil {
 		redisErr = a.redis.Close()
 	}
@@ -178,7 +192,7 @@ func (a *App) Close() error {
 		sqlServerErr = a.sqlServer.Close()
 	}
 	dbErr := a.dbClose()
-	err := errors.Join(shutdownErr, redisErr, sqlServerErr, dbErr)
+	err := errors.Join(shutdownErr, agentErr, redisErr, sqlServerErr, dbErr)
 	if err != nil {
 		a.logger.Error("application shutdown failed", zap.Error(err))
 		return err

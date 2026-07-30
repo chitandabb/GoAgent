@@ -27,10 +27,130 @@ import (
 type Config struct {
 	HTTP      HTTPConfig      `toml:"http"`      // [http] 配置块：API 服务器监听地址
 	Auth      AuthConfig      `toml:"auth"`      // [auth] 配置块：Session、Cookie 与可信前端来源
+	Agent     AgentConfig     `toml:"agent"`     // [agent] Skill 包加载位置
+	Models    ModelsConfig    `toml:"models"`    // [models] 聊天、向量和重排模型
 	Log       LogConfig       `toml:"log"`       // [log] 配置块：结构化日志和文件轮转
 	Postgres  PostgresConfig  `toml:"postgres"`  // [postgres] 配置块：PostgreSQL 数据库连接配置
 	Redis     RedisConfig     `toml:"redis"`     // [redis] 配置块：Redis 缓存连接配置
 	SQLServer SQLServerConfig `toml:"sqlserver"` // [sqlserver] 公司 ERP 工单库（可降级依赖）
+	GitHubMCP GitHubMCPConfig `toml:"githubMCP"` // [githubMCP] 官方 GitHub MCP 只读代码调查
+}
+
+// ModelsConfig 为不同模型职责保留独立配置，避免聊天模型和向量模型共享错误参数。
+type ModelsConfig struct {
+	Chat ChatModelConfig `toml:"chat"`
+}
+
+// ChatModelConfig 定义 OpenAI 兼容聊天模型。当前生产 Provider 为 StepFun Step Plan。
+type ChatModelConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	Provider        string `toml:"provider"`
+	BaseURL         string `toml:"baseURL"`
+	APIKeyEnv       string `toml:"apiKeyEnv"`
+	Model           string `toml:"model"`
+	ReasoningEffort string `toml:"reasoningEffort"`
+	TimeoutMillis   int    `toml:"timeoutMillis"`
+	MaxOutputTokens int    `toml:"maxOutputTokens"`
+}
+
+var modelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func (c ChatModelConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(c.Provider)) != "stepfun" {
+		return errors.New("models.chat provider must be stepfun")
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || endpoint.Host == "" || endpoint.Path == "" {
+		return errors.New("models.chat baseURL must be an absolute URL")
+	}
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
+		return errors.New("models.chat baseURL must use HTTPS unless it points to localhost")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
+		return errors.New("models.chat apiKeyEnv is invalid")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.Model)) {
+		return errors.New("models.chat model is invalid")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.ReasoningEffort)) {
+	case "low", "medium", "high":
+	default:
+		return errors.New("models.chat reasoningEffort must be low, medium, or high")
+	}
+	if c.TimeoutMillis <= 0 || c.TimeoutMillis > 300_000 {
+		return errors.New("models.chat timeoutMillis must be between 1 and 300000")
+	}
+	if c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 65_536 {
+		return errors.New("models.chat maxOutputTokens must be between 1 and 65536")
+	}
+	return nil
+}
+
+func (c ChatModelConfig) APIKey() (string, error) {
+	return requiredEnv(c.APIKeyEnv)
+}
+
+// AgentConfig 只声明 Skill 包目录；具体 Prompt 和权限在该目录的 manifest 中校验。
+type AgentConfig struct {
+	SkillsDirectory string `toml:"skillsDirectory"`
+}
+
+func (c AgentConfig) Validate() error {
+	if strings.TrimSpace(c.SkillsDirectory) == "" {
+		return errors.New("agent skillsDirectory is required")
+	}
+	return nil
+}
+
+// GitHubMCPConfig 只允许访问一个固定仓库和版本。
+// PAT 通过 tokenEnv 指向的环境变量读取，不能写入 TOML 或日志。
+type GitHubMCPConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	Endpoint      string `toml:"endpoint"`
+	TokenEnv      string `toml:"tokenEnv"`
+	Owner         string `toml:"owner"`
+	Repository    string `toml:"repository"`
+	Ref           string `toml:"ref"`
+	TimeoutMillis int    `toml:"timeoutMillis"`
+}
+
+var (
+	environmentVariableName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
+	githubRepositoryPart    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
+	githubRef               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
+)
+
+func (c GitHubMCPConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.Endpoint))
+	if err != nil || endpoint.Host == "" || endpoint.Path == "" {
+		return errors.New("githubMCP endpoint must be an absolute URL")
+	}
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
+		return errors.New("githubMCP endpoint must use HTTPS unless it points to localhost")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.TokenEnv)) {
+		return errors.New("githubMCP tokenEnv is invalid")
+	}
+	if !githubRepositoryPart.MatchString(strings.TrimSpace(c.Owner)) || !githubRepositoryPart.MatchString(strings.TrimSpace(c.Repository)) {
+		return errors.New("githubMCP owner and repository contain unsupported characters")
+	}
+	if !githubRef.MatchString(strings.TrimSpace(c.Ref)) || strings.Contains(c.Ref, "..") || strings.Contains(c.Ref, "@{") {
+		return errors.New("githubMCP ref is invalid")
+	}
+	if c.TimeoutMillis <= 0 || c.TimeoutMillis > 120_000 {
+		return errors.New("githubMCP timeoutMillis must be between 1 and 120000")
+	}
+	return nil
+}
+
+func (c GitHubMCPConfig) Token() (string, error) {
+	return requiredEnv(c.TokenEnv)
 }
 
 // SQLServerConfig 定义公司 ERP 工单库的只读连接和安全映射。
@@ -359,6 +479,12 @@ func (c Config) Validate() error {
 	if err := c.Auth.Validate(); err != nil {
 		return err
 	}
+	if err := c.Agent.Validate(); err != nil {
+		return err
+	}
+	if err := c.Models.Chat.Validate(); err != nil {
+		return err
+	}
 	if err := c.Log.Validate(); err != nil {
 		return err
 	}
@@ -375,6 +501,9 @@ func (c Config) Validate() error {
 		return errors.New("redis host and port are required")
 	}
 	if err := c.SQLServer.Validate(); err != nil {
+		return err
+	}
+	if err := c.GitHubMCP.Validate(); err != nil {
 		return err
 	}
 	return nil
