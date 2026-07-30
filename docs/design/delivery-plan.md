@@ -40,14 +40,17 @@ SQL Server 只读、代码仓库只读、文件读取按权限和范围限制。
 - 公司 ERP SQL Server 专用只读账号、统一工单映射、数据源发现、工单列表/详情与来源指纹；
 - PostgreSQL 数据源/外部工单身份登记，以及默认单测和显式真实数据库集成测试。
 
+当前 Agent 基线还包括：StepFun Tool Calling、工单只读 Tool、GitHub MCP 只读 Tool、Provider usage、调用轨迹，以及用于迁移验证的每 Skill ReAct/Graph Handoff 过渡实现。
+
 当前明确没有实现：
 
-- 登录、角色权限和业务 DTO 校验约定；
-- PostgreSQL 业务迁移、领域表和事务规范；
-- SQL Server 只读适配器与工单快照；
-- RabbitMQ、Outbox、Diagnosis Worker 和 SSE 任务流；
-- Eino 诊断编排、模型接入和受控工具；
-- MinIO 附件、React 工作台和知识库入库。
+- CaseSnapshot、DiagnosisTask、TaskEvent、Outbox 和报告的正式业务闭环；
+- RabbitMQ、Outbox Relay、Diagnosis Worker、SSE 和取消；
+- MinIO 附件固化与授权读取；
+- 单 ADK ChatModelAgent 内循环、Evidence Gate 和正式诊断任务接入；
+- SQL 调查 Tool、RAG、混合文档入库和 SQL 性能实验室。
+
+Agent 的当前迁移顺序见 [`agent-implementation-plan.md`](agent-implementation-plan.md)，不再继续扩展过渡版 Handoff Dispatcher。
 
 ## 总体顺序
 
@@ -63,12 +66,10 @@ M1 工单诊断闭环
   ↓
 M2 知识助手、RAG与混合文档入库
   ↓
-M3 受限代码调查Agent
-  ↓
 M4 SQL性能实验室
 ~~~
 
-M2必须建立在M1的用户、权限、附件元数据、TaskEvent、模型调用记录和可观测性基础上。M3和M4都不能反过来成为M1的前置条件。
+受限代码调查已经并入 M1 Agent 核心，不再作为独立 M3 等到 RAG 之后实现。M2必须建立在M1的用户、权限、附件元数据、TaskEvent、模型调用记录和可观测性基础上。M4不能反过来成为M1的前置条件。
 
 ## M0：基础约定与可测试启动
 
@@ -141,7 +142,7 @@ M1是简历和产品演示的核心版本：用户从 SQL Server 工单开始，
 
 - 接入实际选定的 ChatModel 和多模态模型，保留模型版本、Token、耗时和成本记录；
 - 用 Eino 组件和编排能力装配诊断流程，不重复定义模型接口；
-- 先实现预定义工具：工单快照读取、受控 SQL 查询、附件摘要读取和案例检索；
+- 先实现预定义工具：工单快照读取、受控 SQL 查询、只读 GitHub MCP 代码调查、附件摘要读取和案例检索；
 - 对 Text-to-SQL 实施 Schema Catalog、只读校验、字段脱敏、行数/时间限制和人工可审计记录；
 - 采用结构化报告输出，严格解析并校验结论、证据引用和风险等级；
 - 证据不足时生成 `inconclusive`，不强行猜测根因。
@@ -200,25 +201,6 @@ ONNX 图像分类器作为降低 VLM 调用量的增强路由。M2先用规则�
 - VLM、OCR 或 Embedding 暂时失败时，文档状态明确为处理中/失败，不伪装成可检索成功；
 - RAG 评测集可以比较不同切块、召回、重排和 Prompt 版本的效果。
 
-## M3：受限代码调查 Agent
-
-M3只支持一个已配置的私有代码库和指定版本，不做任意代码执行。
-
-### 主要交付
-
-- admin 手动同步仓库并固定 Commit；
-- 只读 `rg` 搜索和 Git 文件/版本读取工具；
-- 工具参数限制路径、关键词、返回行数和执行时间；
-- 报告引用仓库、Commit、文件路径和行号；
-- 将代码证据与工单、数据库和知识库证据统一进入 EvidenceItem；
-- 对工具调用、权限拒绝和超时完整留痕。
-
-### M3 验收重点
-
-- 模型不能执行 Shell、写文件、切换到未授权仓库或读取仓库外路径；
-- 同一 Commit 的调查可以复现；
-- 代码缺失或版本不匹配时报告明确显示限制，而不是给出无来源结论。
-
 ## M4：SQL 性能实验室
 
 M4是高风险能力，必须与生产数据库隔离。
@@ -250,7 +232,6 @@ M4是高风险能力，必须与生产数据库隔离。
 | M1-D | M1-A、M1-B、M1-C的任务与事件接口 | 模型POC、工具安全测试 |
 | M1-E | M1-C、M1-D | 评测集和指标脚本 |
 | M2 | M1的认证、附件元数据、模型记录和日志 | Embedding/Rerank POC |
-| M3 | M1证据模型、M2附件/知识权限 | 代码库同步和搜索安全测试 |
 | M4 | M1审计与权限边界 | 测试库数据集和执行计划采集 |
 
 可以并行的是验证和准备工作，不是绕过依赖提前把业务能力接入生产路径。

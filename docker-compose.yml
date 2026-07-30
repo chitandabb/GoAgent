@@ -106,6 +106,8 @@ services:
       MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
       MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
       MESGUARD_SQLSERVER_PASSWORD: ${MESGUARD_SQLSERVER_PASSWORD:-MESGuard_Reader!2026}
+      MESGUARD_STEPFUN_API_KEY: ${MESGUARD_STEPFUN_API_KEY:-}
+      MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

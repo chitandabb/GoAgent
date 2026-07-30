@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标系统架构和运行边界。
-- 当前仓库已完成 Web 基础、认证和 M1-A1 只读 ERP 工单后端；RabbitMQ、MinIO、Worker、Eino 与后续能力仍按里程碑实现。
-- React、Nginx、RabbitMQ、MinIO、Diagnosis Worker、Ingestion Worker、Eino 和模型接入均属于后续里程碑，不能作为当前已实现能力描述。
+- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及独立验证的 StepFun 模型、GitHub MCP 只读接入和 Eino Graph/ReAct Skill Handoff 过渡实现；目标会迁移为单 ADK ChatModelAgent 内循环与薄外层 Graph。
+- RabbitMQ、MinIO、Diagnosis Worker、Ingestion Worker，以及 Agent 到正式诊断任务/SSE 的产品链路仍按里程碑实现；独立 Agent 烟雾验证不能描述成完整诊断功能已上线。
 - 本文定义组件职责和数据流，不展开数据库字段、RabbitMQ交换机、HTTP字段或Eino Graph节点。
 
 ## 架构目标
@@ -244,7 +244,7 @@ MinIO保存图片、PDF、日志和原始知识文档。PostgreSQL只保存附�
 
 ### 外部SQL Server
 
-外部SQL Server继续作为MES/ERP工单和业务数据来源。API和Diagnosis Worker通过同一只读适配层访问，但每个进程使用独立连接池。
+外部SQL Server继续作为MES/ERP工单和业务数据来源。它不要求与MESGuard部署在同一台服务器，只要求Diagnosis Worker通过公司内网、专线或VPN访问目标数据库端口。API和Diagnosis Worker通过同一只读适配层访问，但每个进程使用独立连接池。
 
 共享适配层负责：
 
@@ -255,6 +255,8 @@ MinIO保存图片、PDF、日志和原始知识文档。PostgreSQL只保存附�
 - SQL安全校验；
 - 行数、结果大小和并发限制；
 - 字段脱敏和审计记录。
+
+如果目标客户网络不允许MESGuard主动连接，一期为该网络域部署独立MESGuard实例；后续确有跨网络集中诊断需求时，再增加客户侧只出站Connector。Connector只能提供版本化的受控数据源和日志动作，不能成为任意数据库代理或远程Shell。详细权限和Tool边界见`diagnostic-tools.md`。
 
 MESGuard不向SQL Server回写工单、报告或业务状态。
 
@@ -548,10 +550,10 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | MinIO与附件 | 未实现 | M1 |
 | Diagnosis Worker | 未实现 | M1 |
 | React + Nginx | 未实现 | M1 |
-| Eino诊断Graph与模型接入 | 未实现 | M1 |
+| Eino Agent 与 StepFun | 过渡版每Skill ReAct/Graph Handoff已通过烟雾验证；单ADK Agent与Evidence Gate待迁移，未接正式任务链路 | M1 |
 | 知识助手与pgvector RAG | 未实现 | M2 |
 | Ingestion Worker与ONNX | 未实现 | M2 |
-| 代码调查工具 | 未实现 | M3 |
+| GitHub MCP代码调查工具 | 已实现只读接入和参数治理，待真实PAT联调 | M1 |
 | SQL性能实验室 | 未实现 | M4 |
 | Prometheus/Grafana/Trace平台 | 未实现 | 业务埋点后按需接入 |
 

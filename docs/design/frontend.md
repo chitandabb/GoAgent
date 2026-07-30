@@ -54,16 +54,14 @@ web/src/
 /login                      登录(演示账号提示)
 /change-password            修改密码;mustChangePassword=true 时被强制跳转至此
 /cases                      外部工单列表(数据源切换、搜索、状态筛选)
-/cases/:id                  工单详情(17px 阅读态、来源指纹、历史诊断)
-/cases/:id/diagnose         发起诊断(数据源确认、时间范围、附件、40923 处理、
-                            ?retryOf= 重新诊断预填)
+/cases/:id                  工单详情(来源指纹、历史诊断、进入统一工作台)
+/workbench/:conversationId  统一 Agent 工作台(左侧会话历史、中间聊天/任务进度/
+                            报告、右侧卷宗与待办工单)
 /tasks                      任务列表(轮询兜底;admin 可按发起人筛选)
 /tasks/:id                  任务详情(执行过程 SSE 时间线 | 证据 | 工具执行;
                             取消 / admin 恢复 / 重新诊断 / 重试关联)
 /tasks/:id/report           两层报告(业务摘要 + 技术证据;inconclusive 专属版式;
                             反馈 采纳/部分采纳/驳回)
-/assistant                  知识助手(流式对话、停止生成、来源引用、联网开关、
-                            附件二选一归属)
 /knowledge                  知识库(个人库 / 全局库 / 案例卡片;入库状态机)
 /admin/users                用户管理(创建、启禁、改角色、重置密码)      [admin]
 /admin/data-sources         数据源与 Schema Catalog(扫描、草稿编辑、发布) [admin]
@@ -74,6 +72,14 @@ web/src/
 权限由 `app/auth.tsx` 的 `RequireAuth` / `RequireAdmin` 路由守卫实现;
 analyst 访问 admin 路由重定向首页,未登录访问任何页面重定向 `/login`
 并携带回跳地址。
+
+`/workbench/:conversationId` 是目标主体验。知识会话和诊断会话使用同一个
+界面外壳，但右侧卷宗不同：知识会话只显示个人文件和引用资料；诊断会话固定
+一个主工单，并显示附件、证据数据源和任务状态。选择另一张工单时打开新的诊断
+会话，不覆盖当前知识会话或诊断会话。绑定工单本身不触发模型调用。
+
+当前原型中的独立助手、发起诊断和任务详情页面在对应后端契约稳定后逐步收敛
+到统一工作台；保留 `/tasks/:id` 和报告深链接用于刷新恢复、分享和运维定位。
 
 ## 设计语言落地决策
 

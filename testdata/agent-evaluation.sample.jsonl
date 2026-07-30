@@ -1,0 +1,2 @@
+{"caseId":"sample-ticket","expectedSkill":"ticket-diagnosis","selectedSkill":"ticket-diagnosis","expectedFirstTool":"read_external_case","actualToolCalls":["read_external_case"],"baselineInputTokens":1200,"dynamicInputTokens":700}
+{"caseId":"sample-code","expectedSkill":"code-investigation","selectedSkill":"code-investigation","expectedFirstTool":"search_code","actualToolCalls":["search_code","get_file_contents"],"baselineInputTokens":1400,"dynamicInputTokens":800}

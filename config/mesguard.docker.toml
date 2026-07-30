@@ -9,6 +9,19 @@ cookieSecure = false
 sessionIdleMinutes = 120
 sessionAbsoluteMinutes = 720
 
+[agent]
+skillsDirectory = "/app/config/skills"
+
+[models.chat]
+enabled = true
+provider = "stepfun"
+baseURL = "https://api.stepfun.com/step_plan/v1"
+apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
+model = "step-3.7-flash"
+reasoningEffort = "medium"
+timeoutMillis = 120000
+maxOutputTokens = 4096
+
 [log]
 level = "info"
 format = "json"
@@ -35,6 +48,15 @@ host = "redis"
 port = 6379
 password = ""
 database = 0
+
+[githubMCP]
+enabled = false
+endpoint = "https://api.githubcopilot.com/mcp/"
+tokenEnv = "MESGUARD_GITHUB_MCP_TOKEN"
+owner = "chitandabb"
+repository = "GoAgent"
+ref = "codex/mesguard-bootstrap"
+timeoutMillis = 30000
 
 [sqlserver]
 enabled = true

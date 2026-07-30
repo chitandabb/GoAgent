@@ -4,7 +4,7 @@ This file tracks the repository's current implementation state. Target
 milestones, dependencies, and acceptance criteria are defined in
 [`design/delivery-plan.md`](design/delivery-plan.md).
 
-## Current Stage: M1-A1 Backend Complete
+## Current Stage: M1-A1 Backend Complete, Agent Foundation In Progress
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -102,18 +102,73 @@ All acceptance items above were verified on 2026-07-29. The same API process
 continued serving authentication while SQL Server was stopped, returned 503
 for ticket queries, and recovered ticket queries after SQL Server restarted.
 
+## Resume-Driven Slice: Skill Orchestration Foundation
+
+The project is now prioritizing resume-demonstrable Agent capabilities while
+preserving authorization, read-only data access, migrations, critical tests,
+recoverability, and structured logs.
+
+Implemented in the current working slice:
+
+- Eino `v0.9.13` Graph-based intent branching;
+- immutable `SkillDefinition` and registry with Prompt, context budget, Tool
+  allowlist, timeout, and maximum ReAct steps;
+- versioned `skill.toml` plus `system-prompt.md` packages loaded with strict
+  unknown-field, path, duplicate-ID, prompt-size, and definition validation;
+- separately compiled ReAct executors so a Skill sees only its allowed tools;
+- the `ticket-diagnosis` and `code-investigation` Skill definitions;
+- a data-minimized `read_external_case` Eino Tool;
+- official GitHub MCP Streamable HTTP client configuration using read-only mode
+  and an exact four-tool allowlist;
+- application-side repository, ref, path, query, pagination, and commit-SHA
+  validation before GitHub MCP calls;
+- StepFun Step Plan `step-3.7-flash` configuration and Eino OpenAI-compatible
+  ToolCallingChatModel factory, including local protocol and usage tests;
+- a live StepFun capability probe on 2026-07-30 that returned the required Tool
+  Call and provider usage without executing a business tool;
+- bootstrap wiring that loads versioned Skills and degrades model/GitHub MCP
+  failures without stopping authentication and ticket browsing;
+- per-run Eino Callback aggregation across all non-streaming ReAct ChatModel
+  calls, including prompt, completion, total, cached, and reasoning Tokens;
+- a live synthetic-ticket ReAct run on 2026-07-30 that made two model calls,
+  executed only `read_external_case`, and returned aggregated provider usage;
+- evaluation aggregation for routing accuracy, first-tool accuracy,
+  out-of-allowlist calls, and provider-reported input Token reduction;
+- a transitional structured `ticket-diagnosis -> code-investigation` Handoff
+  and generic Dispatcher with loop rejection and a three-handoff limit.
+
+Not yet implemented or verified:
+
+- a live GitHub MCP call with the user's PAT and private demo repository;
+- Eino ADK `ChatModelAgent` and Skill Middleware compatibility with StepFun;
+- the target single-Agent inner loop and thin Evidence Gate Graph;
+- a unified runtime `AgentToolProvider` that filters Tools by task scope;
+- Diagnosis Worker/SSE integration;
+- the resume target values of 93% tool-selection accuracy and 45% Token
+  reduction.
+
+The current per-Skill ReAct/Handoff implementation is a migration baseline,
+not the target architecture. See
+[`design/agent-implementation-plan.md`](design/agent-implementation-plan.md)
+for the ordered migration and [`design/agent-orchestration.md`](design/agent-orchestration.md)
+for the target boundaries.
+
 ## Next Slice
 
-M1-A2 adds MinIO ERP/MESGuard bucket isolation, attachment upload/copy,
-authorization, hashing, and cleanup. `CaseSnapshot` persistence remains in
-M1-B with DiagnosisTask, the first TaskEvent, and OutboxEvent in one PostgreSQL
-transaction.
+The immediate slice is P0 of the Agent implementation plan: build an isolated
+Eino ADK `ChatModelAgent` POC against StepFun, verify Skill Middleware, Tool
+Calling, Callback usage, cancellation, and streaming compatibility, while the
+current Runner remains the working baseline. After that, introduce the unified
+ToolCatalog/`AgentToolProvider`, migrate Skills to `SKILL.md`, and replace the
+per-Skill Executors with one Agent loop.
+
+MinIO attachment work and the DiagnosisTask/Outbox/Worker product chain resume
+after the Agent core reaches the plan's P5 reproducible-evaluation checkpoint.
 
 ## Target Milestones, Not Yet Implemented
 
 - M1: evidence-based ticket diagnosis;
 - M2: knowledge assistant, RAG, and mixed-document ingestion;
-- M3: restricted code investigation;
 - M4: isolated SQL performance laboratory.
 
 Do not mark a target milestone as complete here until its acceptance criteria
