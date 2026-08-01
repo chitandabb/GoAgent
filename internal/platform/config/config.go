@@ -93,14 +93,34 @@ func (c ChatModelConfig) APIKey() (string, error) {
 	return requiredEnv(c.APIKeyEnv)
 }
 
-// AgentConfig 只声明 Skill 包目录；具体 Prompt 和权限在该目录的 manifest 中校验。
+// AgentConfig 声明 Skill 包目录和一次诊断的外层 Evidence Gate 总预算。
 type AgentConfig struct {
-	SkillsDirectory string `toml:"skillsDirectory"`
+	SkillsDirectory  string `toml:"skillsDirectory"`
+	MaxAgentRuns     int    `toml:"maxAgentRuns"`
+	MaxToolCalls     int    `toml:"maxToolCalls"`
+	MaxEvidenceItems int    `toml:"maxEvidenceItems"`
+	MaxTotalTokens   int    `toml:"maxTotalTokens"`
+	TimeoutMillis    int    `toml:"timeoutMillis"`
 }
 
 func (c AgentConfig) Validate() error {
 	if strings.TrimSpace(c.SkillsDirectory) == "" {
 		return errors.New("agent skillsDirectory is required")
+	}
+	if c.MaxAgentRuns < 0 || c.MaxAgentRuns > 4 {
+		return errors.New("agent maxAgentRuns must be between 1 and 4 when configured")
+	}
+	if c.MaxToolCalls < 0 || c.MaxToolCalls > 64 {
+		return errors.New("agent maxToolCalls must be between 1 and 64 when configured")
+	}
+	if c.MaxEvidenceItems < 0 || c.MaxEvidenceItems > 128 {
+		return errors.New("agent maxEvidenceItems must be between 1 and 128 when configured")
+	}
+	if c.MaxTotalTokens != 0 && (c.MaxTotalTokens < 1000 || c.MaxTotalTokens > 1_000_000) {
+		return errors.New("agent maxTotalTokens must be between 1000 and 1000000 when configured")
+	}
+	if c.TimeoutMillis != 0 && (c.TimeoutMillis < 1000 || c.TimeoutMillis > 600_000) {
+		return errors.New("agent timeoutMillis must be between 1000 and 600000 when configured")
 	}
 	return nil
 }
@@ -156,25 +176,26 @@ func (c GitHubMCPConfig) Token() (string, error) {
 // SQLServerConfig 定义公司 ERP 工单库的只读连接和安全映射。
 // relation/fields 只接受标识符，不接受任意 SQL 片段。
 type SQLServerConfig struct {
-	Enabled                bool                   `toml:"enabled"`
-	ID                     string                 `toml:"id"`
-	Code                   string                 `toml:"code"`
-	Name                   string                 `toml:"name"`
-	Environment            string                 `toml:"environment"`
-	Host                   string                 `toml:"host"`
-	Port                   int                    `toml:"port"`
-	User                   string                 `toml:"user"`
-	Database               string                 `toml:"database"`
-	PasswordEnv            string                 `toml:"passwordEnv"`
-	Encrypt                string                 `toml:"encrypt"`
-	TrustServerCertificate bool                   `toml:"trustServerCertificate"`
-	MaxIdle                int                    `toml:"maxIdleConns"`
-	MaxOpen                int                    `toml:"maxOpenConns"`
-	QueryTimeoutMillis     int                    `toml:"queryTimeoutMillis"`
-	MaxTextBytes           int                    `toml:"maxTextBytes"`
-	MaxResultBytes         int                    `toml:"maxResultBytes"`
-	CaseMapping            SQLServerCaseMapping   `toml:"caseMapping"`
-	AttachmentMapping      SQLServerObjectMapping `toml:"attachmentMapping"`
+	Enabled                bool                         `toml:"enabled"`
+	ID                     string                       `toml:"id"`
+	Code                   string                       `toml:"code"`
+	Name                   string                       `toml:"name"`
+	Environment            string                       `toml:"environment"`
+	Host                   string                       `toml:"host"`
+	Port                   int                          `toml:"port"`
+	User                   string                       `toml:"user"`
+	Database               string                       `toml:"database"`
+	PasswordEnv            string                       `toml:"passwordEnv"`
+	Encrypt                string                       `toml:"encrypt"`
+	TrustServerCertificate bool                         `toml:"trustServerCertificate"`
+	MaxIdle                int                          `toml:"maxIdleConns"`
+	MaxOpen                int                          `toml:"maxOpenConns"`
+	QueryTimeoutMillis     int                          `toml:"queryTimeoutMillis"`
+	MaxTextBytes           int                          `toml:"maxTextBytes"`
+	MaxResultBytes         int                          `toml:"maxResultBytes"`
+	CaseMapping            SQLServerCaseMapping         `toml:"caseMapping"`
+	AttachmentMapping      SQLServerObjectMapping       `toml:"attachmentMapping"`
+	Investigation          SQLServerInvestigationConfig `toml:"investigation"`
 }
 
 type SQLServerCaseMapping struct {
@@ -188,6 +209,14 @@ type SQLServerCaseMapping struct {
 type SQLServerObjectMapping struct {
 	Relation string            `toml:"relation"`
 	Fields   map[string]string `toml:"fields"`
+}
+
+type SQLServerInvestigationConfig struct {
+	AllowedSchemas       []string `toml:"allowedSchemas"`
+	MaxQueryBytes        int      `toml:"maxQueryBytes"`
+	MaxRows              int      `toml:"maxRows"`
+	MaxResultBytes       int      `toml:"maxResultBytes"`
+	MaxConcurrentQueries int      `toml:"maxConcurrentQueries"`
 }
 
 // Password 从显式声明的环境变量读取 SQL Server 密码。
@@ -303,6 +332,28 @@ func (c SQLServerConfig) Validate() error {
 		if strings.TrimSpace(raw) == "" || !contains([]string{"high", "medium", "low"}, normalized) {
 			return fmt.Errorf("sqlserver priority mapping %q is invalid", raw)
 		}
+	}
+	seenSchemas := make(map[string]struct{}, len(c.Investigation.AllowedSchemas))
+	for _, schema := range c.Investigation.AllowedSchemas {
+		if schema != strings.TrimSpace(schema) || !sqlIdentifier.MatchString(schema) {
+			return fmt.Errorf("sqlserver investigation schema %q is invalid", schema)
+		}
+		if _, exists := seenSchemas[schema]; exists {
+			return fmt.Errorf("sqlserver investigation schema %q is duplicated", schema)
+		}
+		seenSchemas[schema] = struct{}{}
+	}
+	if c.Investigation.MaxQueryBytes < 1024 || c.Investigation.MaxQueryBytes > 64*1024 {
+		return errors.New("sqlserver investigation maxQueryBytes must be between 1024 and 65536")
+	}
+	if c.Investigation.MaxRows < 1 || c.Investigation.MaxRows > 10000 {
+		return errors.New("sqlserver investigation maxRows must be between 1 and 10000")
+	}
+	if c.Investigation.MaxResultBytes < 1024 || c.Investigation.MaxResultBytes > 4*1024*1024 {
+		return errors.New("sqlserver investigation maxResultBytes must be between 1024 and 4194304")
+	}
+	if c.Investigation.MaxConcurrentQueries < 1 || c.Investigation.MaxConcurrentQueries > 32 {
+		return errors.New("sqlserver investigation maxConcurrentQueries must be between 1 and 32")
 	}
 	return nil
 }

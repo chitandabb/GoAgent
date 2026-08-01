@@ -2,14 +2,16 @@ package agent
 
 import (
 	"context"
+	"io"
 	"sync"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
-// ModelUsage 汇总一次 Skill 执行中的全部 ChatModel 调用。
+// ModelUsage 汇总一次 Agent 执行中的全部 ChatModel 调用。
 type ModelUsage struct {
 	ModelCalls       int `json:"modelCalls"`
 	PromptTokens     int `json:"promptTokens"`
@@ -32,8 +34,9 @@ func (u *ModelUsage) Add(other ModelUsage) {
 }
 
 type modelUsageTrace struct {
-	mu    sync.Mutex
-	usage ModelUsage
+	mu      sync.Mutex
+	usage   ModelUsage
+	onUsage func(ModelUsage)
 }
 
 func (t *modelUsageTrace) append(output callbacks.CallbackOutput) {
@@ -41,19 +44,48 @@ func (t *modelUsageTrace) append(output callbacks.CallbackOutput) {
 		return
 	}
 	modelOutput := model.ConvCallbackOutput(output)
-	if modelOutput == nil || modelOutput.Message == nil || modelOutput.Message.ResponseMeta == nil ||
+	if modelOutput == nil {
+		return
+	}
+	if modelOutput.TokenUsage != nil {
+		t.appendValues(
+			modelOutput.TokenUsage.PromptTokens,
+			modelOutput.TokenUsage.CompletionTokens,
+			modelOutput.TokenUsage.TotalTokens,
+			modelOutput.TokenUsage.PromptTokenDetails.CachedTokens,
+			modelOutput.TokenUsage.CompletionTokensDetails.ReasoningTokens,
+		)
+		return
+	}
+	if modelOutput.Message == nil || modelOutput.Message.ResponseMeta == nil ||
 		modelOutput.Message.ResponseMeta.Usage == nil {
 		return
 	}
 	usage := modelOutput.Message.ResponseMeta.Usage
+	t.appendValues(
+		usage.PromptTokens,
+		usage.CompletionTokens,
+		usage.TotalTokens,
+		usage.PromptTokenDetails.CachedTokens,
+		usage.CompletionTokensDetails.ReasoningTokens,
+	)
+}
+
+func (t *modelUsageTrace) appendValues(prompt, completion, total, cached, reasoning int) {
+	if t == nil {
+		return
+	}
+	delta := ModelUsage{
+		ModelCalls: 1, PromptTokens: prompt, CompletionTokens: completion,
+		TotalTokens: total, CachedTokens: cached, ReasoningTokens: reasoning,
+	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.usage.ModelCalls++
-	t.usage.PromptTokens += usage.PromptTokens
-	t.usage.CompletionTokens += usage.CompletionTokens
-	t.usage.TotalTokens += usage.TotalTokens
-	t.usage.CachedTokens += usage.PromptTokenDetails.CachedTokens
-	t.usage.ReasoningTokens += usage.CompletionTokensDetails.ReasoningTokens
+	t.usage.Add(delta)
+	onUsage := t.onUsage
+	t.mu.Unlock()
+	if onUsage != nil {
+		onUsage(delta)
+	}
 }
 
 func (t *modelUsageTrace) snapshot() ModelUsage {
@@ -72,6 +104,40 @@ func newModelUsageHandler(trace *modelUsageTrace) callbacks.Handler {
 				return ctx
 			}
 			trace.append(output)
+			return ctx
+		}).
+		OnEndWithStreamOutputFn(func(
+			ctx context.Context,
+			info *callbacks.RunInfo,
+			output *schema.StreamReader[callbacks.CallbackOutput],
+		) context.Context {
+			if info == nil || info.Component != components.ComponentOfChatModel || output == nil {
+				return ctx
+			}
+			defer output.Close()
+			// 流式 usage 通常只出现在最后一个分片；只记最后一份，避免把同一次模型调用重复累计。
+			var last callbacks.CallbackOutput
+			for {
+				item, err := output.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return ctx
+				}
+				modelOutput := model.ConvCallbackOutput(item)
+				if modelOutput == nil {
+					continue
+				}
+				if modelOutput.TokenUsage != nil ||
+					(modelOutput.Message != nil && modelOutput.Message.ResponseMeta != nil &&
+						modelOutput.Message.ResponseMeta.Usage != nil) {
+					last = item
+				}
+			}
+			if last != nil {
+				trace.append(last)
+			}
 			return ctx
 		}).
 		Build()

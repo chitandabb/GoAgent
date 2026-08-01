@@ -2,16 +2,17 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
-	"time"
 
-	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -23,9 +24,7 @@ func (stubAgentChatModel) Generate(context.Context, []*schema.Message, ...model.
 	return schema.AssistantMessage("ok", nil), nil
 }
 
-func (stubAgentChatModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (
-	*schema.StreamReader[*schema.Message], error,
-) {
+func (stubAgentChatModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	message, err := (stubAgentChatModel{}).Generate(ctx, messages, options...)
 	if err != nil {
 		return nil, err
@@ -46,8 +45,7 @@ func (stubAgentExternalCases) Get(context.Context, uuid.UUID) (*externalcase.Ext
 func TestBuildAgentRuntimeDegradesWhenChatModelIsUnavailable(t *testing.T) {
 	want := errors.New("missing model key")
 	runtime, err := buildAgentRuntime(
-		context.Background(), testAgentConfig(), stubAgentExternalCases{}, zap.NewNop(), agentRuntimeBuilders{
-			loadSkills: func(string) ([]mesagent.SkillDefinition, error) { return testAgentSkills(), nil },
+		context.Background(), testAgentConfig(), stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
 			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
 				return nil, want
 			},
@@ -62,14 +60,15 @@ func TestBuildAgentRuntimeDegradesWhenChatModelIsUnavailable(t *testing.T) {
 }
 
 func TestBuildAgentRuntimeRejectsInvalidSkillPackage(t *testing.T) {
-	want := errors.New("invalid skill package")
-	_, err := buildAgentRuntime(
-		context.Background(), testAgentConfig(), stubAgentExternalCases{}, zap.NewNop(), agentRuntimeBuilders{
-			loadSkills: func(string) ([]mesagent.SkillDefinition, error) { return nil, want },
+	cfg := testAgentConfig()
+	cfg.Agent.SkillsDirectory = filepath.Join(t.TempDir(), "missing")
+	_, err := buildAgentRuntime(context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+		chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+			return stubAgentChatModel{}, nil
 		},
-	)
-	if !errors.Is(err, want) {
-		t.Fatalf("error = %v", err)
+	})
+	if err == nil {
+		t.Fatal("buildAgentRuntime accepted missing Skill package")
 	}
 }
 
@@ -77,8 +76,7 @@ func TestBuildAgentRuntimeDegradesWhenGitHubMCPIsUnavailable(t *testing.T) {
 	cfg := testAgentConfig()
 	cfg.GitHubMCP.Enabled = true
 	runtime, err := buildAgentRuntime(
-		context.Background(), cfg, stubAgentExternalCases{}, zap.NewNop(), agentRuntimeBuilders{
-			loadSkills: func(string) ([]mesagent.SkillDefinition, error) { return testAgentSkills(), nil },
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
 			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
 				return stubAgentChatModel{}, nil
 			},
@@ -90,12 +88,59 @@ func TestBuildAgentRuntimeDegradesWhenGitHubMCPIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildAgentRuntime: %v", err)
 	}
-	if runtime.runner == nil {
-		t.Fatal("ticket diagnosis runner was not initialized")
+	if runtime.runner == nil || runtime.orchestrator == nil {
+		t.Fatal("ticket diagnosis runtime was not initialized")
 	}
-	_, err = runtime.runner.Invoke(context.Background(), mesagent.RunRequest{UserQuery: "搜索代码提交"})
-	if !errors.Is(err, mesagent.ErrSkillUnavailable) {
-		t.Fatalf("code investigation error = %v", err)
+}
+
+func TestBuildAgentRuntimeSkipsSQLToolWhenSQLServerIsUnavailable(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.SQLServer.Enabled = true
+	cfg.SQLServer.Investigation.AllowedSchemas = []string{"dbo"}
+	called := false
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+			sqlObjectDefinitions: func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error) {
+				called = true
+				return nil, errors.New("must not be called")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime: %v", err)
+	}
+	if called || runtime.runner == nil || runtime.orchestrator == nil {
+		t.Fatalf("unexpected degraded SQL runtime: called=%t runtime=%+v", called, runtime)
+	}
+}
+
+func TestBuildAgentRuntimeRegistersSQLToolWhenSQLServerIsAvailable(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.SQLServer.Enabled = true
+	cfg.SQLServer.Investigation.AllowedSchemas = []string{"dbo"}
+	called := false
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, new(sql.DB), nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+			sqlObjectDefinitions: func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error) {
+				called = true
+				return toolutils.InferTool(
+					"get_database_object_definition", "test SQL Tool",
+					func(context.Context, struct{}) (string, error) { return "ok", nil },
+				)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime: %v", err)
+	}
+	if !called || runtime.runner == nil || runtime.orchestrator == nil {
+		t.Fatalf("SQL Tool was not registered: called=%t runtime=%+v", called, runtime)
 	}
 }
 
@@ -112,26 +157,7 @@ func TestAgentRuntimeCloseReleasesMCP(t *testing.T) {
 
 func testAgentConfig() config.Config {
 	return config.Config{
-		Agent:  config.AgentConfig{SkillsDirectory: "skills"},
+		Agent:  config.AgentConfig{SkillsDirectory: filepath.Join("..", "..", "config", "skills")},
 		Models: config.ModelsConfig{Chat: config.ChatModelConfig{Enabled: true}},
-	}
-}
-
-func testAgentSkills() []mesagent.SkillDefinition {
-	budget := mesagent.ContextBudget{
-		MaxContextTokens: 1000, ReservedOutputTokens: 100,
-		MaxEvidenceTokens: 300, MaxToolResultTokens: 200, MaxToolResultBytes: 1024,
-	}
-	return []mesagent.SkillDefinition{
-		{
-			ID: mesagent.SkillTicketDiagnosis, Version: "test-v1", Description: "ticket",
-			SystemPrompt: "diagnose", AllowedTools: []string{mesagent.ToolReadExternalCase},
-			Budget: budget, MaxSteps: 4, Timeout: time.Second,
-		},
-		{
-			ID: mesagent.SkillCodeInvestigation, Version: "test-v1", Description: "code",
-			SystemPrompt: "investigate", AllowedTools: append([]string(nil), mesagent.GitHubReadOnlyTools...),
-			Budget: budget, MaxSteps: 4, Timeout: time.Second,
-		},
 	}
 }

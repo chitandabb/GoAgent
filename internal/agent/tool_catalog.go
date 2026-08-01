@@ -1,0 +1,170 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sort"
+
+	"github.com/chitandabb/GoAgent/internal/auth"
+
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/google/uuid"
+)
+
+type ToolRegistration struct {
+	Tool                 tool.BaseTool
+	AllowedRoles         []auth.Role
+	AllowedTaskTypes     []TaskType
+	AllowedDataRoles     []DataSourceRole
+	AllowedSafetyModes   []DataSourceSafetyMode
+	RequiredDependencies []ToolDependency
+}
+
+type catalogEntry struct {
+	name                 string
+	tool                 tool.BaseTool
+	allowedRoles         []auth.Role
+	allowedTaskTypes     []TaskType
+	allowedDataRoles     []DataSourceRole
+	allowedSafetyModes   []DataSourceSafetyMode
+	requiredDependencies []ToolDependency
+}
+
+// AgentToolProvider 根据一次任务的授权快照返回模型实际可见的 Tool。
+type AgentToolProvider interface {
+	ToolsFor(ctx context.Context, scope TaskScope) ([]tool.BaseTool, error)
+}
+
+// ToolCatalog 在启动时完成注册并保持只读；注册不等于向某次模型调用暴露。
+type ToolCatalog struct {
+	entries []catalogEntry
+}
+
+func NewToolCatalog(ctx context.Context, registrations ...ToolRegistration) (*ToolCatalog, error) {
+	if len(registrations) == 0 {
+		return nil, errors.New("at least one tool registration is required")
+	}
+	entries := make([]catalogEntry, 0, len(registrations))
+	seenNames := make(map[string]struct{}, len(registrations))
+	for _, registration := range registrations {
+		entry, err := newCatalogEntry(ctx, registration)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seenNames[entry.name]; exists {
+			return nil, fmt.Errorf("duplicate tool %q", entry.name)
+		}
+		seenNames[entry.name] = struct{}{}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+	return &ToolCatalog{entries: entries}, nil
+}
+
+func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalogEntry, error) {
+	if registration.Tool == nil {
+		return catalogEntry{}, errors.New("registered tool is nil")
+	}
+	info, err := registration.Tool.Info(ctx)
+	if err != nil {
+		return catalogEntry{}, fmt.Errorf("read registered tool info: %w", err)
+	}
+	if info == nil {
+		return catalogEntry{}, errors.New("registered tool info is nil")
+	}
+	if !toolNamePattern.MatchString(info.Name) {
+		return catalogEntry{}, fmt.Errorf("registered tool has invalid name %q", info.Name)
+	}
+	if err := validatePolicyValues(registration); err != nil {
+		return catalogEntry{}, fmt.Errorf("tool %q policy is invalid: %w", info.Name, err)
+	}
+	return catalogEntry{
+		name: info.Name, tool: registration.Tool,
+		allowedRoles:         append([]auth.Role(nil), registration.AllowedRoles...),
+		allowedTaskTypes:     append([]TaskType(nil), registration.AllowedTaskTypes...),
+		allowedDataRoles:     append([]DataSourceRole(nil), registration.AllowedDataRoles...),
+		allowedSafetyModes:   append([]DataSourceSafetyMode(nil), registration.AllowedSafetyModes...),
+		requiredDependencies: append([]ToolDependency(nil), registration.RequiredDependencies...),
+	}, nil
+}
+
+func validatePolicyValues(registration ToolRegistration) error {
+	if len(registration.AllowedRoles) == 0 {
+		return errors.New("allowed roles are required")
+	}
+	if len(registration.AllowedTaskTypes) == 0 {
+		return errors.New("allowed task types are required")
+	}
+	for _, role := range registration.AllowedRoles {
+		if !role.Valid() {
+			return fmt.Errorf("invalid role %q", role)
+		}
+	}
+	for _, taskType := range registration.AllowedTaskTypes {
+		if !taskType.Valid() {
+			return fmt.Errorf("invalid task type %q", taskType)
+		}
+	}
+	for _, role := range registration.AllowedDataRoles {
+		if !role.Valid() {
+			return fmt.Errorf("invalid data source role %q", role)
+		}
+	}
+	for _, safetyMode := range registration.AllowedSafetyModes {
+		if !safetyMode.Valid() {
+			return fmt.Errorf("invalid safety mode %q", safetyMode)
+		}
+	}
+	for _, dependency := range registration.RequiredDependencies {
+		if !dependency.Valid() {
+			return fmt.Errorf("invalid dependency %q", dependency)
+		}
+	}
+	if hasDuplicate(registration.AllowedRoles) || hasDuplicate(registration.AllowedTaskTypes) ||
+		hasDuplicate(registration.AllowedDataRoles) || hasDuplicate(registration.AllowedSafetyModes) ||
+		hasDuplicate(registration.RequiredDependencies) {
+		return errors.New("policy contains duplicate values")
+	}
+	return nil
+}
+
+func hasDuplicate[T comparable](values []T) bool {
+	seen := make(map[T]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			return true
+		}
+		seen[value] = struct{}{}
+	}
+	return false
+}
+
+func (c *ToolCatalog) ToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseTool, error) {
+	if c == nil {
+		return nil, errors.New("tool catalog is nil")
+	}
+	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() {
+		return nil, errors.New("task scope is invalid")
+	}
+	tools := make([]tool.BaseTool, 0, len(c.entries))
+	for _, entry := range c.entries {
+		if !slices.Contains(entry.allowedRoles, scope.role) ||
+			!slices.Contains(entry.allowedTaskTypes, scope.taskType) ||
+			!scope.matchesDataSource(entry.allowedDataRoles, entry.allowedSafetyModes) {
+			continue
+		}
+		available := true
+		for _, dependency := range entry.requiredDependencies {
+			if !scope.DependencyAvailable(dependency) {
+				available = false
+				break
+			}
+		}
+		if available {
+			tools = append(tools, entry.tool)
+		}
+	}
+	return tools, nil
+}

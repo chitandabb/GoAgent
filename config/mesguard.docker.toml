@@ -11,6 +11,11 @@ sessionAbsoluteMinutes = 720
 
 [agent]
 skillsDirectory = "/app/config/skills"
+maxAgentRuns = 2
+maxToolCalls = 8
+maxEvidenceItems = 16
+maxTotalTokens = 16000
+timeoutMillis = 90000
 
 [models.chat]
 enabled = true
@@ -124,6 +129,13 @@ Resolved = "closed"
 Urgent = "high"
 Normal = "medium"
 Low = "low"
+
+[sqlserver.investigation]
+allowedSchemas = ["dbo"]
+maxQueryBytes = 8192
+maxRows = 100
+maxResultBytes = 262144
+maxConcurrentQueries = 2
 
 [sqlserver.attachmentMapping]
 relation = "dbo.v_MESGuardExternalCaseAttachments"
