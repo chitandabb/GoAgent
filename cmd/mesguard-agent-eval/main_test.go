@@ -13,9 +13,23 @@ func TestReadObservationsRejectsInvalidJSONL(t *testing.T) {
 	}
 }
 
+func TestReadObservationsRequiresActualAllowedTools(t *testing.T) {
+	_, err := readObservations(strings.NewReader(`{"datasetVersion":"dev-v1","caseId":"sample","variant":"experiment","runId":"run-1","model":"stepfun","modelVersion":"step-3.7-flash","reasoningEffort":"medium","promptVersion":"v1","selectedSkill":"ticket-diagnosis"}` + "\n"))
+	if err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("readObservations error = %v", err)
+	}
+}
+
 func TestRunRequiresInput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run(nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("run code = %d", code)
+	}
+}
+
+func TestReadJSONLinesRejectsUnknownFields(t *testing.T) {
+	_, err := readCases(strings.NewReader(`{"datasetVersion":"dev-v1","caseId":"case-1","taskType":"diagnosis","userQuery":"q","expectedSkill":"ticket-diagnosis","acceptableConclusionStatuses":["probable"],"unknown":true}` + "\n"))
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("readCases error = %v", err)
 	}
 }

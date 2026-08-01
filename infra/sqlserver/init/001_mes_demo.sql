@@ -180,6 +180,7 @@ END;
 GRANT CONNECT TO mesguard_case_reader;
 GRANT SELECT ON OBJECT::dbo.v_MESGuardExternalCases TO mesguard_case_reader;
 GRANT SELECT ON OBJECT::dbo.v_MESGuardExternalCaseAttachments TO mesguard_case_reader;
+GRANT VIEW DEFINITION ON SCHEMA::dbo TO mesguard_case_reader;
 DENY INSERT, UPDATE, DELETE, EXECUTE TO mesguard_case_reader;
 DENY CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, CREATE FUNCTION TO mesguard_case_reader;
 DENY ALTER ANY SCHEMA TO mesguard_case_reader;

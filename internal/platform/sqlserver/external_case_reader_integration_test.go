@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,78 @@ func TestCaseReaderCannotWriteOrExecuteDDL(t *testing.T) {
 	}
 }
 
+func TestCaseReaderCannotReadUnpublishedBaseTable(t *testing.T) {
+	db := openIntegrationDB(t)
+	rows, err := db.QueryContext(context.Background(), "SELECT TOP (1) TicketID FROM dbo.Tickets")
+	if err == nil {
+		_ = rows.Close()
+		t.Fatal("reader unexpectedly queried an unpublished base table")
+	}
+}
+
+func TestObjectDefinitionReaderAgainstSQLServer(t *testing.T) {
+	db := openIntegrationDB(t)
+	reader, err := NewObjectDefinitionReader(db, integrationConfig(), zap.NewNop())
+	if err != nil {
+		t.Fatalf("new object definition reader: %v", err)
+	}
+	definition, objectType, truncated, err := reader.GetObjectDefinition(
+		context.Background(), "dbo", "v_MESGuardExternalCases",
+	)
+	if err != nil {
+		t.Fatalf("get object definition: %v", err)
+	}
+	if objectType != "VIEW" || truncated || !strings.Contains(definition, "TicketProductionContexts") {
+		t.Fatalf("unexpected object definition type=%q truncated=%t definition=%q", objectType, truncated, definition)
+	}
+}
+
+func TestReadonlyQueryGuardAcceptsExecutableSQLServerQuery(t *testing.T) {
+	db := openIntegrationDB(t)
+	guard, err := NewReadonlyQueryGuard([]string{"dbo"}, 8192)
+	if err != nil {
+		t.Fatalf("new readonly query guard: %v", err)
+	}
+	const query = `
+WITH active_cases AS (
+    SELECT TicketID, Status
+    FROM dbo.v_MESGuardExternalCases
+    WHERE Status IN ('New', 'Investigating')
+)
+SELECT TicketID FROM active_cases
+UNION ALL
+SELECT TicketID FROM dbo.v_MESGuardExternalCases WHERE Status = 'Resolved'`
+	analysis, err := guard.Analyze(query)
+	if err != nil {
+		t.Fatalf("analyze executable query: %v", err)
+	}
+	if !analysis.HasCTE || !analysis.HasUnion || len(analysis.Objects) != 1 || analysis.Objects[0].Name != "v_MESGuardExternalCases" {
+		t.Fatalf("unexpected query analysis: %#v", analysis)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("execute guarded query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	rowCount := 0
+	for rows.Next() {
+		var ticketID string
+		if err := rows.Scan(&ticketID); err != nil {
+			t.Fatalf("scan guarded query: %v", err)
+		}
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate guarded query: %v", err)
+	}
+	if rowCount == 0 {
+		t.Fatal("guarded query returned no demo rows")
+	}
+}
+
 func openIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("MESGUARD_TEST_SQLSERVER_DSN")
@@ -146,6 +219,10 @@ func integrationConfig() config.SQLServerConfig {
 				"fileName": "FileName", "mediaType": "MediaType", "sizeBytes": "SizeBytes",
 				"objectKey": "ObjectKey", "contentHash": "ContentHash", "sourceUpdatedAt": "SourceUpdatedAt",
 			},
+		},
+		Investigation: config.SQLServerInvestigationConfig{
+			AllowedSchemas: []string{"dbo"}, MaxQueryBytes: 8192, MaxRows: 100,
+			MaxResultBytes: 262144, MaxConcurrentQueries: 2,
 		},
 	}
 }

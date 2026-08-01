@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,40 +22,46 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("mesguard-agent-eval", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	datasetPath := flags.String("dataset", "", "versioned JSONL evaluation cases")
 	inputPath := flags.String("input", "", "JSONL evaluation observations")
-	skillsDirectory := flags.String("skills-dir", "config/skills", "directory containing Skill packages")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if *inputPath == "" {
-		fmt.Fprintln(stderr, "-input is required")
+	if *datasetPath == "" || *inputPath == "" {
+		fmt.Fprintln(stderr, "-dataset and -input are required")
 		return 2
 	}
-	file, err := os.Open(*inputPath)
+	datasetFile, err := os.Open(*datasetPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "open dataset: %v\n", err)
+		return 1
+	}
+	defer datasetFile.Close()
+	cases, err := readCases(datasetFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "read dataset: %v\n", err)
+		return 1
+	}
+
+	observationFile, err := os.Open(*inputPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "open input: %v\n", err)
 		return 1
 	}
-	defer file.Close()
-
-	observations, err := readObservations(file)
+	defer observationFile.Close()
+	observations, err := readObservations(observationFile)
 	if err != nil {
 		fmt.Fprintf(stderr, "read observations: %v\n", err)
 		return 1
 	}
-	definitions, err := mesagent.LoadSkillDefinitions(*skillsDirectory)
+	summary, err := mesagent.EvaluateDataset(cases, observations)
 	if err != nil {
-		fmt.Fprintf(stderr, "load skills: %v\n", err)
-		return 1
-	}
-	registry, err := mesagent.NewRegistry(definitions...)
-	if err != nil {
-		fmt.Fprintf(stderr, "build skill registry: %v\n", err)
+		fmt.Fprintf(stderr, "evaluate dataset: %v\n", err)
 		return 1
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(mesagent.SummarizeEvaluation(observations, registry)); err != nil {
+	if err = encoder.Encode(summary); err != nil {
 		fmt.Fprintf(stderr, "write summary: %v\n", err)
 		return 1
 	}
@@ -61,23 +69,72 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func readObservations(reader io.Reader) ([]mesagent.EvaluationObservation, error) {
+	values, err := readJSONLines(reader, "observations", func() mesagent.EvaluationObservation {
+		return mesagent.EvaluationObservation{}
+	})
+	if err != nil {
+		return nil, err
+	}
+	for index, value := range values {
+		if err := value.Validate(); err != nil {
+			return nil, fmt.Errorf("observations item %d: %w", index, err)
+		}
+	}
+	return values, nil
+}
+
+func readCases(reader io.Reader) ([]mesagent.EvaluationCase, error) {
+	values, err := readJSONLines(reader, "dataset cases", func() mesagent.EvaluationCase {
+		return mesagent.EvaluationCase{}
+	})
+	if err != nil {
+		return nil, err
+	}
+	for index, value := range values {
+		if err := value.Validate(); err != nil {
+			return nil, fmt.Errorf("dataset cases item %d: %w", index, err)
+		}
+	}
+	return values, nil
+}
+
+func readJSONLines[T any](reader io.Reader, kind string, factory func() T) ([]T, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	var observations []mesagent.EvaluationObservation
+	var values []T
 	line := 0
 	for scanner.Scan() {
 		line++
-		var observation mesagent.EvaluationObservation
-		if err := json.Unmarshal(scanner.Bytes(), &observation); err != nil {
-			return nil, fmt.Errorf("line %d: %w", line, err)
+		contents := bytes.TrimSpace(scanner.Bytes())
+		if len(contents) == 0 {
+			continue
 		}
-		observations = append(observations, observation)
+		decoder := json.NewDecoder(bytes.NewReader(contents))
+		decoder.DisallowUnknownFields()
+		value := factory()
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%s line %d: %w", kind, line, err)
+		}
+		if err := ensureDecoderEOF(decoder); err != nil {
+			return nil, fmt.Errorf("%s line %d: %w", kind, line, err)
+		}
+		values = append(values, value)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	if len(observations) == 0 {
-		return nil, fmt.Errorf("input contains no observations")
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s contains no observations", kind)
 	}
-	return observations, nil
+	return values, nil
+}
+
+func ensureDecoderEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); errors.Is(err, io.EOF) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return errors.New("multiple JSON values on one line")
 }

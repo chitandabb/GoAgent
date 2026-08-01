@@ -32,6 +32,24 @@ func TestSQLServerConfigAcceptsValidatedMapping(t *testing.T) {
 	}
 }
 
+func TestSQLServerConfigRejectsUnsafeInvestigationSchema(t *testing.T) {
+	cfg := validSQLServerConfig()
+	cfg.Investigation.AllowedSchemas = []string{"dbo; DROP TABLE Tickets"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted unsafe investigation schema")
+	}
+}
+
+func TestSQLServerConfigRejectsAmbiguousInvestigationSchemas(t *testing.T) {
+	for _, schemas := range [][]string{{" dbo"}, {"dbo", "dbo"}} {
+		cfg := validSQLServerConfig()
+		cfg.Investigation.AllowedSchemas = schemas
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate accepted ambiguous investigation schemas: %q", schemas)
+		}
+	}
+}
+
 func validSQLServerConfig() SQLServerConfig {
 	return SQLServerConfig{
 		Enabled: true, ID: "8d5c67dc-4c09-4ee5-9e80-4d822303dc35", Code: "erp",
@@ -56,6 +74,10 @@ func validSQLServerConfig() SQLServerConfig {
 				"fileName": "FileName", "mediaType": "MediaType", "sizeBytes": "SizeBytes",
 				"objectKey": "ObjectKey", "contentHash": "ContentHash", "sourceUpdatedAt": "UpdatedAt",
 			},
+		},
+		Investigation: SQLServerInvestigationConfig{
+			AllowedSchemas: []string{"dbo"}, MaxQueryBytes: 8192, MaxRows: 100,
+			MaxResultBytes: 262144, MaxConcurrentQueries: 2,
 		},
 	}
 }

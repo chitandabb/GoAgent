@@ -5,10 +5,50 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+	"go.uber.org/zap"
 )
+
+const (
+	defaultAgentMaxIterations   = 12
+	defaultAgentTimeout         = 90 * time.Second
+	defaultMaxToolResultBytes   = 32 * 1024
+	ToolSkill                   = "skill"
+	githubUnavailableMessage    = "GitHub MCP 工具暂时不可用"
+	sqlServerUnavailableMessage = "SQL Server 调查工具暂时不可用"
+)
+
+var (
+	ErrSkillUnavailable = errors.New("skill is unavailable")
+	ErrToolNotAllowed   = errors.New("tool is not registered or allowed")
+)
+
+type ArgumentRewriter func(ctx context.Context, toolName, arguments string) (string, error)
+
+type RunRequest struct {
+	UserQuery      string  `json:"userQuery"`
+	ExternalCaseID string  `json:"externalCaseId,omitempty"`
+	RequestedSkill SkillID `json:"requestedSkill,omitempty"`
+}
+
+func (r RunRequest) Validate() error {
+	if strings.TrimSpace(r.UserQuery) == "" {
+		return errors.New("user query is required")
+	}
+	if r.RequestedSkill != "" && !skillIDPattern.MatchString(string(r.RequestedSkill)) {
+		return fmt.Errorf("invalid requested skill %q", r.RequestedSkill)
+	}
+	return nil
+}
 
 type ToolExecution struct {
 	Name       string `json:"name"`
@@ -18,254 +58,370 @@ type ToolExecution struct {
 }
 
 type RunResult struct {
-	SkillID         SkillID         `json:"skillId"`
-	SkillVersion    string          `json:"skillVersion"`
-	RouteReason     string          `json:"routeReason"`
-	RouteConfidence float64         `json:"routeConfidence"`
-	Answer          string          `json:"answer"`
-	AllowedTools    []string        `json:"allowedTools"`
-	ToolExecutions  []ToolExecution `json:"toolExecutions"`
-	Usage           ModelUsage      `json:"usage"`
-	Budget          ContextBudget   `json:"budget"`
-	ExecutedSkills  []SkillID       `json:"executedSkills"`
-	Handoffs        []HandoffRecord `json:"handoffs,omitempty"`
-
-	// Handoff 只供外层 Graph 在本次运行中决策，不直接暴露给 HTTP 调用方。
-	Handoff *HandoffRequest `json:"-"`
+	SkillID        SkillID         `json:"skillId"`
+	RouteReason    string          `json:"routeReason"`
+	Answer         string          `json:"answer"`
+	AllowedTools   []string        `json:"allowedTools"`
+	ToolExecutions []ToolExecution `json:"toolExecutions"`
+	Usage          ModelUsage      `json:"usage"`
+	ExecutedSkills []SkillID       `json:"executedSkills"`
 }
 
-type SkillExecutor interface {
-	Execute(ctx context.Context, request RunRequest, definition SkillDefinition) (RunResult, error)
+type RunnerConfig struct {
+	ChatModel             model.ToolCallingChatModel
+	ToolCatalog           *ToolCatalog
+	SkillRuntime          *NativeSkillRuntime
+	GitHubArgumentRewrite ArgumentRewriter
+	Logger                *zap.Logger
+	MaxIterations         int
+	Timeout               time.Duration
+	MaxToolResultBytes    int
 }
 
-type orchestrationState struct {
-	Original      RunRequest
-	Decision      RouteDecision
-	Results       []RunResult
-	Handoffs      []HandoffRecord
-	ExecutedSkill map[SkillID]bool
-}
-
+// Runner 只保存可安全共享的只读依赖；ChatModelAgent 必须在每次 Invoke 时单独创建。
+// Eino v0.9.13 会在首次 Run 时初始化 Agent 内部状态，共享同一实例并发执行会产生数据竞争。
 type Runner struct {
-	runnable compose.Runnable[RunRequest, RunResult]
+	chatModel             model.ToolCallingChatModel
+	toolCatalog           *ToolCatalog
+	skillRuntime          *NativeSkillRuntime
+	toolAuthorization     *ToolAuthorizationMiddleware
+	githubArgumentRewrite ArgumentRewriter
+	log                   *zap.Logger
+	maxIterations         int
+	timeout               time.Duration
+	maxToolResultBytes    int
 }
 
-const maxSkillHandoffs = 3
-
-// NewRunner 使用 Eino Graph 构建“静态安全边界、动态运行路径”的 Skill 编排。
-// Graph 只包含启动时已经校验的 Skill；一次请求实际经过哪些节点由结构化 Handoff 决定。
-func NewRunner(
-	ctx context.Context,
-	router Router,
-	registry *Registry,
-	executors map[SkillID]SkillExecutor,
-) (*Runner, error) {
-	if router == nil || registry == nil {
-		return nil, errors.New("runner router and registry are required")
+func NewRunner(cfg RunnerConfig) (*Runner, error) {
+	if cfg.ChatModel == nil || cfg.ToolCatalog == nil || cfg.SkillRuntime == nil || cfg.Logger == nil {
+		return nil, errors.New("runner model, catalog, Skill runtime, and logger are required")
 	}
-
-	graph := compose.NewGraph[RunRequest, RunResult]()
-	routeNode := compose.InvokableLambda(func(ctx context.Context, request RunRequest) (orchestrationState, error) {
-		decision, err := router.Route(ctx, request)
-		if err != nil {
-			return orchestrationState{}, err
-		}
-		if _, err = registry.Get(decision.SkillID); err != nil {
-			return orchestrationState{}, err
-		}
-		return orchestrationState{
-			Original: request, Decision: decision, ExecutedSkill: make(map[SkillID]bool),
-		}, nil
-	})
-	if err := graph.AddLambdaNode("intent_router", routeNode); err != nil {
-		return nil, fmt.Errorf("add intent router: %w", err)
-	}
-	if err := graph.AddEdge(compose.START, "intent_router"); err != nil {
-		return nil, fmt.Errorf("connect intent router: %w", err)
-	}
-
-	branchTargets := make(map[string]bool, len(registry.IDs()))
-	for _, id := range registry.IDs() {
-		definition, err := registry.Get(id)
-		if err != nil {
-			return nil, err
-		}
-		executor := executors[id]
-		if executor == nil {
-			return nil, fmt.Errorf("skill %q executor is nil", id)
-		}
-		nodeName := string(id)
-		branchTargets[nodeName] = true
-		currentDefinition := definition
-		currentExecutor := executor
-		node := compose.InvokableLambda(func(ctx context.Context, input orchestrationState) (orchestrationState, error) {
-			if input.ExecutedSkill[currentDefinition.ID] {
-				return orchestrationState{}, fmt.Errorf("skill handoff cycle detected: %s", currentDefinition.ID)
-			}
-			executeRequest, buildErr := requestForSkill(input, currentDefinition.ID)
-			if buildErr != nil {
-				return orchestrationState{}, buildErr
-			}
-			result, executeErr := currentExecutor.Execute(ctx, executeRequest, currentDefinition)
-			if executeErr != nil {
-				return orchestrationState{}, executeErr
-			}
-			result.SkillID = currentDefinition.ID
-			result.SkillVersion = currentDefinition.Version
-			result.AllowedTools = append([]string(nil), currentDefinition.AllowedTools...)
-			result.Budget = currentDefinition.Budget
-			input.Results = append(input.Results, result)
-			input.ExecutedSkill[currentDefinition.ID] = true
-			if result.Handoff != nil {
-				input.Handoffs = append(input.Handoffs, HandoffRecord{
-					FromSkill: currentDefinition.ID, ToSkill: result.Handoff.TargetSkill,
-					Reason: result.Handoff.Reason, Query: result.Handoff.Query,
-					Clues: append([]string(nil), result.Handoff.Clues...),
-				})
-			}
-			return input, nil
-		})
-		if err = graph.AddLambdaNode(nodeName, node); err != nil {
-			return nil, fmt.Errorf("add skill node %q: %w", id, err)
-		}
-	}
-
-	const synthesisNode = "report_synthesis"
-	synthesis := compose.InvokableLambda(func(_ context.Context, input orchestrationState) (RunResult, error) {
-		return synthesizeRunResult(input), nil
-	})
-	if err := graph.AddLambdaNode(synthesisNode, synthesis); err != nil {
-		return nil, fmt.Errorf("add report synthesis: %w", err)
-	}
-
-	const dispatcherNode = "handoff_dispatcher"
-	dispatcher := compose.InvokableLambda(func(_ context.Context, input orchestrationState) (orchestrationState, error) {
-		return input, nil
-	})
-	if err := graph.AddLambdaNode(dispatcherNode, dispatcher); err != nil {
-		return nil, fmt.Errorf("add handoff dispatcher: %w", err)
-	}
-	if err := graph.AddEdge("intent_router", dispatcherNode); err != nil {
-		return nil, fmt.Errorf("connect intent router to dispatcher: %w", err)
-	}
-	for _, id := range registry.IDs() {
-		if err := graph.AddEdge(string(id), dispatcherNode); err != nil {
-			return nil, fmt.Errorf("connect skill %q to dispatcher: %w", id, err)
-		}
-	}
-	branchTargets[synthesisNode] = true
-	branch := compose.NewGraphBranch(func(_ context.Context, input orchestrationState) (string, error) {
-		if len(input.Results) == 0 {
-			return string(input.Decision.SkillID), nil
-		}
-		last := input.Results[len(input.Results)-1]
-		if last.Handoff == nil {
-			return synthesisNode, nil
-		}
-		if len(input.Handoffs) > maxSkillHandoffs {
-			return "", fmt.Errorf("skill handoff limit exceeded: %d", maxSkillHandoffs)
-		}
-		target := last.Handoff.TargetSkill
-		if input.ExecutedSkill[target] {
-			return "", fmt.Errorf("skill handoff cycle detected: %s", target)
-		}
-		if _, err := registry.Get(target); err != nil {
-			return synthesisNode, nil
-		}
-		return string(target), nil
-	}, branchTargets)
-	if err := graph.AddBranch(dispatcherNode, branch); err != nil {
-		return nil, fmt.Errorf("add handoff branch: %w", err)
-	}
-
-	if err := graph.AddEdge(synthesisNode, compose.END); err != nil {
-		return nil, fmt.Errorf("connect report synthesis: %w", err)
-	}
-
-	runnable, err := graph.Compile(ctx, compose.WithGraphName("mesguard_skill_router"), compose.WithMaxRunSteps(16))
+	authorization, err := NewToolAuthorizationMiddleware(cfg.ToolCatalog)
 	if err != nil {
-		return nil, fmt.Errorf("compile skill graph: %w", err)
+		return nil, fmt.Errorf("build Tool authorization middleware: %w", err)
 	}
-	return &Runner{runnable: runnable}, nil
+	if cfg.MaxIterations == 0 {
+		cfg.MaxIterations = defaultAgentMaxIterations
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = defaultAgentTimeout
+	}
+	if cfg.MaxToolResultBytes == 0 {
+		cfg.MaxToolResultBytes = defaultMaxToolResultBytes
+	}
+	if cfg.MaxIterations < 1 || cfg.MaxIterations > 32 {
+		return nil, errors.New("runner max iterations must be between 1 and 32")
+	}
+	if cfg.Timeout < time.Second || cfg.Timeout > 10*time.Minute {
+		return nil, errors.New("runner timeout must be between 1 second and 10 minutes")
+	}
+	if cfg.MaxToolResultBytes < 1024 || cfg.MaxToolResultBytes > 1024*1024 {
+		return nil, errors.New("runner max tool result bytes must be between 1024 and 1048576")
+	}
+	return &Runner{
+		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
+		skillRuntime: cfg.SkillRuntime, toolAuthorization: authorization,
+		githubArgumentRewrite: cfg.GitHubArgumentRewrite, log: cfg.Logger,
+		maxIterations: cfg.MaxIterations, timeout: cfg.Timeout,
+		maxToolResultBytes: cfg.MaxToolResultBytes,
+	}, nil
 }
 
-func requestForSkill(input orchestrationState, skillID SkillID) (RunRequest, error) {
-	if len(input.Results) == 0 {
-		return input.Original, nil
-	}
-	previous := input.Results[len(input.Results)-1]
-	if previous.Handoff == nil || previous.Handoff.TargetSkill != skillID {
-		return input.Original, nil
-	}
-	payload := struct {
-		Question             string   `json:"question"`
-		HandoffReason        string   `json:"handoffReason"`
-		Clues                []string `json:"clues,omitempty"`
-		TicketFindingSummary string   `json:"ticketFindingSummary"`
-	}{
-		Question: previous.Handoff.Query, HandoffReason: previous.Handoff.Reason,
-		Clues: previous.Handoff.Clues, TicketFindingSummary: previous.Answer,
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return RunRequest{}, fmt.Errorf("marshal skill handoff: %w", err)
-	}
-	return RunRequest{UserQuery: string(encoded), RequestedSkill: skillID}, nil
-}
-
-func synthesizeRunResult(input orchestrationState) RunResult {
-	if len(input.Results) == 0 {
-		return RunResult{RouteReason: input.Decision.Reason, RouteConfidence: input.Decision.Confidence}
-	}
-	first := input.Results[0]
-	if len(input.Results) == 1 && len(input.Handoffs) == 0 {
-		first.RouteReason = input.Decision.Reason
-		first.RouteConfidence = input.Decision.Confidence
-		first.ExecutedSkills = []SkillID{first.SkillID}
-		first.Handoff = nil
-		return first
-	}
-	result := RunResult{
-		SkillID: first.SkillID, SkillVersion: first.SkillVersion,
-		RouteReason: input.Decision.Reason, RouteConfidence: input.Decision.Confidence,
-		Budget: first.Budget, Handoffs: append([]HandoffRecord(nil), input.Handoffs...),
-	}
-	answers := make([]string, 0, len(input.Results)+1)
-	seenTools := make(map[string]bool)
-	for _, current := range input.Results {
-		result.ExecutedSkills = append(result.ExecutedSkills, current.SkillID)
-		result.ToolExecutions = append(result.ToolExecutions, current.ToolExecutions...)
-		result.Usage.Add(current.Usage)
-		for _, toolName := range current.AllowedTools {
-			if !seenTools[toolName] {
-				seenTools[toolName] = true
-				result.AllowedTools = append(result.AllowedTools, toolName)
-			}
-		}
-		if strings.TrimSpace(current.Answer) != "" {
-			answers = append(answers, fmt.Sprintf("[%s]\n%s", current.SkillID, current.Answer))
-		}
-	}
-	if len(input.Handoffs) > 0 {
-		lastHandoff := input.Handoffs[len(input.Handoffs)-1]
-		if !input.ExecutedSkill[lastHandoff.ToSkill] {
-			answers = append(answers, unavailableSkillMessage(lastHandoff.ToSkill))
-		}
-	}
-	result.Answer = strings.Join(answers, "\n\n")
-	return result
-}
-
-func unavailableSkillMessage(skillID SkillID) string {
-	if skillID == SkillCodeInvestigation {
-		return "[code-investigation]\nGitHub MCP 工具暂时不可用。"
-	}
-	return fmt.Sprintf("[%s]\n目标 Skill 暂时不可用。", skillID)
-}
-
-func (r *Runner) Invoke(ctx context.Context, request RunRequest) (RunResult, error) {
-	if r == nil || r.runnable == nil {
+func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
+	if r == nil {
 		return RunResult{}, errors.New("agent runner is nil")
 	}
-	return r.runnable.Invoke(ctx, request)
+	startedAt := time.Now()
+	defer func() {
+		fields := []zap.Field{
+			zap.String("entry_skill", string(result.SkillID)),
+			zap.Duration("duration", time.Since(startedAt)),
+			zap.Int("tool_calls", len(result.ToolExecutions)),
+			zap.Int("model_calls", result.Usage.ModelCalls),
+			zap.Int("total_tokens", result.Usage.TotalTokens),
+		}
+		if err != nil {
+			r.log.Warn("Agent run failed", append(fields, zap.Error(err))...)
+			return
+		}
+		r.log.Info("Agent run completed", fields...)
+	}()
+
+	if err = request.Validate(); err != nil {
+		return RunResult{}, err
+	}
+	scope, ok := TaskScopeFromContext(ctx)
+	if !ok {
+		return RunResult{}, ErrTaskScopeRequired
+	}
+	allowedTools, resolveErr := r.toolCatalog.ToolsFor(ctx, scope)
+	if resolveErr != nil {
+		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
+	}
+	result.AllowedTools, err = toolNames(ctx, allowedTools)
+	if err != nil {
+		return RunResult{}, err
+	}
+	// Skill Middleware 在 Tool 授权之后追加 skill Tool；评测必须记录模型实际看到的完整 Schema 列表。
+	result.AllowedTools = append(result.AllowedTools, ToolSkill)
+	result.SkillID, result.RouteReason, err = r.entrySkill(request, scope)
+	if err != nil {
+		return RunResult{}, err
+	}
+	entryInstruction, loadErr := r.skillRuntime.Instruction(ctx, result.SkillID)
+	if loadErr != nil {
+		return RunResult{}, loadErr
+	}
+	result.ExecutedSkills = []SkillID{result.SkillID}
+
+	userPrompt, buildErr := BuildUserPrompt(request)
+	if buildErr != nil {
+		return RunResult{}, fmt.Errorf("build user prompt: %w", buildErr)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	budget := executionBudgetFromContext(runCtx)
+	budgetGeneration := budget.bindRunCancel(cancel)
+	defer budget.unbindRunCancel(budgetGeneration)
+	trace := &executionTrace{}
+	runCtx = withExecutionTrace(runCtx, trace)
+	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
+
+	agentInstance, buildErr := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
+		Name:        "mesguard-diagnosis",
+		Description: "使用受控只读工具辅助分析工业软件工单",
+		Instruction: buildAgentInstruction(result.SkillID, entryInstruction, scope),
+		Model:       r.chatModel,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			ExecuteSequentially:  true,
+			UnknownToolsHandler:  rejectUnknownTool,
+			ToolArgumentsHandler: r.rewriteToolArguments,
+			ToolCallMiddlewares: []compose.ToolMiddleware{
+				newToolTraceMiddleware(r.maxToolResultBytes),
+			},
+		}},
+		MaxIterations: r.maxIterations,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			r.toolAuthorization,
+			r.skillRuntime.Middleware,
+		},
+	})
+	if buildErr != nil {
+		return result, fmt.Errorf("build per-run ADK Agent: %w", buildErr)
+	}
+
+	iterator := adk.NewRunner(runCtx, adk.RunnerConfig{Agent: agentInstance}).Query(
+		runCtx,
+		userPrompt,
+		adk.WithCallbacks(newModelUsageHandler(usageTrace)),
+	)
+	for {
+		event, more := iterator.Next()
+		if !more {
+			break
+		}
+		if event.Err != nil {
+			result.ToolExecutions = trace.snapshot()
+			result.ExecutedSkills = mergeSkillIDs(result.ExecutedSkills, trace.skillSnapshot())
+			result.Usage = usageTrace.snapshot()
+			return result, event.Err
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		output := event.Output.MessageOutput
+		message, messageErr := output.GetMessage()
+		if messageErr != nil {
+			return result, fmt.Errorf("read ADK event: %w", messageErr)
+		}
+		if message != nil && output.Role == schema.Assistant && len(message.ToolCalls) == 0 &&
+			strings.TrimSpace(message.Content) != "" {
+			result.Answer = message.Content
+		}
+	}
+	result.ToolExecutions = trace.snapshot()
+	result.ExecutedSkills = mergeSkillIDs(result.ExecutedSkills, trace.skillSnapshot())
+	result.Usage = usageTrace.snapshot()
+	if strings.TrimSpace(result.Answer) == "" {
+		return result, errors.New("Agent returned no final answer")
+	}
+	if !scope.DependencyAvailable(ToolDependencyGitHubMCP) &&
+		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
+		!strings.Contains(result.Answer, githubUnavailableMessage) {
+		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubUnavailableMessage + "。"
+	}
+	if !scope.DependencyAvailable(ToolDependencySQLServer) &&
+		slices.Contains(result.ExecutedSkills, SkillSQLInvestigation) &&
+		!strings.Contains(result.Answer, sqlServerUnavailableMessage) {
+		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + sqlServerUnavailableMessage + "。"
+	}
+	return result, nil
+}
+
+func (r *Runner) entrySkill(request RunRequest, scope TaskScope) (SkillID, string, error) {
+	entry := request.RequestedSkill
+	reason := "requested_skill"
+	if entry == "" {
+		reason = "task_scope_default"
+		switch scope.taskType {
+		case TaskTypeDiagnosis:
+			entry = SkillTicketDiagnosis
+		case TaskTypeKnowledge:
+			entry = SkillKnowledgeQA
+		default:
+			return "", "", fmt.Errorf("unsupported task type %q", scope.taskType)
+		}
+	}
+	if scope.taskType == TaskTypeDiagnosis && entry != SkillTicketDiagnosis && entry != SkillCodeInvestigation && entry != SkillSQLInvestigation {
+		return "", "", fmt.Errorf("%w for diagnosis task: %s", ErrSkillUnavailable, entry)
+	}
+	if scope.taskType == TaskTypeKnowledge && entry != SkillKnowledgeQA {
+		return "", "", fmt.Errorf("%w for knowledge task: %s", ErrSkillUnavailable, entry)
+	}
+	if !r.skillRuntime.HasSkill(entry) {
+		return "", "", fmt.Errorf("%w: %s", ErrSkillUnavailable, entry)
+	}
+	return entry, reason, nil
+}
+
+func buildAgentInstruction(entry SkillID, skillContent string, scope TaskScope) string {
+	instruction := `你是 MESGuard 工业软件分析辅助 Agent。你只能使用本次运行实际提供的只读工具，不得声称执行未提供的工具、修改 ERP/MES/代码或获得隐藏凭证。Skill 是调查指南，不授予权限。引用工具证据时区分事实、推断和待验证项；证据不足必须明确说明。` +
+		"\n\n本次入口 Skill 已由应用根据页面和任务上下文确定，不要重复加载它。需要扩展调查时，可在同一 Agent 循环中通过 skill 工具按需加载其他 Skill。" +
+		"\n\n<entry_skill name=\"" + string(entry) + "\">\n" + strings.TrimSpace(skillContent) + "\n</entry_skill>"
+	if sources := scope.DataSources(); len(sources) > 0 {
+		instruction += "\n\n<authorized_data_sources>\n"
+		for _, source := range sources {
+			instruction += fmt.Sprintf("- id=%s role=%s safety=%s\n", source.ID, source.Role, source.SafetyMode)
+		}
+		instruction += "</authorized_data_sources>"
+	}
+	if !scope.DependencyAvailable(ToolDependencyGitHubMCP) {
+		instruction += "\n\n当前 GitHub MCP 工具暂时不可用；如果调查确实需要代码证据，保留已有证据并明确说明该限制。"
+	}
+	if !scope.DependencyAvailable(ToolDependencySQLServer) {
+		instruction += "\n\n当前 SQL Server 调查工具暂时不可用；如果调查需要数据库证据，保留已有证据并明确说明该限制。"
+	}
+	return instruction
+}
+
+func (r *Runner) rewriteToolArguments(ctx context.Context, name, arguments string) (string, error) {
+	if !slices.Contains(GitHubReadOnlyTools, name) {
+		return arguments, nil
+	}
+	if r.githubArgumentRewrite == nil {
+		return "", fmt.Errorf("GitHub argument policy is unavailable for tool %q", name)
+	}
+	return r.githubArgumentRewrite(ctx, name, arguments)
+}
+
+func rejectUnknownTool(_ context.Context, name, _ string) (string, error) {
+	return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, name)
+}
+
+type executionTrace struct {
+	mu           sync.Mutex
+	entries      []ToolExecution
+	loadedSkills []SkillID
+}
+
+type traceContextKey struct{}
+
+func withExecutionTrace(ctx context.Context, trace *executionTrace) context.Context {
+	return context.WithValue(ctx, traceContextKey{}, trace)
+}
+
+func traceFromContext(ctx context.Context) *executionTrace {
+	trace, _ := ctx.Value(traceContextKey{}).(*executionTrace)
+	return trace
+}
+
+func (t *executionTrace) append(entry ToolExecution, skill SkillID) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.entries = append(t.entries, entry)
+	if skill != "" && !slices.Contains(t.loadedSkills, skill) {
+		t.loadedSkills = append(t.loadedSkills, skill)
+	}
+}
+
+func (t *executionTrace) snapshot() []ToolExecution {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ToolExecution(nil), t.entries...)
+}
+
+func (t *executionTrace) skillSnapshot() []SkillID {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]SkillID(nil), t.loadedSkills...)
+}
+
+func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
+	return compose.ToolMiddleware{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if err := executionBudgetFromContext(ctx).reserveToolCall(); err != nil {
+				return nil, err
+			}
+			startedAt := time.Now()
+			output, err := next(ctx, input)
+			if output != nil && len(output.Result) > maxResultBytes {
+				output.Result = strings.ToValidUTF8(output.Result[:maxResultBytes], "?") +
+					"\n[tool result truncated by MESGuard]"
+			}
+			entry := ToolExecution{
+				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(), Succeeded: err == nil,
+			}
+			if err != nil {
+				entry.Error = "tool execution failed"
+			}
+			loadedSkill := SkillID("")
+			if err == nil && input.Name == ToolSkill {
+				var payload struct {
+					Skill SkillID `json:"skill"`
+				}
+				if json.Unmarshal([]byte(input.Arguments), &payload) == nil {
+					loadedSkill = payload.Skill
+				}
+			}
+			traceFromContext(ctx).append(entry, loadedSkill)
+			return output, err
+		}
+	}}
+}
+
+func toolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {
+	names := make([]string, 0, len(tools))
+	for _, current := range tools {
+		info, err := current.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read authorized tool info: %w", err)
+		}
+		if info == nil {
+			return nil, errors.New("authorized tool returned nil info")
+		}
+		names = append(names, info.Name)
+	}
+	return names, nil
+}
+
+func mergeSkillIDs(base, extra []SkillID) []SkillID {
+	result := append([]SkillID(nil), base...)
+	for _, skillID := range extra {
+		if skillID != "" && !slices.Contains(result, skillID) {
+			result = append(result, skillID)
+		}
+	}
+	return result
 }

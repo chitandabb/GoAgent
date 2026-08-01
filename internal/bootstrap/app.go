@@ -131,7 +131,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	agentRuntime, err := buildAgentRuntime(
-		ctx, cfg, externalCaseService, log.Named("agent"), defaultAgentRuntimeBuilders(),
+		ctx, cfg, externalCaseService, deps.sqlServer, deps.db, log.Named("agent"), defaultAgentRuntimeBuilders(),
 	)
 	if err != nil {
 		closeDependencies()

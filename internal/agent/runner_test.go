@@ -2,198 +2,308 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
-type stubExecutor struct {
-	answer  string
-	handoff *HandoffRequest
-	usage   ModelUsage
+var runnerTestCaseID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+type runnerTestCaseGetter struct{}
+
+func (runnerTestCaseGetter) Get(_ context.Context, id uuid.UUID) (*externalcase.ExternalCase, error) {
+	if id != runnerTestCaseID {
+		return nil, errors.New("case not found")
+	}
+	return &externalcase.ExternalCase{ID: id, ExternalCaseKey: "TKT-1", Title: "报工状态未更新"}, nil
 }
 
-func (s stubExecutor) Execute(context.Context, RunRequest, SkillDefinition) (RunResult, error) {
-	return RunResult{Answer: s.answer, Handoff: s.handoff, Usage: s.usage}, nil
+type runnerModelState struct {
+	mu      sync.Mutex
+	github  bool
+	loop    bool
+	block   chan struct{}
+	calls   int
+	schemas [][]string
 }
 
-func TestRunnerRoutesThroughEinoGraph(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewRegistry(testSkills()...)
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
+type runnerTestModel struct {
+	state *runnerModelState
+	tools []*schema.ToolInfo
+}
+
+func (m *runnerTestModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return &runnerTestModel{state: m.state, tools: append([]*schema.ToolInfo(nil), tools...)}, nil
+}
+
+func (m *runnerTestModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.state.block != nil {
+		select {
+		case <-m.state.block:
+			return nil, errors.New("unblocked")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	router, err := NewRuleRouter(registry)
-	if err != nil {
-		t.Fatalf("NewRuleRouter: %v", err)
+	common := model.GetCommonOptions(nil, opts...)
+	toolInfos := common.Tools
+	if len(toolInfos) == 0 {
+		toolInfos = m.tools
 	}
-	runner, err := NewRunner(ctx, router, registry, map[SkillID]SkillExecutor{
-		SkillTicketDiagnosis:   stubExecutor{answer: "ticket"},
-		SkillCodeInvestigation: stubExecutor{answer: "code"},
+	names := make([]string, 0, len(toolInfos))
+	for _, info := range toolInfos {
+		names = append(names, info.Name)
+	}
+	m.state.mu.Lock()
+	m.state.calls++
+	m.state.schemas = append(m.state.schemas, names)
+	m.state.mu.Unlock()
+	if m.state.loop {
+		return runnerTestToolCall(ToolReadExternalCase, `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`), nil
+	}
+	var lastTool string
+	for _, message := range input {
+		if message.Role == schema.Tool {
+			lastTool = message.ToolName
+		}
+	}
+	if lastTool == "" {
+		return runnerTestToolCall(ToolReadExternalCase, `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`), nil
+	}
+	if lastTool == ToolReadExternalCase {
+		return runnerTestToolCall(ToolSkill, `{"skill":"code-investigation"}`), nil
+	}
+	if lastTool == ToolSkill && m.state.github {
+		return runnerTestToolCall("search_code", `{"query":"报工状态"}`), nil
+	}
+	return withRunnerTestUsage(schema.AssistantMessage("已根据工单证据形成初步诊断。", nil)), nil
+}
+
+func (m *runnerTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func runnerTestToolCall(name, arguments string) *schema.Message {
+	return withRunnerTestUsage(schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-" + name, Function: schema.FunctionCall{Name: name, Arguments: arguments},
+	}}))
+}
+
+func withRunnerTestUsage(message *schema.Message) *schema.Message {
+	message.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{
+		PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
+	}}
+	return message
+}
+
+func TestRunnerUsesOneADKLoopForMultipleSkillsAndTools(t *testing.T) {
+	state := &runnerModelState{github: true}
+	runner := newRunnerTest(t, state)
+	scope := runnerTestScope(t, ToolDependencyExternalCase, ToolDependencyGitHubMCP)
+	result, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{
+		UserQuery: "请诊断工单并在有明确线索时查找代码", ExternalCaseID: runnerTestCaseID.String(),
 	})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-
-	ticketResult, err := runner.Invoke(ctx, RunRequest{UserQuery: "分析根因", ExternalCaseID: "case-id"})
-	if err != nil {
-		t.Fatalf("ticket Invoke: %v", err)
-	}
-	if ticketResult.SkillID != SkillTicketDiagnosis || ticketResult.Answer != "ticket" {
-		t.Fatalf("unexpected ticket result: %+v", ticketResult)
-	}
-	if ticketResult.SkillVersion != "test-v1" {
-		t.Fatalf("ticket skill version = %q", ticketResult.SkillVersion)
-	}
-	if len(ticketResult.AllowedTools) != 2 || ticketResult.AllowedTools[0] != ToolReadExternalCase {
-		t.Fatalf("ticket tools = %v", ticketResult.AllowedTools)
-	}
-
-	codeResult, err := runner.Invoke(ctx, RunRequest{UserQuery: "帮我搜索相关代码提交"})
-	if err != nil {
-		t.Fatalf("code Invoke: %v", err)
-	}
-	if codeResult.SkillID != SkillCodeInvestigation || codeResult.Answer != "code" {
-		t.Fatalf("unexpected code result: %+v", codeResult)
-	}
-}
-
-func TestRunnerHandsTicketDiagnosisToCodeInvestigation(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewRegistry(testSkills()...)
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
-	}
-	router, err := NewRuleRouter(registry)
-	if err != nil {
-		t.Fatalf("NewRuleRouter: %v", err)
-	}
-	runner, err := NewRunner(ctx, router, registry, map[SkillID]SkillExecutor{
-		SkillTicketDiagnosis: stubExecutor{
-			answer: "工单显示 InventoryService 超时",
-			handoff: &HandoffRequest{
-				TargetSkill: SkillCodeInvestigation, Reason: "需要代码证据",
-				Query: "搜索 InventoryService 超时处理", Clues: []string{"InventoryService"},
-			},
-			usage: ModelUsage{ModelCalls: 2, TotalTokens: 100},
-		},
-		SkillCodeInvestigation: stubExecutor{
-			answer: "提交 abc 修复了超时", usage: ModelUsage{ModelCalls: 3, TotalTokens: 200},
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-
-	result, err := runner.Invoke(ctx, RunRequest{UserQuery: "诊断工单", ExternalCaseID: "case-id"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if len(result.ExecutedSkills) != 2 || result.ExecutedSkills[0] != SkillTicketDiagnosis ||
-		result.ExecutedSkills[1] != SkillCodeInvestigation {
-		t.Fatalf("executed skills = %v", result.ExecutedSkills)
+	if result.SkillID != SkillTicketDiagnosis || result.RouteReason != "task_scope_default" {
+		t.Fatalf("entry route = %s/%s", result.SkillID, result.RouteReason)
 	}
-	if len(result.Handoffs) != 1 || result.Handoffs[0].ToSkill != SkillCodeInvestigation {
-		t.Fatalf("handoffs = %+v", result.Handoffs)
+	wantTools := []string{ToolReadExternalCase, ToolSkill, "search_code"}
+	gotTools := make([]string, 0, len(result.ToolExecutions))
+	for _, execution := range result.ToolExecutions {
+		gotTools = append(gotTools, execution.Name)
 	}
-	if result.Usage.ModelCalls != 5 || result.Usage.TotalTokens != 300 {
+	if !slices.Equal(gotTools, wantTools) {
+		t.Fatalf("tool execution order = %v, want %v", gotTools, wantTools)
+	}
+	if !slices.Equal(result.ExecutedSkills, []SkillID{SkillTicketDiagnosis, SkillCodeInvestigation}) {
+		t.Fatalf("executed Skills = %v", result.ExecutedSkills)
+	}
+	if !slices.Contains(result.AllowedTools, ToolSkill) || !slices.Contains(result.AllowedTools, "search_code") {
+		t.Fatalf("allowed Tools = %v", result.AllowedTools)
+	}
+	if strings.Contains(strings.Join(gotTools, ","), "request_code_investigation") {
+		t.Fatal("legacy handoff Tool was still used")
+	}
+	if result.Usage.ModelCalls != 4 || result.Usage.TotalTokens != 48 {
 		t.Fatalf("usage = %+v", result.Usage)
 	}
-	if !strings.Contains(result.Answer, "InventoryService") || !strings.Contains(result.Answer, "提交 abc") {
-		t.Fatalf("answer = %q", result.Answer)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.schemas) == 0 || !slices.Contains(state.schemas[0], ToolSkill) || !slices.Contains(state.schemas[0], "search_code") {
+		t.Fatalf("initial Tool schema = %v", state.schemas)
+	}
+	if slices.Contains(state.schemas[0], "request_code_investigation") {
+		t.Fatal("legacy handoff Tool leaked into schema")
 	}
 }
 
-func TestRunnerReportsUnavailableGitHubMCPWithoutDiscardingTicketFinding(t *testing.T) {
-	ctx := context.Background()
-	ticketDefinition := testSkills()[0]
-	registry, err := NewRegistry(ticketDefinition)
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
-	}
-	router, err := NewRuleRouter(registry)
-	if err != nil {
-		t.Fatalf("NewRuleRouter: %v", err)
-	}
-	runner, err := NewRunner(ctx, router, registry, map[SkillID]SkillExecutor{
-		SkillTicketDiagnosis: stubExecutor{
-			answer: "已经确认工单中的错误模块",
-			handoff: &HandoffRequest{
-				TargetSkill: SkillCodeInvestigation, Reason: "需要代码证据", Query: "搜索错误模块",
-			},
-		},
+func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.T) {
+	state := &runnerModelState{}
+	runner := newRunnerTest(t, state)
+	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	result, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{
+		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-
-	result, err := runner.Invoke(ctx, RunRequest{UserQuery: "诊断工单", ExternalCaseID: "case-id"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if !strings.Contains(result.Answer, "已经确认工单") || !strings.Contains(result.Answer, "GitHub MCP 工具暂时不可用") {
-		t.Fatalf("answer = %q", result.Answer)
+	if !strings.Contains(result.Answer, "已根据工单证据") || !strings.Contains(result.Answer, githubUnavailableMessage) {
+		t.Fatalf("degraded answer = %q", result.Answer)
+	}
+	if slices.Contains(result.AllowedTools, "search_code") {
+		t.Fatal("unavailable GitHub Tool was exposed")
 	}
 }
 
-func TestRunnerDispatcherSupportsConfiguredSkillWithoutHardCodedPath(t *testing.T) {
-	ctx := context.Background()
-	skills := testSkills()
-	sqlSkill := skills[1]
-	sqlSkill.ID = SkillID("sql-investigation")
-	sqlSkill.Description = "sql investigation"
-	registry, err := NewRegistry(skills[0], sqlSkill)
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
+func TestRunnerRequiresTaskScope(t *testing.T) {
+	runner := newRunnerTest(t, &runnerModelState{})
+	_, err := runner.Invoke(context.Background(), RunRequest{UserQuery: "诊断"})
+	if !errors.Is(err, ErrTaskScopeRequired) {
+		t.Fatalf("missing TaskScope error = %v", err)
 	}
-	router, err := NewRuleRouter(registry)
+}
+
+func TestDefaultRunnerRejectsGitHubToolOutsideReadOnlyAllowlist(t *testing.T) {
+	unsafeTool, err := toolutils.InferTool("delete_file", "unsafe", func(context.Context, struct{}) (string, error) {
+		return "", nil
+	})
 	if err != nil {
-		t.Fatalf("NewRuleRouter: %v", err)
+		t.Fatalf("build unsafe Tool: %v", err)
 	}
-	runner, err := NewRunner(ctx, router, registry, map[SkillID]SkillExecutor{
-		SkillTicketDiagnosis: stubExecutor{
-			answer: "ticket", handoff: &HandoffRequest{
-				TargetSkill: sqlSkill.ID, Reason: "需要数据库证据", Query: "检查工单状态流转",
-			},
+	_, err = NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
+		SkillRoot:   filepath.Join("..", "..", "config", "skills"),
+		GitHubTools: []tool.BaseTool{unsafeTool},
+		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) {
+			return arguments, nil
 		},
-		sqlSkill.ID: stubExecutor{answer: "sql evidence"},
+		Logger: zap.NewNop(),
 	})
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-
-	result, err := runner.Invoke(ctx, RunRequest{UserQuery: "诊断工单", ExternalCaseID: "case-id"})
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if len(result.ExecutedSkills) != 2 || result.ExecutedSkills[1] != sqlSkill.ID {
-		t.Fatalf("executed skills = %v", result.ExecutedSkills)
+	if err == nil || !strings.Contains(err.Error(), "outside the read-only allowlist") {
+		t.Fatalf("NewDefaultRunner error = %v", err)
 	}
 }
 
-func TestRunnerRejectsHandoffCycle(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewRegistry(testSkills()...)
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
-	}
-	router, err := NewRuleRouter(registry)
-	if err != nil {
-		t.Fatalf("NewRuleRouter: %v", err)
-	}
-	runner, err := NewRunner(ctx, router, registry, map[SkillID]SkillExecutor{
-		SkillTicketDiagnosis: stubExecutor{answer: "ticket", handoff: &HandoffRequest{
-			TargetSkill: SkillCodeInvestigation, Reason: "code", Query: "code",
-		}},
-		SkillCodeInvestigation: stubExecutor{answer: "code", handoff: &HandoffRequest{
-			TargetSkill: SkillTicketDiagnosis, Reason: "ticket", Query: "ticket",
-		}},
+func TestToolTraceMiddlewareTruncatesResultAndKeepsStableError(t *testing.T) {
+	trace := &executionTrace{}
+	ctx := withExecutionTrace(context.Background(), trace)
+	middleware := newToolTraceMiddleware(1024)
+	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: strings.Repeat("x", 2048)}, nil
 	})
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "large_tool", Arguments: `{}`})
 	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
+		t.Fatalf("invoke middleware: %v", err)
+	}
+	if len(output.Result) >= 2048 || !strings.Contains(output.Result, "truncated by MESGuard") {
+		t.Fatalf("tool output was not truncated: %d bytes", len(output.Result))
+	}
+	entries := trace.snapshot()
+	if len(entries) != 1 || !entries[0].Succeeded || entries[0].Name != "large_tool" {
+		t.Fatalf("trace = %+v", entries)
+	}
+}
+
+func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
+	state := &runnerModelState{block: make(chan struct{})}
+	runner := newRunnerTest(t, state)
+	ctx, cancel := context.WithCancel(context.Background())
+	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	done := make(chan error, 1)
+	go func() {
+		_, err := runner.Invoke(WithTaskScope(ctx, scope), RunRequest{UserQuery: "等待取消"})
+		done <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
 	}
 
-	_, err = runner.Invoke(ctx, RunRequest{UserQuery: "诊断工单", ExternalCaseID: "case-id"})
-	if err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("cycle error = %v", err)
+	loopRunner := newRunnerTest(t, &runnerModelState{loop: true})
+	loopRunner.maxIterations = 2
+	_, err := loopRunner.Invoke(WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{UserQuery: "循环"})
+	if !errors.Is(err, adk.ErrExceedMaxIterations) {
+		t.Fatalf("max iterations error = %v", err)
 	}
+}
+
+func TestRunnerCreatesIsolatedAgentForConcurrentRuns(t *testing.T) {
+	runner := newRunnerTest(t, &runnerModelState{})
+	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{UserQuery: "并发诊断"})
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func newRunnerTest(t *testing.T, state *runnerModelState) *Runner {
+	t.Helper()
+	modelInstance := &runnerTestModel{state: state}
+	searchTool, err := toolutils.InferTool("search_code", "只读代码搜索", func(context.Context, struct {
+		Query string `json:"query" jsonschema:"required"`
+	}) (string, error) {
+		return "code evidence", nil
+	})
+	if err != nil {
+		t.Fatalf("build search Tool: %v", err)
+	}
+	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+		ChatModel: modelInstance, ExternalCases: runnerTestCaseGetter{},
+		SkillRoot:             filepath.Join("..", "..", "config", "skills"),
+		GitHubTools:           []tool.BaseTool{searchTool},
+		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) { return arguments, nil },
+		Logger:                zap.NewNop(),
+	})
+	if err != nil {
+		t.Fatalf("NewDefaultRunner: %v", err)
+	}
+	return runner
+}
+
+func runnerTestScope(t *testing.T, dependencies ...ToolDependency) TaskScope {
+	t.Helper()
+	scope, err := NewTaskScope(TaskScopeConfig{
+		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
+		DataSources:           []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
+		AvailableDependencies: dependencies,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskScope: %v", err)
+	}
+	return scope
 }
