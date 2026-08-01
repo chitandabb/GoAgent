@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
-- 当前过渡代码已经实现 `ticket-diagnosis -> code-investigation` 的结构化 Handoff、工单只读 Tool 和 GitHub MCP 只读 Tool；目标架构会将普通调查合并到单 Agent 内循环，Handoff 不再作为 SQL/RAG/Web 的默认切换方式。
-- SQL、RAG、Web Search、附件正文和运行日志 Tool 尚未实现，本文是后续实现边界，不能作为当前能力宣传。
+- 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索，以及受 QueryGuard、Catalog 和资源限制保护的 `execute_readonly_query` Tool；Catalog 扫描/发布管理、Query Store、RAG、Web Search、附件正文和运行日志 Tool 仍未实现，SQL Server + PostgreSQL 的真实联调仍待补齐，本文是工程边界，不能把目标能力当作已验证结果。
 
 ## 总体原则
 
@@ -93,12 +93,12 @@ Connector 只实现版本化的窄动作，例如读取对象定义、执行受�
 
 SQL 能力放在独立的 `sql-investigation` Skill，不把全部 SQL Tool 塞给工单诊断 Skill。
 
-首批 Tool 建议为：
+首批 Tool 规划为：
 
 | Tool | 作用 | 生产库 |
 | --- | --- | --- |
-| `search_schema_catalog` | 根据业务词、表字段 Comment 和别名检索候选对象 | 允许 |
-| `get_database_object_definition` | 读取授权存储过程、函数或视图定义 | 允许 |
+| `search_schema_catalog` | 根据业务词、表字段 Comment 和别名检索已发布候选对象（当前已实现） | 允许 |
+| `get_database_object_definition` | 读取管理员允许的存储过程、函数或视图定义（当前已实现） | 允许 |
 | `execute_readonly_query` | 执行单条受限查询并返回截断结果 | 允许 |
 | `get_estimated_query_plan` | 获取估算计划，不执行原始业务语句 | 按权限允许 |
 | `search_query_store` | 查询时间窗口内的历史执行统计和计划变化 | 开启 Query Store 且授权时允许 |
@@ -111,10 +111,28 @@ SQL 能力放在独立的 `sql-investigation` Skill，不把全部 SQL Tool 塞�
 3. 校验对象必须属于任务授权的数据源和发布 Catalog；
 4. 禁止跨库名、系统危险对象、动态 SQL 和写入结构；
 5. 设置 Context Timeout、最大行数、最大字节数和并发限制；
-6. 对结果字段脱敏并固化 EvidenceItem；
+6. 对结果字段做安全转换；成功查询结果由上层继续固化为 EvidenceItem；
 7. 日志只记录查询指纹、策略版本、耗时和结果规模，原始敏感 SQL 进入受控审计证据而非普通 Zap 日志。
 
-读取存储过程定义使用固定参数化的元数据查询，不允许模型自行调用 `sp_helptext`、`xp_cmdshell` 或其他系统过程。
+读取存储过程定义使用固定参数化的 `sys.objects`、`sys.schemas` 和 `OBJECT_DEFINITION` 元数据查询，不允许模型自行调用 `sp_helptext`、`xp_cmdshell` 或其他系统过程。Tool 只接受简单 `schema`/`objectName` 标识符，并由 `allowedSchemas` 配置和数据库只读账号共同限制。
+
+### 只读 SQL QueryGuard 与执行器（窄版本已开放）
+
+`execute_readonly_query` 不使用字符串前缀或简单黑名单判断，也不在项目内重写完整
+T-SQL Parser。项目参考 [Bytebase Omni](https://github.com/bytebase/omni) 的语句分类、
+对象提取和对抗测试思路，自行实现一个默认拒绝的窄 `QueryGuard`：词法层必须正确处理
+注释、字符串和带引号标识符；策略层只接受单条 `SELECT` 或只读 CTE，识别 `UNION`、
+拒绝 `SELECT INTO`，并提取引用对象供 TaskScope 和已发布 Catalog 复核。
+
+首版明确拒绝变量、临时表、动态 SQL、跨库/链接服务器、危险系统对象和无法可靠分析的
+方言结构。它不是通用 T-SQL AST，不负责格式化或执行计划分析。当前执行器先复核
+QueryGuard 提取的对象与 PostgreSQL 已发布 Catalog 的对象级白名单，再进入 SQL Server；
+同时强制执行 Context Timeout、最大行数、最大结果字节数和并发信号量。正常、对抗、
+授权、脱敏错误和并发限制已有单测；真实 SQL Server + 已发布 Catalog 的联调仍是下一步。
+
+Catalog 的 `queryable=true` 只是应用层授权，不能授予数据库权限。两侧策略必须取交集：
+对象既要出现在任务允许的已发布 Catalog 中，也要能被该数据源的只读账号访问。生产环境
+优先向账号和 Catalog 发布受控视图；未授权基础表即使被模型写进 SQL，也应由数据库拒绝。
 
 ## 数据库执行证据
 
@@ -163,7 +181,7 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 | Skill | 主要 Tool | 说明 |
 | --- | --- | --- |
 | `ticket-diagnosis` | `read_external_case` | 读取工单、整理线索和规划调查 |
-| `sql-investigation` | Catalog、对象定义、只读查询、Query Store | 核对业务数据和数据库执行证据 |
+| `sql-investigation` | 对象定义、`search_schema_catalog`、`execute_readonly_query`（窄版本当前） | 核对业务数据和数据库执行证据 |
 | `code-investigation` | GitHub MCP 只读 Tool | 定位代码与提交 |
 | `attachment-investigation` | `read_attachment`、OCR/VLM 结果读取 | 按需分析截图、PDF和日志附件 |
 | `knowledge-qa` | `search_knowledge`、`get_knowledge_chunk` | 全局与个人知识库问答 |
@@ -186,4 +204,4 @@ Web Search 不默认获得工单原文。进入 `web-research` 前必须把公�
 - 管理员数据源、能力策略和依赖状态页面；
 - GitHub MCP 暂时不可用、SQL 源不可达、日志证据缺失等明确状态。
 
-诊断页面应以“任务时间线 + 证据 + 最终报告”为主，不展示模型内部思维过程、完整 Prompt、凭证或原始敏感 Tool 参数。最终报告一次性发布；SSE 先传阶段进度，知识问答另行支持逐 Token 流式输出。
+诊断页面应以“任务时间线 + 证据 + 最终报告”为主。时间线可以默认折叠并展示结构化、脱敏的调查过程，但不展示模型原始 `ReasoningContent`、完整 Prompt、凭证或原始敏感 Tool 参数。最终报告一次性发布；SSE 先传阶段进度，知识问答另行支持逐 Token 流式输出。

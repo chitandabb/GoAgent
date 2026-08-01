@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标系统架构和运行边界。
-- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及独立验证的 StepFun 模型、GitHub MCP 只读接入和 Eino Graph/ReAct Skill Handoff 过渡实现；目标会迁移为单 ADK ChatModelAgent 内循环与薄外层 Graph。
+- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及 StepFun 模型、GitHub MCP 只读接入、单 ADK ChatModelAgent 内循环和薄外层 Evidence Gate Graph；正式任务链路尚未实现。
 - RabbitMQ、MinIO、Diagnosis Worker、Ingestion Worker，以及 Agent 到正式诊断任务/SSE 的产品链路仍按里程碑实现；独立 Agent 烟雾验证不能描述成完整诊断功能已上线。
 - 本文定义组件职责和数据流，不展开数据库字段、RabbitMQ交换机、HTTP字段或Eino Graph节点。
 
@@ -545,12 +545,12 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | Gin API与统一响应 | 已实现基础骨架 | M1持续扩展 |
 | PostgreSQL与Redis连接 | 已实现关键/降级依赖语义 | M1持续验证 |
 | Zap结构化日志 | 已实现 | M1增加任务和模型字段 |
-| SQL Server演示容器与工单只读适配器 | M1-A1已实现并验证数据库拒写 | M1-D扩展受控诊断查询 |
+| SQL Server演示容器与工单只读适配器 | M1-A1已实现并验证数据库拒写；受 QueryGuard/Catalog/资源限制的窄查询 Tool 已接入 | M1-D真实联调、EvidenceItem与更多诊断查询 |
 | RabbitMQ与Outbox | 未实现 | M1 |
 | MinIO与附件 | 未实现 | M1 |
 | Diagnosis Worker | 未实现 | M1 |
 | React + Nginx | 未实现 | M1 |
-| Eino Agent 与 StepFun | 过渡版每Skill ReAct/Graph Handoff已通过烟雾验证；单ADK Agent与Evidence Gate待迁移，未接正式任务链路 | M1 |
+| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；正式任务链路待实现 | M1 |
 | 知识助手与pgvector RAG | 未实现 | M2 |
 | Ingestion Worker与ONNX | 未实现 | M2 |
 | GitHub MCP代码调查工具 | 已实现只读接入和参数治理，待真实PAT联调 | M1 |
@@ -562,8 +562,8 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 本文确定组件边界，后续文档继续展开：
 
 ~~~text
-delivery-plan.md
-  里程碑、依赖关系和验收顺序
+agent-implementation-plan.md
+  Agent 迁移顺序、依赖关系和验收门槛
 
 database.md
   PostgreSQL表、约束、索引和迁移

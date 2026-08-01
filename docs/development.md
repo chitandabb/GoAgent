@@ -83,8 +83,30 @@ go run ./cmd/mesguard-agent-smoke
 ```
 
 This command executes only the local read-only `read_external_case` Tool. It
-does not connect to ERP, PostgreSQL, Redis, or GitHub and does not print the
-model's answer text.
+does not connect to ERP, PostgreSQL, Redis, or GitHub. The printed report is a
+local smoke result and is not an evaluation metric.
+
+To aggregate a reproducible baseline/experiment pair, keep the versioned case
+labels separate from each real run observation:
+
+```powershell
+go run ./cmd/mesguard-agent-eval `
+  -dataset testdata/agent-evaluation.dataset.sample.jsonl `
+  -input testdata/agent-evaluation.sample.jsonl
+```
+
+The command rejects mixed dataset versions, duplicate case/variant runs,
+unknown JSON fields, and mismatched model/reasoning settings in a pair. The
+checked-in `sample` files only verify the scoring program; they must not be
+reported as production accuracy or Token reduction.
+
+The SQL investigation runtime exposes `execute_readonly_query` only when both
+the SQL Server pool and PostgreSQL Schema Catalog are available. Its query
+policy is configured under `[sqlserver.investigation]`:
+`maxQueryBytes`, `maxRows`, `maxResultBytes`, and `maxConcurrentQueries`.
+The default unit suite covers the guard, Catalog authorization, result limits,
+and concurrency. The real cross-database path remains opt-in and must use the
+published Catalog plus the synthetic SQL Server data.
 
 ## ERP SQL Server
 

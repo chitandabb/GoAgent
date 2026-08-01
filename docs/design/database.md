@@ -758,10 +758,11 @@ db/
   migrations/
     00001_enable_extensions.sql
     00002_create_users_sessions.sql
-    00003_create_data_sources_cases.sql
-    00004_create_diagnosis_tasks.sql
-    00005_create_events_outbox.sql
-    00006_create_evidence_reports.sql
+    00003_create_data_sources_external_cases.sql
+    00004_create_schema_catalog.sql
+    00005_create_diagnosis_tasks.sql       # 后续 M1-B
+    00006_create_events_outbox.sql         # 后续 M1-B
+    00007_create_evidence_reports.sql      # 后续 M1-B
 ```
 
 每个迁移文件包含明确的Up和Down部分。生产环境通过独立迁移命令或发布步骤执行，API和Worker启动时只检查数据库是否达到要求版本，不在多个实例启动过程中同时自动改表。
