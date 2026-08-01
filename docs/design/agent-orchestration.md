@@ -2,9 +2,10 @@
 
 ## 文档状态
 
-- 当前代码是过渡实现：目录配置化 Skill、每 Skill 一个 `flow/agent/react` Executor、外层 Graph Dispatcher、结构化 Handoff、Tool 白名单和调用轨迹已经可运行。
-- 该实现已验证 StepFun Tool Calling 和 usage 聚合，但普通 Skill Handoff 会增加模型轮次和状态拼接，不再作为目标架构扩展。
-- 目标迁移为一个 Eino ADK `ChatModelAgent` 内循环，外层仅保留上下文准备、Evidence Gate、预算循环和报告分支。
+- P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用不可变 `TaskScope`、统一 `ToolCatalog`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
+- `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
+- 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
+- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索和受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool；真实 SQL Server + Catalog 联调、正式 Diagnosis Worker/SSE 和可复现评测仍待补齐。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构
@@ -38,13 +39,12 @@ Skill 描述调查步骤、证据标准、停止条件和输出规范。它回�
 ~~~text
 config/skills/<skill-id>/
 |-- SKILL.md
-|-- references/
-`-- scripts/
+`-- references/
 ~~~
 
-Eino Skill Middleware 通过 filesystem Backend 发现 Skill，并把 Middleware 放入 `adk.ChatModelAgentConfig.Handlers`。Agent 初始只看到简短 Skill 信息，需要时再读取完整 `SKILL.md` 或 references，形成渐进式暴露。
+Eino Skill Middleware 通过 filesystem Backend 发现 Skill，并把 Middleware 放入 `adk.ChatModelAgentConfig.Handlers`。应用根据页面/任务上下文预加载入口 Skill 的完整 `SKILL.md`；其他 Skill 初始只暴露名称和描述，需要时再读取完整指南或 references，形成渐进式暴露。
 
-脚本不是任意插件机制。只允许确定性转换、格式化和本地校验；不得保存凭证、连接生产库或获得任意 Shell、文件和网络权限。首轮迁移不启用脚本执行。
+未来的脚本也不是任意插件机制。只允许确定性转换、格式化和本地校验；不得保存凭证、连接生产库或获得任意 Shell、文件和网络权限。P2 不创建 `scripts/`，也不启用脚本执行。
 
 Skill 优先级：
 
@@ -71,7 +71,7 @@ type AgentToolProvider interface {
 }
 ~~~
 
-`TaskScope` 包含用户角色、任务类型、数据源、生产/产品库环境和依赖可用状态。注册到 Catalog 不等于暴露给模型。授权 Middleware 在 ADK `BeforeAgent` 阶段读取本次 `TaskScope` 并收敛 Tool 配置，只有 `ToolsFor` 返回的 Tool Schema 才进入本次运行；Agent 和 Tool 实例可以复用，并发请求的授权范围不能写入共享可变状态。
+`TaskScope` 包含用户角色、任务类型、数据源、生产/产品库环境和依赖可用状态。注册到 Catalog 不等于暴露给模型。授权 Middleware 在 ADK `BeforeAgent` 阶段读取本次 `TaskScope` 并收敛 Tool 配置，只有 `ToolsFor` 返回的 Tool Schema 才进入本次运行。Catalog、Middleware、Tool 和无状态模型客户端可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 在 Run 初始化时会改写内部配置，`-race` 已证明不能共享实例并发运行，所以目标 Runtime 必须为每次 Run 创建隔离 Agent。
 
 所有 Tool 继续执行：参数 Schema 校验、应用策略重写、Context Timeout、行数/字节截断、敏感字段脱敏、调用轨迹和证据固化。Prompt 和 Skill 文本都不能代替这些安全边界。
 
@@ -85,7 +85,7 @@ ADK `ChatModelAgent` 负责多轮 Model -> Tool -> Model 循环。目标装配�
 - usage、超时、重试、Tool 策略和轨迹 Middleware/Callback；
 - `MaxIterations` 与任务总预算。
 
-入口任务可由程序直接附加 `ticket-diagnosis` 或 `knowledge-qa` 的简短指令，避免为了选择入口 Skill 额外调用一次模型。后续能力由 Agent 在同一循环内根据证据缺口选择。
+入口任务由程序直接附加 `ticket-diagnosis` 或未来 `knowledge-qa` 的完整入口指南，避免为了选择入口 Skill 额外调用一次模型。后续能力由 Agent 在同一循环内根据证据缺口选择。
 
 ### Graph：外层状态与门禁
 
@@ -97,7 +97,7 @@ Graph 不为每个 Skill 建节点，只保留真实的应用状态分支：
 4. `report`：生成并校验完整报告；
 5. `partial_report`：证据不足、依赖缺失或预算耗尽时输出明确限制。
 
-Evidence Gate 可以在固定上限内把“缺少哪些证据”作为补充指令送回 Agent。Graph 的循环上限、Token、耗时、Tool 次数和取消状态由应用控制，不能只依赖模型自觉停止。
+Evidence Gate 可以在固定上限内把“缺少哪些证据”作为补充指令送回 Agent。Graph 的循环上限、Token、耗时、Tool 次数和取消状态由应用控制，不能只依赖模型自觉停止。Tool、Evidence 和 Agent 轮次是严格的执行前门禁；Token 来自供应商调用后的 usage 结算，达到上限后立即取消当前 Agent Run 且不再启动新模型或 Tool，但已经发出的单次模型调用无法在返回 usage 前撤回，因此可能出现一次结算越界，不能把它描述成精确计费预留。
 
 ### Workflow：确定性子流程
 
@@ -121,10 +121,10 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 服务端连接官方 GitHub MCP Server 时设置：
 
 - `X-MCP-Readonly: true`；
-- `X-MCP-Tools` 只包含 `search_repositories`、`search_code`、`get_file_contents`、`list_commits`、`get_commit`；
+- `X-MCP-Tools` 当前只包含 `search_code`、`get_file_contents`、`list_commits`、`get_commit`；
 - PAT 通过 `MESGUARD_GITHUB_MCP_TOKEN` 注入，不写入 TOML、数据库或日志。
 
-具体私有仓库权限由 fine-grained PAT 或 GitHub App Installation 决定，MESGuard 不重复维护逐仓库 ACL。MCP 配置只保留一个或多个 `allowedOwners` 组织/账号边界；应用为仓库搜索强制附加 owner 条件，并拒绝访问范围外 owner，避免内部诊断跑到无关公开仓库。当前代码中强制单个 owner/repo/ref 的过渡策略在 P1/P3 迁移时删除。
+具体私有仓库权限由 fine-grained PAT 或 GitHub App Installation 决定，MESGuard 不重复维护逐仓库 ACL。当前演示配置仍固定一个 owner/repo/ref，并在调用前强制重写或校验参数；多仓库 `search_repositories` 和 `allowedOwners` 边界尚未实现，后续必须先补参数治理和证据引用规则再开放。
 
 演示环境使用只读 fine-grained PAT。生产目标使用 GitHub App Installation Token 或独立服务账号，并通过 `credential_ref` 注入；P0-P5 只预留凭证提供器接口，不提前实现 Token 自动轮换。
 
@@ -138,7 +138,7 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 
 模型 usage 必须来自供应商响应，按一次任务中的 ChatModel 调用累计 prompt、completion、total、cached 和 reasoning Token。Callback/Middleware 需要按组件类型和调用 ID 去重，避免 Graph 与 Agent 对同一响应重复计数。
 
-诊断任务通过 SSE 发布阶段事件、Tool 摘要和最终报告，不输出模型内部思维。知识问答另行支持逐 Token 流式输出。最终报告仍需持久化并一次性确认，浏览器断开不取消后台任务。
+诊断任务通过 SSE 发布结构化调查轨迹、Tool 摘要、Evidence Gate 结果和最终报告。前端可将调查轨迹默认折叠、按需展开，但不输出或持久化模型原始 `ReasoningContent`、完整 Prompt 和敏感 Tool 参数。知识问答另行支持逐 Token 流式输出。最终报告仍需持久化并一次性确认，浏览器断开不取消后台任务。
 
 应用边界统一使用 Zap 记录任务 ID、Agent Run ID、模型、Skill、Tool、耗时、Token 和降级状态。底层返回错误，由最了解请求/任务语义的边界层记录一次，避免重复日志。
 
@@ -146,7 +146,7 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 
 聊天和多模态模型使用 Step Plan OpenAI 兼容接口，当前模型为 `step-3.7-flash`，API Key 仅通过 `.env` 的 `MESGUARD_STEPFUN_API_KEY` 注入。现有本地协议测试和真实烟雾请求已经验证 Tool Calling 与 provider usage。
 
-当前烟雾数据只能证明协议链路有效。新增 Handoff Tool 后某次运行总 Token 从 1444 增至 1954，说明额外 Tool Schema 和模型轮次确有成本，但单样本不能作为 45% 降幅结论。
+历史烟雾数据只能证明协议链路有效。过渡 Handoff 方案曾出现总 Token 从 1444 增至 1954 的单次对比，说明额外 Tool Schema 和模型轮次有成本；该样本不是当前架构评测，也不能作为 45% 降幅结论。
 
 ## 评测口径
 
@@ -163,7 +163,9 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 | 输入 Token 降幅 | `(baseline_input_tokens - experiment_input_tokens) / baseline_input_tokens` |
 | 端到端耗时 | 从 Agent 开始到完整/部分报告完成 |
 
-`ToolRegistry.SchemaBytes` 只能做静态规模检查，不能替代 Provider Token。示例 JSONL 只验证统计程序，不是项目效果证据。真实实验要保留评测集版本、模型配置、原始脱敏结果和可复现命令。
+P5 的评测输入分为两类：版本化 `EvaluationCase` 保存 expected tools、forbidden tools、required evidence、可接受结论和根因标注；每次真实运行单独保存 `EvaluationObservation`，包括 baseline/experiment、Run ID、模型配置、实际 Tool、报告状态和 Provider usage。CLI 会按 `caseId` 配对，只有模型、版本和 reasoning effort 一致时才计算 Token/TTFT/耗时差异。
+
+Tool Schema 字节数只能做静态规模检查，不能替代 Provider Token。`testdata/*sample*` 只验证统计程序，不是项目效果证据。真实实验要保留该次实际 `AllowedTools`、评测集版本、模型配置、原始脱敏结果和可复现命令。
 
 ## 官方资料
 

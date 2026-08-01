@@ -9,19 +9,28 @@
 
 ## 当前基线
 
-当前工作区已经具备一套可运行的过渡实现：
+当前工作区已经具备可运行的单 ADK Agent 基线：
 
 - Eino `v0.9.13` 和 StepFun `step-3.7-flash` Tool Calling；
-- `ticket-diagnosis`、`code-investigation` 两个配置化 Skill；
+- `ticket-diagnosis`、`code-investigation` 两个原生 `SKILL.md` 包及按需 references；
 - `read_external_case` 和四个只读 GitHub MCP Tool；
 - Tool 参数校验、超时、结果截断、调用轨迹和 Provider Token usage；
-- 每个 Skill 一个 `flow/agent/react` Executor；
-- 外层 Graph 的规则路由、结构化 Handoff 和结果拼接；
-- 模型、Agent 和评测烟雾命令。
+- 每次 Run 独立创建的 `adk.ChatModelAgent`，入口 Skill 由任务上下文确定；
+- `TaskScope -> ToolCatalog -> BeforeAgent` 的运行时 Tool 授权；
+- 同一内循环中的工单读取、Skill 渐进加载和 GitHub 代码调查；
+- 模型、正式 Runner 和评测烟雾命令。
 
 真实 StepFun 工单烟雾运行已经证明模型协议、Tool Call 和 usage 聚合可用，但没有证明完整诊断产品链路，也不能作为简历指标。GitHub MCP 仍缺真实 PAT 与私有演示仓库联调。
 
-过渡实现的问题是：每个 Skill 都有独立 ReAct 循环，普通的 SQL、代码、RAG 或 Web 调查要通过 Handoff 退出当前循环再进入另一个循环。随着 Skill 增加，这会增加模型轮次、状态拼接和 Tool Schema 成本。因此不继续在 Dispatcher 上扩展新能力。
+P0 已于 2026-07-30 验收：隔离的 ADK `ChatModelAgent` POC 在不替换现有 Runner 的前提下，完成了原生 Skill Middleware 渐进加载、同一 ReAct 循环中的业务 Tool 调用、非流式/流式事件、Context 取消、最大迭代限制和 Provider usage 聚合。真实 StepFun 非流式与流式运行均按 `skill -> read_external_case` 顺序完成三次模型调用；单次烟雾数据只证明兼容性，不作为简历效果指标。
+
+Eino `v0.9.13` 的 `adk/filesystem.InMemoryBackend` 在 Windows 下存在 Skill glob/read 路径分隔符不一致，P0 曾使用局部适配器封装。P2 已替换为项目只读目录 Backend，并保留 Windows slash/backslash 回归测试。
+
+P1 已于 2026-07-31 验收：新增不可变 `TaskScope`、启动期只读 `ToolCatalog` 和 ADK `BeforeAgent` 授权 Middleware。Catalog 根据角色、任务类型、同一数据源的 role/safety mode 组合及依赖可用性过滤 Tool；60 个并发 Run 证明授权状态不串用，production 不能获得 bounded-LAB Tool，GitHub MCP 不可用只移除对应 Tool。GCC 到位后的 `-race` 检测发现 Eino `v0.9.13` 的同一 `ChatModelAgent` 实例不能被并发 Run；因此共享 Catalog、Middleware、Tool 和模型客户端，但每次 Run 创建独立 Agent 实例。P3 已将这套生命周期接入正式 Runner。
+
+P2 已于 2026-07-31 验收：两个 Skill 已迁移为 Eino 原生 `SKILL.md + references`，旧 TOML/Prompt 文件删除；项目只读 filesystem Backend 统一拒绝写入、路径逃逸、symbolic link 和 Windows Junction/reparse point，`read_skill_reference` 只允许按行读取 `references/*.md` 并限制行数/字节数。测试证明初始 Tool 描述只包含 Skill 元数据，完整指南和 reference 分别按需进入模型上下文。脚本执行仍未开放。
+
+旧的每 Skill ReAct/Handoff 过渡实现已在 P3 删除。后续 SQL、RAG 或 Web 调查继续接入当前单 Agent 内循环，不再恢复 Dispatcher。
 
 ## 已确认的目标
 
@@ -57,6 +66,8 @@ evidence_gate
 
 ### P0：冻结基线与 ADK 最小 POC
 
+状态：**已完成（2026-07-30）**。
+
 目标：证明 StepFun 能在 Eino ADK `ChatModelAgent` 下工作，避免先大规模重构再发现协议不兼容。
 
 工作：
@@ -71,6 +82,8 @@ evidence_gate
 
 ### P1：统一 ToolCatalog 与运行时授权
 
+状态：**已完成（2026-07-31）**。
+
 目标：Tool 只注册一次，Skill 和 Agent 装配不再各自维护 Tool 实例。
 
 核心接口方向：
@@ -81,42 +94,49 @@ type AgentToolProvider interface {
 }
 ~~~
 
-`TaskScope` 至少包含用户角色、任务类型、数据源、生产/产品库环境和可用依赖。Catalog 注册不等于向模型暴露；授权 Middleware 在 ADK `BeforeAgent` 阶段读取 `TaskScope`，把 `ToolsFor` 的结果写入本次运行的 Tool 配置。Agent 和 Tool 实例可以复用，但不同任务看到的 Tool Schema 不同。
+`TaskScope` 至少包含用户角色、任务类型、数据源、生产/产品库环境和可用依赖。Catalog 注册不等于向模型暴露；授权 Middleware 在 ADK `BeforeAgent` 阶段读取 `TaskScope`，把 `ToolsFor` 的结果写入本次运行的 Tool 配置。Catalog、Middleware 和 Tool 可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 每次 Run 独立创建，不在并发请求间共享实例。不同任务看到的 Tool Schema 不同。
 
 验收：重复 Tool 名启动失败；无授权 Tool 不进入模型；并发任务的 Tool 范围不串用；GitHub MCP 不可用时只移除代码能力；生产库任务不能获得 LAB Tool。
 
 ### P2：Skill 迁移为原生包
+
+状态：**已完成（2026-07-31）**。
 
 目标：从 `skill.toml + system-prompt.md` 迁移到 Eino Skill Middleware 可读取的目录。
 
 ~~~text
 config/skills/<skill-id>/
 |-- SKILL.md
-|-- references/
-`-- scripts/
+`-- references/
 ~~~
 
 顺序：先迁移 `ticket-diagnosis`，再迁移 `code-investigation`。`SKILL.md` 只写 SOP、证据标准、停止条件和输出规范；Tool 权限仍来自 `AgentToolProvider`。
 
-脚本只允许确定性转换、格式化和本地校验，不保存凭证，不直接连接生产库，不提供任意 Shell、任意网络或任意文件访问。首轮迁移不启用脚本执行能力，只验证文档和 references 的渐进式读取。
+未来若增加 `scripts/`，脚本只允许确定性转换、格式化和本地校验，不保存凭证，不直接连接生产库，不提供任意 Shell、任意网络或任意文件访问。P2 没有创建或启用脚本执行能力，只验证文档和 references 的渐进式读取。
 
-验收：Agent 初始上下文只包含 Skill 摘要；需要时才读取完整指南；删除旧 Prompt 后行为测试仍通过；路径逃逸和符号链接资源被拒绝。
+验收：Agent 初始上下文只包含 Skill 摘要；需要时才读取完整指南；删除旧 Prompt 后行为测试仍通过；路径逃逸、符号链接和 Windows Junction 资源被拒绝。
 
 ### P3：切换为单 Agent 内循环
+
+状态：**已完成（2026-07-31）**。
 
 目标：移除普通 Skill 之间的退出、Handoff 和再次启动模型。
 
 工作：
 
 - 用 ADK `ChatModelAgent` 替换按 Skill 创建的 `ReActExecutor`；
-- 入口根据任务类型预加载 `ticket-diagnosis` 或 `knowledge-qa` 的简短指令；
+- 入口根据任务类型预加载 `ticket-diagnosis` 或未来 `knowledge-qa` 的完整指南；
 - 其余 Skill 在同一循环中按需读取；
 - 保留 Tool 参数策略、超时、截断、轨迹、Zap 字段和 usage 聚合；
 - POC 与回归测试通过后，删除 `request_code_investigation`、普通 Handoff Dispatcher 和每 Skill Executor。
 
 验收：一条工单请求可在同一个 Agent 循环内先读工单、再查代码；GitHub MCP 不可用时保留已有证据并返回明确限制；不会额外调用 Handoff Tool。
 
+实际验收：确定性模型按 `read_external_case -> skill(code-investigation) -> search_code -> final` 完成一次运行；测试同时覆盖 TaskScope 缺失、GitHub 降级、Tool Schema 白名单、32 KiB 截断、Provider usage、Context 取消、最大迭代和并发隔离。2026-07-31 的真实 StepFun 正式 Runner 烟雾运行调用 `read_external_case`，两次模型调用共报告 4397 Tokens（其中 cached 1600），约 10.37 秒完成。旧 Handoff Tool、Dispatcher、每 Skill Executor、Registry 与兼容 Loader 已删除。真实 GitHub PAT 联调和效果指标仍留到 P5。
+
 ### P4：增加薄外层 Graph 与 Evidence Gate
+
+状态：**已完成（2026-07-31）**。
 
 目标：模型负责调查，应用负责完成条件和总预算。
 
@@ -126,7 +146,13 @@ Graph 状态至少记录：任务范围、已收集证据、证据缺口、Token
 
 验收：证据不足不会伪装为成功；循环和 Token 均有硬上限；取消后不再开始新 Tool；预算耗尽产生 `partial_report` 并说明缺失证据。
 
+实际验收：已实现 `prepare_context -> agent_loop -> evidence_gate -> report/partial_report` Eino Graph，默认限制为两轮 Agent、8 次 Tool、16 条 Evidence、16000 Tokens 和 90 秒总耗时。严格 JSON 解码拒绝未知字段，Evidence 的 `sourceTool` 必须来自本次成功 Tool，缺失结论、来源、限制或置信度会触发一次定向补证。确定性测试覆盖完整报告、补证、Agent/Token/Tool 上限和取消前置检查。2026-07-31 的真实 StepFun 烟雾运行一轮通过门禁，3 次模型调用共 10434 Tokens、耗时约 67.82 秒，最终以 `inconclusive + low confidence` 明确列出缺失日志与数据库证据。
+
+Token 上限按供应商 usage 在每次模型响应后结算：达到阈值后会取消当前 Agent Run并禁止开始下一次模型或 Tool。由于供应商不会在请求前给出精确输入 Token，已经在途的单次调用可能在结算时越过阈值；当前实现不把这个边界伪装成精确计费预留。
+
 ### P5：真实评测与第一条简历闭环
+
+状态：**评测契约与统计 CLI 已完成；真实数据集运行待补**。
 
 目标：用固定数据集得到可复现指标，而不是把样例统计或静态 Schema 字节数写进简历。
 
@@ -143,13 +169,27 @@ P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的�
 
 后续每增加 SQL、知识问答或附件能力，都向同一版本化评测体系补充样本并重新运行对照实验。目标值 `93%+` 和 `45%+` 只在真实实验达到后写入项目状态。
 
-### P6：实现 sql-investigation
+当前已提供 `EvaluationCase`/`EvaluationObservation` JSONL 契约和
+`cmd/mesguard-agent-eval` 配对统计命令。仓库中的 `dev-v1` 两案例样例只验证
+版本、配对、失败类型、证据覆盖和 Token 差异计算；在 GitHub MCP、SQL 调查
+Tool 和固定合成故障集准备好前，不把样例结果写进简历。
+
+### P6：实现 sql-investigation（进行中）
 
 目标：完成最有业务价值的数据库证据链。
 
-顺序：Schema Catalog -> 对象定义 -> SQL Server 只读校验 -> 限时限行查询 -> Query Store/估算计划 -> EvidenceItem。生产库使用数据库只读账号和应用双重限制；产品库/LAB 的实验能力以后单独实现。
+顺序：Schema Catalog -> 对象定义 -> SQL Server 只读校验 -> 限时限行查询 -> Query Store/估算计划 -> EvidenceItem。当前已完成 Catalog 基础表和已发布版本检索 Tool，以及对象定义 Tool：对象定义使用固定参数化查询 `sys.objects`/`sys.schemas`/`OBJECT_DEFINITION`，只接收简单标识符，并由 `allowedSchemas`、TaskScope 和数据库只读账号共同限制。Catalog 只返回 active 数据源、published 版本和 queryable 条目。生产库使用数据库只读账号和应用双重限制；产品库/LAB 的实验能力以后单独实现。
 
-SQL 方言解析器、Catalog 发布模型和 Evidence Gate 的字段契约会影响安全边界，编码前必须向用户确认具体方案。
+SQL 方言校验、Catalog 发布模型和 Evidence Gate 的字段契约会影响后续安全边界；QueryGuard
+和窄 `execute_readonly_query` Tool 已完成单测与运行时装配，但真实 SQL Server + 已发布
+Catalog 联调和 EvidenceItem 接入仍未完成。
+
+项目不直接依赖尚无正式 Release 且要求 Go `1.25.7` 的 Bytebase Omni，也不重写其完整
+T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词法边界、单条只读查询
+分类、危险结构拒绝和表/函数引用提取；表驱动、模糊测试和真实 SQL Server CTE+UNION
+只读执行均已验证。数据库只读账号、TaskScope/Catalog 授权和执行资源限制继续作为独立
+防线；下一片完成 PostgreSQL 已发布 Catalog 与 SQL Server 合成数据的真实联调，并把
+查询结果转成可追溯 EvidenceItem。
 
 ### P7：接入正式任务链路
 
@@ -184,14 +224,14 @@ MinIO/附件、RAG、Web Search、日志源和 SQL 优化实验按交付计划�
 
 ## 删除与保留规则
 
-ADK POC 通过前保留过渡代码和测试，避免同时失去可运行基线。P3 验收后删除：
+P3 已完成以下删除：
 
 - 普通 Skill 的 `request_*_investigation` Handoff Tool；
 - `handoff_dispatcher` 和环路跳转状态；
 - 每个 Skill 单独创建的 `ReActExecutor`；
-- 与新 `SKILL.md` 重复的 `skill.toml` / `system-prompt.md` 字段和加载器代码。
+- 旧 Runner 使用的 `legacySkillProfiles` 与 `LoadSkillDefinitions` 兼容转换层。
 
-继续保留并迁移：Tool 参数治理、MCP 只读策略、上下文预算、调用轨迹、Provider usage、Zap 日志、评测聚合和依赖降级。
+继续保留并迁移：Tool 参数治理、MCP 只读策略、运行超时/迭代/结果预算、调用轨迹、Provider usage、Zap 日志、评测聚合和依赖降级。总 Token 与 Evidence 预算已在 P4 实现。
 
 ## 恢复工作时的检查清单
 

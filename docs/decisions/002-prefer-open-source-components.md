@@ -49,8 +49,8 @@ error mapping, role-check middleware.
 
 The workbench uses shadcn/ui as a source-owned component foundation while
 `design/DESIGN-apple.md` and `web/src/styles/tokens.css` continue to own the
-visual language. The approved migration is defined in
-`superpowers/specs/2026-07-27-shadcn-migration-design.md`:
+visual language. The migration outcome and current rules are recorded in
+`design/frontend.md` and `design/DESIGN-apple.md`:
 
 - Existing interactive primitives migrate in one pass to shadcn/ui, Radix,
   TanStack Table, and sonner rather than leaving two component systems.

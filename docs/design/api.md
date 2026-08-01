@@ -683,7 +683,7 @@ data: {"taskId":"...","seq":19,"occurredAt":"...","payloadSchemaVersion":1,"payl
 - 每 15 秒发送 SSE 注释心跳，不产生 TaskEvent；
 - 终态事件发送完成后正常关闭连接；
 - Session 过期时关闭连接，重新连接返回 `401`；
-- M1 不传模型内部思维过程，也不把日志行直接当 SSE 事件。
+- M1 不传模型原始内部思维过程，也不把日志行直接当 SSE 事件；可以传输应用生成的结构化调查轨迹，包括阶段、脱敏 Tool 摘要、证据缺口和 Evidence Gate 结果，供前端默认折叠、按需展开。
 
 SSE 建立后不能再改用 JSON 统一错误信封。连接前的认证、权限或参数失败正常返回 JSON 错误；连接后的异常使用安全 SSE `error` 事件或直接断开，并依靠 `requestId` 日志排查。
 
