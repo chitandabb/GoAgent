@@ -55,6 +55,7 @@ type ToolExecution struct {
 	DurationMS int64  `json:"durationMs"`
 	Succeeded  bool   `json:"succeeded"`
 	Error      string `json:"error,omitempty"`
+	EvidenceID string `json:"evidenceId,omitempty"`
 }
 
 type RunResult struct {
@@ -63,6 +64,7 @@ type RunResult struct {
 	Answer         string          `json:"answer"`
 	AllowedTools   []string        `json:"allowedTools"`
 	ToolExecutions []ToolExecution `json:"toolExecutions"`
+	EvidenceItems  []EvidenceItem  `json:"evidenceItems"`
 	Usage          ModelUsage      `json:"usage"`
 	ExecutedSkills []SkillID       `json:"executedSkills"`
 }
@@ -222,6 +224,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		}
 		if event.Err != nil {
 			result.ToolExecutions = trace.snapshot()
+			result.EvidenceItems = trace.evidenceSnapshot()
 			result.ExecutedSkills = mergeSkillIDs(result.ExecutedSkills, trace.skillSnapshot())
 			result.Usage = usageTrace.snapshot()
 			return result, event.Err
@@ -232,6 +235,10 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		output := event.Output.MessageOutput
 		message, messageErr := output.GetMessage()
 		if messageErr != nil {
+			result.ToolExecutions = trace.snapshot()
+			result.EvidenceItems = trace.evidenceSnapshot()
+			result.ExecutedSkills = mergeSkillIDs(result.ExecutedSkills, trace.skillSnapshot())
+			result.Usage = usageTrace.snapshot()
 			return result, fmt.Errorf("read ADK event: %w", messageErr)
 		}
 		if message != nil && output.Role == schema.Assistant && len(message.ToolCalls) == 0 &&
@@ -240,6 +247,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		}
 	}
 	result.ToolExecutions = trace.snapshot()
+	result.EvidenceItems = trace.evidenceSnapshot()
 	result.ExecutedSkills = mergeSkillIDs(result.ExecutedSkills, trace.skillSnapshot())
 	result.Usage = usageTrace.snapshot()
 	if strings.TrimSpace(result.Answer) == "" {
@@ -321,6 +329,7 @@ func rejectUnknownTool(_ context.Context, name, _ string) (string, error) {
 type executionTrace struct {
 	mu           sync.Mutex
 	entries      []ToolExecution
+	evidence     []EvidenceItem
 	loadedSkills []SkillID
 }
 
@@ -335,12 +344,16 @@ func traceFromContext(ctx context.Context) *executionTrace {
 	return trace
 }
 
-func (t *executionTrace) append(entry ToolExecution, skill SkillID) {
+func (t *executionTrace) append(entry ToolExecution, skill SkillID, evidence *EvidenceItem) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if evidence != nil {
+		entry.EvidenceID = evidence.ID
+		t.evidence = append(t.evidence, *evidence)
+	}
 	t.entries = append(t.entries, entry)
 	if skill != "" && !slices.Contains(t.loadedSkills, skill) {
 		t.loadedSkills = append(t.loadedSkills, skill)
@@ -365,6 +378,15 @@ func (t *executionTrace) skillSnapshot() []SkillID {
 	return append([]SkillID(nil), t.loadedSkills...)
 }
 
+func (t *executionTrace) evidenceSnapshot() []EvidenceItem {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]EvidenceItem(nil), t.evidence...)
+}
+
 func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 	return compose.ToolMiddleware{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
@@ -376,9 +398,18 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 			}
 			startedAt := time.Now()
 			output, err := next(ctx, input)
+			outputTruncated := false
 			if output != nil && len(output.Result) > maxResultBytes {
+				outputTruncated = true
 				output.Result = strings.ToValidUTF8(output.Result[:maxResultBytes], "?") +
 					"\n[tool result truncated by MESGuard]"
+			}
+			var evidence *EvidenceItem
+			if err == nil && output != nil {
+				if item, ok := newToolEvidenceItem(input.Name, output.Result, outputTruncated); ok {
+					evidence = &item
+					output.Result = wrapToolResultWithEvidence(item, output.Result, maxResultBytes)
+				}
 			}
 			entry := ToolExecution{
 				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(), Succeeded: err == nil,
@@ -395,10 +426,44 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 					loadedSkill = payload.Skill
 				}
 			}
-			traceFromContext(ctx).append(entry, loadedSkill)
+			traceFromContext(ctx).append(entry, loadedSkill, evidence)
 			return output, err
 		}
 	}}
+}
+
+// wrapToolResultWithEvidence 给模型一个可原样引用的 sourceRef，同时保留工具原始
+// JSON 作为 data。若证据引用包装本身超过工具结果预算，则保留引用和截断标记，
+// 不让包装层突破 Runner 的最大结果字节限制。
+func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int) string {
+	data := json.RawMessage(snapshot)
+	if !json.Valid(data) {
+		encoded, _ := json.Marshal(snapshot)
+		data = encoded
+	}
+	type envelope struct {
+		EvidenceRef string             `json:"evidenceRef"`
+		SourceType  EvidenceSourceType `json:"sourceType"`
+		CollectedAt time.Time          `json:"collectedAt"`
+		Truncated   bool               `json:"truncated"`
+		Data        json.RawMessage    `json:"data"`
+	}
+	value := envelope{
+		EvidenceRef: item.SourceRef, SourceType: item.SourceType,
+		CollectedAt: item.CollectedAt, Truncated: item.Truncated, Data: data,
+	}
+	encoded, err := json.Marshal(value)
+	if err == nil && len(encoded) <= maxBytes {
+		return string(encoded)
+	}
+	value.Data = json.RawMessage(`"[evidence snapshot omitted by result budget]"`)
+	encoded, err = json.Marshal(value)
+	if err == nil && len(encoded) <= maxBytes {
+		return string(encoded)
+	}
+	// The configured minimum is large enough for this fallback. Keep a final
+	// deterministic string in case a caller supplies an unusually small limit.
+	return fmt.Sprintf(`{"evidenceRef":%q,"sourceType":%q,"truncated":true}`, item.SourceRef, item.SourceType)
 }
 
 func toolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {
