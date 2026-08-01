@@ -5,7 +5,7 @@
 - P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用不可变 `TaskScope`、统一 `ToolCatalog`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
-- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索和受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool；真实 SQL Server + Catalog 联调、正式 Diagnosis Worker/SSE 和可复现评测仍待补齐。
+- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；正式 Diagnosis Worker/SSE、证据持久化和可复现评测仍待补齐。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构
@@ -106,7 +106,7 @@ Evidence Gate 可以在固定上限内把“缺少哪些证据”作为补充指
 - SQL 解析、只读校验、授权校验、执行和结果截断；
 - Query 改写、向量/FTS 混合召回、融合和重排；
 - 文档解析、OCR/VLM 路由、切块和索引；
-- 结构化报告解析、Evidence 引用校验和持久化。
+- 结构化报告解析、Evidence 引用校验和持久化；当前 P6 只完成运行时快照，正式持久化留在 DiagnosisTask/Worker。
 
 Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实现步骤。
 
