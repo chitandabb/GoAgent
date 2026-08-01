@@ -174,7 +174,7 @@ P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的�
 版本、配对、失败类型、证据覆盖和 Token 差异计算；在 GitHub MCP、SQL 调查
 Tool 和固定合成故障集准备好前，不把样例结果写进简历。
 
-### P6：实现 sql-investigation（进行中）
+### P6：实现 sql-investigation（进行中，运行时证据切片已完成）
 
 目标：完成最有业务价值的数据库证据链。
 
@@ -182,14 +182,15 @@ Tool 和固定合成故障集准备好前，不把样例结果写进简历。
 
 SQL 方言校验、Catalog 发布模型和 Evidence Gate 的字段契约会影响后续安全边界；QueryGuard
 和窄 `execute_readonly_query` Tool 已完成单测与运行时装配，但真实 SQL Server + 已发布
-Catalog 联调和 EvidenceItem 接入仍未完成。
+Catalog 联调。成功的事实型只读 Tool 结果现在会生成带唯一 `evidenceRef`、来源、哈希、
+采集时间和截断状态的运行时 EvidenceItem，报告引用必须解析到本次运行的 EvidenceItem。
+正式 DiagnosisTask/Worker 持久化仍未开始。
 
 项目不直接依赖尚无正式 Release 且要求 Go `1.25.7` 的 Bytebase Omni，也不重写其完整
 T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词法边界、单条只读查询
 分类、危险结构拒绝和表/函数引用提取；表驱动、模糊测试和真实 SQL Server CTE+UNION
 只读执行均已验证。数据库只读账号、TaskScope/Catalog 授权和执行资源限制继续作为独立
-防线；下一片完成 PostgreSQL 已发布 Catalog 与 SQL Server 合成数据的真实联调，并把
-查询结果转成可追溯 EvidenceItem。
+防线；正式 EvidenceItem 存储、报告关联和 SSE 展示将在 P7 任务链路中落地。
 
 ### P7：接入正式任务链路
 

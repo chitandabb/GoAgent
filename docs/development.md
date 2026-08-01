@@ -105,8 +105,10 @@ the SQL Server pool and PostgreSQL Schema Catalog are available. Its query
 policy is configured under `[sqlserver.investigation]`:
 `maxQueryBytes`, `maxRows`, `maxResultBytes`, and `maxConcurrentQueries`.
 The default unit suite covers the guard, Catalog authorization, result limits,
-and concurrency. The real cross-database path remains opt-in and must use the
-published Catalog plus the synthetic SQL Server data.
+concurrency, and runtime EvidenceItem capture. The opt-in cross-database test
+uses a temporary published Catalog row in PostgreSQL and the synthetic SQL
+Server data; it also verifies that an uncatalogued base table is rejected before
+SQL Server execution.
 
 ## ERP SQL Server
 
@@ -119,7 +121,8 @@ Run the real SQL Server integration suite explicitly:
 
 ```powershell
 $env:MESGUARD_TEST_SQLSERVER_DSN = "sqlserver://mesguard_case_reader:...@127.0.0.1:1433?database=SUPPORT_DEMO&encrypt=disable&TrustServerCertificate=true"
-go test -tags=integration ./internal/platform/sqlserver -count=1 -v
+$env:MESGUARD_TEST_POSTGRES_DSN = "postgres://..."
+go test -tags=integration ./internal/platform/sqlserver ./internal/platform/postgres -count=1 -v
 ```
 
 The suite verifies mapping and also proves that `INSERT`, `UPDATE`, `DELETE`,

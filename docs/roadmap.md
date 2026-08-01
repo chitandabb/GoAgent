@@ -211,14 +211,18 @@ Implemented in the current working slice:
   references against the published Catalog before executing, and enforces
   query timeout, maximum rows/result bytes, and a concurrency semaphore;
   unit, authorization, sanitization, and concurrency tests pass, while a real
-  SQL Server + published-Catalog integration run is still pending.
+  SQL Server + published-Catalog integration run now passes against the Docker
+  PostgreSQL and SQL Server fixtures;
+- successful fact-producing read-only Tool calls now produce bounded runtime
+  `EvidenceItem` snapshots with a unique `evidenceRef`, source, hash, capture
+  time, and truncation state; the Evidence Gate requires report references to
+  resolve to those items.
 
 Not yet implemented or verified:
 
 - a live GitHub MCP call with the user's PAT and private demo repository;
 - Schema Catalog scanning/publishing, Query Store, and estimated-plan Tools;
-- a real SQL Server + PostgreSQL published-Catalog run of
-  `execute_readonly_query`;
+- formal EvidenceItem persistence in the DiagnosisTask/Worker chain;
 - Diagnosis Worker/SSE integration;
 - the resume target values of 93% tool-selection accuracy and 45% Token
   reduction.
@@ -230,11 +234,11 @@ for the target boundaries.
 
 ## Next Slice
 
-P0 through P5 的评测契约与统计基础已完成。P6 已完成对象定义读取、已发布 Schema
-Catalog 窄检索、QueryGuard 和受限 `execute_readonly_query` Tool；仍不等同于通用
-Text-to-SQL。下一步先用 Docker 中的 PostgreSQL 已发布 Catalog 与 SQL Server 合成
-数据完成真实联调，并把查询结果接入 EvidenceItem，再回到第一条简历能力的 GitHub
-PAT 与 baseline/experiment 评测闭环。
+P0 through P5 的评测契约与统计基础已完成。P6 当前切片已完成对象定义读取、已发布
+Schema Catalog 窄检索、QueryGuard、受限 `execute_readonly_query` Tool、真实跨数据库
+联调和运行时 EvidenceItem；仍不等同于通用 Text-to-SQL。下一步回到第一条简历能力的
+GitHub PAT 与 baseline/experiment 评测闭环。正式 EvidenceItem 持久化留到
+DiagnosisTask/Worker 链路稳定后处理。
 
 MinIO attachment work and the DiagnosisTask/Outbox/Worker product chain resume
 after the Agent core reaches the plan's P5 reproducible-evaluation checkpoint.

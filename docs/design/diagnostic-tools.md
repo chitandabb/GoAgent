@@ -4,7 +4,7 @@
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
 - 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
-- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索，以及受 QueryGuard、Catalog 和资源限制保护的 `execute_readonly_query` Tool；Catalog 扫描/发布管理、Query Store、RAG、Web Search、附件正文和运行日志 Tool 仍未实现，SQL Server + PostgreSQL 的真实联调仍待补齐，本文是工程边界，不能把目标能力当作已验证结果。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索，以及受 QueryGuard、Catalog 和资源限制保护的 `execute_readonly_query` Tool；Docker PostgreSQL + SQL Server 的真实跨数据库联调和运行时 EvidenceItem 已验证。Catalog 扫描/发布管理、Query Store、RAG、Web Search、附件正文、运行日志 Tool 和正式证据持久化仍未实现，本文是工程边界，不能把目标能力当作已验证结果。
 
 ## 总体原则
 
@@ -128,7 +128,7 @@ T-SQL Parser。项目参考 [Bytebase Omni](https://github.com/bytebase/omni) �
 方言结构。它不是通用 T-SQL AST，不负责格式化或执行计划分析。当前执行器先复核
 QueryGuard 提取的对象与 PostgreSQL 已发布 Catalog 的对象级白名单，再进入 SQL Server；
 同时强制执行 Context Timeout、最大行数、最大结果字节数和并发信号量。正常、对抗、
-授权、脱敏错误和并发限制已有单测；真实 SQL Server + 已发布 Catalog 的联调仍是下一步。
+授权、脱敏错误和并发限制已有单测；真实 SQL Server + 已发布 Catalog 的联调已由 opt-in 集成测试覆盖，成功结果会在 Agent Runner 中生成受限运行时 EvidenceItem。正式任务持久化和字段级脱敏策略仍需在 DiagnosisTask/Worker 链路中完成。
 
 Catalog 的 `queryable=true` 只是应用层授权，不能授予数据库权限。两侧策略必须取交集：
 对象既要出现在任务允许的已发布 Catalog 中，也要能被该数据源的只读账号访问。生产环境
