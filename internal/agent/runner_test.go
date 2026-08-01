@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -222,6 +223,38 @@ func TestToolTraceMiddlewareTruncatesResultAndKeepsStableError(t *testing.T) {
 	entries := trace.snapshot()
 	if len(entries) != 1 || !entries[0].Succeeded || entries[0].Name != "large_tool" {
 		t.Fatalf("trace = %+v", entries)
+	}
+}
+
+func TestToolTraceMiddlewareCapturesEvidenceReferenceAndHash(t *testing.T) {
+	trace := &executionTrace{}
+	ctx := withExecutionTrace(context.Background(), trace)
+	middleware := newToolTraceMiddleware(4096)
+	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: `{"returnedRows":1,"truncated":true,"rows":[["TKT-1001"]]}`}, nil
+	})
+	output, err := endpoint(ctx, &compose.ToolInput{Name: ToolExecuteReadonlyQuery, Arguments: `{}`})
+	if err != nil {
+		t.Fatalf("invoke middleware: %v", err)
+	}
+	items := trace.evidenceSnapshot()
+	entries := trace.snapshot()
+	if len(items) != 1 || len(entries) != 1 || entries[0].EvidenceID != items[0].ID {
+		t.Fatalf("evidence trace = items=%+v entries=%+v", items, entries)
+	}
+	item := items[0]
+	if item.SourceType != EvidenceSourceSQLQuery || !item.Truncated || item.ContentHash == "" || item.Snapshot == "" {
+		t.Fatalf("unexpected EvidenceItem: %+v", item)
+	}
+	var envelope struct {
+		EvidenceRef string          `json:"evidenceRef"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(output.Result), &envelope); err != nil {
+		t.Fatalf("decode wrapped tool result: %v; result=%s", err, output.Result)
+	}
+	if envelope.EvidenceRef != item.SourceRef || !json.Valid(envelope.Data) {
+		t.Fatalf("wrapped evidence reference = %+v, item=%+v", envelope, item)
 	}
 }
 

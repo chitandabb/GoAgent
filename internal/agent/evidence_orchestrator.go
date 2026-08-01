@@ -27,8 +27,8 @@ const (
 	evidenceNodePartialReport     = "partial_report"
 	evidenceGraphName             = "mesguard-evidence-gate"
 	reportContractInstruction     = `请在完成必要的只读调查后，仅输出一个 JSON 对象，不要使用 Markdown 代码块或附加说明。JSON 必须严格符合以下结构：
-{"conclusionStatus":"conclusive|probable|inconclusive","riskLevel":"low|medium|high","conclusion":"结论","businessSummary":"面向业务人员的摘要","technicalSummary":"面向技术人员的摘要","evidence":[{"claim":"被证据支持或反驳的判断","sourceTool":"本次成功执行的工具名","sourceRef":"可稳定定位原始结果的引用","supportType":"supports|contradicts|context"}],"limitations":[],"confidence":"high|medium|low"}
-不得把猜测写成证据；sourceTool 必须是本次任务中真实成功执行的工具；证据不足时使用 inconclusive、low confidence，并在 limitations 中写清缺口。`
+{"conclusionStatus":"conclusive|probable|inconclusive","riskLevel":"low|medium|high","conclusion":"结论","businessSummary":"面向业务人员的摘要","technicalSummary":"面向技术人员的摘要","evidence":[{"claim":"被证据支持或反驳的判断","sourceTool":"本次成功执行的工具名","sourceRef":"工具结果中的 evidenceRef，必须原样引用","supportType":"supports|contradicts|context"}],"limitations":[],"confidence":"high|medium|low"}
+不得把猜测写成证据；sourceTool 必须是本次任务中真实成功执行的工具，sourceRef 必须来自对应工具结果中的 evidenceRef；证据不足时使用 inconclusive、low confidence，并在 limitations 中写清缺口。`
 )
 
 var (
@@ -76,6 +76,7 @@ type OrchestrationResult struct {
 	MissingEvidence []string            `json:"missingEvidence"`
 	AgentRuns       int                 `json:"agentRuns"`
 	ToolExecutions  []ToolExecution     `json:"toolExecutions"`
+	EvidenceItems   []EvidenceItem      `json:"evidenceItems"`
 	Usage           ModelUsage          `json:"usage"`
 	AllowedTools    []string            `json:"allowedTools"`
 	ExecutedSkills  []SkillID           `json:"executedSkills"`
@@ -105,6 +106,7 @@ type evidenceState struct {
 	gaps             []string
 	nextNode         string
 	toolExecutions   []ToolExecution
+	evidenceItems    []EvidenceItem
 	usage            ModelUsage
 	allowedTools     []string
 	executedSkills   []SkillID
@@ -309,6 +311,7 @@ func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceS
 		state.successfulTools(),
 		o.maxEvidenceItems,
 	)...)
+	gaps = append(gaps, validateEvidenceReferences(state.parsedReport, state.evidenceItems)...)
 	state.gaps = uniqueStrings(append(state.gaps, gaps...))
 	if len(gaps) == 0 && state.parsedReport != nil {
 		state.nextNode = evidenceNodeReport
@@ -352,6 +355,18 @@ func (s *evidenceState) nextAgentQuery() string {
 
 func (s *evidenceState) mergeRunResult(result RunResult) {
 	s.toolExecutions = append(s.toolExecutions, result.ToolExecutions...)
+	for _, item := range result.EvidenceItems {
+		if item.SourceRef == "" || slices.ContainsFunc(s.evidenceItems, func(current EvidenceItem) bool {
+			return current.SourceRef == item.SourceRef
+		}) {
+			continue
+		}
+		if len(s.evidenceItems) >= s.maxEvidenceItems {
+			s.gaps = append(s.gaps, fmt.Sprintf("证据快照数量超过上限 %d", s.maxEvidenceItems))
+			break
+		}
+		s.evidenceItems = append(s.evidenceItems, item)
+	}
 	s.usage.Add(result.Usage)
 	s.allowedTools = uniqueStrings(append(s.allowedTools, result.AllowedTools...))
 	for _, skillID := range result.ExecutedSkills {
@@ -432,6 +447,7 @@ func (s *evidenceState) finishPartial() {
 		partial.Evidence = validEvidenceSubset(
 			s.parsedReport.Evidence,
 			s.successfulTools(),
+			s.evidenceItems,
 			s.maxEvidenceItems,
 		)
 		partial.Limitations = uniqueStrings(append(partial.Limitations, s.parsedReport.Limitations...))
@@ -440,11 +456,17 @@ func (s *evidenceState) finishPartial() {
 	s.appendStep(InvestigationReport, "部分报告", "证据或预算不足，已明确列出限制", "partial", "", 0)
 }
 
-func validEvidenceSubset(evidence []ReportEvidence, successfulTools []string, maxItems int) []ReportEvidence {
+func validEvidenceSubset(
+	evidence []ReportEvidence,
+	successfulTools []string,
+	evidenceItems []EvidenceItem,
+	maxItems int,
+) []ReportEvidence {
 	result := make([]ReportEvidence, 0, min(len(evidence), maxItems))
 	for _, item := range evidence {
 		if strings.TrimSpace(item.Claim) != "" && strings.TrimSpace(item.SourceRef) != "" &&
-			item.SupportType.Valid() && slices.Contains(successfulTools, item.SourceTool) {
+			item.SupportType.Valid() && slices.Contains(successfulTools, item.SourceTool) &&
+			containsEvidenceReference(evidenceItems, item.SourceRef, item.SourceTool) {
 			result = append(result, item)
 			if len(result) == maxItems {
 				break
@@ -452,6 +474,12 @@ func validEvidenceSubset(evidence []ReportEvidence, successfulTools []string, ma
 		}
 	}
 	return result
+}
+
+func containsEvidenceReference(items []EvidenceItem, sourceRef, sourceTool string) bool {
+	return slices.ContainsFunc(items, func(item EvidenceItem) bool {
+		return item.SourceRef == sourceRef && item.SourceTool == sourceTool
+	})
 }
 
 func (s *evidenceState) appendStep(
@@ -474,6 +502,7 @@ func (s *evidenceState) result() OrchestrationResult {
 		MissingEvidence: append([]string(nil), s.gaps...),
 		AgentRuns:       s.agentRuns,
 		ToolExecutions:  append([]ToolExecution(nil), s.toolExecutions...),
+		EvidenceItems:   append([]EvidenceItem(nil), s.evidenceItems...),
 		Usage:           s.usage,
 		AllowedTools:    append([]string(nil), s.allowedTools...),
 		ExecutedSkills:  append([]SkillID(nil), s.executedSkills...),

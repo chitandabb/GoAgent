@@ -58,6 +58,9 @@ func TestEvidenceOrchestratorAcceptsValidReport(t *testing.T) {
 	if result.Partial || result.AgentRuns != 1 || result.Report.ConclusionStatus != ConclusionProbable {
 		t.Fatalf("unexpected result: %+v", result)
 	}
+	if len(result.EvidenceItems) != 1 || result.Report.Evidence[0].SourceRef != result.EvidenceItems[0].SourceRef {
+		t.Fatalf("report evidence was not bound to runtime EvidenceItem: %+v", result)
+	}
 	if len(result.MissingEvidence) != 0 || len(result.Investigation) < 4 {
 		t.Fatalf("unexpected evidence trace: %+v", result)
 	}
@@ -88,6 +91,21 @@ func TestEvidenceOrchestratorRetriesOnlyForEvidenceGaps(t *testing.T) {
 	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "至少需要一条可追溯证据") ||
 		!strings.Contains(requests[1].UserQuery, "<previous_report>") {
 		t.Fatalf("supplemental request = %+v", requests)
+	}
+}
+
+func TestEvidenceOrchestratorRejectsUnknownEvidenceReference(t *testing.T) {
+	report := validEvidenceReport()
+	report.Evidence[0].SourceRef = "evidence:missing"
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{{result: evidenceRunResult(t, report)}}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{MaxAgentRuns: 1})
+
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if !result.Partial || !containsText(result.MissingEvidence, "未对应本次运行的 EvidenceItem") {
+		t.Fatalf("unknown evidence reference was accepted: %+v", result)
 	}
 }
 
@@ -229,7 +247,13 @@ func evidenceRunResult(t *testing.T, report StructuredReport) RunResult {
 	return RunResult{
 		Answer: string(answer),
 		ToolExecutions: []ToolExecution{{
-			Name: ToolReadExternalCase, Succeeded: true, DurationMS: 2,
+			Name: ToolReadExternalCase, Succeeded: true, DurationMS: 2, EvidenceID: "evidence:test-case",
+		}},
+		EvidenceItems: []EvidenceItem{{
+			ID: "evidence:test-case", SourceType: EvidenceSourceCaseSnapshot,
+			SourceTool: ToolReadExternalCase, SourceRef: "evidence:test-case",
+			CollectedAt: time.Unix(1, 0).UTC(), Summary: "test case snapshot",
+			Snapshot: `{"externalCaseKey":"TKT-1"}`, ContentHash: "sha256:test",
 		}},
 		Usage:          ModelUsage{ModelCalls: 2, PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100},
 		AllowedTools:   []string{ToolReadExternalCase, ToolSkill},
@@ -246,7 +270,7 @@ func validEvidenceReport() StructuredReport {
 		TechnicalSummary: "工单证据指向报工后的状态流转环节。",
 		Evidence: []ReportEvidence{{
 			Claim: "报工后状态未更新", SourceTool: ToolReadExternalCase,
-			SourceRef: "external-case:TKT-1", SupportType: EvidenceSupports,
+			SourceRef: "evidence:test-case", SupportType: EvidenceSupports,
 		}},
 		Limitations: []string{"尚未接入 SQL 调查工具"},
 		Confidence:  ConfidenceMedium,

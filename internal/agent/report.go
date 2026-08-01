@@ -170,6 +170,33 @@ func validateStructuredReport(
 	return uniqueStrings(gaps)
 }
 
+// validateEvidenceReferences 把模型报告中的 sourceRef 绑定到本次运行实际捕获的
+// EvidenceItem。仅校验 sourceTool 成功执行不足以保证引用的是哪一次结果。
+func validateEvidenceReferences(report *StructuredReport, items []EvidenceItem) []string {
+	if report == nil {
+		return nil
+	}
+	byRef := make(map[string]EvidenceItem, len(items))
+	for _, item := range items {
+		if item.SourceRef != "" {
+			byRef[item.SourceRef] = item
+		}
+	}
+	gaps := make([]string, 0)
+	for index, evidence := range report.Evidence {
+		prefix := fmt.Sprintf("evidence[%d]", index)
+		item, ok := byRef[strings.TrimSpace(evidence.SourceRef)]
+		if !ok {
+			gaps = append(gaps, prefix+" 的 sourceRef 未对应本次运行的 EvidenceItem")
+			continue
+		}
+		if item.SourceTool != evidence.SourceTool {
+			gaps = append(gaps, prefix+" 的 sourceTool 与 EvidenceItem 来源不一致")
+		}
+	}
+	return uniqueStrings(gaps)
+}
+
 func nonBlankStrings(values []string) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
