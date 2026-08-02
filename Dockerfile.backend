@@ -9,6 +9,7 @@ COPY . .
 
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-api ./cmd/mesguard-api
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-migrate ./cmd/mesguard-migrate
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-outbox-relay ./cmd/mesguard-outbox-relay
 
 FROM debian:bookworm-slim
 
@@ -20,6 +21,7 @@ WORKDIR /app
 
 COPY --from=builder /out/mesguard-api /app/mesguard-api
 COPY --from=builder /out/mesguard-migrate /app/mesguard-migrate
+COPY --from=builder /out/mesguard-outbox-relay /app/mesguard-outbox-relay
 COPY config /app/config
 
 EXPOSE 9090

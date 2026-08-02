@@ -45,6 +45,15 @@ func NewBootstrapFor(service string) *zap.Logger {
 // New 根据类型化配置创建 Logger。
 // 控制台是容器和本地开发的主要输出；文件输出开启后使用 Lumberjack 自动轮转。
 func New(cfg config.LogConfig) (*zap.Logger, func() error, error) {
+	return NewFor(cfg, "mesguard-api")
+}
+
+// NewFor 为 API、Relay、Worker 等独立运行角色创建带正确 service 字段的正式 Logger。
+func NewFor(cfg config.LogConfig, service string) (*zap.Logger, func() error, error) {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return nil, nil, errors.New("logger service is required")
+	}
 	level, err := zapcore.ParseLevel(strings.ToLower(strings.TrimSpace(cfg.Level)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse log level %q: %w", cfg.Level, err)
@@ -74,7 +83,7 @@ func New(cfg config.LogConfig) (*zap.Logger, func() error, error) {
 		zap.AddStacktrace(zap.ErrorLevel),
 		zap.ErrorOutput(zapcore.Lock(os.Stderr)),
 		zap.Fields(
-			zap.String("service", "mesguard-api"),
+			zap.String("service", service),
 			zap.String("environment", cfg.Environment),
 		),
 	)

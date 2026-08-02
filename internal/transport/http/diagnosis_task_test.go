@@ -93,15 +93,68 @@ func TestDiagnosisTaskRoutesGetPassesActor(t *testing.T) {
 	}
 }
 
+func TestDiagnosisTaskRoutesListEventsPassesCursorAndReturnsPage(t *testing.T) {
+	ownerID := uuid.New()
+	taskID := uuid.New()
+	createdAt := time.Date(2026, 8, 2, 5, 0, 0, 0, time.UTC)
+	useCase := &diagnosisTaskUseCaseStub{eventPage: diagnosis.TaskEventPage{
+		Items: []diagnosis.TaskEvent{{
+			TaskID: taskID, Seq: 8, EventType: "task_started", Payload: map[string]any{"attemptCount": 1},
+			PayloadSchemaVersion: 1, CreatedAt: createdAt,
+		}},
+		AfterSeq: 7, NextAfterSeq: 8, HasMore: false,
+	}}
+	routes, _ := NewDiagnosisTaskRoutes(useCase, identityMiddleware(ownerID, false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet,
+		"/api/v1/diagnosis-tasks/"+taskID.String()+"/events?afterSeq=7&limit=25", nil))
+	if response.Code != http.StatusOK || useCase.gotAfterSeq != 7 || useCase.gotEventLimit != 25 ||
+		!strings.Contains(response.Body.String(), `"nextAfterSeq":8`) || !strings.Contains(response.Body.String(), `"eventType":"task_started"`) {
+		t.Fatalf("status=%d afterSeq=%d limit=%d body=%s", response.Code, useCase.gotAfterSeq, useCase.gotEventLimit, response.Body.String())
+	}
+}
+
+func TestDiagnosisTaskRoutesCancelReturnsAcceptedThenMapsStateConflict(t *testing.T) {
+	ownerID := uuid.New()
+	taskID := uuid.New()
+	useCase := &diagnosisTaskUseCaseStub{cancelResult: diagnosis.TaskCancelResult{
+		Task:    diagnosis.DiagnosisTask{ID: taskID, CreatedBy: ownerID, Status: diagnosis.TaskCancelRequested},
+		Changed: true,
+	}}
+	routes, _ := NewDiagnosisTaskRoutes(useCase, identityMiddleware(ownerID, false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost,
+		"/api/v1/diagnosis-tasks/"+taskID.String()+"/cancel", nil))
+	if response.Code != http.StatusAccepted || useCase.gotTaskID != taskID || !strings.Contains(response.Body.String(), `"status":"cancel_requested"`) {
+		t.Fatalf("status=%d taskID=%s body=%s", response.Code, useCase.gotTaskID, response.Body.String())
+	}
+
+	useCase.cancelErr = diagnosis.ErrTaskStateConflict
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost,
+		"/api/v1/diagnosis-tasks/"+taskID.String()+"/cancel", nil))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `40921`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 type diagnosisTaskUseCaseStub struct {
-	createResult diagnosis.TaskCreateResult
-	createErr    error
-	createCalls  int
-	gotActor     diagnosis.TaskActor
-	gotInput     diagnosis.CreateTaskInput
-	getTask      diagnosis.DiagnosisTask
-	getErr       error
-	gotTaskID    uuid.UUID
+	createResult  diagnosis.TaskCreateResult
+	createErr     error
+	createCalls   int
+	gotActor      diagnosis.TaskActor
+	gotInput      diagnosis.CreateTaskInput
+	getTask       diagnosis.DiagnosisTask
+	getErr        error
+	gotTaskID     uuid.UUID
+	eventPage     diagnosis.TaskEventPage
+	eventErr      error
+	gotAfterSeq   int64
+	gotEventLimit int
+	cancelResult  diagnosis.TaskCancelResult
+	cancelErr     error
 }
 
 func (s *diagnosisTaskUseCaseStub) Create(_ context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error) {
@@ -116,4 +169,20 @@ func (s *diagnosisTaskUseCaseStub) Get(_ context.Context, actor diagnosis.TaskAc
 		return diagnosis.DiagnosisTask{}, s.getErr
 	}
 	return s.getTask, nil
+}
+
+func (s *diagnosisTaskUseCaseStub) ListEvents(_ context.Context, actor diagnosis.TaskActor, taskID uuid.UUID, afterSeq int64, limit int) (diagnosis.TaskEventPage, error) {
+	s.gotActor, s.gotTaskID, s.gotAfterSeq, s.gotEventLimit = actor, taskID, afterSeq, limit
+	if s.eventErr != nil {
+		return diagnosis.TaskEventPage{}, s.eventErr
+	}
+	return s.eventPage, nil
+}
+
+func (s *diagnosisTaskUseCaseStub) Cancel(_ context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskCancelResult, error) {
+	s.gotActor, s.gotTaskID = actor, taskID
+	if s.cancelErr != nil {
+		return diagnosis.TaskCancelResult{}, s.cancelErr
+	}
+	return s.cancelResult, nil
 }

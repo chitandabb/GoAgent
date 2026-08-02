@@ -54,6 +54,17 @@ port = 6379
 password = ""
 database = 0
 
+[rabbitmq]
+enabled = true
+urlEnv = "MESGUARD_RABBITMQ_URL"
+exchange = "mesguard.tasks"
+diagnosisQueue = "mesguard.diagnosis.execute"
+diagnosisRoutingKey = "diagnosis.execute"
+relayBatchSize = 10
+relayPollIntervalMillis = 1000
+relayLeaseMillis = 300000
+publishConfirmTimeoutMillis = 5000
+
 [githubMCP]
 enabled = false
 endpoint = "https://api.githubcopilot.com/mcp/"

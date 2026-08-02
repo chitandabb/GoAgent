@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库已实现用户、Session、数据源与外部工单身份表；快照、任务、消息、知识库等后续表尚未全部实现。
+- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、报告最小元数据与反馈表；正式证据、工具执行和知识库等后续表尚未实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -735,6 +735,8 @@ M2采用渐进策略：
 
 Worker在短事务中检查任务状态、租约和幂等条件，成功后写入领取者和`lease_until`。模型调用和SQL Server查询必须在事务外执行，避免长期持有数据库锁。
 
+当前 PostgreSQL Repository 已实现按任务 ID 的原子 Claim 和续租契约：首次领取或过期接管递增 `attempt_count`，返回 `claim_owner + attempt_count` fencing token，并分别追加 `task_started/task_reclaimed` 事件；活跃租约、取消中任务和终态任务返回显式 disposition，不重复执行。续租只允许仍处于 `running`、租约未过期且 fencing token 完全匹配的 Worker，旧 token 更新行数为 0。实际 RabbitMQ Consumer 和 Agent 步骤写入将在后续切片接入。
+
 ### 写入步骤和证据
 
 每个重要步骤完成后使用短事务写入步骤状态、工具调用摘要、证据和TaskEvent。Redis通知必须发生在事务提交之后。
@@ -746,6 +748,8 @@ Worker在短事务中检查任务状态、租约和幂等条件，成功后写�
 ### 取消任务
 
 取消请求只在事务中将`pending`或`running`任务标记为`cancel_requested`并追加事件。Worker在步骤和工具边界检查取消，随后写入`cancelled`。关闭SSE连接不触发数据库状态变更。
+
+当前取消 Repository 已实现任务行锁、状态条件更新、任务内下一个 `seq` 分配和事件写入的单事务边界；重复取消不追加事件，`succeeded/failed` 返回稳定状态冲突。Worker 协作写入 `cancelled` 尚未实现。
 
 ## 迁移策略
 
@@ -901,4 +905,4 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ## 后续工作
 
-用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent和Outbox基础已经落地；后续按`docs/roadmap.md`的纵向切片继续实现 Relay、Worker、证据和报告。
+用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent和Outbox基础已经落地；TaskEvent 游标查询、取消命令、Worker Claim/续租/fencing 和 Outbox Relay 也已实现。后续按`docs/roadmap.md`的纵向切片继续实现 RabbitMQ Consumer、Worker执行、证据和报告。

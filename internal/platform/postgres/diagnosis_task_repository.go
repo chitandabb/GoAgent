@@ -22,6 +22,7 @@ type DiagnosisTaskRepository struct {
 }
 
 var _ diagnosis.TaskRepository = (*DiagnosisTaskRepository)(nil)
+var _ diagnosis.TaskExecutionRepository = (*DiagnosisTaskRepository)(nil)
 
 func NewDiagnosisTaskRepository(db *gorm.DB) *DiagnosisTaskRepository {
 	return &DiagnosisTaskRepository{db: db}
@@ -256,6 +257,292 @@ WHERE task.id = ?`, taskID).Scan(&record)
 		return diagnosis.DiagnosisTask{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 	}
 	return diagnosisTaskFromRecord(record)
+}
+
+func (r *DiagnosisTaskRepository) ListTaskEvents(
+	ctx context.Context,
+	taskID uuid.UUID,
+	afterSeq int64,
+	limit int,
+) (diagnosis.TaskEventPage, error) {
+	if r == nil || r.db == nil {
+		return diagnosis.TaskEventPage{}, errors.New("diagnosis task repository is unavailable")
+	}
+	if taskID == uuid.Nil || afterSeq < 0 || limit < 1 || limit > diagnosis.MaxTaskEventLimit {
+		return diagnosis.TaskEventPage{}, diagnosis.ErrInvalidTask
+	}
+	var records []taskEventRecord
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT task_id, seq, event_type, payload, payload_schema_version, created_at
+FROM task_events
+WHERE task_id = ? AND seq > ?
+ORDER BY seq ASC
+LIMIT ?`, taskID, afterSeq, limit+1).Scan(&records)
+	if result.Error != nil {
+		return diagnosis.TaskEventPage{}, TranslateError(result.Error)
+	}
+
+	hasMore := len(records) > limit
+	if hasMore {
+		records = records[:limit]
+	}
+	items := make([]diagnosis.TaskEvent, 0, len(records))
+	nextAfterSeq := afterSeq
+	for _, record := range records {
+		item, err := taskEventFromRecord(record)
+		if err != nil {
+			return diagnosis.TaskEventPage{}, err
+		}
+		items = append(items, item)
+		nextAfterSeq = item.Seq
+	}
+	return diagnosis.TaskEventPage{
+		Items: items, AfterSeq: afterSeq, NextAfterSeq: nextAfterSeq, HasMore: hasMore,
+	}, nil
+}
+
+func (r *DiagnosisTaskRepository) CancelTask(
+	ctx context.Context,
+	taskID, requestedBy uuid.UUID,
+	requestedAt time.Time,
+) (diagnosis.TaskCancelResult, error) {
+	if r == nil || r.db == nil {
+		return diagnosis.TaskCancelResult{}, errors.New("diagnosis task repository is unavailable")
+	}
+	if taskID == uuid.Nil || requestedBy == uuid.Nil {
+		return diagnosis.TaskCancelResult{}, diagnosis.ErrInvalidTask
+	}
+	requestedAt = requestedAt.UTC()
+	var result diagnosis.TaskCancelResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		record, err := selectDiagnosisTaskForUpdate(tx, taskID)
+		if err != nil {
+			return err
+		}
+		switch record.Status {
+		case diagnosis.TaskCancelRequested, diagnosis.TaskCancelled:
+			task, err := diagnosisTaskFromRecord(record)
+			if err != nil {
+				return err
+			}
+			result = diagnosis.TaskCancelResult{Task: task, Changed: false}
+			return nil
+		case diagnosis.TaskSucceeded, diagnosis.TaskFailed:
+			return diagnosis.ErrTaskStateConflict
+		case diagnosis.TaskPending, diagnosis.TaskRunning:
+		default:
+			return fmt.Errorf("unsupported diagnosis task status %q", record.Status)
+		}
+
+		updated := tx.Exec(`
+UPDATE diagnosis_tasks
+SET status = 'cancel_requested', cancel_requested_at = ?, updated_at = ?
+WHERE id = ? AND status = ?`, requestedAt, requestedAt, taskID, record.Status)
+		if updated.Error != nil {
+			return TranslateError(updated.Error)
+		}
+		if updated.RowsAffected != 1 {
+			return diagnosis.ErrTaskStateConflict
+		}
+		if err := appendTaskEvent(tx, taskID, "task_cancel_requested", map[string]any{
+			"taskId": taskID.String(), "status": string(diagnosis.TaskCancelRequested),
+			"requestedBy": requestedBy.String(),
+		}, requestedAt); err != nil {
+			return err
+		}
+
+		record.Status = diagnosis.TaskCancelRequested
+		record.UpdatedAt = requestedAt
+		task, err := diagnosisTaskFromRecord(record)
+		if err != nil {
+			return err
+		}
+		result = diagnosis.TaskCancelResult{Task: task, Changed: true}
+		return nil
+	})
+	if err != nil {
+		return diagnosis.TaskCancelResult{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+func (r *DiagnosisTaskRepository) ClaimTask(ctx context.Context, input diagnosis.TaskClaimRecord) (diagnosis.TaskClaimResult, error) {
+	if r == nil || r.db == nil {
+		return diagnosis.TaskClaimResult{}, errors.New("diagnosis task repository is unavailable")
+	}
+	if input.TaskID == uuid.Nil || input.ClaimOwner == "" || !input.LeaseUntil.After(input.ClaimedAt) {
+		return diagnosis.TaskClaimResult{}, diagnosis.ErrInvalidTask
+	}
+	input.ClaimedAt = input.ClaimedAt.UTC()
+	input.LeaseUntil = input.LeaseUntil.UTC()
+
+	var result diagnosis.TaskClaimResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		state, err := selectTaskClaimStateForUpdate(tx, input.TaskID)
+		if err != nil {
+			return err
+		}
+		switch state.Status {
+		case diagnosis.TaskSucceeded, diagnosis.TaskFailed, diagnosis.TaskCancelled:
+			result = diagnosis.TaskClaimResult{Disposition: diagnosis.TaskClaimTerminal, Status: state.Status}
+			return nil
+		case diagnosis.TaskCancelRequested:
+			result = diagnosis.TaskClaimResult{Disposition: diagnosis.TaskClaimCancellationRequested, Status: state.Status}
+			return nil
+		case diagnosis.TaskRunning:
+			if state.LeaseUntil != nil && state.LeaseUntil.After(input.ClaimedAt) {
+				result = diagnosis.TaskClaimResult{Disposition: diagnosis.TaskClaimLeaseHeld, Status: state.Status}
+				return nil
+			}
+		case diagnosis.TaskPending:
+		default:
+			return fmt.Errorf("unsupported diagnosis task status %q", state.Status)
+		}
+
+		attemptCount := state.AttemptCount + 1
+		updated := tx.Exec(`
+UPDATE diagnosis_tasks
+SET status = 'running', attempt_count = ?, claim_owner = ?, claimed_at = ?,
+    lease_until = ?, started_at = COALESCE(started_at, ?), updated_at = ?
+WHERE id = ? AND status = ? AND attempt_count = ?`,
+			attemptCount, input.ClaimOwner, input.ClaimedAt, input.LeaseUntil,
+			input.ClaimedAt, input.ClaimedAt, input.TaskID, state.Status, state.AttemptCount,
+		)
+		if updated.Error != nil {
+			return TranslateError(updated.Error)
+		}
+		if updated.RowsAffected != 1 {
+			return diagnosis.ErrTaskStateConflict
+		}
+		eventType := "task_started"
+		if state.AttemptCount > 0 {
+			eventType = "task_reclaimed"
+		}
+		if err := appendTaskEvent(tx, input.TaskID, eventType, map[string]any{
+			"taskId": input.TaskID.String(), "status": string(diagnosis.TaskRunning),
+			"attemptCount": attemptCount,
+		}, input.ClaimedAt); err != nil {
+			return err
+		}
+		lease := diagnosis.TaskLease{
+			TaskID: input.TaskID, ClaimOwner: input.ClaimOwner,
+			AttemptCount: attemptCount, LeaseUntil: input.LeaseUntil,
+		}
+		result = diagnosis.TaskClaimResult{
+			Disposition: diagnosis.TaskClaimAcquired, Status: diagnosis.TaskRunning, Lease: &lease,
+		}
+		return nil
+	})
+	if err != nil {
+		return diagnosis.TaskClaimResult{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+func (r *DiagnosisTaskRepository) RenewTaskLease(ctx context.Context, input diagnosis.TaskLeaseRenewal) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("diagnosis task repository is unavailable")
+	}
+	if input.TaskID == uuid.Nil || input.ClaimOwner == "" || input.AttemptCount < 1 ||
+		!input.NewLeaseUntil.After(input.RenewedAt) {
+		return false, diagnosis.ErrInvalidTask
+	}
+	result := ResolveDB(ctx, r.db).Exec(`
+UPDATE diagnosis_tasks
+SET lease_until = ?, updated_at = ?
+WHERE id = ? AND status = 'running' AND claim_owner = ? AND attempt_count = ?
+  AND lease_until > ?`, input.NewLeaseUntil.UTC(), input.RenewedAt.UTC(), input.TaskID,
+		input.ClaimOwner, input.AttemptCount, input.RenewedAt.UTC())
+	if result.Error != nil {
+		return false, TranslateError(result.Error)
+	}
+	return result.RowsAffected == 1, nil
+}
+
+func selectDiagnosisTaskForUpdate(db *gorm.DB, taskID uuid.UUID) (diagnosisTaskRecord, error) {
+	var record diagnosisTaskRecord
+	result := db.Raw(`
+SELECT id, created_by, external_case_id, case_snapshot_id, retry_of,
+       request_fingerprint, request_text, request_scope, request_scope_schema_version,
+       status, attempt_count, last_error_code, last_error_message, started_at,
+       completed_at, created_at, updated_at
+FROM diagnosis_tasks
+WHERE id = ?
+FOR UPDATE`, taskID).Scan(&record)
+	if result.Error != nil {
+		return diagnosisTaskRecord{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return diagnosisTaskRecord{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	return record, nil
+}
+
+type taskClaimStateRecord struct {
+	ID           uuid.UUID            `gorm:"column:id"`
+	Status       diagnosis.TaskStatus `gorm:"column:status"`
+	AttemptCount int                  `gorm:"column:attempt_count"`
+	LeaseUntil   *time.Time           `gorm:"column:lease_until"`
+}
+
+func selectTaskClaimStateForUpdate(db *gorm.DB, taskID uuid.UUID) (taskClaimStateRecord, error) {
+	var record taskClaimStateRecord
+	result := db.Raw(`
+SELECT id, status, attempt_count, lease_until
+FROM diagnosis_tasks
+WHERE id = ?
+FOR UPDATE`, taskID).Scan(&record)
+	if result.Error != nil {
+		return taskClaimStateRecord{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return taskClaimStateRecord{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	return record, nil
+}
+
+func appendTaskEvent(db *gorm.DB, taskID uuid.UUID, eventType string, payload map[string]any, createdAt time.Time) error {
+	var nextSeq int64
+	if err := db.Raw(`
+SELECT COALESCE(MAX(seq), 0) + 1
+FROM task_events
+WHERE task_id = ?`, taskID).Scan(&nextSeq).Error; err != nil {
+		return TranslateError(err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal task event payload: %w", err)
+	}
+	if err := db.Exec(`
+INSERT INTO task_events
+    (task_id, seq, event_type, payload, payload_schema_version, created_at)
+VALUES (?, ?, ?, ?, 1, ?)`, taskID, nextSeq, eventType, encoded, createdAt.UTC()).Error; err != nil {
+		return TranslateError(err)
+	}
+	return nil
+}
+
+type taskEventRecord struct {
+	TaskID               uuid.UUID `gorm:"column:task_id"`
+	Seq                  int64     `gorm:"column:seq"`
+	EventType            string    `gorm:"column:event_type"`
+	Payload              []byte    `gorm:"column:payload"`
+	PayloadSchemaVersion int       `gorm:"column:payload_schema_version"`
+	CreatedAt            time.Time `gorm:"column:created_at"`
+}
+
+func taskEventFromRecord(record taskEventRecord) (diagnosis.TaskEvent, error) {
+	payload := map[string]any{}
+	if len(record.Payload) > 0 {
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			return diagnosis.TaskEvent{}, fmt.Errorf("decode task event payload: %w", err)
+		}
+	}
+	return diagnosis.TaskEvent{
+		TaskID: record.TaskID, Seq: record.Seq, EventType: record.EventType,
+		Payload: payload, PayloadSchemaVersion: record.PayloadSchemaVersion,
+		CreatedAt: record.CreatedAt,
+	}, nil
 }
 
 // diagnosisTaskRecord 是 PostgreSQL 行映射，避免领域包依赖 GORM 标签和数据库类型。

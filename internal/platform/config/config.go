@@ -32,6 +32,7 @@ type Config struct {
 	Log       LogConfig       `toml:"log"`       // [log] 配置块：结构化日志和文件轮转
 	Postgres  PostgresConfig  `toml:"postgres"`  // [postgres] 配置块：PostgreSQL 数据库连接配置
 	Redis     RedisConfig     `toml:"redis"`     // [redis] 配置块：Redis 缓存连接配置
+	RabbitMQ  RabbitMQConfig  `toml:"rabbitmq"`  // [rabbitmq] Outbox Relay 与 Worker 消息配置
 	SQLServer SQLServerConfig `toml:"sqlserver"` // [sqlserver] 公司 ERP 工单库（可降级依赖）
 	GitHubMCP GitHubMCPConfig `toml:"githubMCP"` // [githubMCP] 官方 GitHub MCP 只读代码调查
 }
@@ -162,6 +163,64 @@ func (c GitHubMCPConfig) Validate() error {
 
 func (c GitHubMCPConfig) Token() (string, error) {
 	return requiredEnv(c.TokenEnv)
+}
+
+// RabbitMQConfig 固定 M1 诊断队列拓扑和 Relay 的有界批处理参数。
+// AMQP URL 可能包含凭证，只能通过 URLEnv 指向的环境变量注入。
+type RabbitMQConfig struct {
+	Enabled                     bool   `toml:"enabled"`
+	URLEnv                      string `toml:"urlEnv"`
+	Exchange                    string `toml:"exchange"`
+	DiagnosisQueue              string `toml:"diagnosisQueue"`
+	DiagnosisRoutingKey         string `toml:"diagnosisRoutingKey"`
+	RelayBatchSize              int    `toml:"relayBatchSize"`
+	RelayPollIntervalMillis     int    `toml:"relayPollIntervalMillis"`
+	RelayLeaseMillis            int    `toml:"relayLeaseMillis"`
+	PublishConfirmTimeoutMillis int    `toml:"publishConfirmTimeoutMillis"`
+}
+
+var amqpEntityName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func (c RabbitMQConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.URLEnv)) {
+		return errors.New("rabbitmq urlEnv is invalid")
+	}
+	for name, value := range map[string]string{
+		"exchange": c.Exchange, "diagnosisQueue": c.DiagnosisQueue,
+		"diagnosisRoutingKey": c.DiagnosisRoutingKey,
+	} {
+		if !amqpEntityName.MatchString(strings.TrimSpace(value)) {
+			return fmt.Errorf("rabbitmq %s is invalid", name)
+		}
+	}
+	if c.RelayBatchSize < 1 || c.RelayBatchSize > 100 {
+		return errors.New("rabbitmq relayBatchSize must be between 1 and 100")
+	}
+	if c.RelayPollIntervalMillis < 100 || c.RelayPollIntervalMillis > 60_000 {
+		return errors.New("rabbitmq relayPollIntervalMillis must be between 100 and 60000")
+	}
+	if c.PublishConfirmTimeoutMillis < 100 || c.PublishConfirmTimeoutMillis > 60_000 {
+		return errors.New("rabbitmq publishConfirmTimeoutMillis must be between 100 and 60000")
+	}
+	if c.RelayLeaseMillis <= c.RelayBatchSize*c.PublishConfirmTimeoutMillis || c.RelayLeaseMillis > 600_000 {
+		return errors.New("rabbitmq relayLeaseMillis must exceed batchSize * publishConfirmTimeoutMillis and be at most 600000")
+	}
+	return nil
+}
+
+func (c RabbitMQConfig) URL() (string, error) {
+	raw, err := requiredEnv(c.URLEnv)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "amqp" && parsed.Scheme != "amqps") {
+		return "", errors.New("rabbitmq URL must be an absolute amqp or amqps URL")
+	}
+	return raw, nil
 }
 
 // SQLServerConfig 定义公司 ERP 工单库的只读连接和安全映射。
@@ -546,6 +605,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.GitHubMCP.Validate(); err != nil {
+		return err
+	}
+	if err := c.RabbitMQ.Validate(); err != nil {
 		return err
 	}
 	return nil

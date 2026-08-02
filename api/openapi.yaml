@@ -275,6 +275,87 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/diagnosis-tasks/{taskId}/events:
+    get:
+      operationId: listDiagnosisTaskEvents
+      summary: 按任务内序号查询结构化任务事件
+      description: 当前实现返回 JSON 历史；后续在同一路径增加 text/event-stream 内容协商。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: afterSeq
+          in: query
+          description: 排他游标，只返回 seq 大于该值的事件
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: 按 seq 升序排列的安全任务事件页
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskEventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/diagnosis-tasks/{taskId}/cancel:
+    post:
+      operationId: cancelDiagnosisTask
+      summary: 幂等请求取消诊断任务
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 任务此前已经请求取消或已经取消，未重复写事件
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskResponse"
+        "202":
+          description: 已原子写入 cancel_requested 状态和任务事件
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /api/v1/diagnosis-reports/{reportId}/reviews:
     get:
       operationId: listDiagnosisReportReviews
@@ -741,6 +822,53 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/DiagnosisTask"
+    DiagnosisTaskEvent:
+      type: object
+      additionalProperties: false
+      required: [seq, eventType, payload, payloadSchemaVersion, createdAt]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        eventType:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        payloadSchemaVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+    DiagnosisTaskEventsData:
+      type: object
+      additionalProperties: false
+      required: [items, afterSeq, nextAfterSeq, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosisTaskEvent"
+        afterSeq:
+          type: integer
+          format: int64
+          minimum: 0
+        nextAfterSeq:
+          type: integer
+          format: int64
+          minimum: 0
+        hasMore:
+          type: boolean
+    DiagnosisTaskEventsResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisTaskEventsData"
     ReportReviewVerdict:
       type: string
       enum: [adopted, partially_adopted, rejected]
