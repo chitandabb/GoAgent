@@ -245,8 +245,7 @@ Not yet implemented or verified:
   reads succeeded; this is recorded as a search error, not as missing code.
   Automatic local clone/search is intentionally still not implemented;
 - Schema Catalog scanning/publishing, Query Store, and estimated-plan Tools;
-- formal EvidenceItem persistence in the DiagnosisTask/Worker chain;
-- Diagnosis Worker/SSE integration;
+- formal diagnosis report query and SSE integration;
 - the resume target values of 93% tool-selection accuracy and 45% Token
   reduction.
 
@@ -271,8 +270,7 @@ Agent paired CLI 已覆盖工单、代码调查、GitHub 降级、SQL 对象定�
 只读查询：代码调查在生产 16000 Token 预算下两边均 partial，SQL v3/v4 在临时 32000
 Token 评测预算下完整通过；v4 的 Catalog 只存在于事务夹具并在结束时回滚。下一步是
 拒答语义人工复核、重复运行和扩大固定数据集；在数据集稳定前不决定本地缓存，也不写入
-简历目标值。正式 EvidenceItem 持久化和 Catalog 扫描/发布管理留到正式任务链路与管理
-边界稳定后处理。
+简历目标值。Catalog 扫描/发布管理仍留到正式管理边界稳定后处理。
 
 后端已开始 P7 正式任务链路：新增 `case_snapshots`、`diagnosis_tasks`、
 `diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_reports` 和
@@ -284,13 +282,18 @@ Token 评测预算下完整通过；v4 的 Catalog 只存在于事务夹具并�
 Claim/续租/fencing 契约也已落地，覆盖活跃租约竞争、过期接管和旧 token 失效。Outbox Relay
 已使用 `FOR UPDATE SKIP LOCKED`、有限租约、失败退避和 RabbitMQ Publisher Confirm 接通，
 Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 RabbitMQ 的真实集成测试已验证
-同一 `message_id` 发布并在 Confirm 后写入 `published_at`。当前 RabbitMQ Consumer、重试/死信
-消费链、真实 Agent Worker、正式 EvidenceItem/ReportEvidence 和报告生成尚未接通，
-`cancel_requested -> cancelled` 也要由后续 Worker 协作完成，不能把评测 observation 当作报告。
+同一 `message_id` 发布并在 Confirm 后写入 `published_at`。Diagnosis Worker 现已接入严格信封
+校验、`prefetch=1`、手动 ACK、30 秒/2 分钟/10 分钟 TTL 重试队列和最终死信队列；Worker
+领取任务后使用创建时冻结的 CaseSnapshot 构造 `TaskScope`，执行现有 ADK Agent + Evidence Gate，
+定时续租，并在 fencing 条件下把 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence、
+正式 DiagnosisReport、TaskEvent 和 `succeeded` 终态作为一个 PostgreSQL 事务提交。
+`cancel_requested -> cancelled`、临时失败释放重试、重试耗尽后的 `failed` 也已接通。
+当前仍缺少正式报告读取 API、SSE 推送/补读前端链路、Worker 进程崩溃与模型故障的完整演练，
+不能把单次 Worker smoke 或评测 observation 当作简历效果指标。
 
 MinIO attachment work remains deferred until the DiagnosisTask/Outbox/Worker
-contract is stable; the Agent core has passed the current P5 reproducible
-evaluation checkpoint and P7 Diagnosis Worker consumption is now the next active backend slice.
+contract is stable; the next active backend slice is formal report reading plus
+TaskEvent SSE, followed by repeatable Worker recovery tests and fixed-dataset evaluation.
 
 ## Target Milestones, Not Yet Implemented
 

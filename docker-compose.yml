@@ -162,6 +162,35 @@ services:
     volumes:
       - ./config:/app/config:ro
 
+  diagnosis-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: mesguard-diagnosis-worker
+    restart: unless-stopped
+    command: ["./mesguard-diagnosis-worker"]
+    environment:
+      TZ: Asia/Shanghai
+      MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
+      MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      MESGUARD_SQLSERVER_PASSWORD: ${MESGUARD_SQLSERVER_PASSWORD:-MESGuard_Reader!2026}
+      MESGUARD_RABBITMQ_URL: "amqp://${MESGUARD_RABBITMQ_USER:-mesguard}:${MESGUARD_RABBITMQ_PASSWORD:-mesguard_dev_password}@rabbitmq:5672/"
+      MESGUARD_STEPFUN_API_KEY: ${MESGUARD_STEPFUN_API_KEY:-}
+      MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+      sqlserver-seed:
+        condition: service_completed_successfully
+    volumes:
+      - ./config:/app/config:ro
+
 volumes:
   mesguard_postgres-data:
   mesguard_sqlserver-data:

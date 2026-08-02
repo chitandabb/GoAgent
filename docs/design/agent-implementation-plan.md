@@ -233,19 +233,19 @@ SQL 方言校验、Catalog 发布模型和 Evidence Gate 的字段契约会影�
 和窄 `execute_readonly_query` Tool 已完成单测与运行时装配，但真实 SQL Server + 已发布
 Catalog 联调，以及 Agent paired v3/v4 观察切片已完成。成功的事实型只读 Tool 结果现在会生成带唯一 `evidenceRef`、来源、哈希、
 采集时间和截断状态的运行时 EvidenceItem，报告引用必须解析到本次运行的 EvidenceItem。
-正式 Catalog 扫描/审核/发布管理和 DiagnosisTask/Worker 持久化仍未开始。
+正式 Catalog 扫描/审核/发布管理仍未开始；DiagnosisTask/Worker 已把运行时证据接入正式持久化。
 
 项目不直接依赖尚无正式 Release 且要求 Go `1.25.7` 的 Bytebase Omni，也不重写其完整
 T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词法边界、单条只读查询
 分类、危险结构拒绝和表/函数引用提取；表驱动、模糊测试和真实 SQL Server CTE+UNION
 只读执行均已验证。数据库只读账号、TaskScope/Catalog 授权和执行资源限制继续作为独立
-防线；正式 EvidenceItem 存储、报告关联和 SSE 展示将在 P7 任务链路中落地。
+防线；正式 EvidenceItem 存储和报告关联已在 P7 Worker 中落地，SSE 展示仍待实现。
 
-### P7：接入正式任务链路（任务控制面已完成）
+### P7：接入正式任务链路（Worker 后端闭环已完成）
 
-当前已建立 `case_snapshots`、`diagnosis_tasks`、`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_reports` 和 `report_reviews` 的最小 PostgreSQL 持久化基础。诊断任务创建/安全摘要查询已接入：外部工单重读后，脱敏快照、pending 任务、首个事件和 `diagnosis.execute` Outbox 在一个事务中落库，并支持幂等重放/冲突。报告反馈也已接入查询/追加 API，采用 `adopted`、`partially_adopted`、`rejected` 三值追加历史，只有任务创建者可提交，管理员只读查看。
+当前已建立 `case_snapshots`、`diagnosis_tasks`、`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_steps`、`tool_executions`、`evidence_items`、`diagnosis_reports`、`report_evidence` 和 `report_reviews` 的 PostgreSQL 持久化基础。诊断任务创建/安全摘要查询已接入：外部工单重读后，脱敏快照、pending 任务、首个事件和 `diagnosis.execute` Outbox 在一个事务中落库，并支持幂等重放/冲突。报告反馈也已接入查询/追加 API，采用 `adopted`、`partially_adopted`、`rejected` 三值追加历史，只有任务创建者可提交，管理员只读查看。
 
-任务控制面现已接入按 `seq/afterSeq` 的 TaskEvent JSON 历史查询和幂等取消命令；Worker 执行前的 PostgreSQL Claim、续租与 fencing token 契约也已实现，活跃租约、过期接管、取消中和终态任务均返回显式 disposition。Outbox Relay 已接入 PostgreSQL 短事务领取、有限租约、失败退避、RabbitMQ 持久消息和逐条 Publisher Confirm，并通过真实 PostgreSQL -> RabbitMQ 集成测试。后续继续接 RabbitMQ Consumer、真实 Diagnosis Worker、TaskEvent 运行时事件、SSE、取消收尾、EvidenceItem/ReportEvidence 和正式报告生成。接口稳定后继续更新 `api/openapi.yaml` 与 `docs/design/openapi.json`，并给前端任务提供页面状态、SSE 事件、错误降级和联调说明。
+任务控制面现已接入按 `seq/afterSeq` 的 TaskEvent JSON 历史查询和幂等取消命令。Outbox Relay 使用 PostgreSQL 短事务领取、有限租约、失败退避、RabbitMQ 持久消息和逐条 Publisher Confirm。Diagnosis Worker 使用严格消息信封、`prefetch=1`、手动 ACK、三级 TTL 重试和最终死信；执行期间定时续租，使用创建时冻结的 CaseSnapshot 运行现有 Agent/Evidence Gate，并以 `task_id + claim_owner + attempt_count` 把步骤、工具调用、证据、报告、TaskEvent 和终态原子提交。真实 PostgreSQL 和 RabbitMQ 集成测试已覆盖终态事务及 Confirm 后 ACK。后续继续接正式报告读取 API、TaskEvent SSE、进程崩溃/模型故障演练，并更新 `api/openapi.yaml` 与 `docs/design/openapi.json` 给前端任务提供稳定契约。
 
 MinIO/附件、RAG、Web Search、日志源和 SQL 优化实验按交付计划继续推进，不与 P0-P5 并行铺空壳。
 

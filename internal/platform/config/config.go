@@ -177,6 +177,9 @@ type RabbitMQConfig struct {
 	RelayPollIntervalMillis     int    `toml:"relayPollIntervalMillis"`
 	RelayLeaseMillis            int    `toml:"relayLeaseMillis"`
 	PublishConfirmTimeoutMillis int    `toml:"publishConfirmTimeoutMillis"`
+	WorkerLeaseMillis           int    `toml:"workerLeaseMillis"`
+	WorkerRenewIntervalMillis   int    `toml:"workerRenewIntervalMillis"`
+	WorkerMaxAttempts           int    `toml:"workerMaxAttempts"`
 }
 
 var amqpEntityName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -207,6 +210,15 @@ func (c RabbitMQConfig) Validate() error {
 	}
 	if c.RelayLeaseMillis <= c.RelayBatchSize*c.PublishConfirmTimeoutMillis || c.RelayLeaseMillis > 600_000 {
 		return errors.New("rabbitmq relayLeaseMillis must exceed batchSize * publishConfirmTimeoutMillis and be at most 600000")
+	}
+	if c.WorkerLeaseMillis < 30_000 || c.WorkerLeaseMillis > 600_000 {
+		return errors.New("rabbitmq workerLeaseMillis must be between 30000 and 600000")
+	}
+	if c.WorkerRenewIntervalMillis < 1000 || c.WorkerRenewIntervalMillis*2 >= c.WorkerLeaseMillis {
+		return errors.New("rabbitmq workerRenewIntervalMillis must be at least 1000 and less than half workerLeaseMillis")
+	}
+	if c.WorkerMaxAttempts < 1 || c.WorkerMaxAttempts > 10 {
+		return errors.New("rabbitmq workerMaxAttempts must be between 1 and 10")
 	}
 	return nil
 }

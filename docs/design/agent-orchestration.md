@@ -5,8 +5,8 @@
 - P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用不可变 `TaskScope`、统一 `ToolCatalog`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
-- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；正式 Diagnosis Worker/SSE、证据持久化和可复现评测仍待补齐。
-- P7 已开始正式任务链路：任务创建会把脱敏 CaseSnapshot、pending DiagnosisTask、首个 TaskEvent 和 Outbox 作为一个 PostgreSQL 事务提交；TaskEvent JSON 补读、取消命令、Worker Claim/续租/fencing 和带 Publisher Confirm 的 Outbox Relay 已实现，真实 Diagnosis Worker、EvidenceItem/ReportEvidence 持久化和 SSE 仍待实现。
+- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；Diagnosis Worker 会把通过门禁或明确降级的报告及其证据引用正式落库，可复现效果评测仍待补齐。
+- P7 正式任务链路已接通任务创建、TaskEvent JSON 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer/三级重试/死信，以及 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence 和 DiagnosisReport 的 fenced 事务提交。正式报告读取 API 与 SSE 仍待实现。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构

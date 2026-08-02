@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
@@ -22,10 +23,14 @@ import (
 )
 
 type agentRuntime struct {
-	runner       *mesagent.Runner
-	orchestrator *mesagent.EvidenceOrchestrator
-	unavailable  error
-	closeMCP     func() error
+	runner                *mesagent.Runner
+	orchestrator          *mesagent.EvidenceOrchestrator
+	availableDependencies []mesagent.ToolDependency
+	modelName             string
+	modelVersion          string
+	promptVersion         string
+	unavailable           error
+	closeMCP              func() error
 }
 
 type agentRuntimeBuilders struct {
@@ -79,7 +84,11 @@ func buildAgentRuntime(
 	log *zap.Logger,
 	builders agentRuntimeBuilders,
 ) (*agentRuntime, error) {
-	runtime := &agentRuntime{}
+	runtime := &agentRuntime{
+		modelName:     strings.TrimSpace(cfg.Models.Chat.Model),
+		modelVersion:  strings.TrimSpace(cfg.Models.Chat.Model),
+		promptVersion: "evidence-gate-v1",
+	}
 	if !cfg.Models.Chat.Enabled {
 		return runtime, nil
 	}
@@ -91,6 +100,7 @@ func buildAgentRuntime(
 		log.Warn("Agent unavailable; continuing without Agent runtime", zap.Error(runtime.unavailable))
 		return runtime, nil
 	}
+	runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyExternalCase)
 	chatModel, err := builders.chatModel(ctx, cfg.Models.Chat)
 	if err != nil {
 		runtime.unavailable = fmt.Errorf("build chat model: %w", err)
@@ -108,6 +118,7 @@ func buildAgentRuntime(
 			runtime.closeMCP = nil
 		} else {
 			argumentRewrite = githubmcp.NewArgumentRewriter()
+			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyGitHubMCP)
 		}
 	}
 
@@ -149,6 +160,9 @@ func buildAgentRuntime(
 				}
 			}
 		}
+	}
+	if sqlObjectDefinitions != nil || schemaCatalog != nil || readonlyQuery != nil {
+		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencySQLServer)
 	}
 
 	runtime.runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
