@@ -125,22 +125,19 @@ func (c AgentConfig) Validate() error {
 	return nil
 }
 
-// GitHubMCPConfig 只允许访问一个固定仓库和版本。
-// PAT 通过 tokenEnv 指向的环境变量读取，不能写入 TOML 或日志。
+// GitHubMCPConfig 描述官方 GitHub MCP 的连接和只读能力边界。
+// 具体 owner/repository/ref 由 GitHub Token/App 的实际权限和本次 Tool 参数决定，
+// 不在应用配置中重复维护逐仓库 ACL。PAT 通过 tokenEnv 指向的环境变量读取，
+// 不能写入 TOML 或日志。
 type GitHubMCPConfig struct {
 	Enabled       bool   `toml:"enabled"`
 	Endpoint      string `toml:"endpoint"`
 	TokenEnv      string `toml:"tokenEnv"`
-	Owner         string `toml:"owner"`
-	Repository    string `toml:"repository"`
-	Ref           string `toml:"ref"`
 	TimeoutMillis int    `toml:"timeoutMillis"`
 }
 
 var (
 	environmentVariableName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
-	githubRepositoryPart    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
-	githubRef               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 )
 
 func (c GitHubMCPConfig) Validate() error {
@@ -156,12 +153,6 @@ func (c GitHubMCPConfig) Validate() error {
 	}
 	if !environmentVariableName.MatchString(strings.TrimSpace(c.TokenEnv)) {
 		return errors.New("githubMCP tokenEnv is invalid")
-	}
-	if !githubRepositoryPart.MatchString(strings.TrimSpace(c.Owner)) || !githubRepositoryPart.MatchString(strings.TrimSpace(c.Repository)) {
-		return errors.New("githubMCP owner and repository contain unsupported characters")
-	}
-	if !githubRef.MatchString(strings.TrimSpace(c.Ref)) || strings.Contains(c.Ref, "..") || strings.Contains(c.Ref, "@{") {
-		return errors.New("githubMCP ref is invalid")
 	}
 	if c.TimeoutMillis <= 0 || c.TimeoutMillis > 120_000 {
 		return errors.New("githubMCP timeoutMillis must be between 1 and 120000")

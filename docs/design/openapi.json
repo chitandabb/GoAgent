@@ -1,0 +1,387 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MESGuard API",
+    "version": "0.1.0",
+    "description": "MESGuard 认证接口集合，统一使用 `code/message/data/requestId` 响应信封。"
+  },
+  "servers": [
+    { "url": "http://localhost:9090" }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["System"],
+        "summary": "健康检查",
+        "responses": {
+          "200": {
+            "description": "服务健康",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Response" },
+                "examples": {
+                  "ok": {
+                    "value": {
+                      "code": 0,
+                      "message": "success",
+                      "data": { "status": "ok" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖不可用",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户登录",
+        "description": "校验用户名密码，创建服务端 Session，返回原始 Token 和 CSRF Token。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LoginResponse" },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "message": "success",
+                      "data": {
+                        "user": {
+                          "id": "01964f6e-7c3a-7d3f-9c4b-123456789abc",
+                          "username": "admin",
+                          "displayName": "系统管理员",
+                          "role": "admin",
+                          "mustChangePassword": false
+                        },
+                        "csrfToken": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+                        "idleExpiresAt": "2026-07-29T14:00:00Z",
+                        "absoluteExpiresAt": "2026-07-30T02:00:00Z"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数错误（用户名或密码为空、长度超限）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "examples": {
+                  "validation": {
+                    "value": {
+                      "code": 40001,
+                      "message": "请求参数错误",
+                      "data": {
+                        "fields": {
+                          "username": "必须包含 1 到 64 个字符"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "用户名或密码错误（用户不存在、密码错误、账号禁用返回相同信息）",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "examples": {
+                  "bad_credentials": {
+                    "value": {
+                      "code": 40101,
+                      "message": "用户名或密码错误"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "请求 Origin 不在允许列表中",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "服务端内部错误",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取当前登录用户信息",
+        "description": "需要 Session Cookie 和有效的 CSRF Token。返回当前用户信息和 CSRF Token（可用于前端刷新）。",
+        "responses": {
+          "200": {
+            "description": "获取成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LoginResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或 Session 已过期",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "403": {
+            "description": "CSRF Token 校验失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "服务端内部错误",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户登出",
+        "description": "撤销当前 Session，清除 Cookie。需要有效的 Session Cookie、CSRF Token 和可信 Origin。",
+        "responses": {
+          "200": {
+            "description": "登出成功",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LogoutResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或 Session 已过期",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin 不在白名单或 CSRF Token 校验失败",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "服务端内部错误",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "Response": {
+        "type": "object",
+        "properties": {
+          "code":      { "type": "integer", "description": "应用错误码，0 表示成功" },
+          "message":   { "type": "string",  "description": "人类可读的消息" },
+          "data":      { "type": "object", "description": "响应数据（成功时存在）" },
+          "requestId": { "type": "string",  "description": "请求追踪 ID" }
+        },
+        "required": ["code", "message"]
+      },
+
+      "ErrorResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          {
+            "type": "object",
+            "properties": {
+              "code":    { "type": "integer", "enum": [40001, 40101, 40301, 40401, 40501, 40901, 42201, 50000, 50301] },
+              "message": { "type": "string" },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "字段级校验错误（仅 4xx 且非 401/403 时返回）"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string", "maxLength": 64,  "description": "登录用户名" },
+          "password": { "type": "string", "maxLength": 256, "description": "登录密码" }
+        },
+        "required": ["username", "password"]
+      },
+
+      "AuthUserResponse": {
+        "type": "object",
+        "description": "脱敏后的用户信息（不包含密码哈希、Token 等敏感字段）",
+        "properties": {
+          "id":                 { "type": "string", "format": "uuid", "description": "用户 ID" },
+          "username":           { "type": "string", "description": "登录用户名" },
+          "displayName":        { "type": "string", "description": "显示名称" },
+          "role":               { "type": "string", "enum": ["analyst", "admin"], "description": "用户角色" },
+          "mustChangePassword": { "type": "boolean", "description": "首次登录后是否必须修改密码" }
+        },
+        "required": ["id", "username", "displayName", "role", "mustChangePassword"]
+      },
+
+      "LoginResponseData": {
+        "type": "object",
+        "properties": {
+          "user":              { "$ref": "#/components/schemas/AuthUserResponse" },
+          "csrfToken":         { "type": "string", "description": "CSRF 令牌，前端需保存并在写请求时放到 X-CSRF-Token 头" },
+          "idleExpiresAt":     { "type": "string", "format": "date-time", "description": "空闲过期时间（2 小时无操作后 Session 失效）" },
+          "absoluteExpiresAt": { "type": "string", "format": "date-time", "description": "绝对过期时间（最多 12 小时后 Session 强制失效）" }
+        },
+        "required": ["user", "csrfToken", "idleExpiresAt", "absoluteExpiresAt"]
+      },
+
+      "LoginResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          {
+            "type": "object",
+            "properties": {
+              "data": { "$ref": "#/components/schemas/LoginResponseData" }
+            }
+          }
+        ]
+      },
+
+      "LogoutResponse": {
+        "type": "object",
+        "properties": {
+          "code":      { "type": "integer", "example": 0 },
+          "message":   { "type": "string", "example": "success" },
+          "requestId": { "type": "string" },
+          "data": {
+            "type": "object",
+            "properties": {
+              "loggedOut": { "type": "boolean", "example": true }
+            },
+            "required": ["loggedOut"]
+          }
+        },
+        "required": ["code", "message"]
+      },
+
+      "Cookie": {
+        "type": "object",
+        "description": "认证接口返回的 Cookie 信息",
+        "properties": {
+          "mesguard_session": {
+            "type": "object",
+            "properties": {
+              "HttpOnly": { "type": "boolean", "example": true },
+              "SameSite": { "type": "string", "example": "Lax" },
+              "Secure":   { "type": "boolean", "example": false },
+              "Path":     { "type": "string", "example": "/" }
+            }
+          },
+          "mesguard_csrf": {
+            "type": "object",
+            "properties": {
+              "HttpOnly": { "type": "boolean", "example": false },
+              "SameSite": { "type": "string", "example": "Lax" },
+              "Secure":   { "type": "boolean", "example": false },
+              "Path":     { "type": "string", "example": "/" }
+            }
+          }
+        }
+      }
+    },
+
+    "headers": {
+      "X-CSRF-Token": {
+        "description": "写操作（logout）需要携带的 CSRF 令牌",
+        "schema": { "type": "string" }
+      },
+      "Origin": {
+        "description": "请求来源，登录和登出接口要求 Origin 在服务端白名单内",
+        "schema": { "type": "string", "format": "uri" }
+      }
+    },
+
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "mesguard_session"
+      },
+      "csrfCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "mesguard_csrf"
+      },
+      "csrfHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token"
+      }
+    }
+  },
+
+  "security": [
+    { "sessionCookie": [], "csrfCookie": [], "csrfHeader": [] }
+  ]
+}

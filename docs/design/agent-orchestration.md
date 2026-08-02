@@ -52,7 +52,7 @@ Skill 优先级：
 | --- | --- | --- |
 | P0 | `ticket-diagnosis` | 从工单出发规划调查、识别证据缺口 |
 | P0 | `sql-investigation` | 调查业务数据、对象定义、计划和执行历史 |
-| P0 | `code-investigation` | 用固定仓库和 Commit 的代码证据解释故障 |
+| P0 | `code-investigation` | 在 GitHub 凭据可见范围内用仓库和 Commit 代码证据解释故障 |
 | P1 | `knowledge-qa` | 全局/个人知识库问答 |
 | P1 | `attachment-investigation` | 分析图片、PDF、日志和聊天附件 |
 | P1 | `web-research` | 对脱敏后的公开问题进行联网调查 |
@@ -121,14 +121,14 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 服务端连接官方 GitHub MCP Server 时设置：
 
 - `X-MCP-Readonly: true`；
-- `X-MCP-Tools` 当前只包含 `search_code`、`get_file_contents`、`list_commits`、`get_commit`；
+- `X-MCP-Tools` 当前只包含 `search_repositories`、`search_code`、`get_repository_tree`、`get_file_contents`、`list_commits`、`get_commit`；
 - PAT 通过 `MESGUARD_GITHUB_MCP_TOKEN` 注入，不写入 TOML、数据库或日志。
 
-具体私有仓库权限由 fine-grained PAT 或 GitHub App Installation 决定，MESGuard 不重复维护逐仓库 ACL。当前演示配置仍固定一个 owner/repo/ref，并在调用前强制重写或校验参数；多仓库 `search_repositories` 和 `allowedOwners` 边界尚未实现，后续必须先补参数治理和证据引用规则再开放。
+具体仓库、分支和私有代码权限由 GitHub Token 或 GitHub App Installation 决定，MESGuard 不重复维护 owner/repository/ref 或 `allowedOwners` ACL。`search_repositories` 用于在 GitHub 当前凭据可见范围内发现候选仓库；后续文件和提交 Tool 使用模型从结果中选出的 owner/repo/ref/sha，不再被应用配置重写到固定仓库或分支。应用层只负责 Tool 白名单、参数形状、路径边界和结果规模，不扩大 GitHub 凭据本身的权限。`get_repository_tree` 只读仓库树，并通过 `tree_sha` 固定版本、`path_filter` 缩小候选目录；它提供文件清单，不替代最终的固定 SHA 文件证据。
 
 演示环境使用只读 fine-grained PAT。生产目标使用 GitHub App Installation Token 或独立服务账号，并通过 `credential_ref` 注入；P0-P5 只预留凭证提供器接口，不提前实现 Token 自动轮换。
 
-分支默认使用仓库默认分支，不维护产品版本、模块和路径映射。`search_code` 只提供候选路径，最终证据必须来自文件读取并记录实际 owner、repository、Commit SHA、文件路径和行号。GitHub MCP 不可用时保留其他证据并明确标注“GitHub MCP 工具暂时不可用”。
+文件读取不指定 ref/sha 时遵从 GitHub Tool 的默认分支行为；需要调查其他分支时由调用参数显式传入 ref，最终证据统一固定到实际 Commit SHA。`search_code` 只提供候选路径，最终证据必须来自文件读取并记录实际 owner、repository、Commit SHA、文件路径和行号。应用对 `incomplete_results=true` 做最多三次短间隔重试；仍不完整时返回 `status=index_pending`。这里的 `index_pending` 是应用内部的搜索降级状态，不是 GitHub 索引完成度结论；系统不生成代码证据，并在最终回答中明确“不能据此证明没有匹配”。GitHub MCP 不可用时保留其他证据并明确标注“GitHub MCP 工具暂时不可用”。
 
 ## 工单 Tool 的数据最小化
 

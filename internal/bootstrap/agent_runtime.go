@@ -107,7 +107,7 @@ func buildAgentRuntime(
 			githubTools = nil
 			runtime.closeMCP = nil
 		} else {
-			argumentRewrite = githubmcp.NewArgumentRewriter(cfg.GitHubMCP)
+			argumentRewrite = githubmcp.NewArgumentRewriter()
 		}
 	}
 

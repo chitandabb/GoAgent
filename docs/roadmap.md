@@ -117,9 +117,12 @@ Implemented in the current working slice:
   with detailed evidence rules split into on-demand `references/*.md`;
 - a data-minimized `read_external_case` Eino Tool;
 - official GitHub MCP Streamable HTTP client configuration using read-only mode
-  and an exact four-tool allowlist;
-- application-side repository, ref, path, query, pagination, and commit-SHA
-  validation before GitHub MCP calls;
+  and an exact six-tool code-only allowlist, including repository-tree candidate
+  discovery;
+- application-side path, query, pagination, repository-identifier, tree prefix,
+  ref, and
+  commit-SHA validation before GitHub MCP calls, while leaving repository and
+  branch scope to the GitHub credential;
 - StepFun Step Plan `step-3.7-flash` configuration and Eino OpenAI-compatible
   ToolCallingChatModel factory, including local protocol and usage tests;
 - a live StepFun capability probe on 2026-07-30 that returned the required Tool
@@ -187,6 +190,10 @@ Implemented in the current working slice:
 - versioned `EvaluationCase`/`EvaluationObservation` contracts, paired
   baseline/experiment scoring, strict JSONL validation, and a local `dev-v1`
   sample command. The sample only verifies the scorer and is not a resume metric.
+- a model-free `mesguard-github-search-eval` command with a bounded JSONL
+  dataset for `search_code -> get_repository_tree -> get_file_contents`; it
+  records search completeness, expected-path recall, candidate recall, fixed
+  SHA file verification, candidate incompleteness, and fallback recovery.
 - a native `sql-investigation` Skill plus narrowly scoped
   `get_database_object_definition` Tool for SQL Server procedures, views, and
   functions. The Tool accepts only simple schema/object identifiers, enforces
@@ -213,6 +220,9 @@ Implemented in the current working slice:
   unit, authorization, sanitization, and concurrency tests pass, while a real
   SQL Server + published-Catalog integration run now passes against the Docker
   PostgreSQL and SQL Server fixtures;
+- a read-only `get_repository_tree` path for narrowing Code Search fallbacks by
+  `tree_sha`, `path_filter`, and bounded recursion; the tree is candidate
+  metadata only and does not replace fixed-SHA file evidence;
 - successful fact-producing read-only Tool calls now produce bounded runtime
   `EvidenceItem` snapshots with a unique `evidenceRef`, source, hash, capture
   time, and truncation state; the Evidence Gate requires report references to
@@ -220,7 +230,13 @@ Implemented in the current working slice:
 
 Not yet implemented or verified:
 
-- a live GitHub MCP call with the user's PAT and private demo repository;
+- a broader GitHub Code Search completeness/stability evaluation across more
+  private/public repositories, query forms, and observed incomplete-response
+  cases. The first `github-code-search-v1` run covers one private C# repository
+  and `octocat/Hello-World`: Search complete 2/2, expected-path recall 2/2,
+  tree candidate recall 2/2, and fixed-SHA file verification 2/2. No incomplete
+  response occurred in this run, so fallback recovery remains unmeasured;
+  automatic local clone/search is intentionally still not implemented;
 - Schema Catalog scanning/publishing, Query Store, and estimated-plan Tools;
 - formal EvidenceItem persistence in the DiagnosisTask/Worker chain;
 - Diagnosis Worker/SSE integration;
@@ -234,11 +250,16 @@ for the target boundaries.
 
 ## Next Slice
 
-P0 through P5 的评测契约与统计基础已完成。P6 当前切片已完成对象定义读取、已发布
+P0 through P5 的评测契约与统计基础已完成。P5 的 GitHub 工具级分层评测切片也已完成；
+P6 当前切片已完成对象定义读取、已发布
 Schema Catalog 窄检索、QueryGuard、受限 `execute_readonly_query` Tool、真实跨数据库
-联调和运行时 EvidenceItem；仍不等同于通用 Text-to-SQL。下一步回到第一条简历能力的
-GitHub PAT 与 baseline/experiment 评测闭环。正式 EvidenceItem 持久化留到
-DiagnosisTask/Worker 链路稳定后处理。
+联调和运行时 EvidenceItem；仍不等同于通用 Text-to-SQL。GitHub MCP 已完成凭据握手、
+六个只读工具加载、私有 C# 仓库按 SHA 文件读取、提交追溯、仓库树候选读取，以及一次
+完整 Code Search 返回的真实只读 smoke；Code Search 遇到 `incomplete_results=true` 时
+运行时会有限重试并显式降级，已知路径仍可继续走文件/提交证据链。下一步应做跨仓库/查询
+形态的扩展稳定性评测，优先收集真实 `incomplete_results` 样本，再跑 baseline/experiment
+评测闭环，随后才决定是否需要本地缓存。正式 EvidenceItem 持久化留到 DiagnosisTask/Worker
+链路稳定后处理。
 
 MinIO attachment work and the DiagnosisTask/Outbox/Worker product chain resume
 after the Agent core reaches the plan's P5 reproducible-evaluation checkpoint.

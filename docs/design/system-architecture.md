@@ -553,7 +553,7 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；正式任务链路待实现 | M1 |
 | 知识助手与pgvector RAG | 未实现 | M2 |
 | Ingestion Worker与ONNX | 未实现 | M2 |
-| GitHub MCP代码调查工具 | 已实现只读接入和参数治理，待真实PAT联调 | M1 |
+| GitHub MCP代码调查工具 | 已实现只读接入、凭据握手、仓库搜索、仓库树候选读取、私有C#仓库按SHA文件读取、提交追溯和不完整搜索降级；已有私有/公开各1条工具级评测，待扩展真实不完整响应与 Agent paired 评测 | M1 |
 | SQL性能实验室 | 未实现 | M4 |
 | Prometheus/Grafana/Trace平台 | 未实现 | 业务埋点后按需接入 |
 

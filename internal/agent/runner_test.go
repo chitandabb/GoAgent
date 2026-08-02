@@ -258,6 +258,28 @@ func TestToolTraceMiddlewareCapturesEvidenceReferenceAndHash(t *testing.T) {
 	}
 }
 
+func TestToolTraceMiddlewareMarksIncompleteCodeSearchAsDegraded(t *testing.T) {
+	trace := &executionTrace{}
+	ctx := withExecutionTrace(context.Background(), trace)
+	middleware := newToolTraceMiddleware(4096)
+	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: `{"status":"index_pending","tool":"search_code","attempts":3,"incomplete_results":true}`}, nil
+	})
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "search_code", Arguments: `{}`}); err != nil {
+		t.Fatalf("invoke middleware: %v", err)
+	}
+	entries := trace.snapshot()
+	if len(entries) != 1 || !entries[0].Succeeded || !entries[0].Degraded {
+		t.Fatalf("trace = %+v", entries)
+	}
+	if items := trace.evidenceSnapshot(); len(items) != 0 {
+		t.Fatalf("incomplete search unexpectedly became evidence: %+v", items)
+	}
+	if !trace.codeSearchIndexPendingSnapshot() {
+		t.Fatal("trace did not retain index pending status")
+	}
+}
+
 func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 	state := &runnerModelState{block: make(chan struct{})}
 	runner := newRunnerTest(t, state)
