@@ -29,7 +29,8 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 		Enabled: true, URLEnv: "MESGUARD_TEST_RABBITMQ_URL_ACTIVE", Exchange: exchange,
 		DiagnosisQueue: queue, DiagnosisRoutingKey: "diagnosis.execute",
 		RelayBatchSize: 1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
-		PublishConfirmTimeoutMillis: 1000,
+		PublishConfirmTimeoutMillis: 1000, WorkerLeaseMillis: 30000,
+		WorkerRenewIntervalMillis: 5000, WorkerMaxAttempts: 4,
 	}
 	publisher, err := OpenPublisher(cfg)
 	if err != nil {

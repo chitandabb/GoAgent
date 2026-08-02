@@ -71,7 +71,8 @@ VALUES (?, 'diagnosis.execute', 'diagnosis_task', ?, ?, ?, 1, 0, now(), 0, now()
 		Enabled: true, URLEnv: "MESGUARD_TEST_RABBITMQ_URL_ACTIVE", Exchange: exchange,
 		DiagnosisQueue: queue, DiagnosisRoutingKey: "diagnosis.execute",
 		RelayBatchSize: 1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
-		PublishConfirmTimeoutMillis: 1000,
+		PublishConfirmTimeoutMillis: 1000, WorkerLeaseMillis: 30000,
+		WorkerRenewIntervalMillis: 5000, WorkerMaxAttempts: 4,
 	}
 	publisher, err := platformrabbitmq.OpenPublisher(rabbitConfig)
 	if err != nil {

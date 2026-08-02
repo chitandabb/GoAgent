@@ -153,6 +153,33 @@ RETURNING id`,
 		return diagnosis.TaskCreateResult{}, errors.New("inserted diagnosis task id mismatch")
 	}
 
+	// 工单快照的数据源是每次诊断必然使用的 case source，不能只记录用户额外
+	// 选择的证据库。00008 会为迁移前创建的任务做同样的回填。
+	caseSourceResult := db.Exec(`
+INSERT INTO diagnosis_task_data_sources
+    (task_id, data_source_id, catalog_version_id, access_scope,
+     access_scope_schema_version, confirmed_by, confirmed_at)
+SELECT ?, external_case.data_source_id,
+       (SELECT version.id
+          FROM schema_catalog_versions version
+         WHERE version.data_source_id = external_case.data_source_id
+           AND version.status = 'published'
+         ORDER BY version.version DESC
+         LIMIT 1),
+       '{}'::jsonb, 1, ?, ?
+FROM external_cases external_case
+JOIN data_sources source ON source.id = external_case.data_source_id
+WHERE external_case.id = ? AND source.status = 'active'
+ON CONFLICT (task_id, data_source_id) DO NOTHING`,
+		taskID, input.CreatedBy, input.CreatedAt, input.ExternalCaseID,
+	)
+	if caseSourceResult.Error != nil {
+		return diagnosis.TaskCreateResult{}, TranslateError(caseSourceResult.Error)
+	}
+	if caseSourceResult.RowsAffected != 1 {
+		return diagnosis.TaskCreateResult{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+
 	for _, dataSourceID := range input.EvidenceDataSourceIDs {
 		result := db.Exec(`
 INSERT INTO diagnosis_task_data_sources
@@ -167,13 +194,27 @@ SELECT ?, ds.id,
          LIMIT 1),
        '{}'::jsonb, 1, ?, ?
 FROM data_sources ds
-WHERE ds.id = ? AND ds.status = 'active'`,
+WHERE ds.id = ? AND ds.status = 'active'
+ON CONFLICT (task_id, data_source_id) DO NOTHING`,
 			taskID, input.CreatedBy, input.CreatedAt, dataSourceID,
 		)
 		if result.Error != nil {
 			return diagnosis.TaskCreateResult{}, TranslateError(result.Error)
 		}
-		if result.RowsAffected != 1 {
+		if result.RowsAffected == 0 {
+			var associated bool
+			if err := db.Raw(`
+SELECT EXISTS (
+    SELECT 1
+    FROM diagnosis_task_data_sources task_source
+    JOIN data_sources source ON source.id = task_source.data_source_id
+    WHERE task_source.task_id = ? AND task_source.data_source_id = ? AND source.status = 'active'
+)`, taskID, dataSourceID).Scan(&associated).Error; err != nil {
+				return diagnosis.TaskCreateResult{}, TranslateError(err)
+			}
+			if associated {
+				continue
+			}
 			return diagnosis.TaskCreateResult{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 		}
 	}

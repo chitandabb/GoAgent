@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、报告最小元数据与反馈表；正式证据、工具执行和知识库等后续表尚未实现。
+- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence 与反馈表；知识库等后续表尚未实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -401,13 +401,13 @@ UNIQUE(external_case_id, snapshot_no)
 - `started_at`、`completed_at`、`duration_ms`；
 - `created_at`、`updated_at`。
 
-约束：
+M1 当前迁移按执行尝试保留步骤结果，约束为：
 
 ```text
-UNIQUE(task_id, step_no)
+UNIQUE(task_id, attempt_count, step_no)
 ```
 
-步骤重试更新同一个步骤的尝试信息，但每次重要工具调用仍在 `tool_executions` 中追加记录。
+同一尝试内不允许重复步骤序号；租约过期接管后的新尝试保留独立步骤轨迹。每次重要工具调用仍在 `tool_executions` 中追加记录。
 
 ### tool_executions
 
@@ -506,6 +506,7 @@ CONSTRAINT evidence_content_schema_ck CHECK (
 - `report_id UUID REFERENCES diagnosis_reports(id)`；
 - `evidence_id UUID REFERENCES evidence_items(id)`；
 - `claim_key`；
+- `claim_text`，保存报告中被证据支持或反驳的完整判断；
 - `support_type`，例如 `supports`、`contradicts`、`context`；
 - `created_at`。
 

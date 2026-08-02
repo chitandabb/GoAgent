@@ -64,6 +64,9 @@ relayBatchSize = 10
 relayPollIntervalMillis = 1000
 relayLeaseMillis = 300000
 publishConfirmTimeoutMillis = 5000
+workerLeaseMillis = 120000
+workerRenewIntervalMillis = 30000
+workerMaxAttempts = 4
 
 [githubMCP]
 enabled = true

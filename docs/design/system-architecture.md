@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标系统架构和运行边界。
-- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及 StepFun 模型、GitHub MCP 只读接入、单 ADK ChatModelAgent 内循环和薄外层 Evidence Gate Graph；P7 已接入任务创建、快照、TaskEvent/Outbox 原子事实、事件 JSON 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay 和报告反馈基础，真实 Worker、正式证据/报告与 SSE 尚未实现。
-- RabbitMQ Consumer/重试死信链、MinIO、Diagnosis Worker、Ingestion Worker，以及 Agent 到正式诊断任务/SSE 的产品链路仍按里程碑实现；独立 Agent 烟雾验证不能描述成完整诊断功能已上线。
+- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及 StepFun 模型、GitHub MCP 只读接入、单 ADK ChatModelAgent 内循环和薄外层 Evidence Gate Graph；P7 已接入任务创建、快照、TaskEvent/Outbox 原子事实、事件 JSON 补读、取消命令、Outbox Relay、Diagnosis Worker、正式证据/报告持久化和报告反馈基础。
+- Diagnosis Worker 已具备 RabbitMQ 手动 ACK、三级 TTL 重试、最终死信、租约续期和 fencing 终态提交。MinIO、Ingestion Worker、正式报告读取 API 和 TaskEvent SSE 产品链路仍按里程碑实现；独立 Agent 或单次 Worker 烟雾验证不能描述成完整诊断功能已上线。
 - 本文定义组件职责和数据流，不展开数据库字段、RabbitMQ交换机、HTTP字段或Eino Graph节点。
 
 ## 架构目标

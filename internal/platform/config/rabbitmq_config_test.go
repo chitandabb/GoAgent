@@ -10,7 +10,8 @@ func TestRabbitMQConfigValidate(t *testing.T) {
 		Enabled: true, URLEnv: "MESGUARD_RABBITMQ_URL", Exchange: "mesguard.tasks",
 		DiagnosisQueue: "mesguard.diagnosis.execute", DiagnosisRoutingKey: "diagnosis.execute",
 		RelayBatchSize: 10, RelayPollIntervalMillis: 1000, RelayLeaseMillis: 300000,
-		PublishConfirmTimeoutMillis: 5000,
+		PublishConfirmTimeoutMillis: 5000, WorkerLeaseMillis: 120000,
+		WorkerRenewIntervalMillis: 30000, WorkerMaxAttempts: 4,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate(): %v", err)
@@ -20,6 +21,12 @@ func TestRabbitMQConfigValidate(t *testing.T) {
 	invalid.RelayLeaseMillis = 50000
 	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "relayLeaseMillis") {
 		t.Fatalf("Validate() error = %v, want relay lease error", err)
+	}
+
+	invalid = valid
+	invalid.WorkerRenewIntervalMillis = 60000
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "workerRenewIntervalMillis") {
+		t.Fatalf("Validate() error = %v, want worker renew interval error", err)
 	}
 }
 

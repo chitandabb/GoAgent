@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义 MESGuard 的 PostgreSQL Outbox、RabbitMQ 拓扑、发布确认、消费者确认、重试、死信、幂等和故障恢复规则。
-- 当前仓库已通过 `00007_create_task_events_outbox.sql` 建立 TaskEvent/Outbox 事实表，并由诊断任务创建事务写入首个事件和待发布消息；TaskEvent JSON 查询、取消命令、Worker Claim/续租/fencing，以及 PostgreSQL 到 RabbitMQ 的 Outbox Relay 已实现。Relay 使用有限租约、失败退避、持久消息和 Publisher Confirm；RabbitMQ Consumer、重试/死信消费链和实际 Diagnosis Worker 尚未实现。
-- 本文是 M1-B/M1-C 的实现输入，不代表当前系统已经具备异步诊断能力。
+- 当前仓库已通过 `00007`/`00008` 建立 TaskEvent、Outbox、执行轨迹、证据和报告事实表。任务创建、事件 JSON 查询、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer、三级 TTL 重试/最终死信，以及真实 Agent Worker 的 fenced 终态事务均已实现。
+- 当前异步诊断后端已形成可运行闭环；正式报告读取 API、TaskEvent SSE、完整故障演练和运维恢复入口仍未实现。
 - PostgreSQL 是业务事实来源，RabbitMQ 只负责唤醒和分发，不保存任务、报告或证据的唯一副本。
 
 ## 设计目标
@@ -78,10 +78,8 @@ mesguard-ingestion-worker
 
 ```text
 mesguard.tasks (durable, direct)
-├─ diagnosis.execute.v1
-│    └─ mesguard.diagnosis.execute.v1
-└─ knowledge.ingest.v1
-     └─ mesguard.knowledge.ingest.v1
+└─ diagnosis.execute
+     └─ mesguard.diagnosis.execute
 ```
 
 主队列要求：
@@ -90,7 +88,7 @@ mesguard.tasks (durable, direct)
 - persistent message；
 - 手动 ACK，禁止 auto-ack；
 - 独立消费者并发和 prefetch 配置；
-- 绑定各自的重试交换机和最终死信交换机；
+- 具有独立 TTL 重试队列和最终死信队列；
 - 消息体只保存任务定位和版本信息。
 
 M1 默认每个 Diagnosis Worker 的 prefetch 为 1，先保证长任务不会被单个进程预取后长期占用。压测后可以按 CPU、模型并发和外部 SQL Server 限额提高，不能只按 RabbitMQ 队列深度盲目调大。
@@ -100,20 +98,20 @@ M1 默认每个 Diagnosis Worker 的 prefetch 为 1，先保证长任务不会�
 每个工作队列单独配置三级延迟队列，不依赖 RabbitMQ Delayed Message 插件：
 
 ```text
-mesguard.diagnosis.execute.v1
+mesguard.diagnosis.execute
     └─ transient failure
-       └─ diagnosis.retry.30s (TTL 30s)
-          └─ after TTL → mesguard.diagnosis.execute.v1
-             └─ second failure → diagnosis.retry.2m (TTL 2m)
-                └─ after TTL → mesguard.diagnosis.execute.v1
-                   └─ third failure → diagnosis.retry.10m (TTL 10m)
-                      └─ after TTL → mesguard.diagnosis.execute.v1
-                         └─ next failure → diagnosis.dead.v1
+       └─ mesguard.diagnosis.execute.retry.30s (TTL 30s)
+          └─ after TTL → mesguard.diagnosis.execute
+             └─ second failure → mesguard.diagnosis.execute.retry.2m (TTL 2m)
+                └─ after TTL → mesguard.diagnosis.execute
+                   └─ third failure → mesguard.diagnosis.execute.retry.10m (TTL 10m)
+                      └─ after TTL → mesguard.diagnosis.execute
+                         └─ next failure → mesguard.diagnosis.execute.dead
 ```
 
 Worker 在确认原消息前，先把同一个信封发布到对应的 TTL 重试队列并等待 Publisher Confirm；确认成功后再 ACK 原消息。TTL 到期后由死信交换机把消息重新路由到主交换机。重试队列只承载等待时间，不作为业务事实存储。
 
-死信配置优先使用 RabbitMQ policy 管理，避免把无法动态调整的 `x-dead-letter-exchange` 参数散落在应用声明代码中。Compose 初始配置可以由声明脚本创建，生产变更必须能审查和重复执行。
+当前 M1 Consumer 在启动时声明三个固定 TTL 队列，并通过 `x-dead-letter-exchange`/`x-dead-letter-routing-key` 回到主交换机；最终失败副本发布到持久化 dead queue，收到 Publisher Confirm 后才 ACK 原消息。生产部署若需要动态调整延迟，再把这些参数迁移到可审查的 RabbitMQ policy，不能同时保留冲突的队列参数。
 
 ### 队列类型
 
@@ -127,27 +125,25 @@ OutboxEvent 发布为统一的 JSON 消息信封。M1 示例：
 
 ```json
 {
-  "message_id": "01900000-0000-7000-8000-000000000001",
-  "event_type": "diagnosis.execute",
-  "schema_version": 1,
-  "aggregate_type": "diagnosis_task",
-  "aggregate_id": "01900000-0000-7000-8000-000000000002",
-  "occurred_at": "2026-07-25T12:00:00Z",
-  "correlation_id": "01900000-0000-7000-8000-000000000003",
-  "causation_id": null,
+  "messageId": "01900000-0000-7000-8000-000000000001",
+  "messageType": "diagnosis.execute",
+  "schemaVersion": 1,
+  "occurredAt": "2026-07-25T12:00:00Z",
+  "correlationId": "01900000-0000-7000-8000-000000000003",
+  "causationId": null,
   "payload": {
-    "task_id": "01900000-0000-7000-8000-000000000002"
+    "taskId": "01900000-0000-7000-8000-000000000002"
   }
 }
 ```
 
 规则如下：
 
-- `message_id` 使用 OutboxEvent 的 UUIDv7；同一 Outbox 重发时保持不变。
-- `event_type` 和 `schema_version` 决定路由和解析契约。
-- `aggregate_id` 用于定位 DiagnosisTask 或未来的 IngestionTask。
-- `correlation_id` 串联一次用户请求、任务和后续日志；`causation_id` 指向产生本消息的上游事件。
-- `payload` 只放 `task_id`、必要版本和少量执行选项，不放工单全文、图片、Base64、SQL 结果、Prompt 或密钥。
+- `messageId` 使用 OutboxEvent 的 UUIDv7；同一 Outbox 重发时保持不变。
+- `messageType` 和 `schemaVersion` 决定路由和解析契约。
+- `correlationId` 串联一次用户请求、任务和后续日志；`causationId` 指向产生本消息的上游事件。
+- `payload` 只放 `taskId`、必要版本和少量执行选项，不放工单全文、图片、Base64、SQL 结果、Prompt 或密钥。
+- Consumer 使用 `DisallowUnknownFields` 严格解析，并要求 AMQP `message_id`、`correlation_id`、`type` 与 JSON 信封完全一致。
 - 不兼容的 schema version 不能猜测解析，直接转入最终死信并报警。
 - 手动重投仍复用原 `message_id`；重新发起诊断才创建新 DiagnosisTask、新 OutboxEvent 和新消息。
 
@@ -228,7 +224,7 @@ basic.deliver
 达到持久化终态，或已确认转发到重试队列后 basic.ack
 ```
 
-当前只实现了“短事务原子领取/续租”的 PostgreSQL 核心：`pending` 或租约过期的 `running` 任务可以被领取，活跃租约返回 `lease_held`，取消中和终态任务返回显式 disposition；尚未启动 RabbitMQ Consumer，也不会执行 Agent 或 ACK 消息。
+当前 Worker 已完整执行该流程：`pending` 或租约过期的 `running` 任务可以被领取，活跃租约进入 30 秒延迟队列，取消中和终态任务返回显式 disposition；长执行按配置续租，正式结果只在 fenced PostgreSQL 事务提交后 ACK。
 
 ### 领取条件
 
@@ -396,9 +392,9 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 2. 实现 `OutboxRepository` 的短事务领取、成功确认和失败退避。（已完成）
 3. 实现 RabbitMQ 连接、持久主交换机/诊断队列和 Compose 健康检查声明。（已完成；重试/死信 policy 待 Consumer 切片）
 4. 用 Publisher Confirm 验证 PostgreSQL 到 RabbitMQ 发布和确认后状态提交。（已完成；NACK/进程崩溃手工故障演练待补）
-5. 先用假的 DiagnosisHandler 验证手动 ACK、重复投递、租约过期和 fencing token。
-6. 实现三级 TTL 重试和最终死信记录。
-7. 再接入真实诊断步骤、TaskEvent、取消和报告写入。
+5. 先用假的 DiagnosisHandler 验证手动 ACK、重复投递、租约过期和 fencing token。（已完成单元与 PostgreSQL 集成覆盖）
+6. 实现三级 TTL 重试和最终死信记录。（已完成；真实 RabbitMQ Confirm/ACK 集成覆盖）
+7. 再接入真实诊断步骤、TaskEvent、取消和报告写入。（已完成后端链路；模型故障演练待补）
 8. M2 复用同一套信封、Relay 和重试规范，增加独立入库队列。
 
 ## 验收场景
@@ -429,4 +425,4 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 ## 后续工作
 
-M0认证、Session、Repository和事务基础已完成；任务取消、事件补读、Worker Claim/续租/fencing 和 RabbitMQ Outbox Relay 已落地，Consumer、重试/死信拓扑与真实 Agent Worker 仍在M1-B/M1-C按本文约束实现。
+M0认证、Session、Repository和事务基础已完成；任务取消、事件补读、Worker Claim/续租/fencing、RabbitMQ Outbox Relay、Consumer、重试/死信拓扑与真实 Agent Worker 均已落地。M1-B/M1-C 接下来补正式报告读取、SSE、恢复管理入口和完整故障演练。
