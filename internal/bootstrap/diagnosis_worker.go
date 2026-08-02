@@ -169,7 +169,7 @@ func (e diagnosisAgentExecutor) Execute(
 	}
 	return diagnosisworker.ExecutionResult{
 		Orchestration: result,
-		ModelName:     e.runtime.modelName, ModelVersion: e.runtime.modelVersion,
+		ModelProvider: e.runtime.modelProvider, ModelID: e.runtime.modelID,
 		PromptVersion: e.runtime.promptVersion,
 	}, nil
 }

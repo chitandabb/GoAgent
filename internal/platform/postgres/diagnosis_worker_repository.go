@@ -145,11 +145,11 @@ func (r *DiagnosisWorkerRepository) Complete(
 		if err := tx.Exec(`
 INSERT INTO diagnosis_reports
     (id, task_id, conclusion_status, business_summary, technical_summary,
-     report_schema_version, risk_level, model_name, model_version,
+     report_schema_version, risk_level, model_provider, model_id,
      prompt_version, generated_at, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
 			reportID, lease.TaskID, report.ConclusionStatus, businessSummary, technicalSummary,
-			report.RiskLevel, result.ModelName, result.ModelVersion, result.PromptVersion,
+			report.RiskLevel, result.ModelProvider, result.ModelID, result.PromptVersion,
 			completedAt, completedAt, completedAt,
 		).Error; err != nil {
 			return TranslateError(err)
@@ -345,8 +345,8 @@ func validateExecutionResult(result diagnosisworker.ExecutionResult) error {
 	if !report.ConclusionStatus.Valid() || !report.RiskLevel.Valid() || !report.Confidence.Valid() ||
 		strings.TrimSpace(report.Conclusion) == "" || strings.TrimSpace(report.BusinessSummary) == "" ||
 		strings.TrimSpace(report.TechnicalSummary) == "" || result.Orchestration.Investigation == nil ||
-		strings.TrimSpace(result.ModelName) == "" || len(result.ModelName) > 128 ||
-		strings.TrimSpace(result.ModelVersion) == "" || len(result.ModelVersion) > 128 ||
+		strings.TrimSpace(result.ModelProvider) == "" || len(result.ModelProvider) > 64 ||
+		strings.TrimSpace(result.ModelID) == "" || len(result.ModelID) > 128 ||
 		strings.TrimSpace(result.PromptVersion) == "" || len(result.PromptVersion) > 128 {
 		return errors.New("diagnosis execution result is invalid")
 	}
