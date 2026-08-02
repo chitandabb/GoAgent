@@ -79,8 +79,8 @@ VALUES (?, ?, ?, ?, ?, ?, 'review fixture task')`,
 	}
 	if err := tx.Exec(`
 INSERT INTO diagnosis_reports
-    (id, task_id, conclusion_status, risk_level, model_name, model_version, prompt_version, generated_at)
-VALUES (?, ?, 'probable', 'medium', 'test-model', 'test-version', 'test-prompt', now())`,
+    (id, task_id, conclusion_status, risk_level, model_provider, model_id, prompt_version, generated_at)
+VALUES (?, ?, 'probable', 'medium', 'stepfun', 'test-model', 'test-prompt', now())`,
 		reportID, taskID).Error; err != nil {
 		t.Fatalf("insert diagnosis report: %v", err)
 	}

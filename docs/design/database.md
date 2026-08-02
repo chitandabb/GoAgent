@@ -419,7 +419,7 @@ UNIQUE(task_id, attempt_count, step_no)
 - `task_id UUID NOT NULL REFERENCES diagnosis_tasks(id)`；
 - `step_id UUID REFERENCES diagnosis_steps(id)`；
 - `tool_name`、`tool_version`；
-- `provider`、`model_name`、`model_version`；
+- `model_provider`、`model_id`；
 - `input_summary JSONB`、`output_summary JSONB`；
 - `status`、`error_kind`、`retry_count`；
 - `started_at`、`completed_at`、`duration_ms`；
@@ -492,7 +492,7 @@ CONSTRAINT evidence_content_schema_ck CHECK (
 - `technical_summary JSONB`；
 - `report_schema_version INTEGER NOT NULL`；
 - `risk_level`；
-- `model_name`、`model_version`、`prompt_version`；
+- `model_provider`、`model_id`、`prompt_version`；`model_id` 保存供应商请求使用的完整模型标识，不再从中猜测或拆分独立版本；
 - `generated_at`、`created_at`、`updated_at`。
 
 报告结论必须通过关联表引用证据。没有证据引用的内容只能作为待验证假设。
@@ -608,7 +608,7 @@ M2初期消息发送后不可编辑，不支持对话分支。用户修正问题
 - `content_schema_version`，结构化内容非空时必填；
 - `generation_status`，例如 `completed`、`interrupted`、`failed`；
 - `sequence_no`；
-- `model_name`、`prompt_version`；
+- `model_provider`、`model_id`、`prompt_version`；
 - `created_at`。
 
 `message_attachments`保存消息和附件的多对多关系，并记录附件在消息中的顺序和用途：
@@ -635,7 +635,7 @@ M2初期消息发送后不可编辑，不支持对话分支。用户修正问题
 - `summary_text TEXT NULL`、`summary_data JSONB NULL`；
 - `summary_schema_version INTEGER NOT NULL`；
 - `input_token_count`、`output_token_count`；
-- `model_name`、`model_version`、`prompt_version`；
+- `model_provider`、`model_id`、`prompt_version`；
 - `content_hash`；
 - `status`，`active`或`superseded`；
 - `created_at`。

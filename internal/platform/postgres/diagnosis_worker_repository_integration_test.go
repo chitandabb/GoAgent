@@ -131,7 +131,7 @@ VALUES (?, ?, ?, 'incident', now())`, externalCaseID, dataSourceID, "WORKER-"+uu
 				Summary: "调查完成", Status: "completed", DurationMS: 5,
 			}},
 		},
-		ModelName: "integration-model", ModelVersion: "integration-model",
+		ModelProvider: "stepfun", ModelID: "integration-model",
 		PromptVersion: "evidence-gate-v1",
 	}
 	completed, err := workerRepository.Complete(ctx, *claim.Lease, executionResult, time.Now().UTC())

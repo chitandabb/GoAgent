@@ -41,8 +41,8 @@ type Task struct {
 
 type ExecutionResult struct {
 	Orchestration agent.OrchestrationResult
-	ModelName     string
-	ModelVersion  string
+	ModelProvider string
+	ModelID       string
 	PromptVersion string
 }
 

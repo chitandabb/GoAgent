@@ -26,8 +26,8 @@ type agentRuntime struct {
 	runner                *mesagent.Runner
 	orchestrator          *mesagent.EvidenceOrchestrator
 	availableDependencies []mesagent.ToolDependency
-	modelName             string
-	modelVersion          string
+	modelProvider         string
+	modelID               string
 	promptVersion         string
 	unavailable           error
 	closeMCP              func() error
@@ -85,8 +85,8 @@ func buildAgentRuntime(
 	builders agentRuntimeBuilders,
 ) (*agentRuntime, error) {
 	runtime := &agentRuntime{
-		modelName:     strings.TrimSpace(cfg.Models.Chat.Model),
-		modelVersion:  strings.TrimSpace(cfg.Models.Chat.Model),
+		modelProvider: strings.ToLower(strings.TrimSpace(cfg.Models.Chat.Provider)),
+		modelID:       strings.TrimSpace(cfg.Models.Chat.Model),
 		promptVersion: "evidence-gate-v1",
 	}
 	if !cfg.Models.Chat.Enabled {
