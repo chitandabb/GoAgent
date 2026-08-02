@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询，以及报告反馈的查询/追加接口；Worker、正式报告查询和证据接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON 历史查询、任务取消，以及报告反馈的查询/追加接口；SSE、Worker、正式报告查询和证据接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
 - M2 知识助手、个人知识库和文档入库只保留版本空间，不在本文提前固定具体接口。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
@@ -256,7 +256,7 @@ CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`
 | POST | `/api/v1/diagnosis-tasks` | 登录 | 创建异步诊断任务 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}` | 登录 | 任务详情与步骤摘要 |
 | POST | `/api/v1/diagnosis-tasks/{taskId}/cancel` | 登录 | 请求取消任务 |
-| GET | `/api/v1/diagnosis-tasks/{taskId}/events` | 登录 | TaskEvent SSE |
+| GET | `/api/v1/diagnosis-tasks/{taskId}/events` | 登录 | TaskEvent JSON 历史；后续增加 SSE 内容协商 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/evidence` | 登录 | 证据列表 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/tool-executions` | 登录 | 工具执行记录 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/report` | 登录 | 任务正式报告 |
@@ -647,6 +647,23 @@ sortOrder
 
 当前实现已返回任务状态、请求摘要、CaseSnapshot ID、错误摘要和报告可用性；步骤、附件、证据和工具执行摘要将在 Worker 链路接通后补充。
 
+### `GET /api/v1/diagnosis-tasks/{taskId}/events`
+
+当前实现提供 JSON 历史查询，按 `seq` 升序返回：
+
+```http
+GET /api/v1/diagnosis-tasks/{taskId}/events?afterSeq=18&limit=100
+Accept: application/json
+```
+
+- `afterSeq` 是排他游标，默认 `0`；
+- `limit` 默认 `100`，最大 `200`；
+- 响应返回 `items`、`afterSeq`、`nextAfterSeq` 和 `hasMore`；
+- 任务创建者只能读取自己的事件，admin 可以读取全部任务；
+- payload 只能是应用生成的安全结构化轨迹，不能放入日志、Prompt、密钥、原始 SQL 或模型内部思维过程。
+
+后续 SSE 继续复用同一路径，通过 `Accept: text/event-stream` 协商，不另建一套事件身份和游标规则。
+
 ### `POST /api/v1/diagnosis-tasks/{taskId}/cancel`
 
 无需单独 Idempotency-Key，命令本身按任务状态幂等：
@@ -657,9 +674,13 @@ sortOrder
 - 任务创建者和 admin 可以取消；
 - 关闭 SSE 不会触发此接口。
 
+当前实现已经落地该命令：首次状态转换返回 `202`，重复取消返回 `200`；权限检查、状态条件更新和 `task_cancel_requested` 事件均有领域、HTTP 和 PostgreSQL 集成测试。Worker 尚未接入，因此 `cancel_requested -> cancelled` 的协作收尾仍属于后续 Worker 切片。
+
 ## TaskEvent SSE
 
 ### `GET /api/v1/diagnosis-tasks/{taskId}/events`
+
+本节描述后续在现有 JSON 历史接口上增加的 SSE 表示，当前尚未实现 `text/event-stream` 分支。
 
 ```http
 GET /api/v1/diagnosis-tasks/{taskId}/events?afterSeq=18
@@ -801,4 +822,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建基础已实现。下一步继续接入 Outbox Relay、Diagnosis Worker、正式证据/报告和 SSE；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史、取消命令、Worker Claim 基础与 Outbox Relay 已实现。下一步接入 RabbitMQ Consumer、Diagnosis Worker、正式证据/报告和 SSE；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。

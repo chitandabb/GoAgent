@@ -49,6 +49,28 @@ func TestNewWritesStructuredFileLog(t *testing.T) {
 	}
 }
 
+func TestNewForUsesRuntimeRole(t *testing.T) {
+	outputDir := t.TempDir()
+	log, closeLog, err := NewFor(config.LogConfig{
+		Level: "info", Format: "json", Environment: "test", EnableFile: true,
+		OutputDir: outputDir, MaxSize: 1, MaxAge: 1, MaxBackups: 1,
+	}, "mesguard-outbox-relay")
+	if err != nil {
+		t.Fatalf("NewFor() error = %v", err)
+	}
+	log.Info("relay ready")
+	if err := closeLog(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(outputDir, "mesguard.log"))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(content), `"service":"mesguard-outbox-relay"`) {
+		t.Fatalf("log = %s, want relay service field", content)
+	}
+}
+
 func TestNewRejectsUnsupportedFormat(t *testing.T) {
 	_, _, err := New(config.LogConfig{Level: "info", Format: "xml"})
 	if err == nil {

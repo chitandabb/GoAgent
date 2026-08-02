@@ -280,12 +280,17 @@ Token 评测预算下完整通过；v4 的 Catalog 只存在于事务夹具并�
 任务创建会在 PostgreSQL 一个事务内写入脱敏快照、pending 任务、首个 `task_created` 事件和
 `diagnosis.execute` Outbox；同一用户同一幂等键支持重放和请求冲突。反馈仍是追加式人工复核
 事实：`adopted` 可映射为👍、`rejected` 可映射为👎，管理员可查看但不能代替任务创建者提交。
-当前 Outbox Relay、Worker、正式 EvidenceItem/ReportEvidence 和报告生成尚未接通，不能把评测
-observation 当作报告。
+任务控制面现已增加 TaskEvent JSON 游标查询和幂等取消命令；Worker 接入前的 PostgreSQL
+Claim/续租/fencing 契约也已落地，覆盖活跃租约竞争、过期接管和旧 token 失效。Outbox Relay
+已使用 `FOR UPDATE SKIP LOCKED`、有限租约、失败退避和 RabbitMQ Publisher Confirm 接通，
+Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 RabbitMQ 的真实集成测试已验证
+同一 `message_id` 发布并在 Confirm 后写入 `published_at`。当前 RabbitMQ Consumer、重试/死信
+消费链、真实 Agent Worker、正式 EvidenceItem/ReportEvidence 和报告生成尚未接通，
+`cancel_requested -> cancelled` 也要由后续 Worker 协作完成，不能把评测 observation 当作报告。
 
 MinIO attachment work remains deferred until the DiagnosisTask/Outbox/Worker
 contract is stable; the Agent core has passed the current P5 reproducible
-evaluation checkpoint and P7 task persistence is now the active backend slice.
+evaluation checkpoint and P7 Diagnosis Worker consumption is now the next active backend slice.
 
 ## Target Milestones, Not Yet Implemented
 

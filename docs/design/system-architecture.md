@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标系统架构和运行边界。
-- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及 StepFun 模型、GitHub MCP 只读接入、单 ADK ChatModelAgent 内循环和薄外层 Evidence Gate Graph；P7 已接入任务创建、快照、TaskEvent/Outbox 原子事实和报告反馈基础，Relay、Worker、正式证据/报告与 SSE 尚未实现。
-- RabbitMQ、MinIO、Diagnosis Worker、Ingestion Worker，以及 Agent 到正式诊断任务/SSE 的产品链路仍按里程碑实现；独立 Agent 烟雾验证不能描述成完整诊断功能已上线。
+- 当前仓库已完成 Web 基础、认证、M1-A1 只读 ERP 工单后端，以及 StepFun 模型、GitHub MCP 只读接入、单 ADK ChatModelAgent 内循环和薄外层 Evidence Gate Graph；P7 已接入任务创建、快照、TaskEvent/Outbox 原子事实、事件 JSON 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay 和报告反馈基础，真实 Worker、正式证据/报告与 SSE 尚未实现。
+- RabbitMQ Consumer/重试死信链、MinIO、Diagnosis Worker、Ingestion Worker，以及 Agent 到正式诊断任务/SSE 的产品链路仍按里程碑实现；独立 Agent 烟雾验证不能描述成完整诊断功能已上线。
 - 本文定义组件职责和数据流，不展开数据库字段、RabbitMQ交换机、HTTP字段或Eino Graph节点。
 
 ## 架构目标
@@ -546,11 +546,11 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | PostgreSQL与Redis连接 | 已实现关键/降级依赖语义 | M1持续验证 |
 | Zap结构化日志 | 已实现 | M1增加任务和模型字段 |
 | SQL Server演示容器与工单只读适配器 | M1-A1已实现并验证数据库拒写；受 QueryGuard/Catalog/资源限制的窄查询 Tool 已接入；SQL v3/v4 paired 运行已验证对象定义、Catalog 检索、只读查询和运行时 EvidenceItem | M1-D Catalog 扫描/审核/发布管理、正式 EvidenceItem 持久化与更多诊断查询 |
-| RabbitMQ与Outbox | PostgreSQL Outbox事实表和任务创建原子写入已实现；RabbitMQ Relay与Publisher Confirm未实现 | M1 |
+| RabbitMQ与Outbox | PostgreSQL Outbox事实表、任务创建原子写入、`SKIP LOCKED` Relay、有限租约、失败退避、持久主队列和 Publisher Confirm 已实现并通过真实集成测试；Consumer 重试/死信链待实现 | M1 |
 | MinIO与附件 | 未实现 | M1 |
-| Diagnosis Worker | 未实现 | M1 |
+| Diagnosis Worker | PostgreSQL Claim、续租和 fencing 基础已实现；RabbitMQ Consumer、Agent执行、取消收尾和结果持久化未实现 | M1 |
 | React + Nginx | 未实现 | M1 |
-| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入任务创建/查询和报告反馈基础链路，正式 Worker 执行与报告生成待实现 | M1 |
+| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入任务创建/查询、事件补读、取消、Claim 和报告反馈基础链路，正式 Worker 执行与报告生成待实现 | M1 |
 | 知识助手与pgvector RAG | 未实现 | M2 |
 | Ingestion Worker与ONNX | 未实现 | M2 |
 | GitHub MCP代码调查工具 | 已实现只读接入、凭据握手、仓库搜索、仓库树候选读取、固定SHA文件读取、提交追溯和不完整搜索降级；v2 工具级评测覆盖私有C#、GoAgent、GoChat和公开仓库共6条样本，2条真实不完整响应均恢复成功；Agent paired 已覆盖工单、代码调查和 GitHub 降级三类样本，完整数据集仍待扩展 | M1 |

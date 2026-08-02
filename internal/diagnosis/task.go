@@ -32,6 +32,7 @@ const (
 var (
 	ErrTaskForbidden          = errors.New("diagnosis task is forbidden")
 	ErrInvalidTask            = errors.New("diagnosis task is invalid")
+	ErrTaskStateConflict      = errors.New("diagnosis task state conflicts with the requested operation")
 	ErrSourceChanged          = errors.New("external case source has changed")
 	ErrIdempotencyConflict    = errors.New("diagnosis task idempotency key conflicts")
 	ErrAttachmentsUnsupported = errors.New("diagnosis task attachments are not implemented")
@@ -120,6 +121,8 @@ type TaskCreateResult struct {
 type TaskRepository interface {
 	CreateTask(ctx context.Context, input CreateTaskRecord) (TaskCreateResult, error)
 	GetTask(ctx context.Context, taskID uuid.UUID) (DiagnosisTask, error)
+	ListTaskEvents(ctx context.Context, taskID uuid.UUID, afterSeq int64, limit int) (TaskEventPage, error)
+	CancelTask(ctx context.Context, taskID, requestedBy uuid.UUID, requestedAt time.Time) (TaskCancelResult, error)
 }
 
 // ExternalCaseReader 只暴露任务创建时需要的重新读取能力。

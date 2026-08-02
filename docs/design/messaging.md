@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 的 PostgreSQL Outbox、RabbitMQ 拓扑、发布确认、消费者确认、重试、死信、幂等和故障恢复规则。
-- 当前仓库已通过 `00007_create_task_events_outbox.sql` 建立 TaskEvent/Outbox 事实表，并由诊断任务创建事务写入首个事件和待发布消息；RabbitMQ、Outbox Relay 和 Diagnosis Worker 尚未实现。
+- 当前仓库已通过 `00007_create_task_events_outbox.sql` 建立 TaskEvent/Outbox 事实表，并由诊断任务创建事务写入首个事件和待发布消息；TaskEvent JSON 查询、取消命令、Worker Claim/续租/fencing，以及 PostgreSQL 到 RabbitMQ 的 Outbox Relay 已实现。Relay 使用有限租约、失败退避、持久消息和 Publisher Confirm；RabbitMQ Consumer、重试/死信消费链和实际 Diagnosis Worker 尚未实现。
 - 本文是 M1-B/M1-C 的实现输入，不代表当前系统已经具备异步诊断能力。
 - PostgreSQL 是业务事实来源，RabbitMQ 只负责唤醒和分发，不保存任务、报告或证据的唯一副本。
 
@@ -206,6 +206,8 @@ Relay 必须启用 Publisher Confirm，并对每条发布等待 ACK/NACK 或有�
 - 通道断开或超时：不能假设未发布，保留未发布状态并允许重复发布；
 - 发布确认不等于消费者已经执行成功，只表示 RabbitMQ 接受了消息。
 
+当前实现使用官方 `amqp091-go` 的单条 Deferred Confirm：发布 Context 具有独立超时，ACK 后才以 `id + locked_by` 条件写入 `published_at`；NACK、超时或连接错误会关闭失效连接、保留原 `message_id`、增加 `attempt_count`、清除租约并按 1/2/4/.../64 秒退避。Publisher 在下一次调用时重新建连并重新声明持久 direct exchange、诊断主队列和 binding。重试队列、死信 policy 与 Consumer ACK 仍属后续 Worker 切片。
+
 ## Worker 消费流程
 
 Worker 使用手动 ACK。收到消息后的顺序如下：
@@ -225,6 +227,8 @@ basic.deliver
     ↓
 达到持久化终态，或已确认转发到重试队列后 basic.ack
 ```
+
+当前只实现了“短事务原子领取/续租”的 PostgreSQL 核心：`pending` 或租约过期的 `running` 任务可以被领取，活跃租约返回 `lease_held`，取消中和终态任务返回显式 disposition；尚未启动 RabbitMQ Consumer，也不会执行 Agent 或 ACK 消息。
 
 ### 领取条件
 
@@ -388,10 +392,10 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 ## 实现顺序
 
-1. 用 PostgreSQL 迁移建立 Outbox 状态、索引和租约字段。
-2. 实现 `OutboxRepository` 的短事务领取、租约续期、成功确认和失败退避。
-3. 实现 RabbitMQ 连接、交换机、队列、policy 和健康检查声明。
-4. 用 Publisher Confirm 验证 Relay 重启、超时、NACK 和重复发布。
+1. 用 PostgreSQL 迁移建立 Outbox 状态、索引和租约字段。（已完成）
+2. 实现 `OutboxRepository` 的短事务领取、成功确认和失败退避。（已完成）
+3. 实现 RabbitMQ 连接、持久主交换机/诊断队列和 Compose 健康检查声明。（已完成；重试/死信 policy 待 Consumer 切片）
+4. 用 Publisher Confirm 验证 PostgreSQL 到 RabbitMQ 发布和确认后状态提交。（已完成；NACK/进程崩溃手工故障演练待补）
 5. 先用假的 DiagnosisHandler 验证手动 ACK、重复投递、租约过期和 fencing token。
 6. 实现三级 TTL 重试和最终死信记录。
 7. 再接入真实诊断步骤、TaskEvent、取消和报告写入。
@@ -425,4 +429,4 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 ## 后续工作
 
-M0认证、Session、Repository和事务基础已完成；RabbitMQ与Worker仍在M1-B/M1-C按本文约束实现。
+M0认证、Session、Repository和事务基础已完成；任务取消、事件补读、Worker Claim/续租/fencing 和 RabbitMQ Outbox Relay 已落地，Consumer、重试/死信拓扑与真实 Agent Worker 仍在M1-B/M1-C按本文约束实现。

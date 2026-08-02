@@ -18,6 +18,8 @@ import (
 type diagnosisTaskUseCase interface {
 	Create(ctx context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error)
 	Get(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.DiagnosisTask, error)
+	ListEvents(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID, afterSeq int64, limit int) (diagnosis.TaskEventPage, error)
+	Cancel(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskCancelResult, error)
 }
 
 type DiagnosisTaskRoutes struct {
@@ -40,11 +42,13 @@ func NewDiagnosisTaskRoutes(
 func (r *DiagnosisTaskRoutes) Register(api *gin.RouterGroup) {
 	protected := api.Group("/diagnosis-tasks")
 	protected.Use(r.auth)
+	protected.GET("/:taskId/events", r.listEvents)
 	protected.GET("/:taskId", r.get)
 
-	create := protected.Group("")
-	create.Use(r.csrf)
-	create.POST("", r.create)
+	commands := protected.Group("")
+	commands.Use(r.csrf)
+	commands.POST("", r.create)
+	commands.POST("/:taskId/cancel", r.cancel)
 }
 
 type diagnosisTaskCreateRequest struct {
@@ -172,6 +176,90 @@ func (r *DiagnosisTaskRoutes) get(c *gin.Context) {
 	WriteSuccess(c, diagnosisTaskResponseFrom(task))
 }
 
+type diagnosisTaskEventsQuery struct {
+	AfterSeq int64 `form:"afterSeq" binding:"omitempty,min=0"`
+	Limit    int   `form:"limit" binding:"omitempty,min=1,max=200"`
+}
+
+type diagnosisTaskEventResponse struct {
+	Seq                  int64          `json:"seq"`
+	EventType            string         `json:"eventType"`
+	Payload              map[string]any `json:"payload"`
+	PayloadSchemaVersion int            `json:"payloadSchemaVersion"`
+	CreatedAt            string         `json:"createdAt"`
+}
+
+type diagnosisTaskEventsResponse struct {
+	Items        []diagnosisTaskEventResponse `json:"items"`
+	AfterSeq     int64                        `json:"afterSeq"`
+	NextAfterSeq int64                        `json:"nextAfterSeq"`
+	HasMore      bool                         `json:"hasMore"`
+}
+
+func (r *DiagnosisTaskRoutes) listEvents(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("taskId"))
+	if err != nil {
+		AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+			Field: "taskId", Reason: "必须是合法的 UUID",
+		}}))
+		return
+	}
+	query, ok := BindQuery[diagnosisTaskEventsQuery](c)
+	if !ok {
+		return
+	}
+	identity, ok := identityFromContext(c)
+	if !ok {
+		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
+		return
+	}
+	page, err := r.useCase.ListEvents(c.Request.Context(), diagnosis.TaskActor{
+		UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin(),
+	}, taskID, query.AfterSeq, query.Limit)
+	if err != nil {
+		AbortWithError(c, translateDiagnosisTaskError("list diagnosis task events", err))
+		return
+	}
+	items := make([]diagnosisTaskEventResponse, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, diagnosisTaskEventResponse{
+			Seq: item.Seq, EventType: item.EventType, Payload: item.Payload,
+			PayloadSchemaVersion: item.PayloadSchemaVersion,
+			CreatedAt:            item.CreatedAt.UTC().Format(timeRFC3339Nano),
+		})
+	}
+	WriteSuccess(c, diagnosisTaskEventsResponse{
+		Items: items, AfterSeq: page.AfterSeq, NextAfterSeq: page.NextAfterSeq, HasMore: page.HasMore,
+	})
+}
+
+func (r *DiagnosisTaskRoutes) cancel(c *gin.Context) {
+	taskID, err := uuid.Parse(c.Param("taskId"))
+	if err != nil {
+		AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+			Field: "taskId", Reason: "必须是合法的 UUID",
+		}}))
+		return
+	}
+	identity, ok := identityFromContext(c)
+	if !ok {
+		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
+		return
+	}
+	result, err := r.useCase.Cancel(c.Request.Context(), diagnosis.TaskActor{
+		UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin(),
+	}, taskID)
+	if err != nil {
+		AbortWithError(c, translateDiagnosisTaskError("cancel diagnosis task", err))
+		return
+	}
+	status := http.StatusOK
+	if result.Changed {
+		status = http.StatusAccepted
+	}
+	WriteSuccessWithStatus(c, status, diagnosisTaskResponseFrom(result.Task))
+}
+
 type diagnosisTaskResponse struct {
 	TaskID                    string               `json:"taskId"`
 	ExternalCaseID            string               `json:"externalCaseId"`
@@ -257,6 +345,8 @@ func translateDiagnosisTaskError(operation string, err error) error {
 		return apperror.Wrap(apperror.CodeSourceChanged, err)
 	case errors.Is(err, diagnosis.ErrIdempotencyConflict):
 		return apperror.Wrap(apperror.CodeIdempotencyConflict, err)
+	case errors.Is(err, diagnosis.ErrTaskStateConflict):
+		return apperror.Wrap(apperror.CodeTaskStateConflict, err)
 	case errors.Is(err, repository.ErrNotFound):
 		return apperror.Wrap(apperror.CodeNotFound, err)
 	default:
