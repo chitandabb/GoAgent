@@ -16,6 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const evidenceTestReportContract = "configured report contract"
+
 type scriptedAgentRun struct {
 	result RunResult
 	err    error
@@ -63,6 +65,10 @@ func TestEvidenceOrchestratorAcceptsValidReport(t *testing.T) {
 	}
 	if len(result.MissingEvidence) != 0 || len(result.Investigation) < 4 {
 		t.Fatalf("unexpected evidence trace: %+v", result)
+	}
+	requests := invoker.snapshotRequests()
+	if len(requests) != 1 || !strings.Contains(requests[0].UserQuery, evidenceTestReportContract) {
+		t.Fatalf("configured report contract was not injected: %+v", requests)
 	}
 	for _, step := range result.Investigation {
 		if strings.Contains(strings.ToLower(step.Summary), "reasoningcontent") {
@@ -222,6 +228,7 @@ func newEvidenceOrchestratorTest(
 	t.Helper()
 	overrides.Runner = invoker
 	overrides.Logger = zap.NewNop()
+	overrides.ReportContractInstruction = evidenceTestReportContract
 	orchestrator, err := NewEvidenceOrchestrator(context.Background(), overrides)
 	if err != nil {
 		t.Fatalf("NewEvidenceOrchestrator: %v", err)

@@ -164,6 +164,10 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return err
 	}
 	cfg.Models.Chat.ReasoningEffort = reasoningEffort
+	prompts, err := cfg.Agent.LoadPrompts()
+	if err != nil {
+		return fmt.Errorf("load Agent prompts: %w", err)
+	}
 	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
 	if err != nil {
 		return fmt.Errorf("build StepFun model: %w", err)
@@ -172,7 +176,10 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	observedModel := &tracedChatModel{inner: chatModel, trace: modelTrace}
 	runner, err := mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel: observedModel, ExternalCases: syntheticCaseGetter{},
-		SkillRoot: cfg.Agent.SkillsDirectory, Logger: log.Named("runner"),
+		SkillRoot:           cfg.Agent.SkillsDirectory,
+		SystemInstruction:   prompts.SystemInstruction,
+		BaselineInstruction: prompts.BaselineInstruction,
+		Logger:              log.Named("runner"),
 	})
 	if err != nil {
 		return fmt.Errorf("build Agent runner: %w", err)
@@ -181,7 +188,8 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		Runner: runner, Logger: log.Named("evidence_orchestrator"),
 		MaxAgentRuns: cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
-		Timeout: time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		Timeout:                   time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		ReportContractInstruction: prompts.ReportContractInstruction,
 	})
 	if err != nil {
 		return fmt.Errorf("build Evidence orchestrator: %w", err)

@@ -94,19 +94,43 @@ func (c ChatModelConfig) APIKey() (string, error) {
 	return requiredEnv(c.APIKeyEnv)
 }
 
-// AgentConfig 声明 Skill 包目录和一次诊断的外层 Evidence Gate 总预算。
+// AgentConfig 声明 Skill/Prompt 文件位置、Prompt 发布标签和一次诊断的外层 Evidence Gate 总预算。
 type AgentConfig struct {
-	SkillsDirectory  string `toml:"skillsDirectory"`
-	MaxAgentRuns     int    `toml:"maxAgentRuns"`
-	MaxToolCalls     int    `toml:"maxToolCalls"`
-	MaxEvidenceItems int    `toml:"maxEvidenceItems"`
-	MaxTotalTokens   int    `toml:"maxTotalTokens"`
-	TimeoutMillis    int    `toml:"timeoutMillis"`
+	SkillsDirectory    string `toml:"skillsDirectory"`
+	PromptVersion      string `toml:"promptVersion"`
+	SystemPromptFile   string `toml:"systemPromptFile"`
+	BaselinePromptFile string `toml:"baselinePromptFile"`
+	ReportContractFile string `toml:"reportContractFile"`
+	MaxAgentRuns       int    `toml:"maxAgentRuns"`
+	MaxToolCalls       int    `toml:"maxToolCalls"`
+	MaxEvidenceItems   int    `toml:"maxEvidenceItems"`
+	MaxTotalTokens     int    `toml:"maxTotalTokens"`
+	TimeoutMillis      int    `toml:"timeoutMillis"`
 }
 
 func (c AgentConfig) Validate() error {
 	if strings.TrimSpace(c.SkillsDirectory) == "" {
 		return errors.New("agent skillsDirectory is required")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
+		return errors.New("agent promptVersion is invalid")
+	}
+	for _, promptFile := range []struct {
+		name string
+		path string
+	}{
+		{name: "systemPromptFile", path: c.SystemPromptFile},
+		{name: "baselinePromptFile", path: c.BaselinePromptFile},
+		{name: "reportContractFile", path: c.ReportContractFile},
+	} {
+		name := promptFile.name
+		path := strings.TrimSpace(promptFile.path)
+		if path == "" {
+			return fmt.Errorf("agent %s is required", name)
+		}
+		if len(path) > 512 {
+			return fmt.Errorf("agent %s must not exceed 512 characters", name)
+		}
 	}
 	if c.MaxAgentRuns < 0 || c.MaxAgentRuns > 4 {
 		return errors.New("agent maxAgentRuns must be between 1 and 4 when configured")

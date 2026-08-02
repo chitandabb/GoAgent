@@ -247,6 +247,8 @@ T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词�
 
 任务控制面现已接入按 `seq/afterSeq` 的 TaskEvent JSON 历史查询和幂等取消命令。Outbox Relay 使用 PostgreSQL 短事务领取、有限租约、失败退避、RabbitMQ 持久消息和逐条 Publisher Confirm。Diagnosis Worker 使用严格消息信封、`prefetch=1`、手动 ACK、三级 TTL 重试和最终死信；执行期间定时续租，使用创建时冻结的 CaseSnapshot 运行现有 Agent/Evidence Gate，并以 `task_id + claim_owner + attempt_count` 把步骤、工具调用、证据、报告、TaskEvent 和终态原子提交。真实 PostgreSQL 和 RabbitMQ 集成测试已覆盖终态事务及 Confirm 后 ACK。后续继续接正式报告读取 API、TaskEvent SSE、进程崩溃/模型故障演练，并更新 `api/openapi.yaml` 与 `docs/design/openapi.json` 给前端任务提供稳定契约。
 
+运行元数据已将报告模型身份规范为 `model_provider + model_id`，删除无法证明来源的独立 `model_version`；`prompt_version` 改由 `[agent]` 配置提供。生产、评测 baseline 和 Evidence Gate 报告契约 Prompt 位于 `config/prompts/`，启动时一次加载并缓存，修改后重启生效。当前只预留人工版本标签，不实现 Nacos、热更新、内容哈希或独立 Prompt 发布平台。
+
 MinIO/附件、RAG、Web Search、日志源和 SQL 优化实验按交付计划继续推进，不与 P0-P5 并行铺空壳。
 
 ## Skill 与 Tool 优先级

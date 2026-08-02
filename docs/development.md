@@ -61,6 +61,27 @@ configuration, Docker environment, or a production secret store. Do not put the
 key in TOML or logs. When the key is absent, authentication and ticket APIs
 remain available while the Agent runtime is disabled.
 
+### Agent Prompt configuration
+
+Agent instructions are stored under `config/prompts/` instead of Go constants:
+
+- `diagnosis-system.md`: production Agent system instruction;
+- `evaluation-baseline.md`: paired-evaluation baseline instruction;
+- `report-contract.md`: Evidence Gate structured-report contract.
+
+The `[agent]` block declares these three paths and a manually maintained
+`promptVersion`. MESGuard reads, trims, validates, and caches each file once
+while building the Agent runtime; a missing, empty, or larger-than-32-KiB file
+fails Agent initialization. Prompt changes take effect after process restart.
+Increment `promptVersion` whenever a content change must be distinguishable in
+persisted diagnosis reports or evaluation observations. The current mechanism
+is intentionally file-based and does not provide hot reload or a Prompt release
+platform.
+
+Prompt and Skill text cannot grant capabilities. `TaskScope`, `ToolCatalog`,
+argument policies, database accounts, and upstream credentials remain the
+authorization boundary even if a Prompt file is edited incorrectly.
+
 GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
 If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
 `code-investigation` is removed from the compiled Graph.

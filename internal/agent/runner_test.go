@@ -25,6 +25,11 @@ import (
 
 var runnerTestCaseID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
+const (
+	runnerTestSystemInstruction   = "configured system instruction"
+	runnerTestBaselineInstruction = "configured baseline instruction"
+)
+
 type runnerTestCaseGetter struct{}
 
 func (runnerTestCaseGetter) Get(_ context.Context, id uuid.UUID) (*externalcase.ExternalCase, error) {
@@ -200,7 +205,9 @@ func TestRunnerBaselineBindsBroadRoleTaskToolsWithoutSkillMiddleware(t *testing.
 func TestNewRunnerRejectsInvalidMode(t *testing.T) {
 	_, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
-		SkillRoot: filepath.Join("..", "..", "config", "skills"), Mode: RunnerMode("invalid"), Logger: zap.NewNop(),
+		SkillRoot:         filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction: runnerTestSystemInstruction, BaselineInstruction: runnerTestBaselineInstruction,
+		Mode: RunnerMode("invalid"), Logger: zap.NewNop(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid runner mode") {
 		t.Fatalf("invalid mode error = %v", err)
@@ -231,7 +238,8 @@ func TestDefaultRunnerRejectsGitHubToolOutsideReadOnlyAllowlist(t *testing.T) {
 	}
 	_, err = NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
-		SkillRoot:   filepath.Join("..", "..", "config", "skills"),
+		SkillRoot:         filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction: runnerTestSystemInstruction, BaselineInstruction: runnerTestBaselineInstruction,
 		GitHubTools: []tool.BaseTool{unsafeTool},
 		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) {
 			return arguments, nil
@@ -381,6 +389,8 @@ func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMod
 	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: modelInstance, ExternalCases: runnerTestCaseGetter{},
 		SkillRoot:             filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction:     runnerTestSystemInstruction,
+		BaselineInstruction:   runnerTestBaselineInstruction,
 		Mode:                  mode,
 		GitHubTools:           []tool.BaseTool{searchTool},
 		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) { return arguments, nil },
