@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现以及外部工单列表/详情；附件上传、诊断、报告和管理接口仍是后续目标。当前机器可读契约见 `api/openapi.yaml`。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询，以及报告反馈的查询/追加接口；Worker、正式报告查询和证据接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
 - M2 知识助手、个人知识库和文档入库只保留版本空间，不在本文提前固定具体接口。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
@@ -596,8 +596,10 @@ API 在创建前重新只读查询 SQL Server 并计算 fingerprint：
 - 与 `expectedSourceFingerprint` 一致时继续；
 - 不一致返回 `40923`，前端刷新工单后让用户重新确认；
 - SQL Server 查询、附件校验和数据源权限检查发生在 PostgreSQL 业务事务之前；
-- PostgreSQL 事务只写 CaseSnapshot、DiagnosisTask、关联数据源、附件关联、首个 TaskEvent 和 OutboxEvent；
+- PostgreSQL 事务目标写入 CaseSnapshot、DiagnosisTask、关联数据源、附件关联、首个 TaskEvent 和 OutboxEvent；当前切片尚未实现附件表和附件关联；
 - 事务提交后返回 `202` 和 `Location: /api/v1/diagnosis-tasks/{taskId}`。
+
+当前实现已完成外部工单重读、fingerprint 校验、脱敏 CaseSnapshot、DiagnosisTask、TaskEvent 和 OutboxEvent 的原子落库，并支持同一用户同一幂等键的重放/冲突判断。附件表和 MinIO 流程尚未实现，非空 `attachments` 会明确返回业务校验失败，不会被静默忽略。
 
 响应：
 
@@ -642,6 +644,8 @@ sortOrder
 - `reportAvailable` 和报告 ID。
 
 不返回模型思维过程、系统 Prompt、密钥、完整原始 SQL 或未脱敏证据。
+
+当前实现已返回任务状态、请求摘要、CaseSnapshot ID、错误摘要和报告可用性；步骤、附件、证据和工具执行摘要将在 Worker 链路接通后补充。
 
 ### `POST /api/v1/diagnosis-tasks/{taskId}/cancel`
 
@@ -733,7 +737,9 @@ POST /api/v1/diagnosis-reports/{reportId}/reviews
 }
 ```
 
-只有任务创建者可以提交。每次提交新增记录，最新一条为当前有效反馈；admin 可以查看但不能静默替用户修改。反馈不回写 MES/ERP，也不会自动进入全局知识库。一期不提供删除反馈接口。
+`adopted` 对应前端的👍，`rejected` 对应👎，`partially_adopted` 保留给需要人工补充判断的情况。只有任务创建者可以提交，管理员可以查看但不能代替创建者修改。每次提交新增记录，最新一条为当前有效反馈；反馈不回写 MES/ERP，也不会自动进入全局知识库。一期不提供删除反馈接口。
+
+当前后端已实现这两个接口和 PostgreSQL 持久化。诊断任务创建已经接通，但正式 Worker/报告生成尚未接通，任务创建后的 `reportAvailable` 仍为 `false`；不能把评测 observation 的 `runId` 当作报告 ID。
 
 ## 管理员失败恢复
 
@@ -795,4 +801,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0 与 M1-A1 后端已实现。下一步按 `docs/roadmap.md` 进入 M1-A2；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
+M0、M1-A1 和 P7 任务创建基础已实现。下一步继续接入 Outbox Relay、Diagnosis Worker、正式证据/报告和 SSE；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。

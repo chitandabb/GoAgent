@@ -519,7 +519,7 @@ CONSTRAINT evidence_content_schema_ck CHECK (
 
 - `id UUID PRIMARY KEY`；
 - `report_id UUID NOT NULL REFERENCES diagnosis_reports(id)`；
-- `reviewed_by UUID REFERENCES users(id)`；
+- `reviewed_by UUID NOT NULL REFERENCES users(id)`；
 - `verdict`，`adopted`、`partially_adopted`、`rejected`；
 - `comment`；
 - `created_at`。
@@ -760,9 +760,10 @@ db/
     00002_create_users_sessions.sql
     00003_create_data_sources_external_cases.sql
     00004_create_schema_catalog.sql
-    00005_create_diagnosis_tasks.sql       # 后续 M1-B
-    00006_create_events_outbox.sql         # 后续 M1-B
-    00007_create_evidence_reports.sql      # 后续 M1-B
+    00005_create_diagnosis_tasks.sql       # 当前已实现：快照、任务和任务数据源
+    00006_create_diagnosis_reports_reviews.sql # 当前已实现：报告最小元数据和追加反馈
+    00007_create_task_events_outbox.sql    # 当前已实现：TaskEvent和Outbox事实表
+    00008_create_evidence_reports.sql      # 后续 M1-B
 ```
 
 每个迁移文件包含明确的Up和Down部分。生产环境通过独立迁移命令或发布步骤执行，API和Worker启动时只检查数据库是否达到要求版本，不在多个实例启动过程中同时自动改表。
@@ -783,9 +784,8 @@ db/
 
 ```go
 type DiagnosisTaskRepository interface {
-    Create(ctx context.Context, input CreateTaskInput) (*DiagnosisTask, error)
-    Get(ctx context.Context, taskID uuid.UUID) (*DiagnosisTask, error)
-    RequestCancel(ctx context.Context, taskID uuid.UUID) error
+    CreateTask(ctx context.Context, input CreateTaskRecord) (TaskCreateResult, error)
+    GetTask(ctx context.Context, taskID uuid.UUID) (DiagnosisTask, error)
 }
 ```
 
@@ -853,18 +853,18 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 - `schema_catalog_versions`、`schema_catalog_entries`；
 - `external_cases`、`case_snapshots`；
 - `attachments`及诊断任务附件关联；
-- `diagnosis_tasks`、`diagnosis_task_data_sources`。
+- `diagnosis_tasks`、`diagnosis_task_data_sources`（当前已通过 `00005` 建立）。
 
 ### M1第二批
 
+- `task_events`、`outbox_events`（当前已通过 `00007` 建立，并由任务创建事务写入首个事实）；
 - `diagnosis_steps`、`tool_executions`；
-- `task_events`、`outbox_events`；
-- Worker领取和幂等所需索引。
+- Outbox Relay、Worker领取和幂等所需索引。
 
 ### M1第三批
 
-- `evidence_items`、`diagnosis_reports`、`report_evidence`；
-- `report_reviews`；
+- `evidence_items`、`report_evidence`；
+- `diagnosis_reports` 的完整证据关联和 `report_reviews` 的正式任务联调；当前 `00006` 已先建立报告最小元数据和追加反馈表，任务创建基础已接通，但正式报告仍待 Worker。
 - 数据库查询、并发、重复消息和取消测试。
 
 ### M2
@@ -901,4 +901,4 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ## 后续工作
 
-用户、Session、DataSource和ExternalCase身份迁移已经落地；后续按`docs/roadmap.md`的纵向切片继续实现快照、任务、事件与Outbox。
+用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent和Outbox基础已经落地；后续按`docs/roadmap.md`的纵向切片继续实现 Relay、Worker、证据和报告。

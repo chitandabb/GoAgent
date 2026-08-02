@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 的 PostgreSQL Outbox、RabbitMQ 拓扑、发布确认、消费者确认、重试、死信、幂等和故障恢复规则。
-- 当前仓库仍处于 Web 基础骨架阶段；RabbitMQ、Outbox Relay 和 Worker 尚未实现。
+- 当前仓库已通过 `00007_create_task_events_outbox.sql` 建立 TaskEvent/Outbox 事实表，并由诊断任务创建事务写入首个事件和待发布消息；RabbitMQ、Outbox Relay 和 Diagnosis Worker 尚未实现。
 - 本文是 M1-B/M1-C 的实现输入，不代表当前系统已经具备异步诊断能力。
 - PostgreSQL 是业务事实来源，RabbitMQ 只负责唤醒和分发，不保存任务、报告或证据的唯一副本。
 

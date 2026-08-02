@@ -59,8 +59,13 @@ func TestCodeSearchStabilityEvaluatorPreservesMultipleStageErrors(t *testing.T) 
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
-	if len(summary.Results) != 1 || len(summary.Results[0].ErrorTypes) != 3 {
+	if len(summary.Results) != 1 || len(summary.Results[0].ErrorTypes) != 3 || len(summary.Results[0].ErrorMessages) != 3 {
 		t.Fatalf("result errors = %+v", summary.Results)
+	}
+	if !strings.Contains(strings.Join(summary.Results[0].ErrorMessages, "\n"), "search unavailable") ||
+		!strings.Contains(strings.Join(summary.Results[0].ErrorMessages, "\n"), "tree unavailable") ||
+		!strings.Contains(strings.Join(summary.Results[0].ErrorMessages, "\n"), "file unavailable") {
+		t.Fatalf("error messages = %+v", summary.Results[0].ErrorMessages)
 	}
 	for _, errorType := range []string{"search_error", "tree_error", "file_error"} {
 		if summary.FailureTypes[errorType] != 1 {

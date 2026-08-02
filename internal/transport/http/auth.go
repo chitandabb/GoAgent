@@ -201,6 +201,11 @@ func (r *AuthRoutes) RequireAuthentication() gin.HandlerFunc {
 	return r.requireAuthentication()
 }
 
+// RequireCSRF 暴露给同一 HTTP 适配层中的写操作路由复用。
+func (r *AuthRoutes) RequireCSRF() gin.HandlerFunc {
+	return r.requireCSRF()
+}
+
 func (r *AuthRoutes) requireTrustedOrigin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := strings.TrimSpace(c.GetHeader("Origin"))

@@ -79,6 +79,8 @@ type OrchestrationResult struct {
 	EvidenceItems   []EvidenceItem      `json:"evidenceItems"`
 	Usage           ModelUsage          `json:"usage"`
 	AllowedTools    []string            `json:"allowedTools"`
+	SelectedSkill   SkillID             `json:"selectedSkill"`
+	StopReason      string              `json:"stopReason,omitempty"`
 	ExecutedSkills  []SkillID           `json:"executedSkills"`
 	Investigation   []InvestigationStep `json:"investigation"`
 }
@@ -109,6 +111,8 @@ type evidenceState struct {
 	evidenceItems    []EvidenceItem
 	usage            ModelUsage
 	allowedTools     []string
+	selectedSkill    SkillID
+	stopReason       string
 	executedSkills   []SkillID
 	investigation    []InvestigationStep
 	lastAgentFailure string
@@ -354,6 +358,9 @@ func (s *evidenceState) nextAgentQuery() string {
 }
 
 func (s *evidenceState) mergeRunResult(result RunResult) {
+	if s.selectedSkill == "" {
+		s.selectedSkill = result.SkillID
+	}
 	s.toolExecutions = append(s.toolExecutions, result.ToolExecutions...)
 	for _, item := range result.EvidenceItems {
 		if item.SourceRef == "" || slices.ContainsFunc(s.evidenceItems, func(current EvidenceItem) bool {
@@ -418,7 +425,11 @@ func (s *evidenceState) canRunAgain(maxAgentRuns int) bool {
 
 func (s *evidenceState) finishPartial() {
 	s.partial = true
-	s.gaps = uniqueStrings(append(s.gaps, s.budget.exhaustionReasons()...))
+	exhaustionReasons := s.budget.exhaustionReasons()
+	s.gaps = uniqueStrings(append(s.gaps, exhaustionReasons...))
+	if s.stopReason == "" {
+		s.stopReason = stopReasonForPartial(exhaustionReasons)
+	}
 	if len(s.gaps) == 0 {
 		s.gaps = []string{"现有证据不足以形成可靠结论"}
 	}
@@ -505,9 +516,25 @@ func (s *evidenceState) result() OrchestrationResult {
 		EvidenceItems:   append([]EvidenceItem(nil), s.evidenceItems...),
 		Usage:           s.usage,
 		AllowedTools:    append([]string(nil), s.allowedTools...),
+		SelectedSkill:   s.selectedSkill,
+		StopReason:      s.stopReason,
 		ExecutedSkills:  append([]SkillID(nil), s.executedSkills...),
 		Investigation:   append([]InvestigationStep(nil), s.investigation...),
 	}
+}
+
+func stopReasonForPartial(exhaustionReasons []string) string {
+	for _, reason := range exhaustionReasons {
+		if strings.Contains(reason, "Token") {
+			return "token_budget_exhausted"
+		}
+	}
+	for _, reason := range exhaustionReasons {
+		if strings.Contains(reason, "工具调用") {
+			return "tool_budget_exhausted"
+		}
+	}
+	return "evidence_gate_partial"
 }
 
 func truncatePromptValue(value string, maxBytes int) string {

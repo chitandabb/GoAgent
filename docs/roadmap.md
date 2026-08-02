@@ -230,13 +230,20 @@ Implemented in the current working slice:
 
 Not yet implemented or verified:
 
-- a broader GitHub Code Search completeness/stability evaluation across more
-  private/public repositories, query forms, and observed incomplete-response
-  cases. The first `github-code-search-v1` run covers one private C# repository
-  and `octocat/Hello-World`: Search complete 2/2, expected-path recall 2/2,
-  tree candidate recall 2/2, and fixed-SHA file verification 2/2. No incomplete
-  response occurred in this run, so fallback recovery remains unmeasured;
-  automatic local clone/search is intentionally still not implemented;
+- the complete Agent paired effectiveness evaluation and a larger repeated
+  GitHub stability dataset. `agent-real-v1` covers one ticket-only case;
+  `agent-real-v2` covers ticket-only, code investigation, and GitHub degraded
+  cases. Both variants kept routing/first-tool/evidence coverage at 1/1 with
+  zero forbidden calls; the code case stopped at the production 16000 Token
+  budget on both sides and is recorded as `token_budget_exhausted`, while the
+  degraded case did not call GitHub or SQL. These are boundary observations,
+  not resume metrics. The `github-code-search-v2` run covers private C#,
+  GoAgent, GoChat, public `Hello-World`, and an `in:file` query: Search complete
+  2/6, two real incomplete responses recovered 2/2 through tree candidates and
+  fixed-SHA file reads, tree-path recall 6/6, and known-path file verification
+  6/6. Two GoChat Search calls hit the GitHub API rate limit while tree/file
+  reads succeeded; this is recorded as a search error, not as missing code.
+  Automatic local clone/search is intentionally still not implemented;
 - Schema Catalog scanning/publishing, Query Store, and estimated-plan Tools;
 - formal EvidenceItem persistence in the DiagnosisTask/Worker chain;
 - Diagnosis Worker/SSE integration;
@@ -250,19 +257,35 @@ for the target boundaries.
 
 ## Next Slice
 
-P0 through P5 的评测契约与统计基础已完成。P5 的 GitHub 工具级分层评测切片也已完成；
+P0 through P5 的评测契约与统计基础已完成。P5 的 GitHub 工具级分层评测切片和首组四类
+Agent baseline/experiment paired 样本也已完成；
 P6 当前切片已完成对象定义读取、已发布
 Schema Catalog 窄检索、QueryGuard、受限 `execute_readonly_query` Tool、真实跨数据库
 联调和运行时 EvidenceItem；仍不等同于通用 Text-to-SQL。GitHub MCP 已完成凭据握手、
 六个只读工具加载、私有 C# 仓库按 SHA 文件读取、提交追溯、仓库树候选读取，以及一次
 完整 Code Search 返回的真实只读 smoke；Code Search 遇到 `incomplete_results=true` 时
-运行时会有限重试并显式降级，已知路径仍可继续走文件/提交证据链。下一步应做跨仓库/查询
-形态的扩展稳定性评测，优先收集真实 `incomplete_results` 样本，再跑 baseline/experiment
-评测闭环，随后才决定是否需要本地缓存。正式 EvidenceItem 持久化留到 DiagnosisTask/Worker
-链路稳定后处理。
+运行时会有限重试并显式降级，已知路径仍可继续走文件/提交证据链。跨仓库/查询形态的
+扩展稳定性评测已得到第一组真实结果：`github-code-search-v2` 的两条
+`incomplete_results` 均恢复成功，但仍需在限流窗口恢复后重复 GoChat 样本并扩大查询集。
+Agent paired CLI 已覆盖工单、代码调查、GitHub 降级、SQL 对象定义以及 SQL Catalog/
+只读查询：代码调查在生产 16000 Token 预算下两边均 partial，SQL v3/v4 在临时 32000
+Token 评测预算下完整通过；v4 的 Catalog 只存在于事务夹具并在结束时回滚。下一步是
+拒答语义人工复核、重复运行和扩大固定数据集；在数据集稳定前不决定本地缓存，也不写入
+简历目标值。正式 EvidenceItem 持久化和 Catalog 扫描/发布管理留到正式任务链路与管理
+边界稳定后处理。
 
-MinIO attachment work and the DiagnosisTask/Outbox/Worker product chain resume
-after the Agent core reaches the plan's P5 reproducible-evaluation checkpoint.
+后端已开始 P7 正式任务链路：新增 `case_snapshots`、`diagnosis_tasks`、
+`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_reports` 和
+`report_reviews` 迁移，实现了诊断任务创建/安全摘要查询，以及报告反馈 GET/POST 接口。
+任务创建会在 PostgreSQL 一个事务内写入脱敏快照、pending 任务、首个 `task_created` 事件和
+`diagnosis.execute` Outbox；同一用户同一幂等键支持重放和请求冲突。反馈仍是追加式人工复核
+事实：`adopted` 可映射为👍、`rejected` 可映射为👎，管理员可查看但不能代替任务创建者提交。
+当前 Outbox Relay、Worker、正式 EvidenceItem/ReportEvidence 和报告生成尚未接通，不能把评测
+observation 当作报告。
+
+MinIO attachment work remains deferred until the DiagnosisTask/Outbox/Worker
+contract is stable; the Agent core has passed the current P5 reproducible
+evaluation checkpoint and P7 task persistence is now the active backend slice.
 
 ## Target Milestones, Not Yet Implemented
 

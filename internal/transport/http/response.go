@@ -69,7 +69,8 @@ func httpStatus(code apperror.Code) int {
 		return http.StatusNotFound
 	case apperror.CodeMethodNotAllowed:
 		return http.StatusMethodNotAllowed
-	case apperror.CodeConflict:
+	case apperror.CodeConflict, apperror.CodeIdempotencyConflict,
+		apperror.CodeTaskStateConflict, apperror.CodeSourceChanged:
 		return http.StatusConflict
 	case apperror.CodeValidationFailed:
 		return http.StatusUnprocessableEntity

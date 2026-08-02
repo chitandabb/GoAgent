@@ -103,6 +103,7 @@ type CodeSearchEvaluationResult struct {
 	FileDurationMillis      int64    `json:"fileDurationMillis"`
 	ErrorType               string   `json:"errorType,omitempty"`
 	ErrorTypes              []string `json:"errorTypes,omitempty"`
+	ErrorMessages           []string `json:"errorMessages,omitempty"`
 }
 
 // CodeSearchEvaluationSummary 是分层检索评测的确定性汇总，不包含模型推断指标。
@@ -214,7 +215,7 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 		SearchStatus:   "error",
 	}
 	if err := ctx.Err(); err != nil {
-		result.addError(evaluationContextErrorType(err))
+		result.addErrorDetails(evaluationContextErrorType(err), err)
 		return result, err
 	}
 
@@ -222,11 +223,11 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 	searchRaw, err := e.invoke(ctx, codeSearchToolName, map[string]any{"query": current.Query})
 	result.SearchDurationMillis = time.Since(searchStarted).Milliseconds()
 	if err != nil {
-		result.addError("search_error")
+		result.addErrorDetails("search_error", err)
 	} else {
 		parsed, parseErr := parseCodeSearchEvaluationResponse(searchRaw)
 		if parseErr != nil {
-			result.addError("search_response_invalid")
+			result.addErrorDetails("search_response_invalid", parseErr)
 		} else {
 			result.SearchStatus = parsed.status
 			result.SearchAttempts = parsed.attempts
@@ -235,7 +236,7 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		result.addError(evaluationContextErrorType(err))
+		result.addErrorDetails(evaluationContextErrorType(err), err)
 		return result, err
 	}
 
@@ -243,15 +244,15 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 	if treeSHA == "" {
 		treeSHA, err = e.resolveTreeSHA(ctx, current.Owner, current.Repo)
 		if err != nil {
-			result.addError("commit_lookup_error")
+			result.addErrorDetails("commit_lookup_error", err)
 			if contextErr := ctx.Err(); contextErr != nil {
-				result.addError(evaluationContextErrorType(contextErr))
+				result.addErrorDetails(evaluationContextErrorType(contextErr), contextErr)
 				return result, contextErr
 			}
 		}
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
-		result.addError(evaluationContextErrorType(contextErr))
+		result.addErrorDetails(evaluationContextErrorType(contextErr), contextErr)
 		return result, contextErr
 	}
 	result.TreeSHA = treeSHA
@@ -267,11 +268,11 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 	result.TreeDurationMillis = time.Since(treeStarted).Milliseconds()
 	result.TreeInvoked = true
 	if treeErr != nil {
-		result.addError("tree_error")
+		result.addErrorDetails("tree_error", treeErr)
 	} else {
 		parsed, parseErr := parseRepositoryTreeEvaluationResponse(treeRaw)
 		if parseErr != nil {
-			result.addError("tree_response_invalid")
+			result.addErrorDetails("tree_response_invalid", parseErr)
 		} else {
 			result.TreeCandidateIncomplete = parsed.incomplete
 			result.TreeCandidateCount = parsed.count
@@ -279,7 +280,7 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		result.addError(evaluationContextErrorType(err))
+		result.addErrorDetails(evaluationContextErrorType(err), err)
 		return result, err
 	}
 
@@ -290,7 +291,7 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 	result.FileDurationMillis = time.Since(fileStarted).Milliseconds()
 	result.FileReadInvoked = true
 	if fileErr != nil {
-		result.addError("file_error")
+		result.addErrorDetails("file_error", fileErr)
 	} else {
 		result.FileVerified = responseContainsContentMarker(fileRaw, current.ContentMarker)
 		if !result.FileVerified {
@@ -298,7 +299,7 @@ func (e *CodeSearchStabilityEvaluator) evaluateCase(ctx context.Context, current
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		result.addError(evaluationContextErrorType(err))
+		result.addErrorDetails(evaluationContextErrorType(err), err)
 		return result, err
 	}
 	result.FallbackRecovered = result.SearchStatus == "incomplete" && result.TreeHitExpectedPath && result.FileVerified
@@ -478,6 +479,10 @@ func containsPath(paths []string, expected string) bool {
 }
 
 func (r *CodeSearchEvaluationResult) addError(errorType string) {
+	r.addErrorDetails(errorType, nil)
+}
+
+func (r *CodeSearchEvaluationResult) addErrorDetails(errorType string, cause error) {
 	if r == nil || errorType == "" {
 		return
 	}
@@ -490,6 +495,19 @@ func (r *CodeSearchEvaluationResult) addError(errorType string) {
 		}
 	}
 	r.ErrorTypes = append(r.ErrorTypes, errorType)
+	if cause == nil {
+		return
+	}
+	detail := errorType + ": " + strings.TrimSpace(cause.Error())
+	if len(detail) > 512 {
+		detail = detail[:512] + "..."
+	}
+	for _, current := range r.ErrorMessages {
+		if current == detail {
+			return
+		}
+	}
+	r.ErrorMessages = append(r.ErrorMessages, detail)
 }
 
 func evaluationContextErrorType(err error) string {
