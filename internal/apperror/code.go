@@ -14,12 +14,15 @@ const (
 	CodeSuccess Code = 0
 
 	// 4xxxx 表示客户端请求存在问题。
-	CodeInvalidArgument  Code = 40001
-	CodeUnauthorized     Code = 40101
-	CodeForbidden        Code = 40301
-	CodeNotFound         Code = 40401
-	CodeMethodNotAllowed Code = 40501
-	CodeConflict         Code = 40901
+	CodeInvalidArgument     Code = 40001
+	CodeUnauthorized        Code = 40101
+	CodeForbidden           Code = 40301
+	CodeNotFound            Code = 40401
+	CodeMethodNotAllowed    Code = 40501
+	CodeConflict            Code = 40901
+	CodeIdempotencyConflict Code = 40911
+	CodeTaskStateConflict   Code = 40921
+	CodeSourceChanged       Code = 40923
 	// CodeValidationFailed 表示请求格式正确但业务校验失败。
 	// 与 CodeInvalidArgument 的分界：40001 由绑定层产生（格式、类型、基础规则），
 	// 42201 由 Service 层产生（需要业务数据才能判断，例如附件不属于当前用户）。
@@ -38,6 +41,9 @@ var messages = map[Code]string{
 	CodeNotFound:              "请求的资源不存在",
 	CodeMethodNotAllowed:      "请求方法不支持",
 	CodeConflict:              "资源状态冲突",
+	CodeIdempotencyConflict:   "幂等键对应的请求内容不一致",
+	CodeTaskStateConflict:     "任务当前状态不允许此操作",
+	CodeSourceChanged:         "外部工单已发生变化，请刷新后重试",
 	CodeValidationFailed:      "业务参数校验失败",
 	CodeInternal:              "服务器内部错误",
 	CodeDependencyUnavailable: "外部依赖暂时不可用",

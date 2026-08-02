@@ -224,6 +224,71 @@
           }
         }
       }
+    },
+
+    "/api/v1/diagnosis-reports/{reportId}/reviews": {
+      "parameters": [
+        {
+          "name": "reportId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "tags": ["Diagnosis Reports"],
+        "summary": "查询报告反馈",
+        "description": "任务创建者和管理员可以查看追加保存的反馈历史，current 表示按创建时间倒序的最新反馈。",
+        "responses": {
+          "200": {
+            "description": "反馈历史",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReportReviewsResponse" }
+              }
+            }
+          },
+          "401": { "description": "未登录", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "无权查看该报告", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "报告不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务端内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      },
+      "post": {
+        "tags": ["Diagnosis Reports"],
+        "summary": "提交报告反馈",
+        "description": "只有诊断任务创建者可以追加反馈。接口不覆盖历史记录，不回写 MES/ERP。",
+        "parameters": [
+          { "$ref": "#/components/parameters/CSRFToken" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ReportReviewRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "反馈已追加",
+            "headers": {
+              "Location": { "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReportReviewResponse" }
+              }
+            }
+          },
+          "400": { "description": "报告 ID 或反馈参数错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "401": { "description": "未登录", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "无权提交反馈或 CSRF 校验失败", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "报告不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "422": { "description": "反馈内容不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务端内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
     }
   },
 
@@ -325,6 +390,52 @@
         "required": ["code", "message"]
       },
 
+      "ReportReviewRequest": {
+        "type": "object",
+        "properties": {
+          "verdict": { "type": "string", "enum": ["adopted", "partially_adopted", "rejected"] },
+          "comment": { "type": "string", "maxLength": 2000 }
+        },
+        "required": ["verdict"]
+      },
+
+      "ReportReview": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "reportId": { "type": "string", "format": "uuid" },
+          "reviewedBy": { "type": "string", "format": "uuid" },
+          "verdict": { "type": "string", "enum": ["adopted", "partially_adopted", "rejected"] },
+          "comment": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "reportId", "reviewedBy", "verdict", "comment", "createdAt"]
+      },
+
+      "ReportReviewResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ReportReview" } } }
+        ]
+      },
+
+      "ReportReviewsData": {
+        "type": "object",
+        "properties": {
+          "reportId": { "type": "string", "format": "uuid" },
+          "current": { "allOf": [{ "$ref": "#/components/schemas/ReportReview" }], "nullable": true },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ReportReview" } }
+        },
+        "required": ["reportId", "current", "items"]
+      },
+
+      "ReportReviewsResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ReportReviewsData" } } }
+        ]
+      },
+
       "Cookie": {
         "type": "object",
         "description": "认证接口返回的 Cookie 信息",
@@ -348,6 +459,16 @@
             }
           }
         }
+      }
+    },
+
+    "parameters": {
+      "CSRFToken": {
+        "description": "写操作需要携带登录响应或 Cookie 中的 CSRF 令牌",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "required": true,
+        "schema": { "type": "string" }
       }
     },
 

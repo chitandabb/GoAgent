@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
@@ -87,6 +88,20 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	reportReviewRepository := platformpostgres.NewDiagnosisReportReviewRepository(deps.db)
+	reportReviewService, err := diagnosis.NewReportReviewService(reportReviewRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build report review service: %w", err)
+	}
+	reportReviewRoutes, err := httptransport.NewReportReviewRoutes(
+		reportReviewService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build report review routes: %w", err)
+	}
+	registrars = append(registrars, reportReviewRoutes)
 	var externalCaseService *externalcase.Service
 	if cfg.SQLServer.Enabled {
 		dataSourceID, parseErr := uuid.Parse(cfg.SQLServer.ID)
@@ -128,6 +143,22 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 			return nil, fmt.Errorf("build external case routes: %w", err)
 		}
 		registrars = append(registrars, externalCaseRoutes)
+	}
+	if externalCaseService != nil {
+		diagnosisTaskRepository := platformpostgres.NewDiagnosisTaskRepository(deps.db)
+		diagnosisTaskService, err := diagnosis.NewDiagnosisTaskService(diagnosisTaskRepository, externalCaseService)
+		if err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build diagnosis task service: %w", err)
+		}
+		diagnosisTaskRoutes, err := httptransport.NewDiagnosisTaskRoutes(
+			diagnosisTaskService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+		)
+		if err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build diagnosis task routes: %w", err)
+		}
+		registrars = append(registrars, diagnosisTaskRoutes)
 	}
 
 	agentRuntime, err := buildAgentRuntime(

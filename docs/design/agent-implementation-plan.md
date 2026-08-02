@@ -133,7 +133,7 @@ config/skills/<skill-id>/
 
 验收：一条工单请求可在同一个 Agent 循环内先读工单、再查代码；GitHub MCP 不可用时保留已有证据并返回明确限制；不会额外调用 Handoff Tool。
 
-实际验收：确定性模型按 `read_external_case -> skill(code-investigation) -> search_code -> final` 完成一次运行；测试同时覆盖 TaskScope 缺失、GitHub 降级、Tool Schema 白名单、32 KiB 截断、Provider usage、Context 取消、最大迭代和并发隔离。2026-07-31 的真实 StepFun 正式 Runner 烟雾运行调用 `read_external_case`，两次模型调用共报告 4397 Tokens（其中 cached 1600），约 10.37 秒完成。旧 Handoff Tool、Dispatcher、每 Skill Executor、Registry 与兼容 Loader 已删除。2026-08-01 的真实只读 smoke 又验证了私有 C# 仓库的仓库发现、提交追溯、固定 SHA 文件读取和一次完整 `search_code` 返回；仍待完成的是跨仓库、跨查询形态的 Code Search 稳定性评测与 P5 完整效果评测。
+实际验收：确定性模型按 `read_external_case -> skill(code-investigation) -> search_code -> final` 完成一次运行；测试同时覆盖 TaskScope 缺失、GitHub 降级、Tool Schema 白名单、32 KiB 截断、Provider usage、Context 取消、最大迭代和并发隔离。2026-07-31 的真实 StepFun 正式 Runner 烟雾运行调用 `read_external_case`，两次模型调用共报告 4397 Tokens（其中 cached 1600），约 10.37 秒完成。旧 Handoff Tool、Dispatcher、每 Skill Executor、Registry 与兼容 Loader 已删除。2026-08-01 的真实只读 smoke 验证了私有 C# 仓库的仓库发现、提交追溯、固定 SHA 文件读取和一次完整 `search_code` 返回；2026-08-02 的 `github-code-search-v2` 又覆盖 GoAgent、GoChat、公开仓库和 `in:file` 查询，共 6 条样本，其中 2 条真实 `incomplete_results` 均通过树候选和固定 SHA 文件读取恢复。仍待完成的是 Agent baseline/experiment 效果评测与更大规模稳定性样本。
 
 ### P4：增加薄外层 Graph 与 Evidence Gate
 
@@ -153,7 +153,7 @@ Token 上限按供应商 usage 在每次模型响应后结算：达到阈值后�
 
 ### P5：真实评测与第一条简历闭环
 
-状态：**评测契约、统计 CLI 和 GitHub 工具级真实评测切片已完成；完整 Agent paired 数据集待补**。
+状态：**评测契约、统计 CLI、GitHub 工具级真实评测切片和首组四类 Agent paired 样本已完成；完整数据集待扩展**。
 
 目标：用固定数据集得到可复现指标，而不是把样例统计或静态 Schema 字节数写进简历。
 
@@ -175,21 +175,55 @@ P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的�
 版本、配对、失败类型、证据覆盖和 Token 差异计算；在 GitHub MCP、SQL 调查
 Tool 和固定合成故障集准备好前，不把样例结果写进简历。
 
+2026-08-02 已新增评测专用 Runner mode 和
+`cmd/mesguard-agent-paired-eval`：默认 Runner 仍使用 experiment；baseline
+只在评测命令中绑定角色/任务维度的宽业务 Tool Schema，不启用 Skill Middleware，
+不会改变生产授权路径。`agent-real-v1` 的首条真实工单样本中，baseline/experiment
+均为首 Tool 正确、Evidence 覆盖和任务完成 1/1，禁止 Tool 调用均为 0；Provider
+输入 Token 为 5960/4640，配对输入 Token 降幅为 22.15%，总 Token 为 7095/6229。
+本次仅 1 条样本，TTFT 尚未测量，端到端耗时为 10.55/12.14 秒（experiment 更慢）；
+这些结果只验证 paired 链路，不是简历指标。可复现命令和本次脱敏 observation
+保存在 `testdata/agent-evaluation.real-v1.jsonl` 与
+`testdata/agent-evaluation.real-v1.observations.jsonl`。
+
+同日的 `agent-real-v2` 扩展为 3 条工单样本、6 次 paired 运行：工单只读、代码调查
+和 GitHub 降级/边界各 1 条。两种 variant 的 Skill 路由、首 Tool、Evidence 覆盖均为
+1/1，禁止 Tool 调用均为 0；代码调查实际走了 baseline 的
+`read_external_case -> search_code -> get_file_contents` 和 experiment 的
+`read_external_case -> skill -> search_code`，但两边都因生产默认 16000 Token 总预算
+停止，`failureTypes` 已记录 `token_budget_exhausted` 各 1 次。该集 experiment 输入
+Token 高于 baseline（35573 对 28651），说明 Skill/代码调查的上下文成本不能用工单样本
+外推。`agent-real-v3` 又验证了 SQL Server 只读对象定义：两边均取得
+`case_snapshot + sql_object_definition` 并完整通过门禁；该次仅为观察完整 SQL 链路，
+使用命令行 32000 Token 覆盖，不改变生产配置。所有 observation 均保留在 `testdata/`，
+仍不是简历指标。
+
+随后 `agent-real-v4` 在本地事务内创建临时 published Catalog，验证了
+`read_external_case -> search_schema_catalog -> execute_readonly_query` 的完整 SQL
+证据链。baseline/experiment 两边的 Tool 选择、Evidence 覆盖、任务完成率和禁止调用均为
+1/1、1/1、1/1、0；均取得 `case_snapshot + schema_catalog + sql_query`。baseline/
+experiment 输入 Token 为 12303/14053，总 Token 为 14327/17431，耗时为 17.64/24.15
+秒；paired 输入 Token 降幅为 -14.22%，耗时降幅为 -36.95%。实验侧明确使用
+`sql-investigation` 入口 Skill。该 Catalog 夹具只在评测事务中存在，命令结束后回滚，不能
+替代生产 Catalog 扫描/审核/发布流程；结果也不写入简历指标。
+
 GitHub 代码调查另有不依赖模型的
 `cmd/mesguard-github-search-eval` 命令，使用
-`testdata/github-code-search-v1.jsonl` 顺序执行 `search_code`、固定
+`testdata/github-code-search-v2.jsonl` 顺序执行 `search_code`、固定
 `tree_sha` 的 `get_repository_tree` 和固定 SHA 的 `get_file_contents`，用于
 区分 Search 完整率、候选路径召回、树候选不完整、已知路径文件核验和 fallback
-恢复率。2026-08-02 的两条真实样本中，Search 完整率、两层路径召回和文件核验均为
-2/2；没有观察到 `incomplete_results`，因此不把 fallback 恢复率写成指标，也不据此
-决定实现本地 clone/search。
+恢复率。2026-08-02 的 v2 六条真实样本中，Search 完整 2/6，观察到 2 条
+`incomplete_results`，两条均通过树候选和固定 SHA 文件读取恢复；树路径召回和已知路径
+文件核验均为 6/6，fallback 恢复率为 2/2。另有两条 GoChat Search 因 GitHub API rate
+limit 返回错误，评测器保留了有界错误详情；这不等价于代码不存在，也不计入
+`incomplete` fallback 分母。
 
-评测器现在同时记录 `errorType` 和完整的 `errorTypes`，取消时停止后续样本并返回
+评测器现在同时记录 `errorType`、完整的 `errorTypes` 和有界 `errorMessages`，取消时停止后续样本并返回
 带 `requestedCases`/`cases` 的部分汇总；仓库树候选响应分别记录上游截断、候选上限、
 应用过滤和候选溢出，避免把主动过滤误判为远端截断。重试包装对非法 JSON、负延迟和
 不足的延迟配置 fail-closed，文件读取参数拒绝超长路径及 `sha`/`ref` 二义性。
 
-### P6：实现 sql-investigation（进行中，运行时证据切片已完成）
+### P6：实现 sql-investigation（进行中，运行时与 paired 证据切片已完成）
 
 目标：完成最有业务价值的数据库证据链。
 
@@ -197,9 +231,9 @@ GitHub 代码调查另有不依赖模型的
 
 SQL 方言校验、Catalog 发布模型和 Evidence Gate 的字段契约会影响后续安全边界；QueryGuard
 和窄 `execute_readonly_query` Tool 已完成单测与运行时装配，但真实 SQL Server + 已发布
-Catalog 联调。成功的事实型只读 Tool 结果现在会生成带唯一 `evidenceRef`、来源、哈希、
+Catalog 联调，以及 Agent paired v3/v4 观察切片已完成。成功的事实型只读 Tool 结果现在会生成带唯一 `evidenceRef`、来源、哈希、
 采集时间和截断状态的运行时 EvidenceItem，报告引用必须解析到本次运行的 EvidenceItem。
-正式 DiagnosisTask/Worker 持久化仍未开始。
+正式 Catalog 扫描/审核/发布管理和 DiagnosisTask/Worker 持久化仍未开始。
 
 项目不直接依赖尚无正式 Release 且要求 Go `1.25.7` 的 Bytebase Omni，也不重写其完整
 T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词法边界、单条只读查询
@@ -207,9 +241,11 @@ T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词�
 只读执行均已验证。数据库只读账号、TaskScope/Catalog 授权和执行资源限制继续作为独立
 防线；正式 EvidenceItem 存储、报告关联和 SSE 展示将在 P7 任务链路中落地。
 
-### P7：接入正式任务链路
+### P7：接入正式任务链路（基础表与报告反馈切片已开始）
 
-在 Agent 核心稳定后，再接 DiagnosisTask、Worker、TaskEvent、SSE、取消、Outbox/RabbitMQ 和报告持久化。接口稳定后更新 `docs/design/openapi.json`，并给前端任务提供页面状态、SSE 事件、错误降级和联调说明。
+当前已建立 `case_snapshots`、`diagnosis_tasks`、`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_reports` 和 `report_reviews` 的最小 PostgreSQL 持久化基础。诊断任务创建/安全摘要查询已接入：外部工单重读后，脱敏快照、pending 任务、首个事件和 `diagnosis.execute` Outbox 在一个事务中落库，并支持幂等重放/冲突。报告反馈也已接入查询/追加 API，采用 `adopted`、`partially_adopted`、`rejected` 三值追加历史，只有任务创建者可提交，管理员只读查看。
+
+后续继续接 Outbox Relay/RabbitMQ、Diagnosis Worker、TaskEvent 运行时事件、SSE、取消、EvidenceItem/ReportEvidence 和正式报告生成。接口稳定后继续更新 `api/openapi.yaml` 与 `docs/design/openapi.json`，并给前端任务提供页面状态、SSE 事件、错误降级和联调说明。
 
 MinIO/附件、RAG、Web Search、日志源和 SQL 优化实验按交付计划继续推进，不与 P0-P5 并行铺空壳。
 

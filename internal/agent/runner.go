@@ -35,6 +35,19 @@ var (
 
 type ArgumentRewriter func(ctx context.Context, toolName, arguments string) (string, error)
 
+// RunnerMode controls how a Runner is assembled for a single evaluation.
+// Production callers should leave it empty, which defaults to experiment.
+type RunnerMode string
+
+const (
+	RunnerModeExperiment RunnerMode = "experiment"
+	RunnerModeBaseline   RunnerMode = "baseline"
+)
+
+func (m RunnerMode) Valid() bool {
+	return m == RunnerModeExperiment || m == RunnerModeBaseline
+}
+
 type RunRequest struct {
 	UserQuery      string  `json:"userQuery"`
 	ExternalCaseID string  `json:"externalCaseId,omitempty"`
@@ -75,6 +88,7 @@ type RunnerConfig struct {
 	ChatModel             model.ToolCallingChatModel
 	ToolCatalog           *ToolCatalog
 	SkillRuntime          *NativeSkillRuntime
+	Mode                  RunnerMode
 	GitHubArgumentRewrite ArgumentRewriter
 	Logger                *zap.Logger
 	MaxIterations         int
@@ -87,6 +101,8 @@ type RunnerConfig struct {
 type Runner struct {
 	chatModel             model.ToolCallingChatModel
 	toolCatalog           *ToolCatalog
+	toolProvider          AgentToolProvider
+	mode                  RunnerMode
 	skillRuntime          *NativeSkillRuntime
 	toolAuthorization     *ToolAuthorizationMiddleware
 	githubArgumentRewrite ArgumentRewriter
@@ -100,7 +116,17 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.ChatModel == nil || cfg.ToolCatalog == nil || cfg.SkillRuntime == nil || cfg.Logger == nil {
 		return nil, errors.New("runner model, catalog, Skill runtime, and logger are required")
 	}
-	authorization, err := NewToolAuthorizationMiddleware(cfg.ToolCatalog)
+	if cfg.Mode == "" {
+		cfg.Mode = RunnerModeExperiment
+	}
+	if !cfg.Mode.Valid() {
+		return nil, fmt.Errorf("invalid runner mode %q", cfg.Mode)
+	}
+	var toolProvider AgentToolProvider = cfg.ToolCatalog
+	if cfg.Mode == RunnerModeBaseline {
+		toolProvider = evaluationBaselineToolProvider{catalog: cfg.ToolCatalog}
+	}
+	authorization, err := NewToolAuthorizationMiddleware(toolProvider)
 	if err != nil {
 		return nil, fmt.Errorf("build Tool authorization middleware: %w", err)
 	}
@@ -124,11 +150,23 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	return &Runner{
 		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
+		toolProvider: toolProvider, mode: cfg.Mode,
 		skillRuntime: cfg.SkillRuntime, toolAuthorization: authorization,
 		githubArgumentRewrite: cfg.GitHubArgumentRewrite, log: cfg.Logger,
 		maxIterations: cfg.MaxIterations, timeout: cfg.Timeout,
 		maxToolResultBytes: cfg.MaxToolResultBytes,
 	}, nil
+}
+
+type evaluationBaselineToolProvider struct {
+	catalog *ToolCatalog
+}
+
+func (p evaluationBaselineToolProvider) ToolsFor(ctx context.Context, scope TaskScope) ([]tool.BaseTool, error) {
+	if p.catalog == nil {
+		return nil, errors.New("evaluation baseline tool catalog is nil")
+	}
+	return p.catalog.EvaluationBaselineToolsFor(ctx, scope)
 }
 
 func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
@@ -158,7 +196,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if !ok {
 		return RunResult{}, ErrTaskScopeRequired
 	}
-	allowedTools, resolveErr := r.toolCatalog.ToolsFor(ctx, scope)
+	allowedTools, resolveErr := r.toolProvider.ToolsFor(ctx, scope)
 	if resolveErr != nil {
 		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
 	}
@@ -166,17 +204,23 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if err != nil {
 		return RunResult{}, err
 	}
-	// Skill Middleware 在 Tool 授权之后追加 skill Tool；评测必须记录模型实际看到的完整 Schema 列表。
-	result.AllowedTools = append(result.AllowedTools, ToolSkill)
+	// Experiment 的 Skill Middleware 在 Tool 授权之后追加 skill Tool；评测必须记录
+	// 模型实际看到的完整 Schema 列表。Baseline 不启用 Skill 渐进式读取。
+	if r.mode == RunnerModeExperiment {
+		result.AllowedTools = append(result.AllowedTools, ToolSkill)
+	}
 	result.SkillID, result.RouteReason, err = r.entrySkill(request, scope)
 	if err != nil {
 		return RunResult{}, err
 	}
-	entryInstruction, loadErr := r.skillRuntime.Instruction(ctx, result.SkillID)
-	if loadErr != nil {
-		return RunResult{}, loadErr
+	entryInstruction := ""
+	if r.mode == RunnerModeExperiment {
+		entryInstruction, err = r.skillRuntime.Instruction(ctx, result.SkillID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		result.ExecutedSkills = []SkillID{result.SkillID}
 	}
-	result.ExecutedSkills = []SkillID{result.SkillID}
 
 	userPrompt, buildErr := BuildUserPrompt(request)
 	if buildErr != nil {
@@ -191,10 +235,16 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	runCtx = withExecutionTrace(runCtx, trace)
 	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
 
+	handlers := []adk.ChatModelAgentMiddleware{r.toolAuthorization}
+	instruction := buildBaselineAgentInstruction(result.SkillID, scope)
+	if r.mode == RunnerModeExperiment {
+		instruction = buildAgentInstruction(result.SkillID, entryInstruction, scope)
+		handlers = append(handlers, r.skillRuntime.Middleware)
+	}
 	agentInstance, buildErr := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
 		Name:        "mesguard-diagnosis",
 		Description: "使用受控只读工具辅助分析工业软件工单",
-		Instruction: buildAgentInstruction(result.SkillID, entryInstruction, scope),
+		Instruction: instruction,
 		Model:       r.chatModel,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			ExecuteSequentially:  true,
@@ -205,10 +255,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 			},
 		}},
 		MaxIterations: r.maxIterations,
-		Handlers: []adk.ChatModelAgentMiddleware{
-			r.toolAuthorization,
-			r.skillRuntime.Middleware,
-		},
+		Handlers:      handlers,
 	})
 	if buildErr != nil {
 		return result, fmt.Errorf("build per-run ADK Agent: %w", buildErr)
@@ -313,6 +360,19 @@ func buildAgentInstruction(entry SkillID, skillContent string, scope TaskScope) 
 	}
 	if !scope.DependencyAvailable(ToolDependencySQLServer) {
 		instruction += "\n\n当前 SQL Server 调查工具暂时不可用；如果调查需要数据库证据，保留已有证据并明确说明该限制。"
+	}
+	return instruction
+}
+
+func buildBaselineAgentInstruction(entry SkillID, scope TaskScope) string {
+	instruction := `你是 MESGuard 工业软件分析辅助 Agent。当前运行是评测 baseline：应用一次性提供本角色和任务类型允许的只读业务 Tool Schema，不启用 Skill Middleware 或 Skill 渐进式读取。你只能使用实际提供的只读工具，不得声称执行未提供的工具、修改 ERP/MES/代码或获得隐藏凭证。引用工具证据时区分事实、推断和待验证项；证据不足必须明确说明。` +
+		"\n\n本次入口任务已由应用根据页面和任务上下文确定：" + string(entry) + "。请直接完成用户问题，不要尝试调用 Skill 工具。"
+	if sources := scope.DataSources(); len(sources) > 0 {
+		instruction += "\n\n<authorized_data_sources>\n"
+		for _, source := range sources {
+			instruction += fmt.Sprintf("- id=%s role=%s safety=%s\n", source.ID, source.Role, source.SafetyMode)
+		}
+		instruction += "</authorized_data_sources>"
 	}
 	return instruction
 }

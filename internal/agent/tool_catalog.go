@@ -142,16 +142,12 @@ func hasDuplicate[T comparable](values []T) bool {
 }
 
 func (c *ToolCatalog) ToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseTool, error) {
-	if c == nil {
-		return nil, errors.New("tool catalog is nil")
-	}
-	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() {
-		return nil, errors.New("task scope is invalid")
+	if err := validateToolScope(c, scope); err != nil {
+		return nil, err
 	}
 	tools := make([]tool.BaseTool, 0, len(c.entries))
 	for _, entry := range c.entries {
-		if !slices.Contains(entry.allowedRoles, scope.role) ||
-			!slices.Contains(entry.allowedTaskTypes, scope.taskType) ||
+		if !entry.matchesRoleAndTask(scope) ||
 			!scope.matchesDataSource(entry.allowedDataRoles, entry.allowedSafetyModes) {
 			continue
 		}
@@ -167,4 +163,39 @@ func (c *ToolCatalog) ToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseT
 		}
 	}
 	return tools, nil
+}
+
+// EvaluationBaselineToolsFor 返回评测 baseline 所需的宽 Tool Schema 集合。
+//
+// 这个集合只按角色和任务类型筛选，故意不套用本次 TaskScope 的数据源与依赖
+// 过滤；它用于和 experiment 的最小运行时 Schema 做 paired evaluation，不能
+// 作为生产授权策略使用。Skill reference Tool 也不属于 baseline，因为 baseline
+// 不启用 Skill 渐进式读取。
+func (c *ToolCatalog) EvaluationBaselineToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseTool, error) {
+	if err := validateToolScope(c, scope); err != nil {
+		return nil, err
+	}
+	tools := make([]tool.BaseTool, 0, len(c.entries))
+	for _, entry := range c.entries {
+		if entry.name == ToolReadSkillReference || !entry.matchesRoleAndTask(scope) {
+			continue
+		}
+		tools = append(tools, entry.tool)
+	}
+	return tools, nil
+}
+
+func validateToolScope(c *ToolCatalog, scope TaskScope) error {
+	if c == nil {
+		return errors.New("tool catalog is nil")
+	}
+	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() {
+		return errors.New("task scope is invalid")
+	}
+	return nil
+}
+
+func (entry catalogEntry) matchesRoleAndTask(scope TaskScope) bool {
+	return slices.Contains(entry.allowedRoles, scope.role) &&
+		slices.Contains(entry.allowedTaskTypes, scope.taskType)
 }

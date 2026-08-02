@@ -123,6 +123,9 @@ func TestEvidenceOrchestratorReturnsPartialAtAgentRunLimit(t *testing.T) {
 		result.Report.Confidence != ConfidenceLow {
 		t.Fatalf("unexpected partial report: %+v", result)
 	}
+	if result.StopReason != "evidence_gate_partial" {
+		t.Fatalf("stop reason = %q, want evidence_gate_partial", result.StopReason)
+	}
 	if !containsText(result.MissingEvidence, "结构化报告") {
 		t.Fatalf("missing evidence = %v", result.MissingEvidence)
 	}
@@ -142,6 +145,9 @@ func TestEvidenceOrchestratorStopsBeforeSecondRunAtTokenLimit(t *testing.T) {
 	}
 	if !result.Partial || result.AgentRuns != 1 || len(invoker.snapshotRequests()) != 1 {
 		t.Fatalf("token budget did not stop retry: %+v", result)
+	}
+	if result.StopReason != "token_budget_exhausted" {
+		t.Fatalf("stop reason = %q, want token_budget_exhausted", result.StopReason)
 	}
 	if !containsText(result.MissingEvidence, "Token 预算") {
 		t.Fatalf("missing evidence = %v", result.MissingEvidence)

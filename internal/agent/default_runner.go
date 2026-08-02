@@ -17,6 +17,7 @@ type DefaultRunnerDependencies struct {
 	ChatModel             model.ToolCallingChatModel
 	ExternalCases         ExternalCaseGetter
 	SkillRoot             string
+	Mode                  RunnerMode
 	GitHubTools           []tool.BaseTool
 	GitHubArgumentRewrite ArgumentRewriter
 	SQLObjectDefinitions  tool.BaseTool
@@ -119,6 +120,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 	return NewRunner(RunnerConfig{
 		ChatModel: dependencies.ChatModel, ToolCatalog: catalog,
 		SkillRuntime:          skillRuntime,
+		Mode:                  dependencies.Mode,
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
 		Logger:                dependencies.Logger,
 	})

@@ -201,10 +201,64 @@ search_repositories
 当前提供一个不依赖模型的评测命令：
 
 ~~~text
-go run ./cmd/mesguard-github-search-eval -cases testdata/github-code-search-v1.jsonl
+go run ./cmd/mesguard-github-search-eval -cases testdata/github-code-search-v2.jsonl
 ~~~
 
 命令顺序执行 Code Search、树候选和固定 SHA 文件读取，最多接受 20 条样本；凭据只从现有 `.env`/配置读取，不输出 Token、不写仓库、不创建本地缓存。输出中的 `fallbackRecoveryRate` 只有在实际观察到 `searchStatus=incomplete` 的样本时才有分母；没有不完整样本时必须保留为未测量，不能解释为“fallback 失败”。评测器会保留每条样本的多个阶段错误；取消时停止新样本，并输出已经完成样本的部分汇总，`requestedCases` 与 `cases` 分别表示请求数和已完成数。
+
+2026-08-02 的 `github-code-search-v2` 真实运行覆盖私有 C#、GoAgent、GoChat 和公开 `Hello-World`，并包含 `in:file` 查询，共 6 条样本：Search 完整 2/6，2 条 `incomplete_results` 均通过树候选和固定 SHA 文件读取恢复，树路径召回与已知路径文件核验均为 6/6，fallback 恢复为 2/2。两条 GoChat Search 因 GitHub API rate limit 返回错误；树和固定 SHA 文件读取仍成功，错误详情已在评测输出中保留。
+
+### Agent paired 评测
+
+同一版本化样本顺序运行 baseline 和 experiment，并把 Provider usage、实际 Tool、
+Evidence、报告状态和耗时写入 observation：
+
+~~~text
+go run ./cmd/mesguard-agent-paired-eval \
+  -dataset testdata/agent-evaluation.real-v1.jsonl \
+  -output testdata/agent-evaluation.real-v1.observations.jsonl
+go run ./cmd/mesguard-agent-eval \
+  -dataset testdata/agent-evaluation.real-v1.jsonl \
+  -input testdata/agent-evaluation.real-v1.observations.jsonl
+
+# 扩展样本；SQL v3/v4 仅为观察完整 SQL 链路临时提高预算
+go run ./cmd/mesguard-agent-paired-eval \
+  -dataset testdata/agent-evaluation.real-v2.jsonl \
+  -output testdata/agent-evaluation.real-v2.observations.jsonl
+go run ./cmd/mesguard-agent-paired-eval \
+  -dataset testdata/agent-evaluation.real-v3.jsonl \
+  -output testdata/agent-evaluation.real-v3.observations.jsonl \
+  -max-total-tokens 32000
+go run ./cmd/mesguard-agent-paired-eval \
+  -dataset testdata/agent-evaluation.real-v4.jsonl \
+  -output testdata/agent-evaluation.real-v4.observations.jsonl \
+  -max-total-tokens 32000
+~~~
+
+SQL v3/v4 还要求运行进程通过 `MESGUARD_SQLSERVER_PASSWORD` 注入只读账号密码；
+v4 同时需要 PostgreSQL 连接密码。v4 会在本地 PostgreSQL transaction 中插入一版最小
+published Catalog，baseline/experiment 共用后 rollback；它不是迁移、seed 或生产发布流程。
+命令不会从参数、代码或 observation 写入凭证。
+
+2026-08-02 的 `agent-real-v1` 首条真实工单样本输入 Token 为 baseline 5960、
+experiment 4640，配对降幅 22.15%；两次均完成 `read_external_case -> case_snapshot`，
+没有调用禁止的代码 Tool。`agent-real-v2` 扩展为工单、代码调查、GitHub 降级 3 条样本：
+两种 variant 的路由/首 Tool/Evidence 覆盖均为 1/1、禁止调用为 0；代码调查实际执行
+代码 Tool，但两边均因默认 16000 Token 预算停止，`failureTypes` 为
+`token_budget_exhausted: 2`。v2 的 paired 输入 Token 为 baseline 28651、experiment
+35573，experiment 更高，不能把工单样本的 Token 降幅外推到代码任务。
+
+SQL v3 使用 `-max-total-tokens 32000` 仅观察完整 SQL 对象定义链路：baseline/experiment
+均执行 `read_external_case -> get_database_object_definition`，并取得
+`case_snapshot + sql_object_definition`；输入 Token 为 6689/5228，耗时为 5.70/5.35 秒。
+TTFT 尚未测量，v3 仍是 1 条样本，不写入简历指标。
+
+SQL v4 使用同样的临时预算观察 Catalog 搜索和受限只读查询：baseline/experiment 均执行
+`read_external_case -> search_schema_catalog -> execute_readonly_query`，并取得
+`case_snapshot + schema_catalog + sql_query`；输入 Token 为 12303/14053，耗时为
+17.64/24.15 秒，任务完成率均为 1/1，禁止 Tool 调用均为 0。实验侧使用
+`sql-investigation` 入口 Skill；paired 输入 Token 和耗时均未下降，因此不外推为效果指标。
+评测结束后 PostgreSQL Catalog 版本和条目均为 0，证明夹具已回滚。
 
 ## 可扩展 Agent 编排
 

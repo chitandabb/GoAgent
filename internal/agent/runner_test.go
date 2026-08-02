@@ -35,12 +35,13 @@ func (runnerTestCaseGetter) Get(_ context.Context, id uuid.UUID) (*externalcase.
 }
 
 type runnerModelState struct {
-	mu      sync.Mutex
-	github  bool
-	loop    bool
-	block   chan struct{}
-	calls   int
-	schemas [][]string
+	mu       sync.Mutex
+	github   bool
+	baseline bool
+	loop     bool
+	block    chan struct{}
+	calls    int
+	schemas  [][]string
 }
 
 type runnerTestModel struct {
@@ -87,6 +88,9 @@ func (m *runnerTestModel) Generate(ctx context.Context, input []*schema.Message,
 		return runnerTestToolCall(ToolReadExternalCase, `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`), nil
 	}
 	if lastTool == ToolReadExternalCase {
+		if m.state.baseline {
+			return withRunnerTestUsage(schema.AssistantMessage("已根据工单证据形成初步诊断。", nil)), nil
+		}
 		return runnerTestToolCall(ToolSkill, `{"skill":"code-investigation"}`), nil
 	}
 	if lastTool == ToolSkill && m.state.github {
@@ -174,6 +178,39 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 	}
 	if slices.Contains(result.AllowedTools, "search_code") {
 		t.Fatal("unavailable GitHub Tool was exposed")
+	}
+}
+
+func TestRunnerBaselineBindsBroadRoleTaskToolsWithoutSkillMiddleware(t *testing.T) {
+	runner := newRunnerTestWithMode(t, &runnerModelState{baseline: true}, RunnerModeBaseline)
+	result, err := runner.Invoke(WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{
+		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
+	})
+	if err != nil {
+		t.Fatalf("Invoke baseline: %v", err)
+	}
+	if !slices.Equal(result.AllowedTools, []string{ToolReadExternalCase, "search_code"}) {
+		t.Fatalf("baseline allowed tools = %v", result.AllowedTools)
+	}
+	if slices.Contains(result.AllowedTools, ToolSkill) || len(result.ExecutedSkills) != 0 {
+		t.Fatalf("baseline unexpectedly exposed or executed Skill: allowed=%v executed=%v", result.AllowedTools, result.ExecutedSkills)
+	}
+}
+
+func TestNewRunnerRejectsInvalidMode(t *testing.T) {
+	_, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
+		SkillRoot: filepath.Join("..", "..", "config", "skills"), Mode: RunnerMode("invalid"), Logger: zap.NewNop(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid runner mode") {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+}
+
+func TestNewRunnerDefaultsToExperimentMode(t *testing.T) {
+	runner := newRunnerTestWithMode(t, &runnerModelState{}, "")
+	if runner.mode != RunnerModeExperiment {
+		t.Fatalf("default runner mode = %q, want %q", runner.mode, RunnerModeExperiment)
 	}
 }
 
@@ -327,6 +364,10 @@ func TestRunnerCreatesIsolatedAgentForConcurrentRuns(t *testing.T) {
 }
 
 func newRunnerTest(t *testing.T, state *runnerModelState) *Runner {
+	return newRunnerTestWithMode(t, state, RunnerModeExperiment)
+}
+
+func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMode) *Runner {
 	t.Helper()
 	modelInstance := &runnerTestModel{state: state}
 	searchTool, err := toolutils.InferTool("search_code", "只读代码搜索", func(context.Context, struct {
@@ -340,6 +381,7 @@ func newRunnerTest(t *testing.T, state *runnerModelState) *Runner {
 	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: modelInstance, ExternalCases: runnerTestCaseGetter{},
 		SkillRoot:             filepath.Join("..", "..", "config", "skills"),
+		Mode:                  mode,
 		GitHubTools:           []tool.BaseTool{searchTool},
 		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) { return arguments, nil },
 		Logger:                zap.NewNop(),

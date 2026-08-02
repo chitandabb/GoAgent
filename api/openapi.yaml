@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: MESGuard API
-  version: 0.1.0-m1a1
-  description: Current implemented backend contract for authentication and ERP external cases.
+  version: 0.1.0-p7-task-foundation
+  description: Current implemented backend contract for authentication, ERP external cases, diagnosis task creation/query, and report feedback.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -209,6 +209,136 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/diagnosis-tasks:
+    post:
+      operationId: createDiagnosisTask
+      summary: 创建异步诊断任务
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiagnosisTaskCreateRequest"
+      responses:
+        "202":
+          description: 任务已持久化，等待后续 Outbox Relay/Worker
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/diagnosis-tasks/{taskId}:
+    get:
+      operationId: getDiagnosisTask
+      summary: 查询诊断任务安全摘要
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 任务状态、快照身份和报告可用性
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/diagnosis-reports/{reportId}/reviews:
+    get:
+      operationId: listDiagnosisReportReviews
+      summary: 查询报告当前反馈和追加历史
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 最新反馈和按时间倒序的历史
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportReviewsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: submitDiagnosisReportReview
+      summary: 追加报告人工反馈
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportReviewRequest"
+      responses:
+        "201":
+          description: 已追加一条人工反馈
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportReviewResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
 components:
   securitySchemes:
     sessionCookie:
@@ -229,6 +359,14 @@ components:
       required: true
       schema:
         type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+        maxLength: 128
   responses:
     BadRequest:
       description: 请求格式或参数错误
@@ -250,6 +388,18 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     NotFound:
       description: 资源不存在或不可见
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: 幂等键冲突或外部工单 fingerprint 已变化
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationFailed:
+      description: 业务输入校验失败
       content:
         application/json:
           schema:
@@ -498,3 +648,149 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ExternalCaseListData"
+    DiagnosisTaskCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [externalCaseId, expectedSourceFingerprint, requestText]
+      properties:
+        externalCaseId:
+          type: string
+          format: uuid
+        expectedSourceFingerprint:
+          type: string
+          maxLength: 128
+        evidenceDataSourceIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        requestText:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        requestScope:
+          type: object
+          additionalProperties: true
+        requestScopeSchemaVersion:
+          type: integer
+          minimum: 1
+          default: 1
+        attachments:
+          type: array
+          description: 当前版本暂不接受非空附件列表
+          maxItems: 0
+          items:
+            type: object
+        retryOfTaskId:
+          type: [string, "null"]
+          format: uuid
+    DiagnosisTaskCreateData:
+      type: object
+      required: [taskId, status, replayed, createdAt]
+      properties:
+        taskId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          const: pending
+        replayed:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    DiagnosisTaskCreateResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisTaskCreateData"
+    DiagnosisTask:
+      type: object
+      required: [taskId, externalCaseId, caseSnapshotId, requestText, requestScope, requestScopeSchemaVersion, status, attemptCount, createdAt, updatedAt, reportAvailable]
+      properties:
+        taskId: {type: string, format: uuid}
+        externalCaseId: {type: string, format: uuid}
+        caseSnapshotId: {type: string, format: uuid}
+        retryOfTaskId: {type: string, format: uuid}
+        requestText: {type: string}
+        requestScope:
+          type: object
+          additionalProperties: true
+        requestScopeSchemaVersion: {type: integer, minimum: 1}
+        status:
+          type: string
+          enum: [pending, running, cancel_requested, succeeded, failed, cancelled]
+        attemptCount: {type: integer, minimum: 0}
+        lastErrorCode: {type: string}
+        lastErrorMessage: {type: string}
+        startedAt: {type: [string, "null"], format: date-time}
+        completedAt: {type: [string, "null"], format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        reportAvailable: {type: boolean}
+        reportId: {type: string, format: uuid}
+    DiagnosisTaskResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisTask"
+    ReportReviewVerdict:
+      type: string
+      enum: [adopted, partially_adopted, rejected]
+    ReportReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [verdict]
+      properties:
+        verdict:
+          $ref: "#/components/schemas/ReportReviewVerdict"
+        comment:
+          type: string
+          maxLength: 2000
+    ReportReview:
+      type: object
+      required: [id, reportId, reviewedBy, verdict, comment, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        reportId: {type: string, format: uuid}
+        reviewedBy: {type: string, format: uuid}
+        verdict:
+          $ref: "#/components/schemas/ReportReviewVerdict"
+        comment: {type: string}
+        createdAt: {type: string, format: date-time}
+    ReportReviewsData:
+      type: object
+      required: [reportId, current, items]
+      properties:
+        reportId: {type: string, format: uuid}
+        current:
+          anyOf:
+            - $ref: "#/components/schemas/ReportReview"
+            - type: "null"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportReview"
+    ReportReviewResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ReportReview"
+    ReportReviewsResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ReportReviewsData"

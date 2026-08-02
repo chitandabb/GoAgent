@@ -81,6 +81,21 @@ func TestToolCatalogFiltersByScope(t *testing.T) {
 	}
 }
 
+func TestToolCatalogEvaluationBaselineUsesRoleAndTaskToolSet(t *testing.T) {
+	catalog := newToolCatalogForTest(t)
+	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
+		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
+	}}, ToolDependencyExternalCase)
+	tools, err := catalog.EvaluationBaselineToolsFor(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("EvaluationBaselineToolsFor: %v", err)
+	}
+	want := []string{testToolGitHub, testToolReadCase, testToolReadSQL}
+	if got := toolNamesForTest(t, tools); !slices.Equal(got, want) {
+		t.Fatalf("baseline tool names = %v, want %v", got, want)
+	}
+}
+
 func TestToolCatalogRequiresOneDataSourceToMatchWholeConstraint(t *testing.T) {
 	conflictingTool := newNamedToolForTest(t, "test_conflicting_source")
 	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{

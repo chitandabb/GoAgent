@@ -6,6 +6,7 @@
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
 - 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；正式 Diagnosis Worker/SSE、证据持久化和可复现评测仍待补齐。
+- P7 已开始正式任务链路：任务创建会把脱敏 CaseSnapshot、pending DiagnosisTask、首个 TaskEvent 和 Outbox 作为一个 PostgreSQL 事务提交；Outbox Relay、Diagnosis Worker、EvidenceItem/ReportEvidence 持久化和 SSE 仍待实现。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构
@@ -166,6 +167,27 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 P5 的评测输入分为两类：版本化 `EvaluationCase` 保存 expected tools、forbidden tools、required evidence、可接受结论和根因标注；每次真实运行单独保存 `EvaluationObservation`，包括 baseline/experiment、Run ID、模型配置、实际 Tool、报告状态和 Provider usage。CLI 会按 `caseId` 配对，只有模型、版本和 reasoning effort 一致时才计算 Token/TTFT/耗时差异。
 
 Tool Schema 字节数只能做静态规模检查，不能替代 Provider Token。`testdata/*sample*` 只验证统计程序，不是项目效果证据。真实实验要保留该次实际 `AllowedTools`、评测集版本、模型配置、原始脱敏结果和可复现命令。
+
+2026-08-02 的首条真实 `agent-real-v1` 工单样本已验证 paired CLI：baseline 暴露
+7 个业务 Tool Schema，experiment 暴露 `read_external_case`、`read_skill_reference`
+和 `skill` 共 3 个 Schema；两者都正确先调用 `read_external_case`，并通过 Evidence
+Gate 取得 `case_snapshot`。Provider 输入 Token 从 5960 降到 4640，配对降幅为
+22.15%；总 Token 从 7095 降到 6229。样本只有 1 条，experiment 耗时从 10.55 秒
+升到 12.14 秒，TTFT 尚未测量，因此不把这次结果写成效果承诺。
+
+随后 `agent-real-v2` 扩展了工单、代码调查和 GitHub 降级三类请求：两种 variant 的
+路由、首 Tool、Evidence 覆盖均为 1/1，禁止 Tool 调用均为 0；代码调查在默认 16000
+Token 总预算下两边都记录为 `token_budget_exhausted` partial，降级样本没有调用代码
+或 SQL Tool。`agent-real-v3` 在临时 32000 Token 评测预算下验证了 SQL Server 视图定义
+读取和 `sql_object_definition` Evidence，两边都通过门禁。v2/v3 的结果只说明不同
+任务形态的真实成本与边界，不能合并成简历效果指标。
+
+`agent-real-v4` 又在事务内临时 published Catalog 上验证了 SQL 调查的
+`read_external_case -> search_schema_catalog -> execute_readonly_query` 顺序；两边都取得
+`case_snapshot`、`schema_catalog` 和 `sql_query`，无禁止调用且完整通过门禁。baseline/
+experiment 输入 Token 为 12303/14053，耗时为 17.64/24.15 秒；Catalog 夹具在命令结束时
+rollback，不代表生产 Catalog 已具备扫描、审核和发布管理。该组结果同样只用于边界和成本
+观察，不能合并成简历指标。
 
 ## 官方资料
 
