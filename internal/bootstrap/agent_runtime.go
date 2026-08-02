@@ -87,13 +87,17 @@ func buildAgentRuntime(
 	runtime := &agentRuntime{
 		modelProvider: strings.ToLower(strings.TrimSpace(cfg.Models.Chat.Provider)),
 		modelID:       strings.TrimSpace(cfg.Models.Chat.Model),
-		promptVersion: "evidence-gate-v1",
+		promptVersion: strings.TrimSpace(cfg.Agent.PromptVersion),
 	}
 	if !cfg.Models.Chat.Enabled {
 		return runtime, nil
 	}
 	if log == nil {
 		return nil, errors.New("agent runtime logger is nil")
+	}
+	prompts, err := cfg.Agent.LoadPrompts()
+	if err != nil {
+		return nil, fmt.Errorf("load Agent prompts: %w", err)
 	}
 	if externalCases == nil {
 		runtime.unavailable = errors.New("external case service is unavailable")
@@ -169,6 +173,8 @@ func buildAgentRuntime(
 		ChatModel:             chatModel,
 		ExternalCases:         externalCases,
 		SkillRoot:             cfg.Agent.SkillsDirectory,
+		SystemInstruction:     prompts.SystemInstruction,
+		BaselineInstruction:   prompts.BaselineInstruction,
 		GitHubTools:           githubTools,
 		GitHubArgumentRewrite: argumentRewrite,
 		SQLObjectDefinitions:  sqlObjectDefinitions,
@@ -184,13 +190,17 @@ func buildAgentRuntime(
 		Runner: runtime.runner, Logger: log.Named("evidence_orchestrator"),
 		MaxAgentRuns: cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
-		Timeout: time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		Timeout:                   time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		ReportContractInstruction: prompts.ReportContractInstruction,
 	})
 	if err != nil {
 		_ = runtime.close()
 		return nil, fmt.Errorf("build Evidence orchestrator: %w", err)
 	}
-	log.Info("Agent runtime initialized", zap.String("skills_directory", cfg.Agent.SkillsDirectory))
+	log.Info("Agent runtime initialized",
+		zap.String("skills_directory", cfg.Agent.SkillsDirectory),
+		zap.String("prompt_version", runtime.promptVersion),
+	)
 	return runtime, nil
 }
 

@@ -106,6 +106,10 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		}
 		cfg.Agent.MaxTotalTokens = *maxTotalTokens
 	}
+	prompts, err := cfg.Agent.LoadPrompts()
+	if err != nil {
+		return fmt.Errorf("load Agent prompts: %w", err)
+	}
 
 	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
 	if err != nil {
@@ -198,7 +202,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 				return err
 			}
 			orchestrator, buildErr := buildPairedEvaluationRun(
-				ctx, cfg, chatModel, githubConnection.Tools, sqlObjectDefinition,
+				ctx, cfg, prompts, chatModel, githubConnection.Tools, sqlObjectDefinition,
 				schemaCatalog, readonlyQuery, log, variant,
 			)
 			if buildErr != nil {
@@ -235,6 +239,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 func buildPairedEvaluationRun(
 	ctx context.Context,
 	cfg config.Config,
+	prompts config.AgentPrompts,
 	chatModel model.ToolCallingChatModel,
 	githubTools []tool.BaseTool,
 	sqlObjectDefinition tool.BaseTool,
@@ -249,8 +254,11 @@ func buildPairedEvaluationRun(
 	}
 	runner, err := mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel: chatModel, ExternalCases: pairedEvalCaseGetter{},
-		SkillRoot: cfg.Agent.SkillsDirectory, Mode: mode,
-		GitHubTools: githubTools, GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
+		SkillRoot:           cfg.Agent.SkillsDirectory,
+		SystemInstruction:   prompts.SystemInstruction,
+		BaselineInstruction: prompts.BaselineInstruction,
+		Mode:                mode,
+		GitHubTools:         githubTools, GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
 		SQLObjectDefinitions: sqlObjectDefinition,
 		SchemaCatalog:        schemaCatalog, ReadonlyQuery: readonlyQuery,
 		Logger: log.Named(string(variant)),
@@ -262,7 +270,8 @@ func buildPairedEvaluationRun(
 		Runner: runner, Logger: log.Named("evidence_" + string(variant)),
 		MaxAgentRuns: cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
-		Timeout: time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		Timeout:                   time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
+		ReportContractInstruction: prompts.ReportContractInstruction,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Evidence orchestrator: %w", err)
@@ -333,7 +342,7 @@ func observationFromResult(
 		Model:            cfg.Models.Chat.Provider,
 		ModelVersion:     cfg.Models.Chat.Model,
 		ReasoningEffort:  cfg.Models.Chat.ReasoningEffort,
-		PromptVersion:    string(variant) + "-v1",
+		PromptVersion:    cfg.Agent.PromptVersion,
 		SelectedSkill:    result.SelectedSkill,
 		ActualToolCalls:  actualTools,
 		AllowedTools:     result.AllowedTools,

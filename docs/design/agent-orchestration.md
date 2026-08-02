@@ -5,6 +5,7 @@
 - P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用不可变 `TaskScope`、统一 `ToolCatalog`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
+- 生产系统指令、评测 baseline 指令和 Evidence Gate 报告契约已外置到 `config/prompts/`，由 `[agent]` 配置启动期一次加载并缓存；`promptVersion` 是随正式报告保存的人工发布标签。当前不做热更新、内容哈希或 Nacos Prompt 发布。
 - 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；Diagnosis Worker 会把通过门禁或明确降级的报告及其证据引用正式落库，可复现效果评测仍待补齐。
 - P7 正式任务链路已接通任务创建、TaskEvent JSON 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer/三级重试/死信，以及 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence 和 DiagnosisReport 的 fenced 事务提交。正式报告读取 API 与 SSE 仍待实现。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
@@ -75,6 +76,12 @@ type AgentToolProvider interface {
 `TaskScope` 包含用户角色、任务类型、数据源、生产/产品库环境和依赖可用状态。注册到 Catalog 不等于暴露给模型。授权 Middleware 在 ADK `BeforeAgent` 阶段读取本次 `TaskScope` 并收敛 Tool 配置，只有 `ToolsFor` 返回的 Tool Schema 才进入本次运行。Catalog、Middleware、Tool 和无状态模型客户端可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 在 Run 初始化时会改写内部配置，`-race` 已证明不能共享实例并发运行，所以目标 Runtime 必须为每次 Run 创建隔离 Agent。
 
 所有 Tool 继续执行：参数 Schema 校验、应用策略重写、Context Timeout、行数/字节截断、敏感字段脱敏、调用轨迹和证据固化。Prompt 和 Skill 文本都不能代替这些安全边界。
+
+### Prompt：可配置指令
+
+`diagnosis-system.md`、`evaluation-baseline.md` 和 `report-contract.md` 分别承载生产 Agent 基础指令、评测 baseline 基础指令和结构化报告契约。应用启动时读取并校验文件，Runner 仍在运行期追加入口 Skill、授权数据源和依赖降级状态，Evidence Orchestrator 仍由代码追加上一轮报告和门禁缺口。这样可编辑内容与不可绕过的运行时状态保持分离。
+
+`promptVersion` 由发布者在修改 Prompt 后显式递增，用于报告和评测追溯；它不是模型版本，也不自动根据文件内容生成。当前工程阶段只保证“文件配置、启动失败保护、重启生效和版本字段预留”，未来若接入 Nacos 或独立 Prompt 平台，应继续向 Runner 注入同一组已解析指令，不改变 Tool 授权和 Evidence Gate 的代码边界。
 
 ### ChatModelAgent：动态调查内循环
 

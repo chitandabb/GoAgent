@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M1-A1 Backend Complete, Agent Foundation In Progress
+## Current Stage: P7 Diagnosis Worker Complete, Report Delivery In Progress
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -18,8 +18,9 @@ execution order and acceptance gates are defined in
 - [x] Structured Zap logging, request-context fields, and optional file rotation.
 - [x] Graceful HTTP, PostgreSQL, and Redis shutdown.
 - [x] React workbench prototype in `web/` running on local mock data only; see
-      [`design/frontend.md`](design/frontend.md). Authentication API is now
-      implemented; ticket and diagnosis APIs are still not implemented.
+      [`design/frontend.md`](design/frontend.md). Authentication is connected to
+      the backend; business pages remain Mock-driven even though external-case,
+      diagnosis-task, event-history, cancellation, and review APIs now exist.
 
 ## M0: Before Business Code
 
@@ -179,6 +180,9 @@ Implemented in the current working slice:
 - a thin Eino Evidence Gate Graph with deterministic structured-report checks,
   at most two Agent runs, Tool/Token/evidence/time budgets, partial-report
   fallback, and a frontend-safe investigation trace;
+- file-configured production, evaluation-baseline, and report-contract Prompts
+  loaded and cached at Agent startup, with a manually released `promptVersion`
+  persisted for report and evaluation traceability;
 - deterministic P4 coverage proving that invalid evidence triggers at most one
   supplemental run, budget exhaustion cannot start another Tool/Agent run, and
   cancellation is checked before Tool execution;
@@ -288,12 +292,44 @@ Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 Rabb
 定时续租，并在 fencing 条件下把 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence、
 正式 DiagnosisReport、TaskEvent 和 `succeeded` 终态作为一个 PostgreSQL 事务提交。
 `cancel_requested -> cancelled`、临时失败释放重试、重试耗尽后的 `failed` 也已接通。
+正式报告模型标识已规范为 `model_provider + model_id`，不再把同一配置值同时伪装成
+模型名称和模型版本；`00009` 已在本地 PostgreSQL 应用并通过 Worker 完成事务与报告反馈
+集成测试。Agent 三类基础 Prompt 已改为启动期文件配置，当前采用重启生效和人工维护的
+`promptVersion`，不提前引入 Nacos、热更新或 Prompt 发布平台。
 当前仍缺少正式报告读取 API、SSE 推送/补读前端链路、Worker 进程崩溃与模型故障的完整演练，
 不能把单次 Worker smoke 或评测 observation 当作简历效果指标。
 
 MinIO attachment work remains deferred until the DiagnosisTask/Outbox/Worker
 contract is stable; the next active backend slice is formal report reading plus
 TaskEvent SSE, followed by repeatable Worker recovery tests and fixed-dataset evaluation.
+
+### Immediate Backend Goal: Formal Diagnosis Report Read API
+
+Implement `GET /api/v1/diagnosis-tasks/{taskId}/report` before adding SSE:
+
+1. add a typed, immutable report read model and PostgreSQL repository query;
+2. authorize through the existing task owner/admin boundary;
+3. return business and technical summaries, partial/missing-evidence state,
+   model/Prompt trace metadata, timestamps, and ordered report evidence claims;
+4. expose evidence identity, source type, source reference, support type, and
+   truncation/validity metadata, but keep raw evidence content behind the later
+   dedicated evidence endpoint;
+5. return `409` when the task exists but no report can currently be read, while
+   preserving `404` for a missing task and `403` for an unauthorized actor;
+6. update `api/openapi.yaml`, `docs/design/openapi.json`, repository integration
+   tests, service authorization tests, and HTTP contract tests together.
+
+Acceptance: a task owner and admin can read the same committed report generated
+by the Worker; another analyst cannot; pending/running/failed/cancelled tasks do
+not fabricate an empty report; malformed stored summary JSON fails explicitly;
+the endpoint performs a bounded query without returning Prompt text, raw model
+reasoning, raw SQL, credentials, or complete evidence snapshots.
+
+After this query contract is stable, add `text/event-stream` content negotiation
+to the existing task-events route. SSE must replay PostgreSQL TaskEvents from
+`Last-Event-ID`/`afterSeq`, emit heartbeats, preserve the existing JSON history
+API, and never treat browser disconnect as task cancellation. Redis may wake a
+stream but cannot become the event source of truth.
 
 ## Target Milestones, Not Yet Implemented
 

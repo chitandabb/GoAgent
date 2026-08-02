@@ -72,6 +72,15 @@ func TestBuildAgentRuntimeRejectsInvalidSkillPackage(t *testing.T) {
 	}
 }
 
+func TestBuildAgentRuntimeRejectsMissingPromptFile(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.Agent.SystemPromptFile = filepath.Join(t.TempDir(), "missing.md")
+	_, err := buildAgentRuntime(context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{})
+	if err == nil {
+		t.Fatal("buildAgentRuntime accepted missing Prompt file")
+	}
+}
+
 func TestBuildAgentRuntimeDegradesWhenGitHubMCPIsUnavailable(t *testing.T) {
 	cfg := testAgentConfig()
 	cfg.GitHubMCP.Enabled = true
@@ -156,8 +165,15 @@ func TestAgentRuntimeCloseReleasesMCP(t *testing.T) {
 }
 
 func testAgentConfig() config.Config {
+	configRoot := filepath.Join("..", "..", "config")
 	return config.Config{
-		Agent:  config.AgentConfig{SkillsDirectory: filepath.Join("..", "..", "config", "skills")},
+		Agent: config.AgentConfig{
+			SkillsDirectory:    filepath.Join(configRoot, "skills"),
+			PromptVersion:      "diagnosis-test-v1",
+			SystemPromptFile:   filepath.Join(configRoot, "prompts", "diagnosis-system.md"),
+			BaselinePromptFile: filepath.Join(configRoot, "prompts", "evaluation-baseline.md"),
+			ReportContractFile: filepath.Join(configRoot, "prompts", "report-contract.md"),
+		},
 		Models: config.ModelsConfig{Chat: config.ChatModelConfig{Enabled: true}},
 	}
 }

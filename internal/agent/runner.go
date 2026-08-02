@@ -88,6 +88,8 @@ type RunnerConfig struct {
 	ChatModel             model.ToolCallingChatModel
 	ToolCatalog           *ToolCatalog
 	SkillRuntime          *NativeSkillRuntime
+	SystemInstruction     string
+	BaselineInstruction   string
 	Mode                  RunnerMode
 	GitHubArgumentRewrite ArgumentRewriter
 	Logger                *zap.Logger
@@ -104,6 +106,8 @@ type Runner struct {
 	toolProvider          AgentToolProvider
 	mode                  RunnerMode
 	skillRuntime          *NativeSkillRuntime
+	systemInstruction     string
+	baselineInstruction   string
 	toolAuthorization     *ToolAuthorizationMiddleware
 	githubArgumentRewrite ArgumentRewriter
 	log                   *zap.Logger
@@ -115,6 +119,9 @@ type Runner struct {
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.ChatModel == nil || cfg.ToolCatalog == nil || cfg.SkillRuntime == nil || cfg.Logger == nil {
 		return nil, errors.New("runner model, catalog, Skill runtime, and logger are required")
+	}
+	if strings.TrimSpace(cfg.SystemInstruction) == "" || strings.TrimSpace(cfg.BaselineInstruction) == "" {
+		return nil, errors.New("runner system and baseline instructions are required")
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = RunnerModeExperiment
@@ -151,7 +158,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	return &Runner{
 		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
 		toolProvider: toolProvider, mode: cfg.Mode,
-		skillRuntime: cfg.SkillRuntime, toolAuthorization: authorization,
+		skillRuntime:          cfg.SkillRuntime,
+		systemInstruction:     strings.TrimSpace(cfg.SystemInstruction),
+		baselineInstruction:   strings.TrimSpace(cfg.BaselineInstruction),
+		toolAuthorization:     authorization,
 		githubArgumentRewrite: cfg.GitHubArgumentRewrite, log: cfg.Logger,
 		maxIterations: cfg.MaxIterations, timeout: cfg.Timeout,
 		maxToolResultBytes: cfg.MaxToolResultBytes,
@@ -236,9 +246,9 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
 
 	handlers := []adk.ChatModelAgentMiddleware{r.toolAuthorization}
-	instruction := buildBaselineAgentInstruction(result.SkillID, scope)
+	instruction := buildBaselineAgentInstruction(r.baselineInstruction, result.SkillID, scope)
 	if r.mode == RunnerModeExperiment {
-		instruction = buildAgentInstruction(result.SkillID, entryInstruction, scope)
+		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction, scope)
 		handlers = append(handlers, r.skillRuntime.Middleware)
 	}
 	agentInstance, buildErr := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
@@ -344,9 +354,8 @@ func (r *Runner) entrySkill(request RunRequest, scope TaskScope) (SkillID, strin
 	return entry, reason, nil
 }
 
-func buildAgentInstruction(entry SkillID, skillContent string, scope TaskScope) string {
-	instruction := `你是 MESGuard 工业软件分析辅助 Agent。你只能使用本次运行实际提供的只读工具，不得声称执行未提供的工具、修改 ERP/MES/代码或获得隐藏凭证。Skill 是调查指南，不授予权限。引用工具证据时区分事实、推断和待验证项；证据不足必须明确说明。` +
-		"\n\n本次入口 Skill 已由应用根据页面和任务上下文确定，不要重复加载它。需要扩展调查时，可在同一 Agent 循环中通过 skill 工具按需加载其他 Skill。" +
+func buildAgentInstruction(baseInstruction string, entry SkillID, skillContent string, scope TaskScope) string {
+	instruction := strings.TrimSpace(baseInstruction) +
 		"\n\n<entry_skill name=\"" + string(entry) + "\">\n" + strings.TrimSpace(skillContent) + "\n</entry_skill>"
 	if sources := scope.DataSources(); len(sources) > 0 {
 		instruction += "\n\n<authorized_data_sources>\n"
@@ -364,9 +373,9 @@ func buildAgentInstruction(entry SkillID, skillContent string, scope TaskScope) 
 	return instruction
 }
 
-func buildBaselineAgentInstruction(entry SkillID, scope TaskScope) string {
-	instruction := `你是 MESGuard 工业软件分析辅助 Agent。当前运行是评测 baseline：应用一次性提供本角色和任务类型允许的只读业务 Tool Schema，不启用 Skill Middleware 或 Skill 渐进式读取。你只能使用实际提供的只读工具，不得声称执行未提供的工具、修改 ERP/MES/代码或获得隐藏凭证。引用工具证据时区分事实、推断和待验证项；证据不足必须明确说明。` +
-		"\n\n本次入口任务已由应用根据页面和任务上下文确定：" + string(entry) + "。请直接完成用户问题，不要尝试调用 Skill 工具。"
+func buildBaselineAgentInstruction(baseInstruction string, entry SkillID, scope TaskScope) string {
+	instruction := strings.TrimSpace(baseInstruction) +
+		"\n\n<entry_task>" + string(entry) + "</entry_task>"
 	if sources := scope.DataSources(); len(sources) > 0 {
 		instruction += "\n\n<authorized_data_sources>\n"
 		for _, source := range sources {

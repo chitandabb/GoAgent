@@ -26,9 +26,6 @@ const (
 	evidenceNodeReport            = "report"
 	evidenceNodePartialReport     = "partial_report"
 	evidenceGraphName             = "mesguard-evidence-gate"
-	reportContractInstruction     = `请在完成必要的只读调查后，仅输出一个 JSON 对象，不要使用 Markdown 代码块或附加说明。JSON 必须严格符合以下结构：
-{"conclusionStatus":"conclusive|probable|inconclusive","riskLevel":"low|medium|high","conclusion":"结论","businessSummary":"面向业务人员的摘要","technicalSummary":"面向技术人员的摘要","evidence":[{"claim":"被证据支持或反驳的判断","sourceTool":"本次成功执行的工具名","sourceRef":"工具结果中的 evidenceRef，必须原样引用","supportType":"supports|contradicts|context"}],"limitations":[],"confidence":"high|medium|low"}
-不得把猜测写成证据；sourceTool 必须是本次任务中真实成功执行的工具，sourceRef 必须来自对应工具结果中的 evidenceRef；证据不足时使用 inconclusive、low confidence，并在 limitations 中写清缺口。`
 )
 
 var (
@@ -41,13 +38,14 @@ type AgentInvoker interface {
 }
 
 type EvidenceOrchestratorConfig struct {
-	Runner           AgentInvoker
-	Logger           *zap.Logger
-	MaxAgentRuns     int
-	MaxToolCalls     int
-	MaxEvidenceItems int
-	MaxTotalTokens   int
-	Timeout          time.Duration
+	Runner                    AgentInvoker
+	Logger                    *zap.Logger
+	MaxAgentRuns              int
+	MaxToolCalls              int
+	MaxEvidenceItems          int
+	MaxTotalTokens            int
+	Timeout                   time.Duration
+	ReportContractInstruction string
 }
 
 type InvestigationStepKind string
@@ -86,37 +84,39 @@ type OrchestrationResult struct {
 }
 
 type EvidenceOrchestrator struct {
-	runner           AgentInvoker
-	log              *zap.Logger
-	maxAgentRuns     int
-	maxToolCalls     int
-	maxEvidenceItems int
-	maxTotalTokens   int
-	timeout          time.Duration
-	graph            compose.Runnable[*evidenceState, *evidenceState]
+	runner                    AgentInvoker
+	log                       *zap.Logger
+	maxAgentRuns              int
+	maxToolCalls              int
+	maxEvidenceItems          int
+	maxTotalTokens            int
+	timeout                   time.Duration
+	reportContractInstruction string
+	graph                     compose.Runnable[*evidenceState, *evidenceState]
 }
 
 type evidenceState struct {
-	request          RunRequest
-	budget           *executionBudget
-	agentRuns        int
-	draft            string
-	parsedReport     *StructuredReport
-	parseError       error
-	report           StructuredReport
-	partial          bool
-	gaps             []string
-	nextNode         string
-	toolExecutions   []ToolExecution
-	evidenceItems    []EvidenceItem
-	usage            ModelUsage
-	allowedTools     []string
-	selectedSkill    SkillID
-	stopReason       string
-	executedSkills   []SkillID
-	investigation    []InvestigationStep
-	lastAgentFailure string
-	maxEvidenceItems int
+	request                   RunRequest
+	budget                    *executionBudget
+	agentRuns                 int
+	draft                     string
+	parsedReport              *StructuredReport
+	parseError                error
+	report                    StructuredReport
+	partial                   bool
+	gaps                      []string
+	nextNode                  string
+	toolExecutions            []ToolExecution
+	evidenceItems             []EvidenceItem
+	usage                     ModelUsage
+	allowedTools              []string
+	selectedSkill             SkillID
+	stopReason                string
+	executedSkills            []SkillID
+	investigation             []InvestigationStep
+	lastAgentFailure          string
+	maxEvidenceItems          int
+	reportContractInstruction string
 }
 
 func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig) (*EvidenceOrchestrator, error) {
@@ -131,7 +131,8 @@ func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig
 		runner: cfg.Runner, log: cfg.Logger,
 		maxAgentRuns: cfg.MaxAgentRuns, maxToolCalls: cfg.MaxToolCalls,
 		maxEvidenceItems: cfg.MaxEvidenceItems, maxTotalTokens: cfg.MaxTotalTokens,
-		timeout: cfg.Timeout,
+		timeout:                   cfg.Timeout,
+		reportContractInstruction: strings.TrimSpace(cfg.ReportContractInstruction),
 	}
 	runnable, err := orchestrator.buildGraph(ctx)
 	if err != nil {
@@ -160,6 +161,9 @@ func applyEvidenceDefaults(cfg *EvidenceOrchestratorConfig) {
 }
 
 func validateEvidenceConfig(cfg EvidenceOrchestratorConfig) error {
+	if strings.TrimSpace(cfg.ReportContractInstruction) == "" {
+		return errors.New("evidence report contract instruction is required")
+	}
 	if cfg.MaxAgentRuns < 1 || cfg.MaxAgentRuns > 4 {
 		return errors.New("evidence max Agent runs must be between 1 and 4")
 	}
@@ -233,7 +237,8 @@ func (o *EvidenceOrchestrator) Invoke(ctx context.Context, request RunRequest) (
 	}
 	state := &evidenceState{
 		request: request, maxEvidenceItems: o.maxEvidenceItems,
-		budget: newExecutionBudget(o.maxToolCalls, o.maxTotalTokens),
+		budget:                    newExecutionBudget(o.maxToolCalls, o.maxTotalTokens),
+		reportContractInstruction: o.reportContractInstruction,
 	}
 	taskCtx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -348,13 +353,13 @@ func (o *EvidenceOrchestrator) finishPartialReport(_ context.Context, state *evi
 
 func (s *evidenceState) nextAgentQuery() string {
 	if s.agentRuns == 1 {
-		return strings.TrimSpace(s.request.UserQuery) + "\n\n" + reportContractInstruction
+		return strings.TrimSpace(s.request.UserQuery) + "\n\n" + s.reportContractInstruction
 	}
 	draft := truncatePromptValue(s.draft, defaultEvidenceMaxPromptBytes)
 	return strings.TrimSpace(s.request.UserQuery) +
 		"\n\n上一轮报告未通过 Evidence Gate。请只针对以下缺口补充必要调查，并重新输出完整 JSON 报告：\n- " +
 		strings.Join(s.gaps, "\n- ") +
-		"\n\n<previous_report>\n" + draft + "\n</previous_report>\n\n" + reportContractInstruction
+		"\n\n<previous_report>\n" + draft + "\n</previous_report>\n\n" + s.reportContractInstruction
 }
 
 func (s *evidenceState) mergeRunResult(result RunResult) {

@@ -27,6 +27,8 @@ func TestDefaultRunnerAuthorizesObjectDefinitionToolByScope(t *testing.T) {
 	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
 		SkillRoot:            filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction:    runnerTestSystemInstruction,
+		BaselineInstruction:  runnerTestBaselineInstruction,
 		SQLObjectDefinitions: sqlTool, SchemaCatalog: mustSchemaCatalogToolForTest(t),
 		ReadonlyQuery: readonlyQuery, Logger: zap.NewNop(),
 	})
@@ -83,7 +85,7 @@ func mustSchemaCatalogToolForTest(t *testing.T) tool.InvokableTool {
 
 func TestAgentInstructionDisclosesUnavailableSQLDependency(t *testing.T) {
 	scope := runnerTestScope(t, ToolDependencyExternalCase)
-	instruction := buildAgentInstruction(SkillSQLInvestigation, "test SQL Skill", scope)
+	instruction := buildAgentInstruction(runnerTestSystemInstruction, SkillSQLInvestigation, "test SQL Skill", scope)
 	if !strings.Contains(instruction, sqlServerUnavailableMessage) {
 		t.Fatalf("instruction did not disclose SQL Server degradation: %s", instruction)
 	}
