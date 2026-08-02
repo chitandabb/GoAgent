@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	defaultAgentMaxIterations   = 12
-	defaultAgentTimeout         = 90 * time.Second
-	defaultMaxToolResultBytes   = 32 * 1024
-	ToolSkill                   = "skill"
-	githubUnavailableMessage    = "GitHub MCP 工具暂时不可用"
-	sqlServerUnavailableMessage = "SQL Server 调查工具暂时不可用"
+	defaultAgentMaxIterations      = 12
+	defaultAgentTimeout            = 90 * time.Second
+	defaultMaxToolResultBytes      = 32 * 1024
+	ToolSkill                      = "skill"
+	githubUnavailableMessage       = "GitHub MCP 工具暂时不可用"
+	githubCodeSearchPendingMessage = "GitHub Code Search 返回不完整；当前搜索不能证明没有匹配代码，也不能据此判断仓库索引状态。已知路径或提交可继续通过仓库树、文件和提交读取核验。"
+	sqlServerUnavailableMessage    = "SQL Server 调查工具暂时不可用"
 )
 
 var (
@@ -54,6 +55,7 @@ type ToolExecution struct {
 	Name       string `json:"name"`
 	DurationMS int64  `json:"durationMs"`
 	Succeeded  bool   `json:"succeeded"`
+	Degraded   bool   `json:"degraded,omitempty"`
 	Error      string `json:"error,omitempty"`
 	EvidenceID string `json:"evidenceId,omitempty"`
 }
@@ -253,6 +255,9 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if strings.TrimSpace(result.Answer) == "" {
 		return result, errors.New("Agent returned no final answer")
 	}
+	if trace.codeSearchIndexPendingSnapshot() && !strings.Contains(result.Answer, githubCodeSearchPendingMessage) {
+		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubCodeSearchPendingMessage
+	}
 	if !scope.DependencyAvailable(ToolDependencyGitHubMCP) &&
 		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
 		!strings.Contains(result.Answer, githubUnavailableMessage) {
@@ -327,10 +332,11 @@ func rejectUnknownTool(_ context.Context, name, _ string) (string, error) {
 }
 
 type executionTrace struct {
-	mu           sync.Mutex
-	entries      []ToolExecution
-	evidence     []EvidenceItem
-	loadedSkills []SkillID
+	mu                     sync.Mutex
+	entries                []ToolExecution
+	evidence               []EvidenceItem
+	loadedSkills           []SkillID
+	codeSearchIndexPending bool
 }
 
 type traceContextKey struct{}
@@ -387,6 +393,24 @@ func (t *executionTrace) evidenceSnapshot() []EvidenceItem {
 	return append([]EvidenceItem(nil), t.evidence...)
 }
 
+func (t *executionTrace) markCodeSearchIndexPending() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.codeSearchIndexPending = true
+}
+
+func (t *executionTrace) codeSearchIndexPendingSnapshot() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.codeSearchIndexPending
+}
+
 func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 	return compose.ToolMiddleware{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
@@ -398,6 +422,11 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 			}
 			startedAt := time.Now()
 			output, err := next(ctx, input)
+			codeSearchIndexPending := err == nil && output != nil &&
+				isGitHubCodeSearchIndexPendingResult(input.Name, output.Result)
+			if codeSearchIndexPending {
+				traceFromContext(ctx).markCodeSearchIndexPending()
+			}
 			outputTruncated := false
 			if output != nil && len(output.Result) > maxResultBytes {
 				outputTruncated = true
@@ -412,7 +441,8 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 				}
 			}
 			entry := ToolExecution{
-				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(), Succeeded: err == nil,
+				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(),
+				Succeeded: err == nil, Degraded: codeSearchIndexPending,
 			}
 			if err != nil {
 				entry.Error = "tool execution failed"

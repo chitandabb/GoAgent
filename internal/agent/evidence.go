@@ -44,7 +44,7 @@ type EvidenceItem struct {
 // 混入诊断证据。sourceRef 同时作为模型报告中可引用的稳定运行时标识。
 func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceItem, bool) {
 	sourceType, ok := evidenceSourceTypeForTool(toolName)
-	if !ok || strings.TrimSpace(snapshot) == "" {
+	if !ok || strings.TrimSpace(snapshot) == "" || isGitHubCodeSearchIndexPendingResult(toolName, snapshot) {
 		return EvidenceItem{}, false
 	}
 
@@ -64,6 +64,20 @@ func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceIte
 		Truncated:   truncated || toolResultTruncated(snapshot),
 		Location:    "tool-output",
 	}, true
+}
+
+func isGitHubCodeSearchIndexPendingResult(toolName, snapshot string) bool {
+	if toolName != "search_code" {
+		return false
+	}
+	var payload struct {
+		Status            string `json:"status"`
+		IncompleteResults bool   `json:"incomplete_results"`
+	}
+	if err := json.Unmarshal([]byte(snapshot), &payload); err != nil {
+		return false
+	}
+	return payload.Status == "index_pending" && payload.IncompleteResults
 }
 
 func evidenceSourceTypeForTool(toolName string) (EvidenceSourceType, bool) {

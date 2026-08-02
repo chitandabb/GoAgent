@@ -1,4 +1,4 @@
-// Package githubmcp 封装官方 GitHub MCP Server 的只读连接和仓库范围约束。
+// Package githubmcp 封装官方 GitHub MCP Server 的只读连接和代码参数策略。
 package githubmcp
 
 import (
@@ -80,25 +80,38 @@ func Connect(ctx context.Context, cfg config.GitHubMCPConfig, log *zap.Logger) (
 		cleanup()
 		return nil, fmt.Errorf("load github MCP tools: %w", err)
 	}
-	if err = verifyTools(ctx, tools); err != nil {
+	wrappedTools := make([]tool.BaseTool, 0, len(tools))
+	for _, current := range tools {
+		wrapped, wrapErr := wrapGitHubTool(ctx, current)
+		if wrapErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("wrap github MCP tool: %w", wrapErr)
+		}
+		wrappedTools = append(wrappedTools, wrapped)
+	}
+	if err = verifyTools(ctx, wrappedTools); err != nil {
 		cleanup()
 		return nil, err
 	}
 	log.Info("GitHub MCP connected in read-only mode",
 		zap.String("endpoint", cfg.Endpoint),
-		zap.String("repository", cfg.Owner+"/"+cfg.Repository),
-		zap.String("ref", cfg.Ref),
-		zap.Int("tools", len(tools)),
+		zap.Int("tools", len(wrappedTools)),
 	)
-	return &Connection{Tools: tools, cli: cli}, nil
+	return &Connection{Tools: wrappedTools, cli: cli}, nil
 }
 
 func verifyTools(ctx context.Context, tools []tool.BaseTool) error {
 	found := make(map[string]struct{}, len(tools))
 	for _, current := range tools {
+		if current == nil {
+			return errors.New("github MCP returned a nil tool")
+		}
 		info, err := current.Info(ctx)
 		if err != nil {
 			return fmt.Errorf("read github MCP tool info: %w", err)
+		}
+		if info == nil || info.Name == "" {
+			return errors.New("github MCP returned a tool without metadata")
 		}
 		found[info.Name] = struct{}{}
 	}

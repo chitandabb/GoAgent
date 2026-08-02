@@ -157,6 +157,55 @@ Catalog 的 `queryable=true` 只是应用层授权，不能授予数据库权限
 
 未来 `log-investigation` Skill 可以使用 `search_logs`、`get_log_context` 两类抽象 Tool。管理员配置日志源、时间窗口上限、索引/目录白名单和脱敏规则；模型不能提交服务器凭证、UNC 路径或任意正则扫描整台服务器。
 
+## 代码调查与 GitHub MCP
+
+代码调查采用分层的“候选发现 + 目录清单 + 版本固定读取”只读链路，不把 GitHub Code Search 当作完整、稳定的代码索引。`search_repositories` 用于发现当前凭据可见的仓库，`search_code` 负责低成本定位候选路径；如果 Code Search 返回不完整且仓库已经确定，则使用 `get_repository_tree` 读取仓库树，优先通过 `tree_sha` 固定版本、`path_filter` 缩小目录，并分别检查 `upstream_truncated` 和 `candidate_limit_reached` 后只挑选少量文件。最终代码结论必须回到 `get_file_contents`，并记录实际 owner、repository、Commit SHA、文件路径和行号。需要解释版本变化时，再通过 `list_commits` 和 `get_commit` 固定提交证据。
+
+代码检索的分层边界如下：
+
+~~~text
+Layer 0  search_repositories
+          -> 发现当前凭据可见的仓库
+Layer 1  search_code
+          -> 关键词候选路径；完整结果优先
+Layer 1b get_repository_tree
+          -> Code Search 不完整时按目录前缀取得候选文件清单
+Layer 2  get_file_contents
+          -> 读取少量文件并固定 Commit SHA，形成代码证据
+Layer 3  本地 shallow clone + rg/git grep
+          -> 当前未实现，仅在远端候选链路经稳定性评测证明不足后评估
+~~~
+
+树目录不是无边界的“全仓库索引”：Git Trees API 的递归结果可能被标记为上游截断，应用侧包装会将正常结果整理为 `status=candidate_paths`，只保留 `blob` 文件、排除常见构建/依赖目录并限制候选数量，同时分别通过 `upstream_truncated`、`candidate_limit_reached`、`filtered_count` 和 `omitted_count` 表达上游截断、候选上限、主动过滤和候选溢出。因此 Skill 要求优先传入窄 `path_filter`，不要把整棵大仓库树直接交给模型。Layer 3 未来若启用，搜索结果必须带本地快照 Commit SHA、采集时间和过期标记，并与远端证据区分。
+
+GitHub REST Search API 的 `incomplete_results=true` 表示查询可能超过服务端时间限制、结果可能不完整；它不是“仓库尚未完成索引”的权威状态，也不能证明 Token 无效，更不能证明没有匹配代码。MESGuard 对该响应最多做三次短间隔重试；仍不完整时返回现有的 `status=index_pending` 机器状态。这个状态在应用语义上表示 `search_degraded`，不生成代码 `EvidenceItem`，最终报告必须保留搜索不完整的限制。
+
+已知路径或已知提交应优先走确定性证据链：
+
+~~~text
+search_repositories
+  -> list_commits
+  -> get_commit
+  -> get_file_contents(固定 Commit SHA)
+  -> 代码证据（文件、符号或行段）
+~~~
+
+这条链路可以可靠支持“某个已知文件/提交中有什么”或“某次变更改了什么”，但不是任意关键词代码搜索的等价替代。若候选路径未知且 Code Search 多次不完整，报告只能说明搜索依赖不可用或结果不完整，不能下“代码中不存在”的结论。
+
+2026-08-01 的真实只读 smoke 已验证私有仓库 `chitandabb/mesguard-csharp-demo`：仓库发现、提交列表、提交详情、固定 SHA 读取 `src/MesGuard.CaseService/TicketSearchService.cs` 均成功；同一仓库的 `TicketSearchService` 查询本次返回 3 条完整结果。此前相同目标的多次查询曾返回 `incomplete_results=true`，因此这组结果只能证明当前请求成功，不能承诺 GitHub Code Search 永远完整可用。
+
+参考：[GitHub REST Search API](https://docs.github.com/en/rest/search/search)、[About GitHub Code Search](https://docs.github.com/en/search-github/github-code-search/about-github-code-search)、[Git Trees API](https://docs.github.com/en/rest/git/trees)、[GitHub MCP Server](https://github.com/github/github-mcp-server)。
+
+### 分层检索评测
+
+当前提供一个不依赖模型的评测命令：
+
+~~~text
+go run ./cmd/mesguard-github-search-eval -cases testdata/github-code-search-v1.jsonl
+~~~
+
+命令顺序执行 Code Search、树候选和固定 SHA 文件读取，最多接受 20 条样本；凭据只从现有 `.env`/配置读取，不输出 Token、不写仓库、不创建本地缓存。输出中的 `fallbackRecoveryRate` 只有在实际观察到 `searchStatus=incomplete` 的样本时才有分母；没有不完整样本时必须保留为未测量，不能解释为“fallback 失败”。评测器会保留每条样本的多个阶段错误；取消时停止新样本，并输出已经完成样本的部分汇总，`requestedCases` 与 `cases` 分别表示请求数和已完成数。
+
 ## 可扩展 Agent 编排
 
 最终使用“单 Agent 内循环 + 薄外层 Graph”：
@@ -191,7 +240,7 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 
 Web Search 不默认获得工单原文。进入 `web-research` 前必须把公司名、客户名、工单号、内部地址、SQL/日志原文和代码片段移除，只允许搜索通用产品概念、公开错误码和公开依赖资料。
 
-代码调查不维护应用内逐仓库授权表。fine-grained PAT 或 GitHub App Installation 决定实际可访问私有仓库，MCP 配置中的 `allowedOwners` 只限制公司组织/演示账号范围。`search_repositories` 用于在该范围内发现候选仓库；最终证据记录实际仓库、Commit SHA、文件和行号。当前不开放公司范围外的公共代码研究，未来如有 Coding Agent 需求，应作为独立 Skill 和授权范围启用。
+代码调查不维护应用内逐仓库、组织或分支授权表。fine-grained PAT 或 GitHub App Installation 决定 GitHub 返回的可见范围；`search_repositories` 用于按查询发现候选仓库，后续 Tool 直接使用选中的 owner/repo/ref/sha。MESGuard 只保留代码相关的只读 Tool，不把凭据在 GitHub 侧拥有的范围缩窄为单仓库。最终证据记录实际仓库、Commit SHA、文件和行号。
 
 ## 前端与 API 交接
 

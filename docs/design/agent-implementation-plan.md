@@ -13,14 +13,15 @@
 
 - Eino `v0.9.13` 和 StepFun `step-3.7-flash` Tool Calling；
 - `ticket-diagnosis`、`code-investigation` 两个原生 `SKILL.md` 包及按需 references；
-- `read_external_case` 和四个只读 GitHub MCP Tool；
-- Tool 参数校验、超时、结果截断、调用轨迹和 Provider Token usage；
+- `read_external_case` 和六个只读 GitHub MCP Tool；
+- Tool 参数校验、超时、结果截断、调用轨迹和 Provider Token usage；GitHub Code Search
+  返回不完整结果时的有限重试与显式降级状态；
 - 每次 Run 独立创建的 `adk.ChatModelAgent`，入口 Skill 由任务上下文确定；
 - `TaskScope -> ToolCatalog -> BeforeAgent` 的运行时 Tool 授权；
 - 同一内循环中的工单读取、Skill 渐进加载和 GitHub 代码调查；
 - 模型、正式 Runner 和评测烟雾命令。
 
-真实 StepFun 工单烟雾运行已经证明模型协议、Tool Call 和 usage 聚合可用，但没有证明完整诊断产品链路，也不能作为简历指标。GitHub MCP 仍缺真实 PAT 与私有演示仓库联调。
+真实 StepFun 工单烟雾运行已经证明模型协议、Tool Call 和 usage 聚合可用，但没有证明完整诊断产品链路，也不能作为简历指标。GitHub MCP 的用户凭据握手、六个工具加载、仓库搜索、仓库树候选读取、按 Commit SHA 文件读取和提交追溯已经验证；`search_code` 返回不完整结果时会通过有限重试和 `index_pending` 显式降级，不能据此推断索引状态或无匹配。
 
 P0 已于 2026-07-30 验收：隔离的 ADK `ChatModelAgent` POC 在不替换现有 Runner 的前提下，完成了原生 Skill Middleware 渐进加载、同一 ReAct 循环中的业务 Tool 调用、非流式/流式事件、Context 取消、最大迭代限制和 Provider usage 聚合。真实 StepFun 非流式与流式运行均按 `skill -> read_external_case` 顺序完成三次模型调用；单次烟雾数据只证明兼容性，不作为简历效果指标。
 
@@ -132,7 +133,7 @@ config/skills/<skill-id>/
 
 验收：一条工单请求可在同一个 Agent 循环内先读工单、再查代码；GitHub MCP 不可用时保留已有证据并返回明确限制；不会额外调用 Handoff Tool。
 
-实际验收：确定性模型按 `read_external_case -> skill(code-investigation) -> search_code -> final` 完成一次运行；测试同时覆盖 TaskScope 缺失、GitHub 降级、Tool Schema 白名单、32 KiB 截断、Provider usage、Context 取消、最大迭代和并发隔离。2026-07-31 的真实 StepFun 正式 Runner 烟雾运行调用 `read_external_case`，两次模型调用共报告 4397 Tokens（其中 cached 1600），约 10.37 秒完成。旧 Handoff Tool、Dispatcher、每 Skill Executor、Registry 与兼容 Loader 已删除。真实 GitHub PAT 联调和效果指标仍留到 P5。
+实际验收：确定性模型按 `read_external_case -> skill(code-investigation) -> search_code -> final` 完成一次运行；测试同时覆盖 TaskScope 缺失、GitHub 降级、Tool Schema 白名单、32 KiB 截断、Provider usage、Context 取消、最大迭代和并发隔离。2026-07-31 的真实 StepFun 正式 Runner 烟雾运行调用 `read_external_case`，两次模型调用共报告 4397 Tokens（其中 cached 1600），约 10.37 秒完成。旧 Handoff Tool、Dispatcher、每 Skill Executor、Registry 与兼容 Loader 已删除。2026-08-01 的真实只读 smoke 又验证了私有 C# 仓库的仓库发现、提交追溯、固定 SHA 文件读取和一次完整 `search_code` 返回；仍待完成的是跨仓库、跨查询形态的 Code Search 稳定性评测与 P5 完整效果评测。
 
 ### P4：增加薄外层 Graph 与 Evidence Gate
 
@@ -152,7 +153,7 @@ Token 上限按供应商 usage 在每次模型响应后结算：达到阈值后�
 
 ### P5：真实评测与第一条简历闭环
 
-状态：**评测契约与统计 CLI 已完成；真实数据集运行待补**。
+状态：**评测契约、统计 CLI 和 GitHub 工具级真实评测切片已完成；完整 Agent paired 数据集待补**。
 
 目标：用固定数据集得到可复现指标，而不是把样例统计或静态 Schema 字节数写进简历。
 
@@ -163,7 +164,7 @@ Token 上限按供应商 usage 在每次模型响应后结算：达到阈值后�
 - 相同模型、温度、问题集、最大迭代和输入上下文；
 - Tool 选择准确率、越权调用率、任务完成率、输入 Token、TTFT、总耗时和失败类型。
 
-P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的请求。开发阶段先用 4 至 5 个案例打通链路，P5 前扩展为约 10 至 12 个不同根因、每个 3 至 5 种业务问法，总计约 40 至 50 条固定请求。C# 演示仓库、SQL Server 合成工单、数据库证据和 Git Commit 共用同一组故障场景。
+P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的请求。代码调查额外比较完整 `search_code`、不完整后 `get_repository_tree` 候选链路和已知路径直接读取的召回、输入 Token、耗时与失败类型；不把本地 clone 方案的假设收益写成指标。开发阶段先用 4 至 5 个案例打通链路，P5 前扩展为约 10 至 12 个不同根因、每个 3 至 5 种业务问法，总计约 40 至 50 条固定请求。C# 演示仓库、SQL Server 合成工单、数据库证据和 Git Commit 共用同一组故障场景。
 
 每个案例标注 `expected_tools`、`forbidden_tools`、`required_evidence`、`expected_root_cause` 和 `acceptable_limits`。Tool、越权、Token 和 Evidence ID 由代码确定性评分，语义结论由人工复核；不同供应商的 LLM Judge 只作辅助，并记录 Judge 模型、版本、Rubric 以及与人工评分的一致率。所有失败样本必须保留。
 
@@ -173,6 +174,20 @@ P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的�
 `cmd/mesguard-agent-eval` 配对统计命令。仓库中的 `dev-v1` 两案例样例只验证
 版本、配对、失败类型、证据覆盖和 Token 差异计算；在 GitHub MCP、SQL 调查
 Tool 和固定合成故障集准备好前，不把样例结果写进简历。
+
+GitHub 代码调查另有不依赖模型的
+`cmd/mesguard-github-search-eval` 命令，使用
+`testdata/github-code-search-v1.jsonl` 顺序执行 `search_code`、固定
+`tree_sha` 的 `get_repository_tree` 和固定 SHA 的 `get_file_contents`，用于
+区分 Search 完整率、候选路径召回、树候选不完整、已知路径文件核验和 fallback
+恢复率。2026-08-02 的两条真实样本中，Search 完整率、两层路径召回和文件核验均为
+2/2；没有观察到 `incomplete_results`，因此不把 fallback 恢复率写成指标，也不据此
+决定实现本地 clone/search。
+
+评测器现在同时记录 `errorType` 和完整的 `errorTypes`，取消时停止后续样本并返回
+带 `requestedCases`/`cases` 的部分汇总；仓库树候选响应分别记录上游截断、候选上限、
+应用过滤和候选溢出，避免把主动过滤误判为远端截断。重试包装对非法 JSON、负延迟和
+不足的延迟配置 fail-closed，文件读取参数拒绝超长路径及 `sha`/`ref` 二义性。
 
 ### P6：实现 sql-investigation（进行中，运行时证据切片已完成）
 
@@ -247,7 +262,7 @@ P3 已完成以下删除：
 - 一个统一 Agent 工作台承载知识会话和诊断会话，后端依据卷宗而非模型猜测入口类型；
 - 一个诊断会话固定一个主工单，同一工单可以有多个独立会话；绑定工单不自动运行；
 - 知识会话选择工单时打开新诊断会话，原会话保留并可继续；
-- GitHub Token/GitHub App 决定具体仓库权限，`allowedOwners` 只限制组织范围，不建设逐仓库管理员 ACL；
-- 多仓库发现增加只读 `search_repositories`，公共代码研究不属于当前 `code-investigation`；
+- GitHub Token/GitHub App 决定仓库、分支和私有代码的可见范围，不建设应用内逐仓库、组织或分支 ACL；
+- `code-investigation` 通过只读 `search_repositories` 发现当前凭据可见的候选仓库，必要时用 `search_code` 或 `get_repository_tree` 缩小候选，再读取选中的文件和提交；
 - 演示使用 fine-grained PAT，生产预留 GitHub App/服务账号凭证提供器但不在 P0-P5 实现轮换；
 - 私有 C# 演示仓库与 SQL Server 合成数据使用同一组可追溯故障案例。

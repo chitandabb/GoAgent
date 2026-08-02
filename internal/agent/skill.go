@@ -27,7 +27,9 @@ const (
 )
 
 var GitHubReadOnlyTools = []string{
+	"search_repositories",
 	"search_code",
+	"get_repository_tree",
 	"get_file_contents",
 	"list_commits",
 	"get_commit",

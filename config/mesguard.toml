@@ -58,9 +58,6 @@ database = 0
 enabled = true
 endpoint = "https://api.githubcopilot.com/mcp/"
 tokenEnv = "MESGUARD_GITHUB_MCP_TOKEN"
-owner = "chitandabb"
-repository = "GoAgent"
-ref = "codex/mesguard-bootstrap"
 timeoutMillis = 30000
 
 [sqlserver]
