@@ -1,0 +1,40 @@
+{
+  "datasetVersion": "tool-selection-v1",
+  "cases": 45,
+  "runs": 90,
+  "pairedCases": 45,
+  "unpairedRuns": 0,
+  "wide": {
+    "runs": 45,
+    "correct": 43,
+    "accuracy": 0.9555555555555556,
+    "invalidSelectionRate": 0,
+    "outOfWhitelistRate": 0,
+    "promptTokens": 136570,
+    "completionTokens": 8262,
+    "totalTokens": 144832,
+    "toolSchemaBytes": 441900,
+    "basePromptTokens": 10210,
+    "toolSchemaPromptTokens": 126360,
+    "averageDurationMillis": 1983.2666666666667,
+    "failedRuns": 0
+  },
+  "filtered": {
+    "runs": 45,
+    "correct": 44,
+    "accuracy": 0.9777777777777777,
+    "invalidSelectionRate": 0,
+    "outOfWhitelistRate": 0,
+    "promptTokens": 78346,
+    "completionTokens": 8237,
+    "totalTokens": 86583,
+    "toolSchemaBytes": 225429,
+    "basePromptTokens": 10210,
+    "toolSchemaPromptTokens": 68136,
+    "averageDurationMillis": 2053.288888888889,
+    "failedRuns": 0
+  },
+  "pairedPromptTokenReduction": 0.42633081936003514,
+  "pairedToolSchemaTokenReduction": 0.4607787274453941,
+  "pairedSchemaByteReduction": 0.48986422267481333
+}

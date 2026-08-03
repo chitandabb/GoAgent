@@ -1,0 +1,15 @@
+{
+  "datasetVersion": "text-to-sql-v1",
+  "cases": 20,
+  "correct": 20,
+  "executionAccuracy": 1,
+  "usage": {
+    "modelCalls": 20,
+    "promptTokens": 12440,
+    "completionTokens": 2825,
+    "totalTokens": 15265,
+    "cachedTokens": 10240,
+    "reasoningTokens": 0
+  },
+  "averageDurationMillis": 1328.45
+}
