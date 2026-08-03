@@ -171,7 +171,7 @@ func TestRunnerUsesOneADKLoopForMultipleSkillsAndTools(t *testing.T) {
 func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.T) {
 	state := &runnerModelState{}
 	runner := newRunnerTest(t, state)
-	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	scope := runnerTestScopeWithCapabilities(t, []ToolCapability{ToolCapabilityCase, ToolCapabilityCode}, ToolDependencyExternalCase)
 	result, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{
 		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
@@ -404,9 +404,24 @@ func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMod
 
 func runnerTestScope(t *testing.T, dependencies ...ToolDependency) TaskScope {
 	t.Helper()
+	capabilities := []ToolCapability{ToolCapabilityCase}
+	for _, dependency := range dependencies {
+		switch dependency {
+		case ToolDependencyGitHubMCP:
+			capabilities = append(capabilities, ToolCapabilityCode)
+		case ToolDependencySQLServer:
+			capabilities = append(capabilities, ToolCapabilitySQL)
+		}
+	}
+	return runnerTestScopeWithCapabilities(t, capabilities, dependencies...)
+}
+
+func runnerTestScopeWithCapabilities(t *testing.T, capabilities []ToolCapability, dependencies ...ToolDependency) TaskScope {
+	t.Helper()
 	scope, err := NewTaskScope(TaskScopeConfig{
 		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
 		DataSources:           []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
+		AllowedCapabilities:   capabilities,
 		AvailableDependencies: dependencies,
 	})
 	if err != nil {

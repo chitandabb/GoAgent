@@ -166,3 +166,25 @@ func TestRequestLoggerIncludesRequestContextFields(t *testing.T) {
 		t.Fatalf("status = %v", fields["status"])
 	}
 }
+
+func TestErrorHandlerLogsFailureAfterResponseStartedWithoutRewritingBody(t *testing.T) {
+	core, observed := observer.New(zap.ErrorLevel)
+	router := gin.New()
+	router.Use(RequestID(), ErrorHandler(zap.New(core)))
+	router.GET("/stream", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("stream-started\n"))
+		_ = c.Error(apperror.Wrap(apperror.CodeInternal, errors.New("database read failed")))
+	})
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if response.Code != http.StatusOK || response.Body.String() != "stream-started\n" {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	entries := observed.FilterMessage("HTTP request failed after response started").All()
+	if len(entries) != 1 || entries[0].ContextMap()["code"] != int64(apperror.CodeInternal) {
+		t.Fatalf("entries=%v", entries)
+	}
+}

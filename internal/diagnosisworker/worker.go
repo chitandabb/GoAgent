@@ -235,7 +235,7 @@ func (w *Worker) renewLease(
 
 func (w *Worker) releaseAndRetry(ctx context.Context, lease diagnosis.TaskLease, cause error) Outcome {
 	if lease.AttemptCount >= w.maxAttempts {
-		return w.failPermanent(ctx, lease, "agent_execution_failed", cause)
+		return w.failPermanent(ctx, lease, diagnosis.TaskFailureAgentExecution, cause)
 	}
 	released, err := w.repository.ReleaseForRetry(
 		ctx, lease, "agent_execution_retry", stableReason(cause), w.clock().UTC(),
@@ -265,7 +265,7 @@ func (w *Worker) handleLostLease(ctx context.Context, taskID uuid.UUID, cause er
 	if err != nil {
 		return retryOutcome(30*time.Second, err)
 	}
-	if isTerminal(status) {
+	if status.IsTerminal() {
 		return Outcome{Action: ActionAck, Reason: "task reached terminal state"}
 	}
 	return retryOutcome(30*time.Second, cause)
@@ -276,14 +276,10 @@ func (w *Worker) finalizeCancellation(ctx context.Context, taskID uuid.UUID) Out
 	if err != nil {
 		return retryOutcome(30*time.Second, err)
 	}
-	if isTerminal(status) {
+	if status.IsTerminal() {
 		return Outcome{Action: ActionAck, Reason: "task cancellation committed"}
 	}
 	return Outcome{Action: ActionRetry, RetryDelay: 30 * time.Second, Reason: "task cancellation raced with execution"}
-}
-
-func isTerminal(status diagnosis.TaskStatus) bool {
-	return status == diagnosis.TaskSucceeded || status == diagnosis.TaskFailed || status == diagnosis.TaskCancelled
 }
 
 func retryDelay(attempt int) time.Duration {

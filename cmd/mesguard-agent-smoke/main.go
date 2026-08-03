@@ -200,6 +200,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			ID: uuid.New(), Role: mesagent.DataSourceRoleCaseSource,
 			SafetyMode: mesagent.DataSourceSafetyReadOnly,
 		}},
+		AllowedCapabilities:   []mesagent.ToolCapability{mesagent.ToolCapabilityCase},
 		AvailableDependencies: []mesagent.ToolDependency{mesagent.ToolDependencyExternalCase},
 	})
 	if err != nil {

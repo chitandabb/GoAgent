@@ -159,6 +159,19 @@ VALUES (?, ?, ?, 'incident', now())`, externalCaseID, dataSourceID, "WORKER-"+uu
 	if state != "succeeded" || reports != 1 || evidence != 1 || links != 1 || steps != 1 || tools != 1 || successEvents != 1 {
 		t.Fatalf("state/counts = %s %d/%d/%d/%d/%d/%d", state, reports, evidence, links, steps, tools, successEvents)
 	}
+	reportLookup, err := NewDiagnosisReportRepository(tx).FindTaskReport(ctx, created.Task.ID)
+	if err != nil {
+		t.Fatalf("FindTaskReport(): %v", err)
+	}
+	if reportLookup.TaskCreator != ownerID || reportLookup.TaskStatus != diagnosis.TaskSucceeded || reportLookup.Report == nil {
+		t.Fatalf("report lookup = %+v", reportLookup)
+	}
+	formalReport := reportLookup.Report
+	if formalReport.ModelProvider != "stepfun" || formalReport.ModelID != "integration-model" ||
+		formalReport.Conclusion != "状态更新存在延迟" || len(formalReport.Evidence) != 1 ||
+		formalReport.Evidence[0].SourceRef != evidenceRef || formalReport.Evidence[0].ClaimKey != "claim-001" {
+		t.Fatalf("formal report = %+v", formalReport)
+	}
 
 	completed, err = workerRepository.Complete(ctx, *claim.Lease, executionResult, time.Now().UTC())
 	if err != nil || completed {

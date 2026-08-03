@@ -2,6 +2,7 @@ package diagnosis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -64,6 +65,80 @@ func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testi
 	}
 	if !strings.HasPrefix(repo.createInput.RequestFingerprint, "sha256:") {
 		t.Fatalf("request fingerprint = %q", repo.createInput.RequestFingerprint)
+	}
+	var persistedScope map[string]any
+	if err := json.Unmarshal(repo.createInput.RequestScope, &persistedScope); err != nil {
+		t.Fatalf("decode persisted request scope: %v", err)
+	}
+	capabilities, err := TaskCapabilitiesFromRequestScope(persistedScope)
+	if err != nil || len(capabilities) != 1 || capabilities[0] != TaskCapabilityCase {
+		t.Fatalf("default capabilities = %v, err=%v", capabilities, err)
+	}
+}
+
+func TestNormalizeTaskRequestScopeValidatesCapabilitiesAndSkill(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   map[string]any
+		want    []TaskCapability
+		wantErr bool
+	}{
+		{name: "defaults to case", scope: nil, want: []TaskCapability{TaskCapabilityCase}},
+		{
+			name:  "legacy code skill infers capability",
+			scope: map[string]any{RequestScopeKeyRequestedSkill: RequestedSkillCodeInvestigation},
+			want:  []TaskCapability{TaskCapabilityCase, TaskCapabilityCode},
+		},
+		{
+			name: "sql investigation", scope: map[string]any{
+				RequestScopeKeyRequestedSkill:      RequestedSkillSQLInvestigation,
+				RequestScopeKeyAllowedCapabilities: []string{"sql", "case"},
+			},
+			want: []TaskCapability{TaskCapabilityCase, TaskCapabilitySQL},
+		},
+		{
+			name: "broad ticket diagnosis", scope: map[string]any{
+				RequestScopeKeyRequestedSkill:      RequestedSkillTicketDiagnosis,
+				RequestScopeKeyAllowedCapabilities: []string{"sql", "code", "case"},
+			},
+			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilitySQL},
+		},
+		{name: "missing case", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"sql"}}, wantErr: true},
+		{name: "duplicate", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "case"}}, wantErr: true},
+		{name: "unknown", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "shell"}}, wantErr: true},
+		{
+			name: "code skill without capability", scope: map[string]any{
+				RequestScopeKeyRequestedSkill:      RequestedSkillCodeInvestigation,
+				RequestScopeKeyAllowedCapabilities: []string{"case"},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, err := NormalizeTaskRequestScope(tt.scope)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("NormalizeTaskRequestScope accepted invalid scope")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeTaskRequestScope: %v", err)
+			}
+			got, err := TaskCapabilitiesFromRequestScope(normalized)
+			if err != nil {
+				t.Fatalf("TaskCapabilitiesFromRequestScope: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("capabilities = %v, want %v", got, tt.want)
+			}
+			for index := range got {
+				if got[index] != tt.want[index] {
+					t.Fatalf("capabilities = %v, want %v", got, tt.want)
+				}
+			}
+		})
 	}
 }
 
@@ -138,6 +213,37 @@ func TestDiagnosisTaskServiceListEventsNormalizesLimitAndEnforcesOwner(t *testin
 	}
 	if _, err := service.ListEvents(context.Background(), TaskActor{UserID: ownerID}, taskID, -1, 1); !errors.Is(err, ErrInvalidTask) {
 		t.Fatalf("negative afterSeq error = %v, want ErrInvalidTask", err)
+	}
+}
+
+func TestDiagnosisTaskServiceOpensAuthorizedEventStreamOnce(t *testing.T) {
+	ownerID := uuid.New()
+	taskID := uuid.New()
+	repo := &taskRepositoryStub{
+		getTask: DiagnosisTask{ID: taskID, CreatedBy: ownerID, Status: TaskRunning},
+		eventPage: TaskEventPage{
+			Items:    []TaskEvent{{TaskID: taskID, Seq: 2, EventType: "task_started"}},
+			AfterSeq: 1, NextAfterSeq: 2,
+		},
+	}
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{})
+
+	if _, err := service.OpenEventStream(context.Background(), TaskActor{UserID: uuid.New()}, taskID); !errors.Is(err, ErrTaskForbidden) {
+		t.Fatalf("non-owner OpenEventStream() error = %v, want ErrTaskForbidden", err)
+	}
+	stream, err := service.OpenEventStream(context.Background(), TaskActor{UserID: ownerID}, taskID)
+	if err != nil {
+		t.Fatalf("OpenEventStream(): %v", err)
+	}
+	if stream.InitialStatus() != TaskRunning {
+		t.Fatalf("initial status = %q, want running", stream.InitialStatus())
+	}
+	page, err := stream.Next(context.Background(), 1, MaxTaskEventLimit)
+	if err != nil {
+		t.Fatalf("stream.Next(): %v", err)
+	}
+	if len(page.Items) != 1 || repo.gotAfterSeq != 1 || repo.gotEventLimit != MaxTaskEventLimit {
+		t.Fatalf("page=%+v afterSeq=%d limit=%d", page, repo.gotAfterSeq, repo.gotEventLimit)
 	}
 }
 

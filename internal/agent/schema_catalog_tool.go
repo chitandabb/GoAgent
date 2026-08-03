@@ -47,7 +47,7 @@ func NewSearchSchemaCatalogTool(searcher SchemaCatalogSearcher) (tool.InvokableT
 	}
 	return toolutils.InferTool(
 		ToolSearchSchemaCatalog,
-		"在管理员发布的 SQL Schema Catalog 中检索表、视图和字段语义；只返回 queryable 条目，不接受 SQL 片段",
+		"在管理员发布的 SQL Schema Catalog 中检索未知的表、视图和字段语义；只返回 queryable 元数据，不接受 SQL 片段、不读取业务行数据，也不替代实际数据查询",
 		func(ctx context.Context, input schemaCatalogInput) ([]schemaCatalogResult, error) {
 			scope, ok := TaskScopeFromContext(ctx)
 			if !ok {

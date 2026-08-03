@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
@@ -146,9 +145,14 @@ func (e diagnosisAgentExecutor) Execute(
 			ID: source.ID, Role: source.Role, SafetyMode: source.SafetyMode,
 		})
 	}
+	capabilities, err := taskCapabilitiesFromScope(task.RequestScope)
+	if err != nil {
+		return diagnosisworker.ExecutionResult{}, err
+	}
 	scope, err := agent.NewTaskScope(agent.TaskScopeConfig{
 		UserID: task.CreatedBy, Role: task.Role, TaskType: agent.TaskTypeDiagnosis,
 		DataSources:           dataSources,
+		AllowedCapabilities:   capabilities,
 		AvailableDependencies: append([]agent.ToolDependency(nil), e.runtime.availableDependencies...),
 	})
 	if err != nil {
@@ -175,19 +179,39 @@ func (e diagnosisAgentExecutor) Execute(
 }
 
 func requestedSkillFromScope(scope map[string]any) (agent.SkillID, error) {
-	value, exists := scope["requestedSkill"]
-	if !exists || value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+	value, err := diagnosis.RequestedSkillFromRequestScope(scope)
+	if err != nil {
+		return "", fmt.Errorf("%w: requestScope.requestedSkill: %v", diagnosis.ErrInvalidTask, err)
+	}
+	if value == "" {
 		return agent.SkillTicketDiagnosis, nil
 	}
-	text, ok := value.(string)
-	if !ok {
-		return "", fmt.Errorf("%w: requestScope.requestedSkill must be a string", diagnosis.ErrInvalidTask)
-	}
-	requested := agent.SkillID(strings.TrimSpace(text))
+	requested := agent.SkillID(value)
 	if err := (agent.RunRequest{UserQuery: "validation", RequestedSkill: requested}).Validate(); err != nil {
 		return "", fmt.Errorf("%w: %v", diagnosis.ErrInvalidTask, err)
 	}
 	return requested, nil
+}
+
+func taskCapabilitiesFromScope(scope map[string]any) ([]agent.ToolCapability, error) {
+	values, err := diagnosis.TaskCapabilitiesFromRequestScope(scope)
+	if err != nil {
+		return nil, fmt.Errorf("%w: requestScope.allowedCapabilities: %v", diagnosis.ErrInvalidTask, err)
+	}
+	result := make([]agent.ToolCapability, 0, len(values))
+	for _, value := range values {
+		switch value {
+		case diagnosis.TaskCapabilityCase:
+			result = append(result, agent.ToolCapabilityCase)
+		case diagnosis.TaskCapabilityCode:
+			result = append(result, agent.ToolCapabilityCode)
+		case diagnosis.TaskCapabilitySQL:
+			result = append(result, agent.ToolCapabilitySQL)
+		default:
+			return nil, fmt.Errorf("%w: unsupported task capability %q", diagnosis.ErrInvalidTask, value)
+		}
+	}
+	return result, nil
 }
 
 type executionCaseSnapshotContextKey struct{}

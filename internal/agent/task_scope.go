@@ -69,6 +69,27 @@ func (d ToolDependency) Valid() bool {
 	return false
 }
 
+// ToolCapability 是任务创建时冻结的业务能力范围；它与依赖健康状态相互独立。
+type ToolCapability string
+
+const (
+	ToolCapabilityCase       ToolCapability = "case"
+	ToolCapabilityCode       ToolCapability = "code"
+	ToolCapabilitySQL        ToolCapability = "sql"
+	ToolCapabilityKnowledge  ToolCapability = "knowledge"
+	ToolCapabilityAttachment ToolCapability = "attachment"
+	ToolCapabilityWebSearch  ToolCapability = "web_search"
+)
+
+func (c ToolCapability) Valid() bool {
+	switch c {
+	case ToolCapabilityCase, ToolCapabilityCode, ToolCapabilitySQL, ToolCapabilityKnowledge,
+		ToolCapabilityAttachment, ToolCapabilityWebSearch:
+		return true
+	}
+	return false
+}
+
 // ScopedDataSource 是一次 Agent Run 已获授权的数据源，不包含连接信息或凭证。
 type ScopedDataSource struct {
 	ID         uuid.UUID
@@ -97,6 +118,7 @@ type TaskScopeConfig struct {
 	Role                  auth.Role
 	TaskType              TaskType
 	DataSources           []ScopedDataSource
+	AllowedCapabilities   []ToolCapability
 	AvailableDependencies []ToolDependency
 }
 
@@ -106,6 +128,7 @@ type TaskScope struct {
 	role                  auth.Role
 	taskType              TaskType
 	dataSources           []ScopedDataSource
+	allowedCapabilities   []ToolCapability
 	availableDependencies []ToolDependency
 }
 
@@ -125,6 +148,9 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 	if cfg.TaskType == TaskTypeKnowledge && len(cfg.DataSources) != 0 {
 		return TaskScope{}, errors.New("knowledge task scope cannot bind diagnosis data sources")
 	}
+	if len(cfg.AllowedCapabilities) == 0 {
+		return TaskScope{}, errors.New("task scope requires at least one allowed capability")
+	}
 
 	dataSources := append([]ScopedDataSource(nil), cfg.DataSources...)
 	seenDataSources := make(map[uuid.UUID]struct{}, len(dataSources))
@@ -136,6 +162,30 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 			return TaskScope{}, fmt.Errorf("duplicate task scope data source %s", dataSource.ID)
 		}
 		seenDataSources[dataSource.ID] = struct{}{}
+	}
+
+	capabilities := append([]ToolCapability(nil), cfg.AllowedCapabilities...)
+	seenCapabilities := make(map[ToolCapability]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		if !capability.Valid() {
+			return TaskScope{}, fmt.Errorf("invalid task scope capability %q", capability)
+		}
+		if _, exists := seenCapabilities[capability]; exists {
+			return TaskScope{}, fmt.Errorf("duplicate task scope capability %q", capability)
+		}
+		seenCapabilities[capability] = struct{}{}
+		if cfg.TaskType == TaskTypeDiagnosis && capability == ToolCapabilityKnowledge {
+			return TaskScope{}, errors.New("diagnosis task scope cannot use knowledge capability")
+		}
+		if cfg.TaskType == TaskTypeKnowledge && capability != ToolCapabilityKnowledge {
+			return TaskScope{}, fmt.Errorf("knowledge task scope cannot use capability %q", capability)
+		}
+	}
+	if cfg.TaskType == TaskTypeDiagnosis && !slices.Contains(capabilities, ToolCapabilityCase) {
+		return TaskScope{}, errors.New("diagnosis task scope requires case capability")
+	}
+	if cfg.TaskType == TaskTypeKnowledge && !slices.Contains(capabilities, ToolCapabilityKnowledge) {
+		return TaskScope{}, errors.New("knowledge task scope requires knowledge capability")
 	}
 
 	dependencies := append([]ToolDependency(nil), cfg.AvailableDependencies...)
@@ -152,7 +202,7 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 
 	return TaskScope{
 		userID: cfg.UserID, role: cfg.Role, taskType: cfg.TaskType,
-		dataSources: dataSources, availableDependencies: dependencies,
+		dataSources: dataSources, allowedCapabilities: capabilities, availableDependencies: dependencies,
 	}, nil
 }
 
@@ -164,6 +214,14 @@ func (s TaskScope) TaskType() TaskType { return s.taskType }
 
 func (s TaskScope) DataSources() []ScopedDataSource {
 	return append([]ScopedDataSource(nil), s.dataSources...)
+}
+
+func (s TaskScope) AllowedCapabilities() []ToolCapability {
+	return append([]ToolCapability(nil), s.allowedCapabilities...)
+}
+
+func (s TaskScope) CapabilityAllowed(capability ToolCapability) bool {
+	return slices.Contains(s.allowedCapabilities, capability)
 }
 
 func (s TaskScope) DependencyAvailable(dependency ToolDependency) bool {

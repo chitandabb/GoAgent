@@ -10,6 +10,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/auth"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
@@ -19,6 +20,7 @@ type ToolRegistration struct {
 	AllowedTaskTypes     []TaskType
 	AllowedDataRoles     []DataSourceRole
 	AllowedSafetyModes   []DataSourceSafetyMode
+	RequiredCapabilities []ToolCapability
 	RequiredDependencies []ToolDependency
 }
 
@@ -29,6 +31,7 @@ type catalogEntry struct {
 	allowedTaskTypes     []TaskType
 	allowedDataRoles     []DataSourceRole
 	allowedSafetyModes   []DataSourceSafetyMode
+	requiredCapabilities []ToolCapability
 	requiredDependencies []ToolDependency
 }
 
@@ -86,6 +89,7 @@ func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalo
 		allowedTaskTypes:     append([]TaskType(nil), registration.AllowedTaskTypes...),
 		allowedDataRoles:     append([]DataSourceRole(nil), registration.AllowedDataRoles...),
 		allowedSafetyModes:   append([]DataSourceSafetyMode(nil), registration.AllowedSafetyModes...),
+		requiredCapabilities: append([]ToolCapability(nil), registration.RequiredCapabilities...),
 		requiredDependencies: append([]ToolDependency(nil), registration.RequiredDependencies...),
 	}, nil
 }
@@ -117,6 +121,11 @@ func validatePolicyValues(registration ToolRegistration) error {
 			return fmt.Errorf("invalid safety mode %q", safetyMode)
 		}
 	}
+	for _, capability := range registration.RequiredCapabilities {
+		if !capability.Valid() {
+			return fmt.Errorf("invalid capability %q", capability)
+		}
+	}
 	for _, dependency := range registration.RequiredDependencies {
 		if !dependency.Valid() {
 			return fmt.Errorf("invalid dependency %q", dependency)
@@ -124,6 +133,7 @@ func validatePolicyValues(registration ToolRegistration) error {
 	}
 	if hasDuplicate(registration.AllowedRoles) || hasDuplicate(registration.AllowedTaskTypes) ||
 		hasDuplicate(registration.AllowedDataRoles) || hasDuplicate(registration.AllowedSafetyModes) ||
+		hasDuplicate(registration.RequiredCapabilities) ||
 		hasDuplicate(registration.RequiredDependencies) {
 		return errors.New("policy contains duplicate values")
 	}
@@ -147,19 +157,12 @@ func (c *ToolCatalog) ToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseT
 	}
 	tools := make([]tool.BaseTool, 0, len(c.entries))
 	for _, entry := range c.entries {
-		if !entry.matchesRoleAndTask(scope) ||
-			!scope.matchesDataSource(entry.allowedDataRoles, entry.allowedSafetyModes) {
-			continue
-		}
-		available := true
-		for _, dependency := range entry.requiredDependencies {
-			if !scope.DependencyAvailable(dependency) {
-				available = false
-				break
+		if entry.authorized(scope) {
+			guarded, err := entry.scopedTool()
+			if err != nil {
+				return nil, err
 			}
-		}
-		if available {
-			tools = append(tools, entry.tool)
+			tools = append(tools, guarded)
 		}
 	}
 	return tools, nil
@@ -189,7 +192,7 @@ func validateToolScope(c *ToolCatalog, scope TaskScope) error {
 	if c == nil {
 		return errors.New("tool catalog is nil")
 	}
-	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() {
+	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() || len(scope.allowedCapabilities) == 0 {
 		return errors.New("task scope is invalid")
 	}
 	return nil
@@ -198,4 +201,50 @@ func validateToolScope(c *ToolCatalog, scope TaskScope) error {
 func (entry catalogEntry) matchesRoleAndTask(scope TaskScope) bool {
 	return slices.Contains(entry.allowedRoles, scope.role) &&
 		slices.Contains(entry.allowedTaskTypes, scope.taskType)
+}
+
+func (entry catalogEntry) authorized(scope TaskScope) bool {
+	if !entry.matchesRoleAndTask(scope) ||
+		!scope.matchesDataSource(entry.allowedDataRoles, entry.allowedSafetyModes) {
+		return false
+	}
+	for _, capability := range entry.requiredCapabilities {
+		if !scope.CapabilityAllowed(capability) {
+			return false
+		}
+	}
+	for _, dependency := range entry.requiredDependencies {
+		if !scope.DependencyAvailable(dependency) {
+			return false
+		}
+	}
+	return true
+}
+
+func (entry catalogEntry) scopedTool() (tool.BaseTool, error) {
+	invokable, ok := entry.tool.(tool.InvokableTool)
+	if !ok {
+		return nil, fmt.Errorf("registered tool %q is not invokable", entry.name)
+	}
+	return &scopeGuardedTool{inner: invokable, entry: entry}, nil
+}
+
+type scopeGuardedTool struct {
+	inner tool.InvokableTool
+	entry catalogEntry
+}
+
+func (t *scopeGuardedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return t.inner.Info(ctx)
+}
+
+func (t *scopeGuardedTool) InvokableRun(ctx context.Context, arguments string, opts ...tool.Option) (string, error) {
+	scope, ok := TaskScopeFromContext(ctx)
+	if !ok {
+		return "", ErrTaskScopeRequired
+	}
+	if !t.entry.authorized(scope) {
+		return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, t.entry.name)
+	}
+	return t.inner.InvokableRun(ctx, arguments, opts...)
 }

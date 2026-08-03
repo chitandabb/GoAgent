@@ -181,7 +181,7 @@ WHERE id = ? AND status = 'running' AND claim_owner = ? AND attempt_count = ?
 		if updated.RowsAffected != 1 {
 			return diagnosisworker.ErrLeaseLost
 		}
-		if err := appendTaskEvent(tx, lease.TaskID, "task_succeeded", map[string]any{
+		if err := appendTaskEvent(tx, lease.TaskID, diagnosis.TaskEventSucceeded, map[string]any{
 			"taskId": lease.TaskID.String(), "status": string(diagnosis.TaskSucceeded),
 			"reportId": reportID.String(), "partial": result.Orchestration.Partial,
 			"attemptCount": lease.AttemptCount,
@@ -244,10 +244,10 @@ func (r *DiagnosisWorkerRepository) finishAttempt(
 			return err
 		}
 		completedAt := any(nil)
-		eventType := "task_retry_scheduled"
+		eventType := diagnosis.TaskEventRetryScheduled
 		if status == diagnosis.TaskFailed {
 			completedAt = finishedAt
-			eventType = "task_failed"
+			eventType = diagnosis.TaskEventFailed
 		}
 		updated := tx.Exec(`
 UPDATE diagnosis_tasks
@@ -310,7 +310,7 @@ WHERE id = ? AND status = 'cancel_requested'`, completedAt, completedAt, taskID)
 		if updated.RowsAffected != 1 {
 			return diagnosis.ErrTaskStateConflict
 		}
-		if err := appendTaskEvent(tx, taskID, "task_cancelled", map[string]any{
+		if err := appendTaskEvent(tx, taskID, diagnosis.TaskEventCancelled, map[string]any{
 			"taskId": taskID.String(), "status": string(diagnosis.TaskCancelled),
 		}, completedAt); err != nil {
 			return err

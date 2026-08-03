@@ -230,7 +230,7 @@ SELECT EXISTS (
 	if err := db.Exec(`
 INSERT INTO task_events
     (task_id, seq, event_type, payload, payload_schema_version, created_at)
-VALUES (?, 1, 'task_created', ?, 1, ?)`, taskID, taskCreatedPayload, input.CreatedAt).Error; err != nil {
+VALUES (?, 1, ?, ?, 1, ?)`, taskID, diagnosis.TaskEventCreated, taskCreatedPayload, input.CreatedAt).Error; err != nil {
 		return diagnosis.TaskCreateResult{}, TranslateError(err)
 	}
 
@@ -385,7 +385,7 @@ WHERE id = ? AND status = ?`, requestedAt, requestedAt, taskID, record.Status)
 		if updated.RowsAffected != 1 {
 			return diagnosis.ErrTaskStateConflict
 		}
-		if err := appendTaskEvent(tx, taskID, "task_cancel_requested", map[string]any{
+		if err := appendTaskEvent(tx, taskID, diagnosis.TaskEventCancelRequested, map[string]any{
 			"taskId": taskID.String(), "status": string(diagnosis.TaskCancelRequested),
 			"requestedBy": requestedBy.String(),
 		}, requestedAt); err != nil {
@@ -455,9 +455,9 @@ WHERE id = ? AND status = ? AND attempt_count = ?`,
 		if updated.RowsAffected != 1 {
 			return diagnosis.ErrTaskStateConflict
 		}
-		eventType := "task_started"
+		eventType := diagnosis.TaskEventStarted
 		if state.AttemptCount > 0 {
-			eventType = "task_reclaimed"
+			eventType = diagnosis.TaskEventReclaimed
 		}
 		if err := appendTaskEvent(tx, input.TaskID, eventType, map[string]any{
 			"taskId": input.TaskID.String(), "status": string(diagnosis.TaskRunning),
@@ -542,34 +542,39 @@ FOR UPDATE`, taskID).Scan(&record)
 	return record, nil
 }
 
-func appendTaskEvent(db *gorm.DB, taskID uuid.UUID, eventType string, payload map[string]any, createdAt time.Time) error {
+func appendTaskEvent(db *gorm.DB, taskID uuid.UUID, eventType diagnosis.TaskEventType, payload map[string]any, createdAt time.Time) error {
+	_, err := appendTaskEventWithSeq(db, taskID, eventType, payload, createdAt)
+	return err
+}
+
+func appendTaskEventWithSeq(db *gorm.DB, taskID uuid.UUID, eventType diagnosis.TaskEventType, payload map[string]any, createdAt time.Time) (int64, error) {
 	var nextSeq int64
 	if err := db.Raw(`
 SELECT COALESCE(MAX(seq), 0) + 1
 FROM task_events
 WHERE task_id = ?`, taskID).Scan(&nextSeq).Error; err != nil {
-		return TranslateError(err)
+		return 0, TranslateError(err)
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal task event payload: %w", err)
+		return 0, fmt.Errorf("marshal task event payload: %w", err)
 	}
 	if err := db.Exec(`
 INSERT INTO task_events
     (task_id, seq, event_type, payload, payload_schema_version, created_at)
 VALUES (?, ?, ?, ?, 1, ?)`, taskID, nextSeq, eventType, encoded, createdAt.UTC()).Error; err != nil {
-		return TranslateError(err)
+		return 0, TranslateError(err)
 	}
-	return nil
+	return nextSeq, nil
 }
 
 type taskEventRecord struct {
-	TaskID               uuid.UUID `gorm:"column:task_id"`
-	Seq                  int64     `gorm:"column:seq"`
-	EventType            string    `gorm:"column:event_type"`
-	Payload              []byte    `gorm:"column:payload"`
-	PayloadSchemaVersion int       `gorm:"column:payload_schema_version"`
-	CreatedAt            time.Time `gorm:"column:created_at"`
+	TaskID               uuid.UUID               `gorm:"column:task_id"`
+	Seq                  int64                   `gorm:"column:seq"`
+	EventType            diagnosis.TaskEventType `gorm:"column:event_type"`
+	Payload              []byte                  `gorm:"column:payload"`
+	PayloadSchemaVersion int                     `gorm:"column:payload_schema_version"`
+	CreatedAt            time.Time               `gorm:"column:created_at"`
 }
 
 func taskEventFromRecord(record taskEventRecord) (diagnosis.TaskEvent, error) {

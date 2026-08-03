@@ -3,6 +3,7 @@ package githubmcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -119,6 +120,13 @@ func TestRepositoryTreeToolPreservesUnsupportedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap tree: %v", err)
 	}
+	info, err := wrapped.Info(context.Background())
+	if err != nil {
+		t.Fatalf("tree info: %v", err)
+	}
+	if !strings.Contains(info.Desc, "get_file_contents") || !strings.Contains(info.Desc, "upstream tree description") {
+		t.Fatalf("tree description = %q", info.Desc)
+	}
 	result, err := wrapped.(tool.InvokableTool).InvokableRun(context.Background(), `{}`)
 	if err != nil {
 		t.Fatalf("invoke tree: %v", err)
@@ -133,7 +141,7 @@ type repositoryTreeTestTool struct {
 }
 
 func (*repositoryTreeTestTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{Name: repositoryTreeToolName}, nil
+	return &schema.ToolInfo{Name: repositoryTreeToolName, Desc: "upstream tree description"}, nil
 }
 
 func (t *repositoryTreeTestTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
