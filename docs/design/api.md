@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON 历史查询、任务取消、报告反馈查询/追加，以及 RabbitMQ Diagnosis Worker 异步执行与报告落库；SSE、正式报告查询和证据接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复，以及报告反馈查询/追加；独立证据和工具执行读取接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
 - M2 知识助手、个人知识库和文档入库只保留版本空间，不在本文提前固定具体接口。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
@@ -223,7 +223,7 @@ CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`
 | 查看完整运维元数据 | 禁止 | 允许 |
 | 管理用户和恢复失败任务 | 禁止 | 允许 |
 
-对 analyst 而言，不属于自己的任务、报告或附件默认返回 `40401`，避免通过 UUID 区分“存在但无权”。admin 跨用户查看附件原文或恢复任务必须记录审计日志。
+当前任务、正式报告和报告反馈接口对其他 analyst 返回 `40301`，任务不存在时返回 `40401`；admin 可以跨用户读取任务和报告。失败任务恢复只允许 admin，并通过专用恢复表记录操作者、原因、原错误、原尝试次数、TaskEvent 和 Outbox 关联。
 
 ## 接口总览
 
@@ -256,7 +256,7 @@ CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`
 | POST | `/api/v1/diagnosis-tasks` | 登录 | 创建异步诊断任务 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}` | 登录 | 任务详情与步骤摘要 |
 | POST | `/api/v1/diagnosis-tasks/{taskId}/cancel` | 登录 | 请求取消任务 |
-| GET | `/api/v1/diagnosis-tasks/{taskId}/events` | 登录 | TaskEvent JSON 历史；后续增加 SSE 内容协商 |
+| GET | `/api/v1/diagnosis-tasks/{taskId}/events` | 登录 | TaskEvent JSON 历史或 SSE 订阅 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/evidence` | 登录 | 证据列表 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/tool-executions` | 登录 | 工具执行记录 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}/report` | 登录 | 任务正式报告 |
@@ -575,6 +575,8 @@ X-CSRF-Token: <token>
   "evidenceDataSourceIds": ["..."],
   "requestText": "请先检查数据库中的业务状态",
   "requestScope": {
+    "requestedSkill": "sql-investigation",
+    "allowedCapabilities": ["case", "sql"],
     "timeRange": {
       "from": "2026-07-25T00:00:00Z",
       "to": "2026-07-26T00:00:00Z"
@@ -590,6 +592,13 @@ X-CSRF-Token: <token>
   "retryOfTaskId": null
 }
 ```
+
+`requestScope.allowedCapabilities` 是任务创建时冻结的能力白名单，可选值为 `case`、`code`、
+`sql`。它与服务健康状态分离：声明 `sql` 不代表 SQL Server 当前可用，未声明 `sql` 时即使
+SQL Server 健康也不会向模型暴露 SQL Tool。未提供该字段时，后端先按 `requestedSkill` 推导；
+两者都未提供时默认 `case`。`code-investigation` 必须包含 `case + code`，
+`sql-investigation` 必须包含 `case + sql`；常规 `ticket-diagnosis` 可以按调查需求选择
+`case`、`case + code`、`case + sql` 或三者组合。
 
 API 在创建前重新只读查询 SQL Server 并计算 fingerprint：
 
@@ -645,7 +654,7 @@ sortOrder
 
 不返回模型思维过程、系统 Prompt、密钥、完整原始 SQL 或未脱敏证据。
 
-当前实现已返回任务状态、请求摘要、CaseSnapshot ID、错误摘要和报告可用性；步骤、附件、证据和工具执行摘要将在 Worker 链路接通后补充。
+当前实现已返回任务状态、请求摘要、CaseSnapshot ID、错误摘要和报告可用性；Worker 已完成步骤、证据、工具执行和报告持久化，但这些明细仍由各自的专用读取接口逐步开放。
 
 ### `GET /api/v1/diagnosis-tasks/{taskId}/events`
 
@@ -662,7 +671,7 @@ Accept: application/json
 - 任务创建者只能读取自己的事件，admin 可以读取全部任务；
 - payload 只能是应用生成的安全结构化轨迹，不能放入日志、Prompt、密钥、原始 SQL 或模型内部思维过程。
 
-后续 SSE 继续复用同一路径，通过 `Accept: text/event-stream` 协商，不另建一套事件身份和游标规则。
+同一路径通过 `Accept: text/event-stream` 协商 SSE，不另建一套事件身份和游标规则。SSE 建流前复用相同的 owner/admin 授权；`Last-Event-ID` 存在时优先于 `afterSeq`。
 
 ### `POST /api/v1/diagnosis-tasks/{taskId}/cancel`
 
@@ -674,13 +683,13 @@ Accept: application/json
 - 任务创建者和 admin 可以取消；
 - 关闭 SSE 不会触发此接口。
 
-当前实现已经落地该命令：首次状态转换返回 `202`，重复取消返回 `200`；权限检查、状态条件更新和 `task_cancel_requested` 事件均有领域、HTTP 和 PostgreSQL 集成测试。Worker 尚未接入，因此 `cancel_requested -> cancelled` 的协作收尾仍属于后续 Worker 切片。
+当前实现已经落地该命令：首次状态转换返回 `202`，重复取消返回 `200`；权限检查、状态条件更新和 `task_cancel_requested` 事件均有领域、HTTP 和 PostgreSQL 集成测试。Worker 会在领取和执行边界识别取消请求并提交 `cancelled` 终态。
 
 ## TaskEvent SSE
 
 ### `GET /api/v1/diagnosis-tasks/{taskId}/events`
 
-本节描述后续在现有 JSON 历史接口上增加的 SSE 表示，当前尚未实现 `text/event-stream` 分支。
+同一路径已经实现 `text/event-stream` 表示。服务端先按游标从 PostgreSQL 补读，再以固定间隔轮询新 TaskEvent；Redis 尚未参与唤醒，因此不会成为事件事实来源。
 
 ```http
 GET /api/v1/diagnosis-tasks/{taskId}/events?afterSeq=18
@@ -693,8 +702,8 @@ Accept: text/event-stream
 retry: 3000
 
 id: 19
-event: step_started
-data: {"taskId":"...","seq":19,"occurredAt":"...","payloadSchemaVersion":1,"payload":{}}
+event: task_started
+data: {"seq":19,"eventType":"task_started","payload":{"attemptCount":1},"payloadSchemaVersion":1,"createdAt":"..."}
 
 ```
 
@@ -703,14 +712,15 @@ data: {"taskId":"...","seq":19,"occurredAt":"...","payloadSchemaVersion":1,"payl
 - SSE `id` 等于 PostgreSQL `task_events.seq`；
 - 浏览器自动重连使用 `Last-Event-ID`；页面刷新后可以用 `afterSeq`；
 - 两者同时存在时 `Last-Event-ID` 优先；
-- API 先从 PostgreSQL 按序补读，再监听 Redis 新事件通知；
-- Redis 不可用时轮询 PostgreSQL；
+- API 先从 PostgreSQL 按序补读，再轮询 PostgreSQL 新事件；
+- 轮询是当前可靠基线，后续可以增加 Redis 唤醒但不能替代 PostgreSQL；
 - 每 15 秒发送 SSE 注释心跳，不产生 TaskEvent；
 - 终态事件发送完成后正常关闭连接；
-- Session 过期时关闭连接，重新连接返回 `401`；
+- 应用收到停机信号时主动关闭 SSE，避免长连接阻塞优雅关停；
+- 连接达到当前 Session 的 `absoluteExpiresAt` 时关闭，重新连接会重新执行 Session 校验；
 - M1 不传模型原始内部思维过程，也不把日志行直接当 SSE 事件；可以传输应用生成的结构化调查轨迹，包括阶段、脱敏 Tool 摘要、证据缺口和 Evidence Gate 结果，供前端默认折叠、按需展开。
 
-SSE 建立后不能再改用 JSON 统一错误信封。连接前的认证、权限或参数失败正常返回 JSON 错误；连接后的异常使用安全 SSE `error` 事件或直接断开，并依靠 `requestId` 日志排查。
+SSE 建立后不能再改用 JSON 统一错误信封。连接前的认证、权限或参数失败正常返回 JSON 错误；连接后的读取异常使用不含底层原因的 SSE `error` 事件，并依靠 `requestId` 日志排查。
 
 ## 证据与工具执行
 
@@ -730,15 +740,17 @@ SSE 建立后不能再改用 JSON 统一错误信封。连接前的认证、权�
 
 ### `GET /api/v1/diagnosis-tasks/{taskId}/report`
 
-报告不存在且任务仍在执行时返回 `40401` 并提供安全提示；任务成功后返回：
+任务存在但尚无正式报告时返回 `40921`；任务不存在返回 `40401`，其他 analyst 越权读取返回 `40301`。报告可用后返回：
 
 - `conclusionStatus`：`conclusive/probable/inconclusive`；
 - `riskLevel`；
 - `businessSummary`；
 - `technicalSummary`；
-- 报告 schema、模型和 Prompt 版本；
-- 按 claim 组织的 Evidence 引用；
-- 当前用户反馈。
+- `partial`、`missingEvidence`、Token 用量和 Agent 运行摘要；
+- 报告 schema、`modelProvider + modelId` 和 `promptVersion`；
+- 按 claim 组织的 Evidence 身份、来源定位、支持类型、哈希、截断与有效性元数据。
+
+当前接口不返回完整 Evidence 内容、原始 Prompt、模型内部推理或原始 SQL；人工复核继续通过独立的 `/diagnosis-reports/{reportId}/reviews` 接口读取和追加。仓储最多执行一次任务/报告查询和一次证据声明查询，并严格按 v1 schema 解码持久化 JSON。
 
 任务 `succeeded` 只表示流程完成。`inconclusive` 是正常报告结论，不映射为 HTTP 或任务失败。
 
@@ -760,7 +772,7 @@ POST /api/v1/diagnosis-reports/{reportId}/reviews
 
 `adopted` 对应前端的👍，`rejected` 对应👎，`partially_adopted` 保留给需要人工补充判断的情况。只有任务创建者可以提交，管理员可以查看但不能代替创建者修改。每次提交新增记录，最新一条为当前有效反馈；反馈不回写 MES/ERP，也不会自动进入全局知识库。一期不提供删除反馈接口。
 
-当前后端已实现这两个接口和 PostgreSQL 持久化。诊断任务创建已经接通，但正式 Worker/报告生成尚未接通，任务创建后的 `reportAvailable` 仍为 `false`；不能把评测 observation 的 `runId` 当作报告 ID。
+当前后端已实现这两个接口和 PostgreSQL 持久化。Diagnosis Worker 成功提交后，任务摘要的 `reportAvailable` 为 `true`，正式报告查询返回持久化报告 ID；评测 observation 的 `runId` 仍不是报告 ID。
 
 ## 管理员失败恢复
 
@@ -776,15 +788,15 @@ POST /api/v1/diagnosis-reports/{reportId}/reviews
 
 只有同时满足以下条件才返回 `202`：
 
-- 任务为可恢复的 `failed`；
+- 任务为 `agent_execution_failed` 的可恢复 `failed`；
 - 没有正式报告；
 - 没有活动租约或其他运行者；
-- 输入、附件和数据源仍可用；
+- 任务未请求取消，创建者和关联数据源仍为 active；
 - 当前管理员有权限且提供恢复原因。
 
-同一 PostgreSQL 事务把任务置为 `pending`、追加 `task_requeued` TaskEvent、记录管理员审计并重新打开原 Outbox。Relay 继续使用同一个 `messageId` 发布。恢复接口不能修改原请求范围、附件或数据源；输入变化必须创建新的诊断任务。
+同一 PostgreSQL 事务把任务置为 `pending`，清除租约、完成时间和上次错误，追加 `task_requeued` TaskEvent，记录管理员审计并重新打开原 Outbox。Relay 继续使用同一个 `messageId` 发布。恢复事务保留原 `attemptCount`，下一次 Worker Claim 才增加尝试次数；恢复接口不能修改原请求范围、附件或数据源，输入变化必须创建新的诊断任务。
 
-同一恢复 Key 重放返回原结果。`succeeded/cancelled/running` 或不可恢复失败返回 `40921`。
+幂等范围为 `task + admin + Idempotency-Key`：相同 Key 和原因重放返回原结果与 `200`，相同 Key 但原因不同返回 `40911`。`succeeded/cancelled/running`、存在正式报告、已取消、依赖停用或不可恢复失败返回 `40921`。
 
 ## CORS 与入口
 
@@ -822,4 +834,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史、取消命令、Worker Claim 基础与 Outbox Relay 已实现。下一步接入 RabbitMQ Consumer、Diagnosis Worker、正式证据/报告和 SSE；机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。下一步优先完成 Worker 进程/模型故障的可重复演练，再进入固定数据集验收；独立证据/工具执行接口仍按后续切片推进。机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。

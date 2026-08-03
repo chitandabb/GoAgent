@@ -73,7 +73,14 @@ type AgentToolProvider interface {
 }
 ~~~
 
-`TaskScope` 包含用户角色、任务类型、数据源、生产/产品库环境和依赖可用状态。注册到 Catalog 不等于暴露给模型。授权 Middleware 在 ADK `BeforeAgent` 阶段读取本次 `TaskScope` 并收敛 Tool 配置，只有 `ToolsFor` 返回的 Tool Schema 才进入本次运行。Catalog、Middleware、Tool 和无状态模型客户端可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 在 Run 初始化时会改写内部配置，`-race` 已证明不能共享实例并发运行，所以目标 Runtime 必须为每次 Run 创建隔离 Agent。
+`TaskScope` 包含用户角色、任务类型、数据源、生产/产品库环境、任务创建时冻结的
+`allowedCapabilities`，以及 Runtime 探测到的依赖可用状态。能力授权与依赖健康相互独立：
+GitHub MCP 或 SQL Server 在线不会自动扩大本任务的 Tool 集合。注册到 Catalog 不等于暴露给
+模型；Tool 必须同时满足角色、任务、数据源、安全模式、业务能力和依赖健康六类条件。
+授权 Middleware 在 ADK `BeforeAgent` 阶段读取本次 `TaskScope` 并收敛 Tool 配置，只有
+`ToolsFor` 返回的 Tool Schema 才进入本次运行。Catalog、Middleware、Tool 和无状态模型客户端
+可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 在 Run 初始化时会改写内部配置，`-race` 已证明
+不能共享实例并发运行，所以目标 Runtime 必须为每次 Run 创建隔离 Agent。
 
 所有 Tool 继续执行：参数 Schema 校验、应用策略重写、Context Timeout、行数/字节截断、敏感字段脱敏、调用轨迹和证据固化。Prompt 和 Skill 文本都不能代替这些安全边界。
 

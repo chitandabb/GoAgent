@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: P7 Diagnosis Worker Complete, Report Delivery In Progress
+## Current Stage: P7 Admin Recovery Complete, Failure Drills Next
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -154,7 +154,8 @@ Implemented in the current working slice:
   Shell, or Skill script execution is exposed;
 - an immutable per-run `TaskScope` covering user, analyst/admin role, diagnosis
   versus knowledge task type, authorized data sources, production/product
-  replica safety mode, and currently available dependencies;
+  replica safety mode, task-level allowed capabilities, and currently available
+  dependencies; task authorization and runtime dependency health are independent;
 - a startup-built, read-only `ToolCatalog` that rejects duplicate names and
   invalid policies, then filters Tools by the complete TaskScope without
   mutating shared Agent state;
@@ -249,9 +250,26 @@ Not yet implemented or verified:
   reads succeeded; this is recorded as a search error, not as missing code.
   Automatic local clone/search is intentionally still not implemented;
 - Schema Catalog scanning/publishing, Query Store, and estimated-plan Tools;
-- formal diagnosis report query and SSE integration;
-- the resume target values of 93% tool-selection accuracy and 45% Token
-  reduction.
+
+The repeatable Worker model-failure recovery drill is complete: four exhausted
+attempts reach `failed`, an admin requeues the original task, the fifth attempt
+succeeds, exactly one report is persisted, and duplicate messages do not call
+the model again. The fixed `tool-selection-v1` run is also complete: TaskScope
+filtering reached 44/45 (`97.78%`) accuracy with zero invalid or out-of-whitelist
+calls; Provider-calibrated Tool Schema prompt tokens fell from 126360 to 68136
+(`46.08%`). Total prompt-token reduction was `42.63%` and remains a separate
+metric. These artifacts are stored under `testdata/tool-selection-v1.*`.
+
+The fixed SQL safety and Text-to-SQL evaluations for resume item 2 are also
+complete. `sql-safety-v1` blocks 40/40 high-risk statements, accepts 12/12 safe
+read-only controls, and matches 40/40 expected rejection reason codes.
+`text-to-sql-v1` sends 20 fixed industrial-ticket requests through a single
+StepFun-generated `execute_readonly_query` Tool Call, the production QueryGuard,
+a fixed published-Catalog authorization, and the Docker SQL Server read-only
+account. Deterministic column/result comparison reaches 20/20 (`100%`) with an
+average duration of `1328.45ms`; no SQL string similarity or model self-scoring
+is used. The datasets, observations, and summaries are stored under
+`testdata/sql-safety-v1.*` and `testdata/text-to-sql-v1.*`.
 
 The single-Agent inner loop is now the production Runner baseline. See
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md)
@@ -288,7 +306,9 @@ Claim/续租/fencing 契约也已落地，覆盖活跃租约竞争、过期接�
 Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 RabbitMQ 的真实集成测试已验证
 同一 `message_id` 发布并在 Confirm 后写入 `published_at`。Diagnosis Worker 现已接入严格信封
 校验、`prefetch=1`、手动 ACK、30 秒/2 分钟/10 分钟 TTL 重试队列和最终死信队列；Worker
-领取任务后使用创建时冻结的 CaseSnapshot 构造 `TaskScope`，执行现有 ADK Agent + Evidence Gate，
+领取任务后使用创建时冻结的 CaseSnapshot、数据源和 `requestScope.allowedCapabilities` 构造
+`TaskScope`，执行现有 ADK Agent + Evidence Gate。`case/code/sql` 能力白名单与 Runtime
+探测的依赖健康状态分离，GitHub MCP 或 SQL Server 在线不会自动扩大任务 Tool 集合；Worker
 定时续租，并在 fencing 条件下把 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence、
 正式 DiagnosisReport、TaskEvent 和 `succeeded` 终态作为一个 PostgreSQL 事务提交。
 `cancel_requested -> cancelled`、临时失败释放重试、重试耗尽后的 `failed` 也已接通。
@@ -296,16 +316,40 @@ Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 Rabb
 模型名称和模型版本；`00009` 已在本地 PostgreSQL 应用并通过 Worker 完成事务与报告反馈
 集成测试。Agent 三类基础 Prompt 已改为启动期文件配置，当前采用重启生效和人工维护的
 `promptVersion`，不提前引入 Nacos、热更新或 Prompt 发布平台。
-当前仍缺少正式报告读取 API、SSE 推送/补读前端链路、Worker 进程崩溃与模型故障的完整演练，
-不能把单次 Worker smoke 或评测 observation 当作简历效果指标。
+正式报告读取 API 已接入：任务创建者和管理员可读取 Worker 提交的业务/技术摘要、Token
+用量、模型与 Prompt 追踪元数据及有序证据声明；接口不返回完整证据、原始 Prompt、模型
+推理或原始 SQL。任务存在但尚无报告时返回 `40921`，缺失任务与越权分别返回 `404`/`403`。
+领域、HTTP、仓储单测和真实 PostgreSQL Worker 写入后读回集成测试均已通过。管理员失败恢复
+入口也已接入：仅允许恢复 `agent_execution_failed`，原子写入 `failed -> pending`、
+`task_requeued`、恢复审计并重开原 Outbox；当前仍缺少前端 SSE 消费/复核工作台、
+Worker 进程崩溃演练仍待补充；模型重试耗尽、管理员恢复、恢复后成功和重复消息幂等已通过
+真实 PostgreSQL 演练。固定 45 条 Tool 选择评测已形成简历指标，单次 Worker smoke 和小样本
+端到端 observation 仍不能冒充完整诊断效果指标。
 
-MinIO attachment work remains deferred until the DiagnosisTask/Outbox/Worker
-contract is stable; the next active backend slice is formal report reading plus
-TaskEvent SSE, followed by repeatable Worker recovery tests and fixed-dataset evaluation.
+The DiagnosisTask/Outbox/Worker contract and resume item 2 SQL evaluation are
+now stable enough to start resume item 3. The next active backend slice is a
+minimal verifiable ingestion/retrieval path for mixed documents, MinIO,
+PostgreSQL FTS, and pgvector. M2-A1 now provides `knowledge_documents`, immutable
+`knowledge_document_versions`, traceable `knowledge_chunks`, deterministic
+Markdown/text chunking, Han-bigram search normalization, and PostgreSQL FTS with
+scope filtering in SQL. A live PostgreSQL test verifies current-version switching
+and global/personal visibility. The fixed `rag-retrieval-v1` corpus contains 12
+industrial documents and 24 literal/paraphrased queries. Two repeated PostgreSQL
+FTS runs produced the same hit set: Recall@5 23/24 (`95.83%`) and MRR `0.9028`;
+the missed ERP 504 paraphrase is retained for the vector-retrieval comparison.
+Ingestion timing is recorded but the small local run is not a resume throughput
+metric. The next slice is Embedding plus hybrid fusion on this same dataset;
+MinIO, OCR/VLM, reranking, mixed-document throughput improvement, and the final
+resume item 3 claim remain incomplete. TaskEvent SSE
+reuses the JSON event identity and cursor,
+replays PostgreSQL facts, emits heartbeats, closes after terminal events, and is
+cancelled by application shutdown without treating browser disconnect as task
+cancellation. Worker process-crash drills remain a smaller reliability follow-up
+and do not displace the resume-driven RAG target.
 
-### Immediate Backend Goal: Formal Diagnosis Report Read API
+### Completed Backend Checkpoint: Formal Diagnosis Report Read API
 
-Implement `GET /api/v1/diagnosis-tasks/{taskId}/report` before adding SSE:
+`GET /api/v1/diagnosis-tasks/{taskId}/report` has been implemented with these boundaries:
 
 1. add a typed, immutable report read model and PostgreSQL repository query;
 2. authorize through the existing task owner/admin boundary;
@@ -319,17 +363,38 @@ Implement `GET /api/v1/diagnosis-tasks/{taskId}/report` before adding SSE:
 6. update `api/openapi.yaml`, `docs/design/openapi.json`, repository integration
    tests, service authorization tests, and HTTP contract tests together.
 
-Acceptance: a task owner and admin can read the same committed report generated
+Verified acceptance: a task owner and admin can read the same committed report generated
 by the Worker; another analyst cannot; pending/running/failed/cancelled tasks do
 not fabricate an empty report; malformed stored summary JSON fails explicitly;
 the endpoint performs a bounded query without returning Prompt text, raw model
 reasoning, raw SQL, credentials, or complete evidence snapshots.
 
-After this query contract is stable, add `text/event-stream` content negotiation
-to the existing task-events route. SSE must replay PostgreSQL TaskEvents from
-`Last-Event-ID`/`afterSeq`, emit heartbeats, preserve the existing JSON history
-API, and never treat browser disconnect as task cancellation. Redis may wake a
-stream but cannot become the event source of truth.
+### Completed Backend Checkpoint: TaskEvent SSE
+
+`text/event-stream` content negotiation is now available on the existing task-events route.
+SSE replays PostgreSQL TaskEvents from
+`Last-Event-ID`/`afterSeq`, emits heartbeats, preserves the existing JSON history
+API, and never treats browser disconnect as task cancellation. Redis may wake a
+stream but cannot become the event source of truth. Task lifecycle event names
+now use the domain `TaskEventType`; one status/event mapping defines the
+`succeeded`, `failed`, and `cancelled` terminal transitions shared by SSE,
+Worker, and PostgreSQL adapters. These state-machine values are compile-time
+protocol constants rather than runtime configuration.
+
+### Completed Backend Checkpoint: Administrator Failed-Task Recovery
+
+`POST /api/v1/admin/diagnosis-tasks/{taskId}/recover` now restores only allowlisted
+`agent_execution_failed` tasks. The PostgreSQL transaction preserves the prior
+attempt count, clears execution/error state, appends one `task_requeued`, reopens
+the original Outbox/message ID, and writes an immutable admin/reason/error audit.
+The same admin/key/reason replays without duplicate events; a changed reason
+conflicts. Tasks with cancellation, reports, active leases, inactive creators or
+data sources, or permanent failures are rejected. A later Worker Claim increments
+the attempt and stale leases remain fenced.
+
+The next backend checkpoint is repeatable process interruption, temporary model
+failure, retry/dead-letter and recovered-success drills, followed by fixed-dataset
+evaluation without fabricating duplicate reports or overwriting fenced results.
 
 ## Target Milestones, Not Yet Implemented
 
