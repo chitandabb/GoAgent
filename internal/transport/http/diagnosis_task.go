@@ -2,10 +2,15 @@ package httptransport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chitandabb/GoAgent/internal/apperror"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
@@ -19,24 +24,38 @@ type diagnosisTaskUseCase interface {
 	Create(ctx context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error)
 	Get(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.DiagnosisTask, error)
 	ListEvents(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID, afterSeq int64, limit int) (diagnosis.TaskEventPage, error)
+	OpenEventStream(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskEventStream, error)
 	Cancel(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskCancelResult, error)
 }
 
 type DiagnosisTaskRoutes struct {
-	useCase diagnosisTaskUseCase
-	auth    gin.HandlerFunc
-	csrf    gin.HandlerFunc
+	useCase              diagnosisTaskUseCase
+	auth                 gin.HandlerFunc
+	csrf                 gin.HandlerFunc
+	lifecycle            context.Context
+	ssePollInterval      time.Duration
+	sseHeartbeatInterval time.Duration
 }
 
+const (
+	taskEventSSERetryMillis     = 3000
+	defaultSSEPollInterval      = time.Second
+	defaultSSEHeartbeatInterval = 15 * time.Second
+)
+
 func NewDiagnosisTaskRoutes(
+	lifecycle context.Context,
 	useCase diagnosisTaskUseCase,
 	authMiddleware gin.HandlerFunc,
 	csrfMiddleware gin.HandlerFunc,
 ) (*DiagnosisTaskRoutes, error) {
-	if useCase == nil || authMiddleware == nil || csrfMiddleware == nil {
+	if lifecycle == nil || useCase == nil || authMiddleware == nil || csrfMiddleware == nil {
 		return nil, errors.New("diagnosis task route dependencies are nil")
 	}
-	return &DiagnosisTaskRoutes{useCase: useCase, auth: authMiddleware, csrf: csrfMiddleware}, nil
+	return &DiagnosisTaskRoutes{
+		useCase: useCase, auth: authMiddleware, csrf: csrfMiddleware, lifecycle: lifecycle,
+		ssePollInterval: defaultSSEPollInterval, sseHeartbeatInterval: defaultSSEHeartbeatInterval,
+	}, nil
 }
 
 func (r *DiagnosisTaskRoutes) Register(api *gin.RouterGroup) {
@@ -213,24 +232,236 @@ func (r *DiagnosisTaskRoutes) listEvents(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	page, err := r.useCase.ListEvents(c.Request.Context(), diagnosis.TaskActor{
+	actor := diagnosis.TaskActor{
 		UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin(),
-	}, taskID, query.AfterSeq, query.Limit)
+	}
+	if acceptsEventStream(c.GetHeader("Accept")) {
+		afterSeq, cursorErr := taskEventStreamAfterSeq(c, query.AfterSeq)
+		if cursorErr != nil {
+			AbortWithError(c, cursorErr)
+			return
+		}
+		batchLimit := query.Limit
+		if batchLimit == 0 {
+			batchLimit = diagnosis.DefaultTaskEventLimit
+		}
+		r.streamEvents(c, actor, taskID, afterSeq, batchLimit)
+		return
+	}
+	page, err := r.useCase.ListEvents(c.Request.Context(), actor, taskID, query.AfterSeq, query.Limit)
 	if err != nil {
 		AbortWithError(c, translateDiagnosisTaskError("list diagnosis task events", err))
 		return
 	}
 	items := make([]diagnosisTaskEventResponse, 0, len(page.Items))
 	for _, item := range page.Items {
-		items = append(items, diagnosisTaskEventResponse{
-			Seq: item.Seq, EventType: item.EventType, Payload: item.Payload,
-			PayloadSchemaVersion: item.PayloadSchemaVersion,
-			CreatedAt:            item.CreatedAt.UTC().Format(timeRFC3339Nano),
-		})
+		items = append(items, diagnosisTaskEventResponseFrom(item))
 	}
 	WriteSuccess(c, diagnosisTaskEventsResponse{
 		Items: items, AfterSeq: page.AfterSeq, NextAfterSeq: page.NextAfterSeq, HasMore: page.HasMore,
 	})
+}
+
+func (r *DiagnosisTaskRoutes) streamEvents(
+	c *gin.Context,
+	actor diagnosis.TaskActor,
+	taskID uuid.UUID,
+	afterSeq int64,
+	batchLimit int,
+) {
+	stream, err := r.useCase.OpenEventStream(c.Request.Context(), actor, taskID)
+	if err != nil {
+		AbortWithError(c, translateDiagnosisTaskError("open diagnosis task event stream", err))
+		return
+	}
+	if stream == nil {
+		AbortWithError(c, apperror.Wrap(apperror.CodeInternal, errors.New("diagnosis task event stream is nil")))
+		return
+	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		AbortWithError(c, apperror.Wrap(apperror.CodeInternal, errors.New("streaming is not supported")))
+		return
+	}
+	page, err := stream.Next(c.Request.Context(), afterSeq, batchLimit)
+	if err != nil {
+		AbortWithError(c, translateDiagnosisTaskError("read diagnosis task event stream", err))
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	if _, err := fmt.Fprintf(c.Writer, "retry: %d\n\n", taskEventSSERetryMillis); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	pollInterval := r.ssePollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultSSEPollInterval
+	}
+	heartbeatInterval := r.sseHeartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = defaultSSEHeartbeatInterval
+	}
+	poll := time.NewTicker(pollInterval)
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer poll.Stop()
+	defer heartbeat.Stop()
+
+	var sessionTimer *time.Timer
+	var sessionExpired <-chan time.Time
+	if expiresAt := identityAbsoluteExpiry(c); !expiresAt.IsZero() {
+		remaining := time.Until(expiresAt)
+		if remaining <= 0 {
+			return
+		}
+		sessionTimer = time.NewTimer(remaining)
+		sessionExpired = sessionTimer.C
+		defer sessionTimer.Stop()
+	}
+
+	cursor := afterSeq
+	initialTerminal := stream.InitialStatus().IsTerminal()
+	for {
+		terminalSent, writeErr := writeTaskEventPage(c.Writer, page)
+		if writeErr != nil {
+			return
+		}
+		if page.NextAfterSeq > cursor {
+			cursor = page.NextAfterSeq
+		}
+		if len(page.Items) > 0 {
+			flusher.Flush()
+		}
+		if terminalSent || (initialTerminal && !page.HasMore) {
+			return
+		}
+		if page.HasMore {
+			page, err = stream.Next(c.Request.Context(), cursor, batchLimit)
+			if err != nil {
+				r.writeTaskEventStreamError(c, err)
+				flusher.Flush()
+				return
+			}
+			continue
+		}
+
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-r.lifecycle.Done():
+			return
+		case <-sessionExpired:
+			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(c.Writer, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-poll.C:
+			page, err = stream.Next(c.Request.Context(), cursor, batchLimit)
+			if err != nil {
+				r.writeTaskEventStreamError(c, err)
+				flusher.Flush()
+				return
+			}
+		}
+	}
+}
+
+func (r *DiagnosisTaskRoutes) writeTaskEventStreamError(c *gin.Context, cause error) {
+	_ = c.Error(apperror.Wrap(apperror.CodeInternal, fmt.Errorf("read diagnosis task event stream: %w", cause)))
+	_ = writeSSEFrame(c.Writer, "", "error", map[string]any{
+		"code": int(apperror.CodeInternal), "message": apperror.CodeInternal.Message(),
+		"requestId": RequestIDFromContext(c),
+	})
+}
+
+func diagnosisTaskEventResponseFrom(item diagnosis.TaskEvent) diagnosisTaskEventResponse {
+	payload := item.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	return diagnosisTaskEventResponse{
+		Seq: item.Seq, EventType: string(item.EventType), Payload: payload,
+		PayloadSchemaVersion: item.PayloadSchemaVersion,
+		CreatedAt:            item.CreatedAt.UTC().Format(timeRFC3339Nano),
+	}
+}
+
+func writeTaskEventPage(writer io.Writer, page diagnosis.TaskEventPage) (bool, error) {
+	terminalSent := false
+	for _, item := range page.Items {
+		if item.Seq < 1 || strings.TrimSpace(string(item.EventType)) == "" || strings.ContainsAny(string(item.EventType), "\r\n") {
+			return false, errors.New("task event stream payload is invalid")
+		}
+		if err := writeSSEFrame(writer, strconv.FormatInt(item.Seq, 10), string(item.EventType), diagnosisTaskEventResponseFrom(item)); err != nil {
+			return false, err
+		}
+		terminalSent = terminalSent || item.EventType.IsTerminal()
+	}
+	return terminalSent, nil
+}
+
+func writeSSEFrame(writer io.Writer, id, event string, data any) error {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if id != "" {
+		if _, err := fmt.Fprintf(writer, "id: %s\n", id); err != nil {
+			return err
+		}
+	}
+	if event != "" {
+		if _, err := fmt.Fprintf(writer, "event: %s\n", event); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(writer, "data: %s\n\n", encoded)
+	return err
+}
+
+func acceptsEventStream(accept string) bool {
+	for _, value := range strings.Split(accept, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(value))
+		if err != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+			continue
+		}
+		if quality, ok := params["q"]; ok {
+			parsed, parseErr := strconv.ParseFloat(quality, 64)
+			if parseErr != nil || parsed <= 0 {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func taskEventStreamAfterSeq(c *gin.Context, queryAfterSeq int64) (int64, error) {
+	value := strings.TrimSpace(c.GetHeader("Last-Event-ID"))
+	if value == "" {
+		return queryAfterSeq, nil
+	}
+	afterSeq, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || afterSeq < 0 {
+		return 0, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+			Field: "Last-Event-ID", Reason: "必须是非负整数",
+		}})
+	}
+	return afterSeq, nil
+}
+
+func identityAbsoluteExpiry(c *gin.Context) time.Time {
+	identity, ok := identityFromContext(c)
+	if !ok {
+		return time.Time{}
+	}
+	return identity.Session.AbsoluteExpiresAt.UTC()
 }
 
 func (r *DiagnosisTaskRoutes) cancel(c *gin.Context) {
@@ -347,6 +578,8 @@ func translateDiagnosisTaskError(operation string, err error) error {
 		return apperror.Wrap(apperror.CodeIdempotencyConflict, err)
 	case errors.Is(err, diagnosis.ErrTaskStateConflict):
 		return apperror.Wrap(apperror.CodeTaskStateConflict, err)
+	case errors.Is(err, diagnosis.ErrTaskReportUnavailable):
+		return apperror.NewWithMessage(apperror.CodeTaskStateConflict, "当前任务尚无可读取的正式诊断报告")
 	case errors.Is(err, repository.ErrNotFound):
 		return apperror.Wrap(apperror.CodeNotFound, err)
 	default:

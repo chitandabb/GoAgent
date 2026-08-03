@@ -84,7 +84,7 @@ func mustSchemaCatalogToolForTest(t *testing.T) tool.InvokableTool {
 }
 
 func TestAgentInstructionDisclosesUnavailableSQLDependency(t *testing.T) {
-	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	scope := runnerTestScopeWithCapabilities(t, []ToolCapability{ToolCapabilityCase, ToolCapabilitySQL}, ToolDependencyExternalCase)
 	instruction := buildAgentInstruction(runnerTestSystemInstruction, SkillSQLInvestigation, "test SQL Skill", scope)
 	if !strings.Contains(instruction, sqlServerUnavailableMessage) {
 		t.Fatalf("instruction did not disclose SQL Server degradation: %s", instruction)

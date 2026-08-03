@@ -77,11 +77,21 @@ func RequestIDFromContext(c *gin.Context) string {
 func ErrorHandler(base *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
-		if len(c.Errors) == 0 || c.Writer.Written() {
+		if len(c.Errors) == 0 {
 			return
 		}
 		err := c.Errors.Last().Err
 		appErr := apperror.Normalize(err)
+		if c.Writer.Written() {
+			if httpStatus(appErr.Code) >= 500 {
+				platformlogger.FromContext(c.Request.Context(), base).Error(
+					"HTTP request failed after response started",
+					zap.Int("code", int(appErr.Code)),
+					zap.Error(err),
+				)
+			}
+			return
+		}
 		if httpStatus(appErr.Code) >= 500 {
 			platformlogger.FromContext(c.Request.Context(), base).Error(
 				"HTTP request failed",

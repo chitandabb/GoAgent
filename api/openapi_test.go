@@ -25,9 +25,28 @@ func TestOpenAPIYAMLParsesAndContainsTaskControlPaths(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/diagnosis-tasks/{taskId}/events",
 		"/api/v1/diagnosis-tasks/{taskId}/cancel",
+		"/api/v1/diagnosis-tasks/{taskId}/report",
+		"/api/v1/admin/diagnosis-tasks/{taskId}/recover",
 	} {
 		if _, ok := document.Paths[path]; !ok {
 			t.Fatalf("OpenAPI path %q is missing", path)
 		}
+	}
+	events := document.Paths["/api/v1/diagnosis-tasks/{taskId}/events"]["get"]
+	operation, ok := events.(map[string]any)
+	if !ok {
+		t.Fatal("task events GET operation is invalid")
+	}
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("task events responses are invalid")
+	}
+	okResponse, ok := responses["200"].(map[string]any)
+	if !ok {
+		t.Fatal("task events 200 response is missing")
+	}
+	contentMap, ok := okResponse["content"].(map[string]any)
+	if !ok || contentMap["application/json"] == nil || contentMap["text/event-stream"] == nil {
+		t.Fatal("task events must document JSON and text/event-stream representations")
 	}
 }

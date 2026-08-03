@@ -88,6 +88,34 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	diagnosisTaskRecoveryRepository := platformpostgres.NewDiagnosisTaskRecoveryRepository(deps.db)
+	diagnosisTaskRecoveryService, err := diagnosis.NewTaskRecoveryService(diagnosisTaskRecoveryRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build diagnosis task recovery service: %w", err)
+	}
+	diagnosisTaskRecoveryRoutes, err := httptransport.NewDiagnosisTaskRecoveryRoutes(
+		diagnosisTaskRecoveryService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build diagnosis task recovery routes: %w", err)
+	}
+	registrars = append(registrars, diagnosisTaskRecoveryRoutes)
+	diagnosisReportRepository := platformpostgres.NewDiagnosisReportRepository(deps.db)
+	diagnosisReportService, err := diagnosis.NewDiagnosisReportService(diagnosisReportRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build diagnosis report service: %w", err)
+	}
+	diagnosisReportRoutes, err := httptransport.NewDiagnosisReportRoutes(
+		diagnosisReportService, authRoutes.RequireAuthentication(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build diagnosis report routes: %w", err)
+	}
+	registrars = append(registrars, diagnosisReportRoutes)
 	reportReviewRepository := platformpostgres.NewDiagnosisReportReviewRepository(deps.db)
 	reportReviewService, err := diagnosis.NewReportReviewService(reportReviewRepository)
 	if err != nil {
@@ -152,7 +180,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 			return nil, fmt.Errorf("build diagnosis task service: %w", err)
 		}
 		diagnosisTaskRoutes, err := httptransport.NewDiagnosisTaskRoutes(
-			diagnosisTaskService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+			ctx, diagnosisTaskService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
 		)
 		if err != nil {
 			closeDependencies()

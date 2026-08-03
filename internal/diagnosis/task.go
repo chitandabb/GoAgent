@@ -29,6 +29,64 @@ const (
 	TaskCancelled       TaskStatus = "cancelled"
 )
 
+// TaskEventType 是 DiagnosisTask 生命周期事件的持久化协议类型。
+// 数据库仍保存字符串值，但生产代码必须使用这些常量，避免状态机协议散落在各层。
+type TaskEventType string
+
+const (
+	TaskEventCreated         TaskEventType = "task_created"
+	TaskEventCancelRequested TaskEventType = "task_cancel_requested"
+	TaskEventStarted         TaskEventType = "task_started"
+	TaskEventReclaimed       TaskEventType = "task_reclaimed"
+	TaskEventRetryScheduled  TaskEventType = "task_retry_scheduled"
+	TaskEventSucceeded       TaskEventType = "task_succeeded"
+	TaskEventFailed          TaskEventType = "task_failed"
+	TaskEventCancelled       TaskEventType = "task_cancelled"
+	TaskEventRequeued        TaskEventType = "task_requeued"
+)
+
+type terminalTaskTransition struct {
+	status TaskStatus
+	event  TaskEventType
+}
+
+// terminalTaskTransitions 是终态状态与终态事件对应关系的唯一来源。
+func terminalTaskTransitions() [3]terminalTaskTransition {
+	return [3]terminalTaskTransition{
+		{status: TaskSucceeded, event: TaskEventSucceeded},
+		{status: TaskFailed, event: TaskEventFailed},
+		{status: TaskCancelled, event: TaskEventCancelled},
+	}
+}
+
+func (s TaskStatus) IsTerminal() bool {
+	_, ok := s.TerminalEvent()
+	return ok
+}
+
+func (s TaskStatus) TerminalEvent() (TaskEventType, bool) {
+	for _, transition := range terminalTaskTransitions() {
+		if transition.status == s {
+			return transition.event, true
+		}
+	}
+	return "", false
+}
+
+func (e TaskEventType) IsTerminal() bool {
+	_, ok := e.TerminalStatus()
+	return ok
+}
+
+func (e TaskEventType) TerminalStatus() (TaskStatus, bool) {
+	for _, transition := range terminalTaskTransitions() {
+		if transition.event == e {
+			return transition.status, true
+		}
+	}
+	return "", false
+}
+
 var (
 	ErrTaskForbidden          = errors.New("diagnosis task is forbidden")
 	ErrInvalidTask            = errors.New("diagnosis task is invalid")
@@ -37,6 +95,28 @@ var (
 	ErrIdempotencyConflict    = errors.New("diagnosis task idempotency key conflicts")
 	ErrAttachmentsUnsupported = errors.New("diagnosis task attachments are not implemented")
 )
+
+const (
+	RequestScopeKeyRequestedSkill      = "requestedSkill"
+	RequestScopeKeyAllowedCapabilities = "allowedCapabilities"
+
+	RequestedSkillTicketDiagnosis   = "ticket-diagnosis"
+	RequestedSkillCodeInvestigation = "code-investigation"
+	RequestedSkillSQLInvestigation  = "sql-investigation"
+)
+
+// TaskCapability 是创建任务时冻结的业务调查能力，不表示对应外部依赖当前健康。
+type TaskCapability string
+
+const (
+	TaskCapabilityCase TaskCapability = "case"
+	TaskCapabilityCode TaskCapability = "code"
+	TaskCapabilitySQL  TaskCapability = "sql"
+)
+
+func (c TaskCapability) Valid() bool {
+	return c == TaskCapabilityCase || c == TaskCapabilityCode || c == TaskCapabilitySQL
+}
 
 // TaskActor 是任务查询和创建所需的最小权限上下文。
 type TaskActor struct {
@@ -250,13 +330,140 @@ func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTas
 	input.ExpectedSourceFingerprint = strings.TrimSpace(input.ExpectedSourceFingerprint)
 	input.RequestText = strings.TrimSpace(input.RequestText)
 	input.EvidenceDataSourceIDs = uniqueSortedUUIDs(input.EvidenceDataSourceIDs)
-	if input.RequestScope == nil {
-		input.RequestScope = map[string]any{}
-	}
-	if _, err := json.Marshal(input.RequestScope); err != nil {
+	requestScope, err := NormalizeTaskRequestScope(input.RequestScope)
+	if err != nil {
 		return CreateTaskInput{}, nil, ErrInvalidTask
 	}
-	return input, input.RequestScope, nil
+	input.RequestScope = requestScope
+	return input, requestScope, nil
+}
+
+// NormalizeTaskRequestScope 复制并校验任务创建时可由调用方声明的窄调查范围。
+// 缺省只允许工单能力；代码和 SQL 能力必须显式声明，且仍受角色、数据源和依赖健康约束。
+func NormalizeTaskRequestScope(scope map[string]any) (map[string]any, error) {
+	if scope == nil {
+		scope = map[string]any{}
+	}
+	encoded, err := json.Marshal(scope)
+	if err != nil {
+		return nil, err
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return nil, err
+	}
+	if normalized == nil {
+		normalized = map[string]any{}
+	}
+
+	capabilities, err := TaskCapabilitiesFromRequestScope(normalized)
+	if err != nil {
+		return nil, err
+	}
+	capabilityValues := make([]string, len(capabilities))
+	for index, capability := range capabilities {
+		capabilityValues[index] = string(capability)
+	}
+	normalized[RequestScopeKeyAllowedCapabilities] = capabilityValues
+
+	requestedSkill, err := RequestedSkillFromRequestScope(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if requestedSkill != "" {
+		normalized[RequestScopeKeyRequestedSkill] = requestedSkill
+	}
+	if requestedSkill == RequestedSkillCodeInvestigation && !slicesContainsCapability(capabilities, TaskCapabilityCode) {
+		return nil, errors.New("code-investigation requires code capability")
+	}
+	if requestedSkill == RequestedSkillSQLInvestigation && !slicesContainsCapability(capabilities, TaskCapabilitySQL) {
+		return nil, errors.New("sql-investigation requires sql capability")
+	}
+	return normalized, nil
+}
+
+func TaskCapabilitiesFromRequestScope(scope map[string]any) ([]TaskCapability, error) {
+	raw, exists := scope[RequestScopeKeyAllowedCapabilities]
+	if !exists || raw == nil {
+		requestedSkill, err := RequestedSkillFromRequestScope(scope)
+		if err != nil {
+			return nil, err
+		}
+		switch requestedSkill {
+		case RequestedSkillCodeInvestigation:
+			return []TaskCapability{TaskCapabilityCase, TaskCapabilityCode}, nil
+		case RequestedSkillSQLInvestigation:
+			return []TaskCapability{TaskCapabilityCase, TaskCapabilitySQL}, nil
+		default:
+			return []TaskCapability{TaskCapabilityCase}, nil
+		}
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		if stringsValues, stringsOK := raw.([]string); stringsOK {
+			values = make([]any, len(stringsValues))
+			for index, value := range stringsValues {
+				values[index] = value
+			}
+		} else {
+			return nil, errors.New("allowedCapabilities must be an array")
+		}
+	}
+	if len(values) == 0 || len(values) > 3 {
+		return nil, errors.New("allowedCapabilities must contain between one and three values")
+	}
+	capabilities := make([]TaskCapability, 0, len(values))
+	seen := make(map[TaskCapability]struct{}, len(values))
+	for _, rawValue := range values {
+		value, ok := rawValue.(string)
+		if !ok {
+			return nil, errors.New("allowedCapabilities values must be strings")
+		}
+		capability := TaskCapability(strings.TrimSpace(value))
+		if !capability.Valid() {
+			return nil, fmt.Errorf("invalid task capability %q", capability)
+		}
+		if _, duplicate := seen[capability]; duplicate {
+			return nil, fmt.Errorf("duplicate task capability %q", capability)
+		}
+		seen[capability] = struct{}{}
+		capabilities = append(capabilities, capability)
+	}
+	if !slicesContainsCapability(capabilities, TaskCapabilityCase) {
+		return nil, errors.New("diagnosis task requires case capability")
+	}
+	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
+	return capabilities, nil
+}
+
+func RequestedSkillFromRequestScope(scope map[string]any) (string, error) {
+	raw, exists := scope[RequestScopeKeyRequestedSkill]
+	if !exists || raw == nil {
+		return "", nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", errors.New("requestedSkill must be a string")
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	switch value {
+	case RequestedSkillTicketDiagnosis, RequestedSkillCodeInvestigation, RequestedSkillSQLInvestigation:
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid requestedSkill %q", value)
+	}
+}
+
+func slicesContainsCapability(values []TaskCapability, target TaskCapability) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueSortedUUIDs(values []uuid.UUID) []uuid.UUID {

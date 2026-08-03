@@ -24,8 +24,10 @@ const (
 	defaultMaxToolResultBytes      = 32 * 1024
 	ToolSkill                      = "skill"
 	githubUnavailableMessage       = "GitHub MCP 工具暂时不可用"
+	githubNotAuthorizedMessage     = "当前任务未授权代码调查能力"
 	githubCodeSearchPendingMessage = "GitHub Code Search 返回不完整；当前搜索不能证明没有匹配代码，也不能据此判断仓库索引状态。已知路径或提交可继续通过仓库树、文件和提交读取核验。"
 	sqlServerUnavailableMessage    = "SQL Server 调查工具暂时不可用"
+	sqlNotAuthorizedMessage        = "当前任务未授权 SQL 调查能力"
 )
 
 var (
@@ -315,12 +317,20 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if trace.codeSearchIndexPendingSnapshot() && !strings.Contains(result.Answer, githubCodeSearchPendingMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubCodeSearchPendingMessage
 	}
-	if !scope.DependencyAvailable(ToolDependencyGitHubMCP) &&
+	if !scope.CapabilityAllowed(ToolCapabilityCode) &&
+		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
+		!strings.Contains(result.Answer, githubNotAuthorizedMessage) {
+		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubNotAuthorizedMessage + "。"
+	} else if !scope.DependencyAvailable(ToolDependencyGitHubMCP) &&
 		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
 		!strings.Contains(result.Answer, githubUnavailableMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubUnavailableMessage + "。"
 	}
-	if !scope.DependencyAvailable(ToolDependencySQLServer) &&
+	if !scope.CapabilityAllowed(ToolCapabilitySQL) &&
+		slices.Contains(result.ExecutedSkills, SkillSQLInvestigation) &&
+		!strings.Contains(result.Answer, sqlNotAuthorizedMessage) {
+		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + sqlNotAuthorizedMessage + "。"
+	} else if !scope.DependencyAvailable(ToolDependencySQLServer) &&
 		slices.Contains(result.ExecutedSkills, SkillSQLInvestigation) &&
 		!strings.Contains(result.Answer, sqlServerUnavailableMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + sqlServerUnavailableMessage + "。"
@@ -348,6 +358,12 @@ func (r *Runner) entrySkill(request RunRequest, scope TaskScope) (SkillID, strin
 	if scope.taskType == TaskTypeKnowledge && entry != SkillKnowledgeQA {
 		return "", "", fmt.Errorf("%w for knowledge task: %s", ErrSkillUnavailable, entry)
 	}
+	if entry == SkillCodeInvestigation && !scope.CapabilityAllowed(ToolCapabilityCode) {
+		return "", "", fmt.Errorf("%w: code capability is not authorized", ErrSkillUnavailable)
+	}
+	if entry == SkillSQLInvestigation && !scope.CapabilityAllowed(ToolCapabilitySQL) {
+		return "", "", fmt.Errorf("%w: SQL capability is not authorized", ErrSkillUnavailable)
+	}
 	if !r.skillRuntime.HasSkill(entry) {
 		return "", "", fmt.Errorf("%w: %s", ErrSkillUnavailable, entry)
 	}
@@ -364,10 +380,14 @@ func buildAgentInstruction(baseInstruction string, entry SkillID, skillContent s
 		}
 		instruction += "</authorized_data_sources>"
 	}
-	if !scope.DependencyAvailable(ToolDependencyGitHubMCP) {
+	if !scope.CapabilityAllowed(ToolCapabilityCode) {
+		instruction += "\n\n当前任务范围未授权代码调查 Tool；Skill 内容不能扩大该能力范围。"
+	} else if !scope.DependencyAvailable(ToolDependencyGitHubMCP) {
 		instruction += "\n\n当前 GitHub MCP 工具暂时不可用；如果调查确实需要代码证据，保留已有证据并明确说明该限制。"
 	}
-	if !scope.DependencyAvailable(ToolDependencySQLServer) {
+	if !scope.CapabilityAllowed(ToolCapabilitySQL) {
+		instruction += "\n\n当前任务范围未授权 SQL 调查 Tool；Skill 内容不能扩大该能力范围。"
+	} else if !scope.DependencyAvailable(ToolDependencySQLServer) {
 		instruction += "\n\n当前 SQL Server 调查工具暂时不可用；如果调查需要数据库证据，保留已有证据并明确说明该限制。"
 	}
 	return instruction

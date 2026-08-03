@@ -44,7 +44,13 @@ func (t *repositoryTreeTool) Info(ctx context.Context) (*schema.ToolInfo, error)
 	if t == nil || t.inner == nil {
 		return nil, errors.New("github repository tree tool is nil")
 	}
-	return t.inner.Info(ctx)
+	info, err := t.inner.Info(ctx)
+	if err != nil || info == nil {
+		return info, err
+	}
+	cloned := *info
+	cloned.Desc = "浏览仓库目录结构或文件树时使用；支持按提交和路径前缀返回候选文件。已知具体文件路径并需要正文时才使用 get_file_contents。" + strings.TrimSpace(info.Desc)
+	return &cloned, nil
 }
 
 func (t *repositoryTreeTool) InvokableRun(ctx context.Context, arguments string, opts ...tool.Option) (string, error) {

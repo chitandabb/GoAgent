@@ -43,7 +43,7 @@ func NewDatabaseObjectDefinitionTool(reader DatabaseObjectDefinitionReader) (too
 	}
 	return toolutils.InferTool(
 		ToolDatabaseObjectDefinition,
-		"读取管理员允许的 SQL Server 存储过程、视图或函数定义；仅只读，不接受任意 SQL",
+		"读取管理员允许的 SQL Server 存储过程、视图或函数的 SQL 定义；用于检查对象内部实现，不要用 Schema Catalog 元数据检索代替定义读取；仅只读，不接受任意 SQL",
 		func(ctx context.Context, input databaseObjectDefinitionInput) (DatabaseObjectDefinitionResult, error) {
 			schemaName := strings.TrimSpace(input.Schema)
 			objectName := strings.TrimSpace(input.ObjectName)

@@ -243,6 +243,7 @@ func evidenceTestContext(t *testing.T) context.Context {
 		DataSources: []ScopedDataSource{{
 			ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
 		}},
+		AllowedCapabilities:   []ToolCapability{ToolCapabilityCase},
 		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase},
 	})
 	if err != nil {

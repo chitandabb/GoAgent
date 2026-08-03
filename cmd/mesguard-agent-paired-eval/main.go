@@ -285,8 +285,10 @@ func newPairedEvaluationScope(definition mesagent.EvaluationCase, cfg config.Con
 		ID:   uuid.MustParse("33333333-3333-3333-3333-333333333333"),
 		Role: mesagent.DataSourceRoleCaseSource, SafetyMode: mesagent.DataSourceSafetyReadOnly,
 	}}
+	capabilities := []mesagent.ToolCapability{mesagent.ToolCapabilityCase}
 	if containsString(definition.Tags, "github-enabled") {
 		dependencies = append(dependencies, mesagent.ToolDependencyGitHubMCP)
+		capabilities = append(capabilities, mesagent.ToolCapabilityCode)
 	}
 	if containsString(definition.Tags, "sql-enabled") || containsString(definition.Tags, "sql-query-enabled") {
 		dataSourceID, err := uuid.Parse(cfg.SQLServer.ID)
@@ -294,6 +296,7 @@ func newPairedEvaluationScope(definition mesagent.EvaluationCase, cfg config.Con
 			return mesagent.TaskScope{}, fmt.Errorf("parse SQL data source id: %w", err)
 		}
 		dependencies = append(dependencies, mesagent.ToolDependencySQLServer)
+		capabilities = append(capabilities, mesagent.ToolCapabilitySQL)
 		dataSources = append(dataSources, mesagent.ScopedDataSource{
 			ID: dataSourceID, Role: mesagent.DataSourceRoleProduction,
 			SafetyMode: mesagent.DataSourceSafetyReadOnly,
@@ -303,6 +306,7 @@ func newPairedEvaluationScope(definition mesagent.EvaluationCase, cfg config.Con
 		UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 		Role:   auth.RoleAnalyst, TaskType: mesagent.TaskTypeDiagnosis,
 		DataSources:           dataSources,
+		AllowedCapabilities:   capabilities,
 		AvailableDependencies: dependencies,
 	})
 }

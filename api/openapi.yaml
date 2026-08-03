@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: MESGuard API
-  version: 0.1.0-p7-task-foundation
-  description: Current implemented backend contract for authentication, ERP external cases, diagnosis task creation/query, and report feedback.
+  version: 0.1.0-p7-admin-recovery
+  description: Current implemented backend contract for authentication, ERP external cases, asynchronous diagnosis tasks, resumable TaskEvent streaming, formal report reading, administrator recovery, and report feedback.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -278,8 +278,8 @@ paths:
   /api/v1/diagnosis-tasks/{taskId}/events:
     get:
       operationId: listDiagnosisTaskEvents
-      summary: 按任务内序号查询结构化任务事件
-      description: 当前实现返回 JSON 历史；后续在同一路径增加 text/event-stream 内容协商。
+      summary: 查询或持续订阅结构化任务事件
+      description: application/json 返回游标页；text/event-stream 先从 PostgreSQL 补读，再轮询新事件，终态事件后关闭。断开连接不会取消任务。
       security:
         - sessionCookie: []
       parameters:
@@ -297,8 +297,15 @@ paths:
             format: int64
             minimum: 0
             default: 0
+        - name: Last-Event-ID
+          in: header
+          description: SSE 重连游标；提供时优先于 afterSeq
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
         - name: limit
           in: query
+          description: 单次 JSON 页或 SSE PostgreSQL 补读批次的最大事件数
           schema:
             type: integer
             minimum: 1
@@ -306,11 +313,20 @@ paths:
             default: 100
       responses:
         "200":
-          description: 按 seq 升序排列的安全任务事件页
+          description: 按 seq 升序排列的安全任务事件页或可断点续传的 SSE
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/DiagnosisTaskEventsResponse"
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                retry: 3000
+
+                id: 19
+                event: task_started
+                data: {"seq":19,"eventType":"task_started","payload":{"attemptCount":1},"payloadSchemaVersion":1,"createdAt":"2026-08-03T06:00:00Z"}
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -319,6 +335,41 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/diagnosis-tasks/{taskId}/report:
+    get:
+      operationId: getDiagnosisTaskReport
+      summary: 查询 Worker 已提交的正式诊断报告
+      description: 返回结构化报告和有序证据声明元数据；不返回完整证据内容、原始 Prompt、模型推理或原始 SQL。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 任务创建者或管理员读取正式报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisReportResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 任务存在，但当前没有可读取的正式报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/diagnosis-tasks/{taskId}/cancel:
     post:
       operationId: cancelDiagnosisTask
@@ -356,6 +407,57 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+  /api/v1/admin/diagnosis-tasks/{taskId}/recover:
+    post:
+      operationId: recoverDiagnosisTask
+      summary: 管理员恢复可重试的失败诊断任务
+      description: 仅恢复 agent_execution_failed；原子重置任务执行状态、追加 task_requeued、写入恢复审计并重新打开原 Outbox。恢复保留 attemptCount，下一次 Worker Claim 时再加一。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiagnosisTaskRecoveryRequest"
+      responses:
+        "200":
+          description: 同一管理员使用相同幂等键和原因重放原恢复结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskRecoveryResponse"
+        "202":
+          description: 恢复事务已提交，任务等待 Outbox Relay 和 Worker
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskRecoveryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 幂等键冲突、任务状态或错误不可恢复，或任务输入依赖已不可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
   /api/v1/diagnosis-reports/{reportId}/reviews:
     get:
       operationId: listDiagnosisReportReviews
@@ -751,8 +853,7 @@ components:
           minLength: 1
           maxLength: 20000
         requestScope:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/DiagnosisTaskRequestScope"
         requestScopeSchemaVersion:
           type: integer
           minimum: 1
@@ -766,6 +867,26 @@ components:
         retryOfTaskId:
           type: [string, "null"]
           format: uuid
+    DiagnosisTaskRequestScope:
+      type: object
+      additionalProperties: true
+      description: >-
+        创建时冻结的任务调查范围。allowedCapabilities 表示本任务允许使用的业务能力，
+        不表示对应外部依赖当前健康；未提供时后端按 requestedSkill 推导，仍未提供则默认 [case]。
+      properties:
+        requestedSkill:
+          type: string
+          enum: [ticket-diagnosis, code-investigation, sql-investigation]
+          default: ticket-diagnosis
+        allowedCapabilities:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          default: [case]
+          items:
+            type: string
+            enum: [case, code, sql]
     DiagnosisTaskCreateData:
       type: object
       required: [taskId, status, replayed, createdAt]
@@ -799,8 +920,7 @@ components:
         retryOfTaskId: {type: string, format: uuid}
         requestText: {type: string}
         requestScope:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/DiagnosisTaskRequestScope"
         requestScopeSchemaVersion: {type: integer, minimum: 1}
         status:
           type: string
@@ -822,6 +942,37 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/DiagnosisTask"
+    DiagnosisTaskRecoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    DiagnosisTaskRecovery:
+      type: object
+      additionalProperties: false
+      required: [recoveryId, taskId, status, replayed, taskEventSeq, previousAttemptCount, recoveredAt]
+      properties:
+        recoveryId: {type: string, format: uuid}
+        taskId: {type: string, format: uuid}
+        status:
+          type: string
+          const: pending
+        replayed: {type: boolean}
+        taskEventSeq: {type: integer, format: int64, minimum: 1}
+        previousAttemptCount: {type: integer, minimum: 1}
+        recoveredAt: {type: string, format: date-time}
+    DiagnosisTaskRecoveryResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisTaskRecovery"
     DiagnosisTaskEvent:
       type: object
       additionalProperties: false
@@ -869,6 +1020,96 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/DiagnosisTaskEventsData"
+    DiagnosisReportUsage:
+      type: object
+      additionalProperties: false
+      required: [modelCalls, promptTokens, completionTokens, totalTokens, cachedTokens, reasoningTokens]
+      properties:
+        modelCalls: {type: integer, minimum: 0}
+        promptTokens: {type: integer, minimum: 0}
+        completionTokens: {type: integer, minimum: 0}
+        totalTokens: {type: integer, minimum: 0}
+        cachedTokens: {type: integer, minimum: 0}
+        reasoningTokens: {type: integer, minimum: 0}
+    DiagnosisReportEvidence:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, claimKey, claim, supportType, sourceType, sourceRef, sourceTool, contentHash, collectedAt, redactionStatus, truncated, validityStatus]
+      properties:
+        evidenceId: {type: string, format: uuid}
+        claimKey: {type: string}
+        claim: {type: string}
+        supportType:
+          type: string
+          enum: [supports, contradicts, context]
+        sourceType:
+          type: string
+          enum: [case_snapshot, schema_catalog, sql_object_definition, sql_query, code_search, attachment, knowledge_chunk, web]
+        sourceRef: {type: string}
+        sourceTool: {type: string}
+        location: {type: string}
+        contentHash: {type: string}
+        collectedAt: {type: string, format: date-time}
+        redactionStatus:
+          type: string
+          enum: [not_required, redacted]
+        truncated: {type: boolean}
+        validityStatus:
+          type: string
+          enum: [valid, superseded, invalid]
+    DiagnosisReport:
+      type: object
+      additionalProperties: false
+      required: [reportId, taskId, conclusionStatus, riskLevel, conclusion, businessSummary, technicalSummary, confidence, limitations, partial, missingEvidence, usage, agentRuns, selectedSkill, executedSkills, reportSchemaVersion, modelProvider, modelId, promptVersion, evidence, generatedAt, createdAt, updatedAt]
+      properties:
+        reportId: {type: string, format: uuid}
+        taskId: {type: string, format: uuid}
+        conclusionStatus:
+          type: string
+          enum: [conclusive, probable, inconclusive]
+        riskLevel:
+          type: string
+          enum: [low, medium, high]
+        conclusion: {type: string}
+        businessSummary: {type: string}
+        technicalSummary: {type: string}
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        limitations:
+          type: array
+          items: {type: string}
+        partial: {type: boolean}
+        missingEvidence:
+          type: array
+          items: {type: string}
+        usage:
+          $ref: "#/components/schemas/DiagnosisReportUsage"
+        agentRuns: {type: integer, minimum: 0}
+        selectedSkill: {type: string}
+        executedSkills:
+          type: array
+          items: {type: string}
+        stopReason: {type: string}
+        reportSchemaVersion: {type: integer, const: 1}
+        modelProvider: {type: string}
+        modelId: {type: string}
+        promptVersion: {type: string}
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosisReportEvidence"
+        generatedAt: {type: string, format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    DiagnosisReportResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisReport"
     ReportReviewVerdict:
       type: string
       enum: [adopted, partially_adopted, rejected]

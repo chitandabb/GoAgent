@@ -28,6 +28,15 @@ type DefaultRunnerDependencies struct {
 	Logger                *zap.Logger
 }
 
+type DefaultToolCatalogDependencies struct {
+	ExternalCases        ExternalCaseGetter
+	SkillReference       tool.BaseTool
+	GitHubTools          []tool.BaseTool
+	SQLObjectDefinitions tool.BaseTool
+	SchemaCatalog        tool.BaseTool
+	ReadonlyQuery        tool.BaseTool
+}
+
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
 // Skill 只描述调查 SOP；ToolCatalog 才是角色、任务、数据源和依赖权限的事实来源。
 func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencies) (*Runner, error) {
@@ -38,84 +47,14 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 	if err != nil {
 		return nil, fmt.Errorf("build native Skill runtime: %w", err)
 	}
-	readExternalCase, err := NewReadExternalCaseTool(dependencies.ExternalCases)
-	if err != nil {
-		return nil, fmt.Errorf("build external case tool: %w", err)
+	if len(dependencies.GitHubTools) > 0 && dependencies.GitHubArgumentRewrite == nil {
+		return nil, errors.New("github argument rewriter is required when github tools are enabled")
 	}
-
-	roles := []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}
-	registrations := []ToolRegistration{
-		{
-			Tool: readExternalCase, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles:     []DataSourceRole{DataSourceRoleCaseSource},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
-		},
-		{
-			Tool: skillRuntime.ReferenceTool, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
-		},
-	}
-	if dependencies.SQLObjectDefinitions != nil {
-		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.SQLObjectDefinitions, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles: []DataSourceRole{
-				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
-			},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-		})
-	}
-	if dependencies.SchemaCatalog != nil {
-		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.SchemaCatalog, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles: []DataSourceRole{
-				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
-			},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-		})
-	}
-	if dependencies.ReadonlyQuery != nil {
-		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.ReadonlyQuery, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles: []DataSourceRole{
-				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
-			},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-		})
-	}
-	if len(dependencies.GitHubTools) > 0 {
-		if dependencies.GitHubArgumentRewrite == nil {
-			return nil, errors.New("github argument rewriter is required when github tools are enabled")
-		}
-		for _, githubTool := range dependencies.GitHubTools {
-			if githubTool == nil {
-				return nil, errors.New("github tool is nil")
-			}
-			info, infoErr := githubTool.Info(ctx)
-			if infoErr != nil {
-				return nil, fmt.Errorf("read github tool info: %w", infoErr)
-			}
-			if info == nil {
-				return nil, errors.New("github tool info is nil")
-			}
-			if !slices.Contains(GitHubReadOnlyTools, info.Name) {
-				return nil, fmt.Errorf("github tool %q is outside the read-only allowlist", info.Name)
-			}
-			registrations = append(registrations, ToolRegistration{
-				Tool: githubTool, AllowedRoles: roles,
-				AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-				RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
-			})
-		}
-	}
-	catalog, err := NewToolCatalog(ctx, registrations...)
+	catalog, err := NewDefaultToolCatalog(ctx, DefaultToolCatalogDependencies{
+		ExternalCases: dependencies.ExternalCases, SkillReference: skillRuntime.ReferenceTool,
+		GitHubTools: dependencies.GitHubTools, SQLObjectDefinitions: dependencies.SQLObjectDefinitions,
+		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
 	}
@@ -128,4 +67,70 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
 		Logger:                dependencies.Logger,
 	})
+}
+
+// NewDefaultToolCatalog 复用生产 Runner 的 Tool 注册与 TaskScope 筛选规则。
+// SkillReference 可为空，供只评测业务 Tool Schema 的受控实验使用。
+func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+	if dependencies.ExternalCases == nil {
+		return nil, errors.New("default tool catalog external cases are required")
+	}
+	readExternalCase, err := NewReadExternalCaseTool(dependencies.ExternalCases)
+	if err != nil {
+		return nil, fmt.Errorf("build external case tool: %w", err)
+	}
+	roles := []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}
+	registrations := []ToolRegistration{{
+		Tool: readExternalCase, AllowedRoles: roles,
+		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
+		AllowedDataRoles:     []DataSourceRole{DataSourceRoleCaseSource},
+		AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
+		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
+		RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+	}}
+	if dependencies.SkillReference != nil {
+		registrations = append(registrations, ToolRegistration{
+			Tool: dependencies.SkillReference, AllowedRoles: roles,
+			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+		})
+	}
+	for _, sqlTool := range []tool.BaseTool{
+		dependencies.SQLObjectDefinitions, dependencies.SchemaCatalog, dependencies.ReadonlyQuery,
+	} {
+		if sqlTool == nil {
+			continue
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: sqlTool, AllowedRoles: roles,
+			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			AllowedDataRoles: []DataSourceRole{
+				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
+			},
+			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
+			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
+			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
+		})
+	}
+	for _, githubTool := range dependencies.GitHubTools {
+		if githubTool == nil {
+			return nil, errors.New("github tool is nil")
+		}
+		info, infoErr := githubTool.Info(ctx)
+		if infoErr != nil {
+			return nil, fmt.Errorf("read github tool info: %w", infoErr)
+		}
+		if info == nil {
+			return nil, errors.New("github tool info is nil")
+		}
+		if !slices.Contains(GitHubReadOnlyTools, info.Name) {
+			return nil, fmt.Errorf("github tool %q is outside the read-only allowlist", info.Name)
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: githubTool, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
+			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
+		})
+	}
+	return NewToolCatalog(ctx, registrations...)
 }
