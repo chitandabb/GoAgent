@@ -1,0 +1,15 @@
+{
+  "datasetVersion": "rag-retrieval-v1",
+  "retriever": "postgres-fts-v1",
+  "k": 5,
+  "documents": 12,
+  "chunks": 24,
+  "cases": 24,
+  "hitsAtK": 23,
+  "recallAtK": 0.9583333333333334,
+  "meanReciprocalRank": 0.9027777777777777,
+  "averageQueryDurationMillis": 3.422083333333333,
+  "ingestionDurationMillis": 157.291,
+  "documentsPerSecond": 76.2917140840862,
+  "chunksPerSecond": 152.5834281681724
+}
