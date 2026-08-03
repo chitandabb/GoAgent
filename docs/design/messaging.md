@@ -4,7 +4,7 @@
 
 - 本文定义 MESGuard 的 PostgreSQL Outbox、RabbitMQ 拓扑、发布确认、消费者确认、重试、死信、幂等和故障恢复规则。
 - 当前仓库已通过 `00007`/`00008` 建立 TaskEvent、Outbox、执行轨迹、证据和报告事实表。任务创建、事件 JSON 查询、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer、三级 TTL 重试/最终死信，以及真实 Agent Worker 的 fenced 终态事务均已实现。
-- 当前异步诊断后端已形成可运行闭环；正式报告读取 API、TaskEvent SSE、完整故障演练和运维恢复入口仍未实现。
+- 当前异步诊断后端已形成可运行闭环，正式报告读取 API、TaskEvent SSE 和受审计的管理员失败恢复入口均已接通；仍需完成进程崩溃、模型故障与 RabbitMQ 重试/死信的可重复联合演练。
 - PostgreSQL 是业务事实来源，RabbitMQ 只负责唤醒和分发，不保存任务、报告或证据的唯一副本。
 
 ## 设计目标
@@ -307,7 +307,7 @@ Worker 崩溃或连接断开时，RabbitMQ 会重新投递未 ACK 消息。重�
 4. admin 可以执行“恢复任务”，在 PostgreSQL 事务中将可恢复的 `failed` 任务重新置为 `pending`，追加 `task_requeued` TaskEvent，并重新打开原 Outbox 记录；
 5. Relay 重新发布同一个 `message_id`。死信队列中的原消息保留作为审计副本，不直接与主队列消息同时消费；
 6. 恢复前必须检查任务没有正式报告、没有被取消、没有新的运行者，并记录操作者和原因；
-7. 恢复增加执行尝试和步骤尝试，但不新建任务、不覆盖已有步骤、证据或报告。
+7. 恢复事务保留当前 `attempt_count`；新 Worker Claim 时再增加执行尝试和步骤尝试，不新建任务、不覆盖已有步骤、证据或报告。
 
 `failed -> pending` 只允许 admin 的受审计恢复用例发生。普通用户点击“重新诊断”仍然创建新的 DiagnosisTask，并通过 `retry_of` 关联历史任务。
 
@@ -390,7 +390,7 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 1. 用 PostgreSQL 迁移建立 Outbox 状态、索引和租约字段。（已完成）
 2. 实现 `OutboxRepository` 的短事务领取、成功确认和失败退避。（已完成）
-3. 实现 RabbitMQ 连接、持久主交换机/诊断队列和 Compose 健康检查声明。（已完成；重试/死信 policy 待 Consumer 切片）
+3. 实现 RabbitMQ 连接、持久主交换机/诊断队列和 Compose 健康检查声明。（已完成）
 4. 用 Publisher Confirm 验证 PostgreSQL 到 RabbitMQ 发布和确认后状态提交。（已完成；NACK/进程崩溃手工故障演练待补）
 5. 先用假的 DiagnosisHandler 验证手动 ACK、重复投递、租约过期和 fencing token。（已完成单元与 PostgreSQL 集成覆盖）
 6. 实现三级 TTL 重试和最终死信记录。（已完成；真实 RabbitMQ Confirm/ACK 集成覆盖）
@@ -425,4 +425,4 @@ Relay 和 Worker 不领取新任务。RabbitMQ 中未 ACK 的消息会等待或�
 
 ## 后续工作
 
-M0认证、Session、Repository和事务基础已完成；任务取消、事件补读、Worker Claim/续租/fencing、RabbitMQ Outbox Relay、Consumer、重试/死信拓扑与真实 Agent Worker 均已落地。M1-B/M1-C 接下来补正式报告读取、SSE、恢复管理入口和完整故障演练。
+M0认证、Session、Repository和事务基础已完成；任务取消、事件 JSON/SSE 补读、Worker Claim/续租/fencing、RabbitMQ Outbox Relay、Consumer、重试/死信拓扑、真实 Agent Worker、正式报告读取和受审计的 admin 恢复均已落地。M1-B/M1-C 接下来完成完整故障演练和固定数据集验收。

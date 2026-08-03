@@ -238,6 +238,11 @@ cancel_requested 是过渡状态，不能长期停留。Worker 要在步骤边�
 - failed 表示系统故障或不可恢复的执行错误，不表示业务上没有找到根因。
 - cancelled 不生成正式报告，但保留已完成步骤、工具调用和证据。
 - 普通用户对已结束任务再次诊断必须创建新任务，不能原地重置状态。admin 的失败任务恢复是运维补偿，不等价于重新诊断，必须追加 TaskEvent 和审计记录。
+- 任务状态和生命周期事件是编译期领域协议，不是运行配置。Go 代码通过强类型
+  `TaskStatus`、`TaskEventType` 及唯一的终态状态/事件映射维护；HTTP、Worker 和 PostgreSQL
+  Adapter 不得各自硬编码终态集合。超时、重试和心跳可以配置，状态机枚举不能配置化。
+- `succeeded`、`failed`、`cancelled` 在当前执行阶段都产生终态事件并关闭 SSE；管理员从
+  `failed` 恢复时追加 `task_requeued`，客户端重新连接后从事件游标继续读取。
 
 ## DiagnosisStep 状态机
 
@@ -340,7 +345,7 @@ task_started
 step_started
 tool_completed
 evidence_created
-cancel_requested
+task_cancel_requested
 task_cancelled
 task_failed
 task_succeeded

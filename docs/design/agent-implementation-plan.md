@@ -27,7 +27,7 @@ P0 已于 2026-07-30 验收：隔离的 ADK `ChatModelAgent` POC 在不替换现
 
 Eino `v0.9.13` 的 `adk/filesystem.InMemoryBackend` 在 Windows 下存在 Skill glob/read 路径分隔符不一致，P0 曾使用局部适配器封装。P2 已替换为项目只读目录 Backend，并保留 Windows slash/backslash 回归测试。
 
-P1 已于 2026-07-31 验收：新增不可变 `TaskScope`、启动期只读 `ToolCatalog` 和 ADK `BeforeAgent` 授权 Middleware。Catalog 根据角色、任务类型、同一数据源的 role/safety mode 组合及依赖可用性过滤 Tool；60 个并发 Run 证明授权状态不串用，production 不能获得 bounded-LAB Tool，GitHub MCP 不可用只移除对应 Tool。GCC 到位后的 `-race` 检测发现 Eino `v0.9.13` 的同一 `ChatModelAgent` 实例不能被并发 Run；因此共享 Catalog、Middleware、Tool 和模型客户端，但每次 Run 创建独立 Agent 实例。P3 已将这套生命周期接入正式 Runner。
+P1 已于 2026-07-31 验收：新增不可变 `TaskScope`、启动期只读 `ToolCatalog` 和 ADK `BeforeAgent` 授权 Middleware。Catalog 根据角色、任务类型、同一数据源的 role/safety mode 组合及依赖可用性过滤 Tool；2026-08-03 又将任务级 `allowedCapabilities` 与 Runtime 依赖健康拆分，任务创建时冻结 `case/code/sql` 白名单，Worker 不再因 GitHub MCP 或 SQL Server 在线而自动向所有诊断任务暴露对应 Tool。60 个并发 Run 证明授权状态不串用，production 不能获得 bounded-LAB Tool，GitHub MCP 不可用只移除对应 Tool。GCC 到位后的 `-race` 检测发现 Eino `v0.9.13` 的同一 `ChatModelAgent` 实例不能被并发 Run；因此共享 Catalog、Middleware、Tool 和模型客户端，但每次 Run 创建独立 Agent 实例。P3 已将这套生命周期接入正式 Runner。
 
 P2 已于 2026-07-31 验收：两个 Skill 已迁移为 Eino 原生 `SKILL.md + references`，旧 TOML/Prompt 文件删除；项目只读 filesystem Backend 统一拒绝写入、路径逃逸、symbolic link 和 Windows Junction/reparse point，`read_skill_reference` 只允许按行读取 `references/*.md` 并限制行数/字节数。测试证明初始 Tool 描述只包含 Skill 元数据，完整指南和 reference 分别按需进入模型上下文。脚本执行仍未开放。
 
@@ -95,7 +95,12 @@ type AgentToolProvider interface {
 }
 ~~~
 
-`TaskScope` 至少包含用户角色、任务类型、数据源、生产/产品库环境和可用依赖。Catalog 注册不等于向模型暴露；授权 Middleware 在 ADK `BeforeAgent` 阶段读取 `TaskScope`，把 `ToolsFor` 的结果写入本次运行的 Tool 配置。Catalog、Middleware 和 Tool 可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 每次 Run 独立创建，不在并发请求间共享实例。不同任务看到的 Tool Schema 不同。
+`TaskScope` 至少包含用户角色、任务类型、数据源、生产/产品库环境、任务允许的能力和可用依赖。
+`allowedCapabilities` 决定本任务是否允许 `case/code/sql`，`availableDependencies` 只描述外部服务
+当前是否健康，两者同时满足时 Tool 才可见。Catalog 注册不等于向模型暴露；授权 Middleware 在
+ADK `BeforeAgent` 阶段读取 `TaskScope`，把 `ToolsFor` 的结果写入本次运行的 Tool 配置。
+Catalog、Middleware 和 Tool 可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 每次 Run 独立创建，
+不在并发请求间共享实例。不同任务看到的 Tool Schema 不同。
 
 验收：重复 Tool 名启动失败；无授权 Tool 不进入模型；并发任务的 Tool 范围不串用；GitHub MCP 不可用时只移除代码能力；生产库任务不能获得 LAB Tool。
 
@@ -153,7 +158,7 @@ Token 上限按供应商 usage 在每次模型响应后结算：达到阈值后�
 
 ### P5：真实评测与第一条简历闭环
 
-状态：**评测契约、统计 CLI、GitHub 工具级真实评测切片和首组四类 Agent paired 样本已完成；完整数据集待扩展**。
+状态：**第一条简历的固定 Tool 选择指标已完成真实评测；完整诊断效果数据集仍待扩展**。
 
 目标：用固定数据集得到可复现指标，而不是把样例统计或静态 Schema 字节数写进简历。
 
@@ -169,6 +174,24 @@ P5 首轮评测覆盖当前已实现的工单、代码和需要拒绝/降级的�
 每个案例标注 `expected_tools`、`forbidden_tools`、`required_evidence`、`expected_root_cause` 和 `acceptable_limits`。Tool、越权、Token 和 Evidence ID 由代码确定性评分，语义结论由人工复核；不同供应商的 LLM Judge 只作辅助，并记录 Judge 模型、版本、Rubric 以及与人工评分的一致率。所有失败样本必须保留。
 
 后续每增加 SQL、知识问答或附件能力，都向同一版本化评测体系补充样本并重新运行对照实验。目标值 `93%+` 和 `45%+` 只在真实实验达到后写入项目状态。
+
+2026-08-03 已完成独立的 `tool-selection-v1` 固定评测：45 条请求覆盖工单读取、6 类 GitHub
+只读工具和 3 类 SQL 只读工具，宽/过滤两组共 90 条 observation；每个案例另执行一次无业务
+Tool Schema 的 Provider 基线调用，用 `variantPromptTokens - basePromptTokens` 校准 Tool Schema
+Token，避免用静态 JSON 字节数冒充 Token，也避免把固定 Prompt Token 算入 Schema 降幅。
+评测固定使用 `stepfun/step-3.7-flash`、`reasoningEffort=low`、`temperature=0`、
+`tool_choice=required`、`maxOutputTokens=1024` 和 `tool-selection-v4` Prompt；宽/过滤顺序按案例
+交替，所有失败样本保留。
+
+最终结果为：宽集合准确 `43/45 = 95.56%`，TaskScope 过滤集合准确
+`44/45 = 97.78%`，两组无效 Tool Call 和越白名单调用均为 0；Provider 校准的 Tool Schema
+Prompt Token 从 126360 降至 68136，降幅 `46.08%`。整体 Prompt Token 降幅为 `42.63%`，
+与简历中的 Schema Token 指标分开记录。过滤组唯一错例保留为 `sql-query-05`：请求未给出具体
+视图名时，模型先选择 `search_schema_catalog`，固定标签要求 `execute_readonly_query`。
+可复现数据位于 `testdata/tool-selection-v1.jsonl`、
+`testdata/tool-selection-v1.observations.jsonl` 和 `testdata/tool-selection-v1.summary.json`，
+运行入口为 `cmd/mesguard-tool-selection-eval`。据此，第一条简历中的 `93%+` 工具选择准确率和
+`45%+` 无关 Tool Schema Token 降幅已有真实 Provider usage 支撑。
 
 当前已提供 `EvaluationCase`/`EvaluationObservation` JSONL 契约和
 `cmd/mesguard-agent-eval` 配对统计命令。仓库中的 `dev-v1` 两案例样例只验证
@@ -239,17 +262,36 @@ Catalog 联调，以及 Agent paired v3/v4 观察切片已完成。成功的事�
 T-SQL Parser。当前 POC 已实现默认拒绝的窄 QueryGuard，只处理词法边界、单条只读查询
 分类、危险结构拒绝和表/函数引用提取；表驱动、模糊测试和真实 SQL Server CTE+UNION
 只读执行均已验证。数据库只读账号、TaskScope/Catalog 授权和执行资源限制继续作为独立
-防线；正式 EvidenceItem 存储和报告关联已在 P7 Worker 中落地，SSE 展示仍待实现。
+防线；正式 EvidenceItem 存储和报告关联已在 P7 Worker 中落地，TaskEvent JSON/SSE 展示边界也已接入。
+
+简历第二条的固定评测已经闭环。`sql-safety-v1` 使用 40 条高风险 DML、DDL、权限、
+副作用和外部访问语句，加 12 条安全只读对照，生产 QueryGuard 对高风险语句拦截
+`40/40`、安全只读通过 `12/12`、原因码匹配 `40/40`。`text-to-sql-v1` 使用 20 条
+工业工单自然语言查询，由 StepFun 强制生成一次 `execute_readonly_query` Tool Call，随后
+经过生产 QueryGuard、固定已发布 Catalog 授权、SQL Server 只读账号和真实查询执行，
+再以确定性列/结果行比较判定正确性；正式结果为 `20/20`，执行正确率 `100%`，平均耗时
+`1328.45ms`。评测不使用 SQL 字符串相似度或模型自评，错例不会被删除或改标签凑指标；
+固定数据集、逐例 observation 和 summary 位于 `testdata/sql-safety-v1.*` 与
+`testdata/text-to-sql-v1.*`。
 
 ### P7：接入正式任务链路（Worker 后端闭环已完成）
 
-当前已建立 `case_snapshots`、`diagnosis_tasks`、`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_steps`、`tool_executions`、`evidence_items`、`diagnosis_reports`、`report_evidence` 和 `report_reviews` 的 PostgreSQL 持久化基础。诊断任务创建/安全摘要查询已接入：外部工单重读后，脱敏快照、pending 任务、首个事件和 `diagnosis.execute` Outbox 在一个事务中落库，并支持幂等重放/冲突。报告反馈也已接入查询/追加 API，采用 `adopted`、`partially_adopted`、`rejected` 三值追加历史，只有任务创建者可提交，管理员只读查看。
+当前已建立 `case_snapshots`、`diagnosis_tasks`、`diagnosis_task_data_sources`、`task_events`、`outbox_events`、`diagnosis_steps`、`tool_executions`、`evidence_items`、`diagnosis_reports`、`report_evidence`、`report_reviews` 和 `diagnosis_task_recoveries` 的 PostgreSQL 持久化基础。诊断任务创建/安全摘要查询已接入：外部工单重读后，脱敏快照、pending 任务、首个事件和 `diagnosis.execute` Outbox 在一个事务中落库，并支持幂等重放/冲突。报告反馈也已接入查询/追加 API，采用 `adopted`、`partially_adopted`、`rejected` 三值追加历史，只有任务创建者可提交，管理员只读查看。
 
-任务控制面现已接入按 `seq/afterSeq` 的 TaskEvent JSON 历史查询和幂等取消命令。Outbox Relay 使用 PostgreSQL 短事务领取、有限租约、失败退避、RabbitMQ 持久消息和逐条 Publisher Confirm。Diagnosis Worker 使用严格消息信封、`prefetch=1`、手动 ACK、三级 TTL 重试和最终死信；执行期间定时续租，使用创建时冻结的 CaseSnapshot 运行现有 Agent/Evidence Gate，并以 `task_id + claim_owner + attempt_count` 把步骤、工具调用、证据、报告、TaskEvent 和终态原子提交。真实 PostgreSQL 和 RabbitMQ 集成测试已覆盖终态事务及 Confirm 后 ACK。后续继续接正式报告读取 API、TaskEvent SSE、进程崩溃/模型故障演练，并更新 `api/openapi.yaml` 与 `docs/design/openapi.json` 给前端任务提供稳定契约。
+任务控制面现已接入按 `seq/afterSeq` 的 TaskEvent JSON 历史查询和幂等取消命令。Outbox Relay 使用 PostgreSQL 短事务领取、有限租约、失败退避、RabbitMQ 持久消息和逐条 Publisher Confirm。Diagnosis Worker 使用严格消息信封、`prefetch=1`、手动 ACK、三级 TTL 重试和最终死信；执行期间定时续租，使用创建时冻结的 CaseSnapshot 运行现有 Agent/Evidence Gate，并以 `task_id + claim_owner + attempt_count` 把步骤、工具调用、证据、报告、TaskEvent 和终态原子提交。真实 PostgreSQL 和 RabbitMQ 集成测试已覆盖终态事务及 Confirm 后 ACK。正式报告读取 API 已按任务创建者/admin 边界接入，返回结构化报告、运行元数据和有序证据声明，但不暴露完整证据、Prompt、模型推理或原始 SQL；Worker 写入后读回的 PostgreSQL 集成测试已经通过。TaskEvent SSE 复用 `seq`/`Last-Event-ID` 补读、心跳、终态关闭和应用生命周期取消，已与 JSON 历史接口共用同一路径并更新机器契约。admin 恢复命令现已按 `agent_execution_failed` 白名单接入：任务、`task_requeued`、原 Outbox 重开和恢复审计在同一事务提交，幂等重放不制造重复事实，下一次 Claim 才增加尝试次数。下一步是进程崩溃/模型故障演练与固定数据集验收。
 
 运行元数据已将报告模型身份规范为 `model_provider + model_id`，删除无法证明来源的独立 `model_version`；`prompt_version` 改由 `[agent]` 配置提供。生产、评测 baseline 和 Evidence Gate 报告契约 Prompt 位于 `config/prompts/`，启动时一次加载并缓存，修改后重启生效。当前只预留人工版本标签，不实现 Nacos、热更新、内容哈希或独立 Prompt 发布平台。
 
-MinIO/附件、RAG、Web Search、日志源和 SQL 优化实验按交付计划继续推进，不与 P0-P5 并行铺空壳。
+下一项简历主目标已转入第三条的混合文档解析与 Agentic RAG。现状审计确认此前只有设计和
+`pgvector` 扩展，没有后端知识文档表、摄取或检索实现。M2-A1 已新增文档逻辑身份、不可变
+解析版本、可追溯 Chunk、Markdown/文本确定性分块和 PostgreSQL FTS 基线；真实 PostgreSQL
+测试验证了当前版本切换以及全局/个人权限在检索 SQL 内生效。固定 `rag-retrieval-v1`
+使用 12 份工业故障文档和 24 个原词/语义改写查询，PostgreSQL FTS 基线达到
+Recall@5 `23/24 = 95.83%`、MRR `0.9028`；唯一未命中样本是“上游系统长时间没有回应”
+对 ERP 504 文档的语义改写，保留为向量检索补位案例。摄取耗时和速率已记录，但单机小语料
+结果不作为吞吐提升指标。下一步接 Embedding 与融合检索，并在同一数据集上比较；MinIO 和
+复杂文档解析在同一数据契约上继续扩展。Web Search、日志源和 SQL 优化实验继续排队，
+不并行铺空壳。
 
 ## Skill 与 Tool 优先级
 

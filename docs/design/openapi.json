@@ -2,8 +2,8 @@
   "openapi": "3.0.3",
   "info": {
     "title": "MESGuard API",
-    "version": "0.1.0",
-    "description": "MESGuard 认证接口集合，统一使用 `code/message/data/requestId` 响应信封。"
+    "version": "0.1.0-p7-admin-recovery",
+    "description": "MESGuard 当前 HTTP API、TaskEvent SSE 与管理员失败恢复契约；JSON 接口统一使用 `code/message/data/requestId` 响应信封。"
   },
   "servers": [
     { "url": "http://localhost:9090" }
@@ -226,6 +226,130 @@
       }
     },
 
+    "/api/v1/diagnosis-tasks/{taskId}/events": {
+      "parameters": [
+        {
+          "name": "taskId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        },
+        {
+          "name": "afterSeq",
+          "in": "query",
+          "description": "排他游标，只读取 seq 大于该值的事件",
+          "schema": { "type": "integer", "format": "int64", "minimum": 0, "default": 0 }
+        },
+        {
+          "name": "Last-Event-ID",
+          "in": "header",
+          "description": "SSE 重连游标；提供时优先于 afterSeq",
+          "schema": { "type": "string", "pattern": "^[0-9]+$" }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "description": "单次 JSON 页或 SSE 补读批次的最大事件数",
+          "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100 }
+        }
+      ],
+      "get": {
+        "tags": ["Diagnosis Tasks"],
+        "summary": "查询或持续订阅任务事件",
+        "description": "application/json 返回游标页；text/event-stream 从 PostgreSQL 补读并轮询新事件，终态事件后关闭，断线不取消任务。",
+        "responses": {
+          "200": {
+            "description": "JSON 事件页或 SSE 事件流",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DiagnosisTaskEventsResponse" }
+              },
+              "text/event-stream": {
+                "schema": { "type": "string" },
+                "example": "retry: 3000\n\nid: 19\nevent: task_started\ndata: {\"seq\":19,\"eventType\":\"task_started\",\"payload\":{\"attemptCount\":1},\"payloadSchemaVersion\":1,\"createdAt\":\"2026-08-03T06:00:00Z\"}\n\n"
+              }
+            }
+          },
+          "400": { "description": "任务 ID、游标或批次大小非法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "401": { "description": "未登录", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "无权查看该任务", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "任务不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "事件读取失败", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+
+    "/api/v1/diagnosis-tasks/{taskId}/report": {
+      "parameters": [
+        {
+          "name": "taskId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "tags": ["Diagnosis Reports"],
+        "summary": "查询正式诊断报告",
+        "description": "任务创建者和管理员可以读取 Worker 已提交的结构化报告与证据声明元数据；不返回完整证据内容、原始 Prompt、模型推理或原始 SQL。",
+        "responses": {
+          "200": {
+            "description": "正式诊断报告",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DiagnosisReportResponse" }
+              }
+            }
+          },
+          "400": { "description": "任务 ID 非法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "401": { "description": "未登录", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "无权查看该任务", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "任务不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "409": { "description": "任务当前没有可读取的正式报告", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "报告持久化结构无效", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+
+    "/api/v1/admin/diagnosis-tasks/{taskId}/recover": {
+      "parameters": [
+        {
+          "name": "taskId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "post": {
+        "tags": ["Diagnosis Tasks"],
+        "summary": "管理员恢复可重试的失败诊断任务",
+        "description": "仅恢复 agent_execution_failed；任务、task_requeued、恢复审计和原 Outbox 重开在同一事务提交。恢复保留 attemptCount，下一次 Worker Claim 时再增加。",
+        "parameters": [
+          { "$ref": "#/components/parameters/CSRFToken" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DiagnosisTaskRecoveryRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "幂等重放原恢复结果", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DiagnosisTaskRecoveryResponse" } } } },
+          "202": { "description": "恢复事务已提交", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DiagnosisTaskRecoveryResponse" } } } },
+          "400": { "description": "任务 ID、幂等键或请求体非法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "401": { "description": "未登录", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "403": { "description": "非管理员或 CSRF 校验失败", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "任务不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "409": { "description": "幂等冲突或任务不可恢复", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "422": { "description": "恢复原因不合法", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "500": { "description": "服务端内部错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+
     "/api/v1/diagnosis-reports/{reportId}/reviews": {
       "parameters": [
         {
@@ -311,7 +435,7 @@
           {
             "type": "object",
             "properties": {
-              "code":    { "type": "integer", "enum": [40001, 40101, 40301, 40401, 40501, 40901, 42201, 50000, 50301] },
+              "code":    { "type": "integer", "enum": [40001, 40101, 40301, 40401, 40501, 40901, 40921, 42201, 50000, 50301] },
               "message": { "type": "string" },
               "data": {
                 "type": "object",
@@ -388,6 +512,151 @@
           }
         },
         "required": ["code", "message"]
+      },
+
+      "DiagnosisReportUsage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelCalls": { "type": "integer", "minimum": 0 },
+          "promptTokens": { "type": "integer", "minimum": 0 },
+          "completionTokens": { "type": "integer", "minimum": 0 },
+          "totalTokens": { "type": "integer", "minimum": 0 },
+          "cachedTokens": { "type": "integer", "minimum": 0 },
+          "reasoningTokens": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["modelCalls", "promptTokens", "completionTokens", "totalTokens", "cachedTokens", "reasoningTokens"]
+      },
+
+      "DiagnosisTaskEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "seq": { "type": "integer", "format": "int64", "minimum": 1 },
+          "eventType": { "type": "string" },
+          "payload": { "type": "object", "additionalProperties": true },
+          "payloadSchemaVersion": { "type": "integer", "minimum": 1 },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["seq", "eventType", "payload", "payloadSchemaVersion", "createdAt"]
+      },
+
+      "DiagnosisTaskEventsData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/DiagnosisTaskEvent" } },
+          "afterSeq": { "type": "integer", "format": "int64", "minimum": 0 },
+          "nextAfterSeq": { "type": "integer", "format": "int64", "minimum": 0 },
+          "hasMore": { "type": "boolean" }
+        },
+        "required": ["items", "afterSeq", "nextAfterSeq", "hasMore"]
+      },
+
+      "DiagnosisTaskEventsResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          {
+            "type": "object",
+            "properties": { "data": { "$ref": "#/components/schemas/DiagnosisTaskEventsData" } },
+            "required": ["data"]
+          }
+        ]
+      },
+
+      "DiagnosisTaskRecoveryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        },
+        "required": ["reason"]
+      },
+
+      "DiagnosisTaskRecovery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "recoveryId": { "type": "string", "format": "uuid" },
+          "taskId": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["pending"] },
+          "replayed": { "type": "boolean" },
+          "taskEventSeq": { "type": "integer", "format": "int64", "minimum": 1 },
+          "previousAttemptCount": { "type": "integer", "minimum": 1 },
+          "recoveredAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["recoveryId", "taskId", "status", "replayed", "taskEventSeq", "previousAttemptCount", "recoveredAt"]
+      },
+
+      "DiagnosisTaskRecoveryResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          {
+            "type": "object",
+            "properties": { "data": { "$ref": "#/components/schemas/DiagnosisTaskRecovery" } },
+            "required": ["data"]
+          }
+        ]
+      },
+
+      "DiagnosisReportEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "evidenceId": { "type": "string", "format": "uuid" },
+          "claimKey": { "type": "string" },
+          "claim": { "type": "string" },
+          "supportType": { "type": "string", "enum": ["supports", "contradicts", "context"] },
+          "sourceType": { "type": "string" },
+          "sourceRef": { "type": "string" },
+          "sourceTool": { "type": "string" },
+          "location": { "type": "string" },
+          "contentHash": { "type": "string" },
+          "collectedAt": { "type": "string", "format": "date-time" },
+          "redactionStatus": { "type": "string", "enum": ["not_required", "redacted"] },
+          "truncated": { "type": "boolean" },
+          "validityStatus": { "type": "string", "enum": ["valid", "superseded", "invalid"] }
+        },
+        "required": ["evidenceId", "claimKey", "claim", "supportType", "sourceType", "sourceRef", "sourceTool", "contentHash", "collectedAt", "redactionStatus", "truncated", "validityStatus"]
+      },
+
+      "DiagnosisReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reportId": { "type": "string", "format": "uuid" },
+          "taskId": { "type": "string", "format": "uuid" },
+          "conclusionStatus": { "type": "string", "enum": ["conclusive", "probable", "inconclusive"] },
+          "riskLevel": { "type": "string", "enum": ["low", "medium", "high"] },
+          "conclusion": { "type": "string" },
+          "businessSummary": { "type": "string" },
+          "technicalSummary": { "type": "string" },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+          "limitations": { "type": "array", "items": { "type": "string" } },
+          "partial": { "type": "boolean" },
+          "missingEvidence": { "type": "array", "items": { "type": "string" } },
+          "usage": { "$ref": "#/components/schemas/DiagnosisReportUsage" },
+          "agentRuns": { "type": "integer", "minimum": 0 },
+          "selectedSkill": { "type": "string" },
+          "executedSkills": { "type": "array", "items": { "type": "string" } },
+          "stopReason": { "type": "string" },
+          "reportSchemaVersion": { "type": "integer", "enum": [1] },
+          "modelProvider": { "type": "string" },
+          "modelId": { "type": "string" },
+          "promptVersion": { "type": "string" },
+          "evidence": { "type": "array", "items": { "$ref": "#/components/schemas/DiagnosisReportEvidence" } },
+          "generatedAt": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["reportId", "taskId", "conclusionStatus", "riskLevel", "conclusion", "businessSummary", "technicalSummary", "confidence", "limitations", "partial", "missingEvidence", "usage", "agentRuns", "selectedSkill", "executedSkills", "reportSchemaVersion", "modelProvider", "modelId", "promptVersion", "evidence", "generatedAt", "createdAt", "updatedAt"]
+      },
+
+      "DiagnosisReportResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Response" },
+          { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/DiagnosisReport" } } }
+        ]
       },
 
       "ReportReviewRequest": {
@@ -469,6 +738,13 @@
         "name": "X-CSRF-Token",
         "required": true,
         "schema": { "type": "string" }
+      },
+      "IdempotencyKey": {
+        "description": "恢复请求的 UUID 幂等键",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid", "maxLength": 128 }
       }
     },
 

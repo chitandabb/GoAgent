@@ -7,6 +7,7 @@ This directory is the single location for project documentation.
 | Document | Purpose |
 | --- | --- |
 | [Resume](简历.md) | Resume source of truth; only verified project outcomes may be written as metrics |
+| [Resume Project Points 1-2](resume-project-points-1-2.md) | Business, architecture, implementation, evidence, and interview narrative for the first two MESGuard resume items |
 | [Development](development.md) | Local configuration, Docker, tests, and volume operation |
 | [Roadmap](roadmap.md) | Current delivery state and ordered next milestones |
 | [Agent Orchestration](design/agent-orchestration.md) | Single-Agent loop, thin Graph, Skill/Tool boundaries, GitHub MCP, and evaluation metrics |

@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence 与反馈表；知识库等后续表尚未实现。
+- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence、反馈与失败恢复审计表；知识库等后续表尚未实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -552,6 +552,23 @@ ORDER BY seq
 LIMIT $3;
 ```
 
+### diagnosis_task_recoveries
+
+保存 admin 对可恢复失败任务执行的追加式运维补偿事实，不承担通用审计平台职责。
+
+关键字段：
+
+- `id UUID PRIMARY KEY`；
+- `task_id UUID REFERENCES diagnosis_tasks(id)`；
+- `recovered_by UUID REFERENCES users(id)`；
+- `idempotency_key`、`reason`；
+- `previous_error_code`、`previous_error_message`、`previous_attempt_count`；
+- `task_event_seq`，与本次 `task_requeued` 事件形成复合外键；
+- `outbox_event_id UUID REFERENCES outbox_events(id)`；
+- `created_at`。
+
+`(task_id, recovered_by, idempotency_key)` 唯一，保证同一管理员的同一恢复请求只产生一次补偿事实；`(task_id, task_event_seq)` 唯一，防止同一事件关联多次恢复。恢复事务将符合条件的 `failed` 任务置回 `pending`、清理租约和错误字段、追加事件、重开原 Outbox 并写入本表。任务 `attempt_count` 在恢复时保持不变，后续 Worker Claim 才增加。
+
 ### outbox_events
 
 保存需要发布到RabbitMQ的待发送事件。
@@ -672,6 +689,19 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
 
 文档重新解析或更换Embedding模型时创建新版本，不能覆盖已经被历史报告引用的旧版本。
 
+`00011_create_knowledge_documents.sql` 已实现第一阶段持久化基线：
+
+- `knowledge_documents`保存 `global`/`personal` 范围，个人文档强制绑定所有者；
+- `knowledge_document_versions`保存不可变版本、来源哈希、解析器版本和当前版本标记，发布
+  新版本时旧版本转为 `retired`，历史 Chunk 不被覆盖；
+- `knowledge_chunks`保存章节路径、元素类型、正文、检索归一化文本、内容哈希和 JSON 元数据；
+- PostgreSQL 生成 `tsvector` 并建立 GIN 索引，仓储查询在 SQL 内同时过滤当前版本、删除状态
+  和全局/个人权限；中文基线使用应用层确定性的 Han bigram 归一化。
+
+当前只验证了 Markdown/纯文本和结构化表格块的 FTS 基线。MinIO 原始对象、PDF/Office 解析、
+OCR/VLM、Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条
+的吞吐量或 Recall@5 指标已经完成。
+
 ### embeddings
 
 向量表保存：
@@ -750,7 +780,7 @@ Worker在短事务中检查任务状态、租约和幂等条件，成功后写�
 
 取消请求只在事务中将`pending`或`running`任务标记为`cancel_requested`并追加事件。Worker在步骤和工具边界检查取消，随后写入`cancelled`。关闭SSE连接不触发数据库状态变更。
 
-当前取消 Repository 已实现任务行锁、状态条件更新、任务内下一个 `seq` 分配和事件写入的单事务边界；重复取消不追加事件，`succeeded/failed` 返回稳定状态冲突。Worker 协作写入 `cancelled` 尚未实现。
+当前取消 Repository 已实现任务行锁、状态条件更新、任务内下一个 `seq` 分配和事件写入的单事务边界；重复取消不追加事件，`succeeded/failed` 返回稳定状态冲突。Worker 已实现 `cancel_requested -> cancelled`。管理员恢复 Repository 已实现 `failed -> pending`、`task_requeued`、原 Outbox 重开和专用审计的单事务边界。
 
 ## 迁移策略
 
@@ -768,7 +798,9 @@ db/
     00005_create_diagnosis_tasks.sql       # 当前已实现：快照、任务和任务数据源
     00006_create_diagnosis_reports_reviews.sql # 当前已实现：报告最小元数据和追加反馈
     00007_create_task_events_outbox.sql    # 当前已实现：TaskEvent和Outbox事实表
-    00008_create_evidence_reports.sql      # 后续 M1-B
+    00008_create_diagnosis_execution_results.sql # 当前已实现：步骤、工具、证据和正式报告
+    00009_normalize_diagnosis_report_model_identity.sql # 当前已实现：模型身份规范化
+    00010_create_diagnosis_task_recoveries.sql # 当前已实现：admin失败恢复审计
 ```
 
 每个迁移文件包含明确的Up和Down部分。生产环境通过独立迁移命令或发布步骤执行，API和Worker启动时只检查数据库是否达到要求版本，不在多个实例启动过程中同时自动改表。
@@ -906,4 +938,4 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ## 后续工作
 
-用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent和Outbox基础已经落地；TaskEvent 游标查询、取消命令、Worker Claim/续租/fencing 和 Outbox Relay 也已实现。后续按`docs/roadmap.md`的纵向切片继续实现 RabbitMQ Consumer、Worker执行、证据和报告。
+用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、Worker执行结果、正式报告和失败恢复审计基础已经落地；TaskEvent JSON/SSE、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer 和管理员恢复也已实现。后续按`docs/roadmap.md`完成故障演练和固定数据集验收。
