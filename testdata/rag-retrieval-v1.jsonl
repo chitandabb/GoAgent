@@ -1,0 +1,24 @@
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-transaction-timeout-literal","query":"SQL Server 事务超时报工排查","relevantDocumentKeys":["report-transaction-timeout"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-transaction-timeout-paraphrase","query":"工单提交一直卡住没有结果","relevantDocumentKeys":["report-transaction-timeout"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-barcode-conflict-literal","query":"SerialNo unique constraint violation","relevantDocumentKeys":["barcode-unique-conflict"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-barcode-conflict-paraphrase","query":"扫码时提示这个码已经存在","relevantDocumentKeys":["barcode-unique-conflict"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-erp-timeout-literal","query":"ERP HTTP 504 Gateway Timeout","relevantDocumentKeys":["erp-gateway-timeout"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-erp-timeout-paraphrase","query":"上游系统长时间没有回应","relevantDocumentKeys":["erp-gateway-timeout"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-plc-offline-literal","query":"PLC heartbeat offline","relevantDocumentKeys":["plc-heartbeat-offline"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-plc-offline-paraphrase","query":"产线设备突然掉线","relevantDocumentKeys":["plc-heartbeat-offline"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-deadlock-literal","query":"SQL Server deadlock error 1205","relevantDocumentKeys":["sqlserver-deadlock-1205"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-deadlock-paraphrase","query":"数据库两个事务互相等待后回滚","relevantDocumentKeys":["sqlserver-deadlock-1205"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-stock-literal","query":"MaterialCode available quantity 不足","relevantDocumentKeys":["material-stock-shortage"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-stock-paraphrase","query":"工单投料时提示库存不够","relevantDocumentKeys":["material-stock-shortage"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-quality-literal","query":"sampling rule 没有生成 inspection task","relevantDocumentKeys":["quality-sampling-rule"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-quality-paraphrase","query":"完工以后为什么没有触发抽检","relevantDocumentKeys":["quality-sampling-rule"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-route-literal","query":"route version mismatch 无法开工","relevantDocumentKeys":["route-version-mismatch"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-route-paraphrase","query":"工单引用了错误的工艺版本","relevantDocumentKeys":["route-version-mismatch"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-clock-literal","query":"NTP out-of-order SourceUpdatedAt","relevantDocumentKeys":["equipment-clock-drift"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-clock-paraphrase","query":"设备时间慢了十分钟导致记录顺序不对","relevantDocumentKeys":["equipment-clock-drift"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-certificate-literal","query":"TLS handshake x509 certificate expired","relevantDocumentKeys":["certificate-expired"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-certificate-paraphrase","query":"HTTPS 调用因为证书到期失败","relevantDocumentKeys":["certificate-expired"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-trace-literal","query":"BatchNo genealogy trace gap","relevantDocumentKeys":["batch-trace-gap"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-trace-paraphrase","query":"成品找不到对应的原料批次","relevantDocumentKeys":["batch-trace-gap"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-permission-literal","query":"生产报表 permission denied role","relevantDocumentKeys":["report-role-denied"],"k":5}
+{"datasetVersion":"rag-retrieval-v1","caseId":"rag-permission-paraphrase","query":"普通用户看不了报表但管理员可以","relevantDocumentKeys":["report-role-denied"],"k":5}
