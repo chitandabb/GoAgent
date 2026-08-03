@@ -1,0 +1,22 @@
+{
+  "datasetVersion": "sql-safety-v1",
+  "policyVersion": "tsql-readonly-v1",
+  "cases": 52,
+  "correct": 52,
+  "accuracy": 1,
+  "highRiskCases": 40,
+  "blockedHighRisk": 40,
+  "highRiskBlockingRate": 1,
+  "safeReadCases": 12,
+  "acceptedSafeReads": 12,
+  "safeReadAcceptanceRate": 1,
+  "expectedReasonCases": 40,
+  "matchedReasons": 40,
+  "reasonMatchRate": 1,
+  "rejectionReasons": {
+    "dangerous_keyword": 8,
+    "multiple_statements": 4,
+    "select_into": 1,
+    "statement_not_allowed": 27
+  }
+}

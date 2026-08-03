@@ -1,0 +1,45 @@
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-01","scope":"ticket","userQuery":"读取当前 ERP 工单的标题、描述、状态和优先级，作为诊断起点。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-02","scope":"ticket","userQuery":"先获取这张外部工单的标准化只读快照，暂时不要查询代码或数据库。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-03","scope":"ticket","userQuery":"查看工单里记录的模块、产品版本、产线和设备信息。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-04","scope":"ticket","userQuery":"核对用户提交的故障描述和工单当前处理状态。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-05","scope":"ticket","userQuery":"获取本次诊断绑定工单的附件元数据和更新时间。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"ticket-read-06","scope":"ticket","userQuery":"在开始调查前读取工单事实，不要推测不存在的字段。","expectedTool":"read_external_case"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-repository-01","scope":"github","userQuery":"根据名称 GoChat 找到我有权访问的对应仓库。","expectedTool":"search_repositories"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-repository-02","scope":"github","userQuery":"查找描述中提到 instant messaging 的私有或公开仓库。","expectedTool":"search_repositories"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-repository-03","scope":"github","userQuery":"我只知道项目叫 mesguard csharp demo，先定位仓库，不搜索文件内容。","expectedTool":"search_repositories"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-repository-04","scope":"github","userQuery":"按仓库名称和说明寻找包含 AI agent 示例的项目。","expectedTool":"search_repositories"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-code-01","scope":"github","userQuery":"在已授权仓库中定位 TicketSearchService 符号出现在哪些代码文件。","expectedTool":"search_code"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-code-02","scope":"github","userQuery":"查找代码内容中处理 agent_execution_failed 的位置。","expectedTool":"search_code"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-code-03","scope":"github","userQuery":"搜索所有调用 ExecuteReadonlyQuery 的代码行和文件路径。","expectedTool":"search_code"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-code-04","scope":"github","userQuery":"定位项目中定义 task_requeued 事件的代码，不读取整个仓库。","expectedTool":"search_code"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-tree-01","scope":"github","userQuery":"列出仓库当前提交下 internal/platform 目录的文件树。","expectedTool":"get_repository_tree"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-tree-02","scope":"github","userQuery":"查看仓库根目录有哪些文件和一级目录，以便选择下一步读取路径。","expectedTool":"get_repository_tree"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-tree-03","scope":"github","userQuery":"给定一个 commit tree SHA，枚举 docs/design 下的候选文件。","expectedTool":"get_repository_tree"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-tree-04","scope":"github","userQuery":"我不知道具体文件名，先浏览 cmd 目录在指定版本中的结构。","expectedTool":"get_repository_tree"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-file-01","scope":"github","userQuery":"读取已知路径 internal/diagnosis/task.go 在指定 commit SHA 下的内容。","expectedTool":"get_file_contents"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-file-02","scope":"github","userQuery":"打开仓库中的 README.md，返回该文件当前版本的正文。","expectedTool":"get_file_contents"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-file-03","scope":"github","userQuery":"核对已知路径 config/config.toml 在 main 分支上的内容。","expectedTool":"get_file_contents"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-file-04","scope":"github","userQuery":"读取指定仓库和提交中的 docs/简历.md 文件，不做全文搜索。","expectedTool":"get_file_contents"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commits-01","scope":"github","userQuery":"查看这个仓库最近 20 次提交的摘要和 SHA。","expectedTool":"list_commits"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commits-02","scope":"github","userQuery":"列出 main 分支最新提交历史，判断项目最近是否维护。","expectedTool":"list_commits"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commits-03","scope":"github","userQuery":"查找某个文件路径最近相关的提交列表，不需要单个提交详情。","expectedTool":"list_commits"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commits-04","scope":"github","userQuery":"给出仓库近期提交时间、作者和标题的列表。","expectedTool":"list_commits"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commit-01","scope":"github","userQuery":"读取指定 SHA 7b3f539 对应提交的作者、说明和改动文件。","expectedTool":"get_commit"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commit-02","scope":"github","userQuery":"核对一个完整 commit hash 的详细变更，不需要列出其他提交。","expectedTool":"get_commit"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commit-03","scope":"github","userQuery":"查看某次提交具体修改了哪些文件以及提交消息。","expectedTool":"get_commit"}
+{"datasetVersion":"tool-selection-v1","caseId":"github-commit-04","scope":"github","userQuery":"已知仓库和提交 SHA，请追溯该提交的完整元数据。","expectedTool":"get_commit"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-definition-01","scope":"sql","userQuery":"读取 dbo.usp_UpdateWorkReport 存储过程的定义，检查状态更新逻辑。","expectedTool":"get_database_object_definition"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-definition-02","scope":"sql","userQuery":"查看 dbo.v_MESGuardExternalCases 视图的 SQL 定义。","expectedTool":"get_database_object_definition"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-definition-03","scope":"sql","userQuery":"获取指定 SQL Server 函数的源码以分析字段转换规则。","expectedTool":"get_database_object_definition"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-definition-04","scope":"sql","userQuery":"核对一个存储过程内部是否更新了 TicketStatus 字段。","expectedTool":"get_database_object_definition"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-definition-05","scope":"sql","userQuery":"读取已知 schema 和对象名对应的视图定义，不执行查询。","expectedTool":"get_database_object_definition"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-catalog-01","scope":"sql","userQuery":"在已发布 Schema Catalog 中查找表示工单状态的表和字段。","expectedTool":"search_schema_catalog"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-catalog-02","scope":"sql","userQuery":"我不知道表名，按业务词 报工时间 检索可查询字段。","expectedTool":"search_schema_catalog"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-catalog-03","scope":"sql","userQuery":"查找 Catalog 中与设备编号语义相关的视图和列。","expectedTool":"search_schema_catalog"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-catalog-04","scope":"sql","userQuery":"确认 dbo.v_MESGuardExternalCases 的 Status 列是否已发布且允许查询。","expectedTool":"search_schema_catalog"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-catalog-05","scope":"sql","userQuery":"按字段含义 工单更新时间 搜索管理员发布的数据库目录。","expectedTool":"search_schema_catalog"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-query-01","scope":"sql","userQuery":"执行单条只读查询 SELECT TOP 5 TicketID, Status FROM dbo.v_MESGuardExternalCases。","expectedTool":"execute_readonly_query"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-query-02","scope":"sql","userQuery":"在授权生产数据源上查询最近 10 条工单状态记录，不做任何写入。","expectedTool":"execute_readonly_query"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-query-03","scope":"sql","userQuery":"运行已通过 Catalog 约束的 SELECT，核对指定 TicketID 的当前状态。","expectedTool":"execute_readonly_query"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-query-04","scope":"sql","userQuery":"用只读 SQL 统计状态为 Processing 的工单数量。","expectedTool":"execute_readonly_query"}
+{"datasetVersion":"tool-selection-v1","caseId":"sql-query-05","scope":"sql","userQuery":"查询视图中 WorkOrderNo 对应的更新时间和状态，只返回有限结果集。","expectedTool":"execute_readonly_query"}
