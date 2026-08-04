@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/platform/migration"
+	platformminio "github.com/chitandabb/GoAgent/internal/platform/minio"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
@@ -19,11 +21,13 @@ import (
 )
 
 type runtimeDependencies struct {
-	db             *gorm.DB
-	dbClose        func() error
-	redis          *rediscli.Client
-	sqlServer      *sql.DB
-	sqlServerError error
+	db               *gorm.DB
+	dbClose          func() error
+	redis            *rediscli.Client
+	objectStore      objectstore.Store
+	objectStoreError error
+	sqlServer        *sql.DB
+	sqlServerError   error
 }
 
 type dependencyOpeners struct {
@@ -31,6 +35,7 @@ type dependencyOpeners struct {
 	unwrapPostgres func(*gorm.DB) (*sql.DB, error)
 	checkMigration func(context.Context, *sql.DB) error
 	redis          func(context.Context, config.RedisConfig) (*rediscli.Client, error)
+	minio          func(context.Context, config.MinIOConfig) (objectstore.Store, error)
 	sqlServer      func(context.Context, config.SQLServerConfig) (*sql.DB, error)
 	pingSQLServer  func(context.Context, *sql.DB) error
 }
@@ -39,6 +44,9 @@ func defaultDependencyOpeners() dependencyOpeners {
 	return dependencyOpeners{
 		postgres: platformpostgres.Open, checkMigration: migration.CheckCurrent,
 		redis: platformredis.Open, sqlServer: platformsqlserver.Open,
+		minio: func(ctx context.Context, cfg config.MinIOConfig) (objectstore.Store, error) {
+			return platformminio.Open(ctx, cfg)
+		},
 		unwrapPostgres: func(db *gorm.DB) (*sql.DB, error) { return db.DB() },
 		pingSQLServer:  func(ctx context.Context, db *sql.DB) error { return db.PingContext(ctx) },
 	}
@@ -70,6 +78,17 @@ func openRuntimeDependencies(
 		log.Warn("Redis unavailable; continuing in degraded mode", zap.Error(err))
 		deps.redis = nil
 	}
+	if cfg.MinIO.Enabled {
+		deps.objectStore, err = openers.minio(ctx, cfg.MinIO)
+		if err != nil {
+			deps.objectStoreError = err
+			if deps.objectStore == nil {
+				log.Warn("MinIO unavailable; attachment and knowledge uploads are degraded", zap.Error(err))
+			} else {
+				log.Warn("MinIO initialization failed; uploads will retry on demand", zap.Error(err))
+			}
+		}
+	}
 	if cfg.SQLServer.Enabled {
 		deps.sqlServer, err = openers.sqlServer(ctx, cfg.SQLServer)
 		if err != nil {
@@ -96,6 +115,9 @@ func (d *runtimeDependencies) close() error {
 	var errs []error
 	if d.sqlServer != nil {
 		errs = append(errs, d.sqlServer.Close())
+	}
+	if d.objectStore != nil {
+		errs = append(errs, d.objectStore.Close())
 	}
 	if d.redis != nil {
 		errs = append(errs, d.redis.Close())

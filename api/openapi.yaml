@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: MESGuard API
-  version: 0.1.0-p7-admin-recovery
-  description: Current implemented backend contract for authentication, ERP external cases, asynchronous diagnosis tasks, resumable TaskEvent streaming, formal report reading, administrator recovery, and report feedback.
+  version: 0.2.0-m2-knowledge-ingestion
+  description: Current implemented backend contract for authentication, ERP external cases, asynchronous diagnosis, administrator recovery, report feedback, and administrator knowledge-source ingestion.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -458,6 +458,133 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+  /api/v1/admin/knowledge-documents:
+    post:
+      operationId: createKnowledgeDocument
+      summary: 管理员创建企业知识文档并上传首个不可变版本
+      description: 文件经 API 有界流式暂存并校验格式签名，随后上传私有对象存储；逻辑文档、queued 版本、pending 入库任务、首个事件和 knowledge.ingest Outbox 在一个 PostgreSQL 事务中创建。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/KnowledgeDocumentCreateRequest"
+      responses:
+        "200":
+          description: 相同幂等键和完全相同请求重放原任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionResponse"
+        "202":
+          description: 原文与入库任务已持久化，等待 Relay 和 Worker
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionResponse"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "503": {$ref: "#/components/responses/DependencyUnavailable"}
+  /api/v1/admin/knowledge-documents/{documentId}/versions:
+    post:
+      operationId: createKnowledgeDocumentVersion
+      summary: 管理员为已有企业知识文档上传不可变新版本
+      description: 新版本保持 queued 且不会替换 current；只有后续入库质量门禁通过并发布后才切换当前版本。该入口不能修改文档标题。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: documentId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/KnowledgeDocumentVersionRequest"
+      responses:
+        "200":
+          description: 相同幂等键和完全相同请求重放原任务
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionResponse"
+        "202":
+          description: 新版已持久化，旧 current 继续提供检索
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionResponse"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "503": {$ref: "#/components/responses/DependencyUnavailable"}
+  /api/v1/admin/knowledge-ingestion-tasks/{taskId}:
+    get:
+      operationId: getKnowledgeIngestionTask
+      summary: 管理员查询知识文档入库任务
+      description: 返回 PostgreSQL 事实源中的 stage、进度、attempt、取消和错误摘要；不返回 checkpoint 原文、对象存储地址或凭据。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: 当前任务事实
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionTaskResponse"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/admin/knowledge-ingestion-tasks/{taskId}/cancel:
+    post:
+      operationId: cancelKnowledgeIngestionTask
+      summary: 管理员协作式取消知识文档入库任务
+      description: pending/running/retry_wait 原子转为 cancel_requested 并追加事件；运行中的 Worker 通过心跳观察取消，服务端不强杀解析进程。重复取消返回原状态。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - name: taskId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: 取消命令已存在或任务已经 cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionTaskResponse"
+        "202":
+          description: cancel_requested 事实与事件已提交
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionTaskResponse"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
   /api/v1/diagnosis-reports/{reportId}/reviews:
     get:
       operationId: listDiagnosisReportReviews
@@ -1163,3 +1290,82 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ReportReviewsData"
+    KnowledgeDocumentCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [title, file]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 512}
+        file:
+          type: string
+          format: binary
+          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX、PNG 和 JPEG。
+    KnowledgeDocumentVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX、PNG 和 JPEG。
+    KnowledgeIngestionData:
+      type: object
+      required: [documentId, documentVersionId, version, taskId, status, stage, replayed, createdAt]
+      properties:
+        documentId: {type: string, format: uuid}
+        documentVersionId: {type: string, format: uuid}
+        version: {type: integer, minimum: 1}
+        taskId: {type: string, format: uuid}
+        status:
+          type: string
+          enum: [pending, running, retry_wait, cancel_requested, succeeded, partial_succeeded, failed, cancelled]
+        stage:
+          type: string
+          enum: [uploaded, scanning, parsing, chunking, indexing, publishing, completed]
+        replayed: {type: boolean}
+        createdAt: {type: string, format: date-time}
+    KnowledgeIngestionResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/KnowledgeIngestionData"
+    KnowledgeIngestionTaskData:
+      type: object
+      required: [taskId, documentVersionId, documentId, status, stage, attemptCount, maxAttempts, progressPercent, createdAt, updatedAt]
+      properties:
+        taskId: {type: string, format: uuid}
+        documentVersionId: {type: string, format: uuid}
+        documentId: {type: string, format: uuid}
+        status:
+          type: string
+          enum: [pending, running, retry_wait, cancel_requested, succeeded, partial_succeeded, failed, cancelled]
+        stage:
+          type: string
+          enum: [uploaded, scanning, parsing, chunking, indexing, publishing, completed]
+        attemptCount: {type: integer, minimum: 0, maximum: 10}
+        maxAttempts: {type: integer, minimum: 1, maximum: 10}
+        progressPercent: {type: integer, minimum: 0, maximum: 100}
+        cancelRequestedAt: {type: string, format: date-time}
+        lastError:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}
+        startedAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+        cancellationChanged: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    KnowledgeIngestionTaskResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/KnowledgeIngestionTaskData"

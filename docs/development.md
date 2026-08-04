@@ -7,6 +7,8 @@ The local development stack contains only MESGuard dependencies:
 - SQL Server 2022 Developer: synthetic company ERP tickets queried through the
   dedicated `mesguard_case_reader` account.
 - Redis 7: short-lived state, locks, and cache. It is not the system of record.
+- MinIO: private attachment and knowledge-source objects. PostgreSQL stores the
+  immutable object references and lifecycle facts.
 - StepFun Step Plan: OpenAI-compatible `step-3.7-flash` ChatModel for Agent runs.
 - GitHub MCP: optional read-only code investigation tools.
 - `backend`: the `cmd/mesguard-api` executable.
@@ -46,11 +48,12 @@ go run ./cmd/mesguard-user -username admin01 -display-name "系统管理员" -ro
 Invoke-RestMethod http://127.0.0.1:9090/healthz
 ```
 
-PostgreSQL is the critical fact store checked by `/healthz`. Redis, the ERP SQL
+PostgreSQL is the critical fact store checked by `/healthz`. Redis, MinIO, the ERP SQL
 Server, StepFun, and GitHub MCP are degradable dependencies: startup continues
 when one is down, and only the affected capability fails. The SQL Server
 connection pool retries on later requests, so recovery does not require an API
-restart. The API checks the required PostgreSQL migration version at startup
+restart. MinIO initialization and bucket creation are retried on later uploads.
+The API checks the required PostgreSQL migration version at startup
 but never applies migrations itself.
 
 ## Agent providers
@@ -73,6 +76,22 @@ The `[agent]` block declares these three paths and a manually maintained
 `promptVersion`. MESGuard reads, trims, validates, and caches each file once
 while building the Agent runtime; a missing, empty, or larger-than-32-KiB file
 fails Agent initialization. Prompt changes take effect after process restart.
+
+## Knowledge ingestion
+
+The `[knowledge]` block configures the current ingestion contract:
+
+- `pipelineVersion`: persisted with every immutable source version and task;
+- `maxAttempts`: bounded transient-failure attempts;
+- `maxUploadBytes`: API upload limit, which must not exceed `[minio].maxObjectBytes`.
+
+Administrator uploads use `multipart/form-data`, a UUID `Idempotency-Key`, the
+authenticated Session, and CSRF protection. The API stages one bounded file in the
+system temporary directory, computes SHA-256, validates its first format boundary,
+uploads it to MinIO, and removes the temporary file before returning. A successful
+response means the immutable object and PostgreSQL ingestion facts are durable; it
+does not yet mean a parser consumed the RabbitMQ message. The ingestion Consumer and
+actual parser executor remain the next backend slice.
 Increment `promptVersion` whenever a content change must be distinguishable in
 persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release
@@ -204,7 +223,7 @@ go test ./internal/platform/postgres -run TestTxManagerAgainstPostgres -v
 ```
 
 Stop the stack with `docker compose down`. Do not add `-v` unless the local
-PostgreSQL, SQL Server, and Redis data should be discarded deliberately.
+PostgreSQL, SQL Server, Redis, and MinIO data should be discarded deliberately.
 
 ## Volumes
 
@@ -215,4 +234,5 @@ of these variables in `.env`:
 MESGUARD_POSTGRES_DATA=D:/develop/docker_workspace/mesguard/postgres
 MESGUARD_SQLSERVER_DATA=D:/develop/docker_workspace/mesguard/sqlserver
 MESGUARD_REDIS_DATA=D:/develop/docker_workspace/mesguard/redis
+MESGUARD_MINIO_DATA=D:/develop/docker_workspace/mesguard/minio
 ```

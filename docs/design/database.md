@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence、反馈与失败恢复审计表；知识库等后续表尚未实现。
+- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence、反馈与失败恢复审计表，以及知识文档、不可变版本、Chunk 和入库任务/事件的持久化骨架；Embedding 与完整评测表仍未实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -698,9 +698,27 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
 - PostgreSQL 生成 `tsvector` 并建立 GIN 索引，仓储查询在 SQL 内同时过滤当前版本、删除状态
   和全局/个人权限；中文基线使用应用层确定性的 Han bigram 归一化。
 
-当前只验证了 Markdown/纯文本和结构化表格块的 FTS 基线。MinIO 原始对象、PDF/Office 解析、
-OCR/VLM、Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条
-的吞吐量或 Recall@5 指标已经完成。
+`00012_create_knowledge_ingestion_tasks.sql` 和
+`00013_relax_source_version_and_add_ingestion_idempotency.sql` 已继续落地可恢复入库骨架：
+
+- `knowledge_document_versions` 保存 MinIO 逻辑 Bucket、不可变 ObjectKey、可选 VersionID、ETag、
+  原文件名、上传时间和 `pipeline_version`；queued 版本不会提前成为 current；
+- `knowledge_ingestion_tasks` 保存 stage、attempt、claim/lease/heartbeat、checkpoint、进度、取消、
+  错误与终态，`idempotency_key/request_fingerprint` 已建立成对约束和创建者范围唯一索引；
+- 入库任务 `stage` 是细粒度执行阶段并包含 `publishing`；文档版本 `status` 是粗粒度可用性状态，
+  publishing checkpoint 仍投影为 `indexing`，直到 Worker 终态事务原子切换为 `ready` 或
+  `partial_ready`。前端和运维若要展示“正在发布”必须读取任务 stage，不能从版本 status 推断；
+- `knowledge_ingestion_events` 使用 `(task_id, seq)` 保存有序、追加式入库事件；
+- 应用服务在一个 PostgreSQL 事务中创建 queued version、pending task、首个 event 和
+  `knowledge.ingest` Outbox；事务提交后由 Relay 发布 RabbitMQ，不在数据库事务内执行网络 I/O；
+- MinIO 上传先于数据库事务。事务失败时仅补偿删除本次服务端生成的唯一 ObjectKey，避免留下
+  无引用原文；对象版本和数据库业务版本是两套不同概念。
+
+当前已验证 Markdown/纯文本、结构化表格块的 FTS 基线，以及 MinIO 原文写入和入库任务原子创建。
+管理员上传 HTTP API、幂等重放/冲突处理、任务查询/协作式取消以及 Worker
+claim/lease/heartbeat/checkpoint/fencing/退避状态转换已接入，并通过真实 PostgreSQL 集成测试。
+RabbitMQ 入库 Consumer 和实际 PDF/Office、OCR/VLM Parser Executor、Embedding 表、向量索引、
+混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条的吞吐量或最终 Recall@5 指标已经完成。
 
 ### embeddings
 

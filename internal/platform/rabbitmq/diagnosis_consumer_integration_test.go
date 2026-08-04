@@ -25,10 +25,12 @@ func TestDiagnosisConsumerPublishesConfirmedRetryAndDeadCopies(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 	cfg := config.RabbitMQConfig{
 		Enabled: true, URLEnv: "MESGUARD_TEST_RABBITMQ_URL_ACTIVE",
-		Exchange:            "mesguard.worker.test." + suffix,
-		DiagnosisQueue:      "mesguard.worker.test.queue." + suffix,
-		DiagnosisRoutingKey: "diagnosis.execute",
-		RelayBatchSize:      1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
+		Exchange:                     "mesguard.worker.test." + suffix,
+		DiagnosisQueue:               "mesguard.worker.test.queue." + suffix,
+		DiagnosisRoutingKey:          "diagnosis.execute",
+		KnowledgeIngestionQueue:      "mesguard.worker.test.knowledge." + suffix,
+		KnowledgeIngestionRoutingKey: "knowledge.ingest",
+		RelayBatchSize:               1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
 		PublishConfirmTimeoutMillis: 2000, WorkerLeaseMillis: 30000,
 		WorkerRenewIntervalMillis: 5000, WorkerMaxAttempts: 4,
 	}

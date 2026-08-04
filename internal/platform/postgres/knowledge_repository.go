@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -22,6 +23,8 @@ func NewKnowledgeRepository(db *gorm.DB) *KnowledgeRepository {
 }
 
 var _ knowledge.Repository = (*KnowledgeRepository)(nil)
+var _ knowledge.IngestionRepository = (*KnowledgeRepository)(nil)
+var _ knowledge.IngestionTaskControlRepository = (*KnowledgeRepository)(nil)
 
 func (r *KnowledgeRepository) CreateDocument(
 	ctx context.Context,
@@ -136,6 +139,316 @@ VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)`,
 		return knowledge.DocumentVersion{}, fmt.Errorf("publish knowledge document version: %w", TranslateError(err))
 	}
 	return published, nil
+}
+
+func (r *KnowledgeRepository) QueueVersion(
+	ctx context.Context,
+	input knowledge.QueueVersionInput,
+) (knowledge.QueueVersionResult, error) {
+	if r == nil || r.db == nil {
+		return knowledge.QueueVersionResult{}, errors.New("knowledge repository is unavailable")
+	}
+	if err := input.Validate(); err != nil {
+		return knowledge.QueueVersionResult{}, err
+	}
+	createdAt := input.CreatedAt.UTC()
+	var queued knowledge.QueueVersionResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		if input.NewDocument != nil {
+			if err := tx.Exec(`
+INSERT INTO knowledge_documents
+    (id, scope, owner_user_id, title, created_by, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				input.NewDocument.ID, input.NewDocument.Scope, input.NewDocument.OwnerUserID,
+				input.NewDocument.Title, input.NewDocument.CreatedBy, createdAt, createdAt,
+			).Error; err != nil {
+				return err
+			}
+		} else {
+			var documentExists bool
+			if err := tx.Raw(
+				"SELECT true FROM knowledge_documents WHERE id = ? AND scope = 'global' AND deleted_at IS NULL FOR UPDATE",
+				input.DocumentID,
+			).Scan(&documentExists).Error; err != nil {
+				return err
+			}
+			if !documentExists {
+				return gorm.ErrRecordNotFound
+			}
+		}
+
+		var version int
+		if err := tx.Raw(
+			"SELECT COALESCE(MAX(version), 0) + 1 FROM knowledge_document_versions WHERE document_id = ?",
+			input.DocumentID,
+		).Scan(&version).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+INSERT INTO knowledge_document_versions
+    (id, document_id, version, status, is_current, source_media_type,
+     source_size_bytes, source_sha256, source_bucket, source_object_key,
+     source_object_version, source_etag, source_original_name, source_uploaded_at,
+     pipeline_version, parser_version, parser_metadata, created_by, created_at)
+VALUES (?, ?, ?, 'queued', false, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}'::jsonb, ?, ?)`,
+			input.VersionID, input.DocumentID, version, input.Source.MediaType,
+			input.Source.SizeBytes, input.Source.SHA256, input.Source.Bucket,
+			input.Source.ObjectKey, nullableTrimmedString(input.Source.VersionID), input.Source.ETag,
+			input.Source.OriginalName, createdAt, input.PipelineVersion,
+			input.CreatedBy, createdAt,
+		).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+INSERT INTO knowledge_ingestion_tasks
+    (id, document_version_id, status, stage, attempt_count, max_attempts,
+     available_at, checkpoint, progress_percent, created_by, idempotency_key,
+     request_fingerprint, created_at, updated_at)
+VALUES (?, ?, 'pending', 'uploaded', 0, ?, ?, '{}'::jsonb, 0, ?, ?, ?, ?, ?)`,
+			input.TaskID, input.VersionID, input.MaxAttempts, createdAt,
+			input.CreatedBy, input.IdempotencyKey, input.RequestFingerprint, createdAt, createdAt,
+		).Error; err != nil {
+			return err
+		}
+		eventPayload, err := json.Marshal(map[string]any{
+			"taskId": input.TaskID.String(), "documentVersionId": input.VersionID.String(),
+			"status": string(knowledge.IngestionPending), "stage": string(knowledge.IngestionStageUploaded),
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+INSERT INTO knowledge_ingestion_events
+    (task_id, seq, event_type, payload, payload_schema_version, created_at)
+VALUES (?, 1, 'ingestion_queued', ?, 1, ?)`, input.TaskID, eventPayload, createdAt).Error; err != nil {
+			return err
+		}
+		outboxPayload, err := json.Marshal(map[string]any{
+			"taskId": input.TaskID.String(), "documentVersionId": input.VersionID.String(),
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+INSERT INTO outbox_events
+    (id, event_type, aggregate_type, aggregate_id, correlation_id, causation_id,
+     payload, payload_schema_version, attempt_count, available_at, requeue_count, created_at)
+VALUES (?, 'knowledge.ingest', 'knowledge_ingestion_task', ?, ?, NULL, ?, 1, 0, ?, 0, ?)`,
+			input.OutboxEventID, input.TaskID, input.CorrelationID,
+			outboxPayload, createdAt, createdAt,
+		).Error; err != nil {
+			return err
+		}
+		queued = knowledge.QueueVersionResult{
+			Version: knowledge.DocumentVersion{
+				ID: input.VersionID, DocumentID: input.DocumentID,
+				Version: version, CreatedAt: createdAt,
+			},
+			Task: knowledge.IngestionTask{
+				ID: input.TaskID, DocumentVersionID: input.VersionID,
+				Status: knowledge.IngestionPending, Stage: knowledge.IngestionStageUploaded,
+				AttemptCount: 0, MaxAttempts: input.MaxAttempts, CreatedAt: createdAt,
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		return knowledge.QueueVersionResult{}, fmt.Errorf("queue knowledge document version: %w", TranslateError(err))
+	}
+	return queued, nil
+}
+
+func nullableTrimmedString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func (r *KnowledgeRepository) FindQueuedVersionByIdempotency(
+	ctx context.Context,
+	createdBy uuid.UUID,
+	idempotencyKey string,
+) (knowledge.QueueVersionResult, string, error) {
+	if r == nil || r.db == nil {
+		return knowledge.QueueVersionResult{}, "", errors.New("knowledge repository is unavailable")
+	}
+	if createdBy == uuid.Nil {
+		return knowledge.QueueVersionResult{}, "", errors.New("knowledge ingestion creator is required")
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(idempotencyKey)); err != nil {
+		return knowledge.QueueVersionResult{}, "", errors.New("knowledge ingestion idempotency key must be a UUID")
+	}
+	type row struct {
+		VersionID          uuid.UUID
+		DocumentID         uuid.UUID
+		Version            int
+		VersionCreatedAt   time.Time
+		TaskID             uuid.UUID
+		Status             knowledge.IngestionTaskStatus
+		Stage              knowledge.IngestionStage
+		AttemptCount       int
+		MaxAttempts        int
+		TaskCreatedAt      time.Time
+		RequestFingerprint string
+	}
+	var found row
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT version.id AS version_id,
+       version.document_id,
+       version.version,
+       version.created_at AS version_created_at,
+       task.id AS task_id,
+       task.status,
+       task.stage,
+       task.attempt_count,
+       task.max_attempts,
+       task.created_at AS task_created_at,
+       task.request_fingerprint
+FROM knowledge_ingestion_tasks task
+JOIN knowledge_document_versions version ON version.id = task.document_version_id
+WHERE task.created_by = ? AND task.idempotency_key = ?`, createdBy, idempotencyKey).Scan(&found)
+	if result.Error != nil {
+		return knowledge.QueueVersionResult{}, "", TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return knowledge.QueueVersionResult{}, "", repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	return knowledge.QueueVersionResult{
+		Version: knowledge.DocumentVersion{
+			ID: found.VersionID, DocumentID: found.DocumentID,
+			Version: found.Version, CreatedAt: found.VersionCreatedAt,
+		},
+		Task: knowledge.IngestionTask{
+			ID: found.TaskID, DocumentVersionID: found.VersionID,
+			Status: found.Status, Stage: found.Stage, AttemptCount: found.AttemptCount,
+			MaxAttempts: found.MaxAttempts, CreatedAt: found.TaskCreatedAt,
+		},
+	}, found.RequestFingerprint, nil
+}
+
+func (r *KnowledgeRepository) FindIngestionTask(
+	ctx context.Context,
+	taskID uuid.UUID,
+) (knowledge.IngestionTaskDetail, error) {
+	if r == nil || r.db == nil {
+		return knowledge.IngestionTaskDetail{}, errors.New("knowledge repository is unavailable")
+	}
+	if taskID == uuid.Nil {
+		return knowledge.IngestionTaskDetail{}, errors.New("knowledge ingestion task id is required")
+	}
+	var detail knowledge.IngestionTaskDetail
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT task.id, task.document_version_id, version.document_id, task.status, task.stage,
+       task.attempt_count, task.max_attempts, task.progress_percent,
+       task.cancel_requested_at, COALESCE(task.last_error_code, '') AS last_error_code,
+       COALESCE(task.last_error_message, '') AS last_error_message,
+       task.started_at, task.completed_at, task.created_at, task.updated_at
+FROM knowledge_ingestion_tasks task
+JOIN knowledge_document_versions version ON version.id = task.document_version_id
+WHERE task.id = ?`, taskID).Scan(&detail)
+	if result.Error != nil {
+		return knowledge.IngestionTaskDetail{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return knowledge.IngestionTaskDetail{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	if err := detail.Validate(); err != nil {
+		return knowledge.IngestionTaskDetail{}, err
+	}
+	return detail, nil
+}
+
+func (r *KnowledgeRepository) RequestIngestionCancellation(
+	ctx context.Context,
+	taskID, requestedBy uuid.UUID,
+	requestedAt time.Time,
+) (knowledge.IngestionCancelResult, error) {
+	if r == nil || r.db == nil {
+		return knowledge.IngestionCancelResult{}, errors.New("knowledge repository is unavailable")
+	}
+	if taskID == uuid.Nil || requestedBy == uuid.Nil {
+		return knowledge.IngestionCancelResult{}, errors.New("knowledge ingestion cancellation is invalid")
+	}
+	requestedAt = requestedAt.UTC()
+	var cancelled knowledge.IngestionCancelResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var state struct {
+			Status knowledge.IngestionTaskStatus `gorm:"column:status"`
+		}
+		result := tx.Raw(`
+SELECT status FROM knowledge_ingestion_tasks WHERE id = ? FOR UPDATE`, taskID).Scan(&state)
+		if result.Error != nil {
+			return TranslateError(result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		switch state.Status {
+		case knowledge.IngestionCancelRequested, knowledge.IngestionCancelled:
+			detail, err := findIngestionTaskWithDB(tx, taskID)
+			if err != nil {
+				return err
+			}
+			cancelled = knowledge.IngestionCancelResult{Task: detail, Changed: false}
+			return nil
+		case knowledge.IngestionPending, knowledge.IngestionRunning, knowledge.IngestionRetryWait:
+		case knowledge.IngestionSucceeded, knowledge.IngestionPartialSucceeded, knowledge.IngestionFailed:
+			return knowledge.ErrIngestionTaskStateConflict
+		default:
+			return fmt.Errorf("unsupported knowledge ingestion task status %q", state.Status)
+		}
+		updated := tx.Exec(`
+UPDATE knowledge_ingestion_tasks
+SET status = 'cancel_requested', cancel_requested_at = ?, updated_at = ?
+WHERE id = ? AND status = ?`, requestedAt, requestedAt, taskID, state.Status)
+		if updated.Error != nil {
+			return TranslateError(updated.Error)
+		}
+		if updated.RowsAffected != 1 {
+			return knowledge.ErrIngestionTaskStateConflict
+		}
+		if err := appendKnowledgeIngestionEvent(tx, taskID, "ingestion_cancel_requested", map[string]any{
+			"taskId": taskID.String(), "status": string(knowledge.IngestionCancelRequested),
+			"requestedBy": requestedBy.String(),
+		}, requestedAt); err != nil {
+			return err
+		}
+		detail, err := findIngestionTaskWithDB(tx, taskID)
+		if err != nil {
+			return err
+		}
+		cancelled = knowledge.IngestionCancelResult{Task: detail, Changed: true}
+		return nil
+	})
+	if err != nil {
+		return knowledge.IngestionCancelResult{}, TranslateError(err)
+	}
+	return cancelled, nil
+}
+
+func findIngestionTaskWithDB(db *gorm.DB, taskID uuid.UUID) (knowledge.IngestionTaskDetail, error) {
+	var detail knowledge.IngestionTaskDetail
+	result := db.Raw(`
+SELECT task.id, task.document_version_id, version.document_id, task.status, task.stage,
+       task.attempt_count, task.max_attempts, task.progress_percent,
+       task.cancel_requested_at, COALESCE(task.last_error_code, '') AS last_error_code,
+       COALESCE(task.last_error_message, '') AS last_error_message,
+       task.started_at, task.completed_at, task.created_at, task.updated_at
+FROM knowledge_ingestion_tasks task
+JOIN knowledge_document_versions version ON version.id = task.document_version_id
+WHERE task.id = ?`, taskID).Scan(&detail)
+	if result.Error != nil {
+		return knowledge.IngestionTaskDetail{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return knowledge.IngestionTaskDetail{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	if err := detail.Validate(); err != nil {
+		return knowledge.IngestionTaskDetail{}, err
+	}
+	return detail, nil
 }
 
 func (r *KnowledgeRepository) SearchFTS(

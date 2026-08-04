@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	rediscli "github.com/redis/go-redis/v9"
@@ -47,6 +48,7 @@ func TestOpenRuntimeDependenciesClosesPostgresWhenMigrationCheckFails(t *testing
 func TestOpenRuntimeDependenciesKeepsOptionalFailuresDegraded(t *testing.T) {
 	redisErr := errors.New("redis unavailable")
 	sqlServerErr := errors.New("sqlserver unavailable")
+	minioErr := errors.New("minio unavailable")
 	openers := stubOpeners()
 	openers.redis = func(context.Context, config.RedisConfig) (*rediscli.Client, error) {
 		return nil, redisErr
@@ -54,17 +56,26 @@ func TestOpenRuntimeDependenciesKeepsOptionalFailuresDegraded(t *testing.T) {
 	openers.sqlServer = func(context.Context, config.SQLServerConfig) (*sql.DB, error) {
 		return nil, sqlServerErr
 	}
-	cfg := config.Config{SQLServer: config.SQLServerConfig{Enabled: true}}
+	openers.minio = func(context.Context, config.MinIOConfig) (objectstore.Store, error) {
+		return nil, minioErr
+	}
+	cfg := config.Config{
+		SQLServer: config.SQLServerConfig{Enabled: true},
+		MinIO:     config.MinIOConfig{Enabled: true},
+	}
 
 	deps, err := openRuntimeDependencies(context.Background(), cfg, zap.NewNop(), openers)
 	if err != nil {
 		t.Fatalf("open dependencies: %v", err)
 	}
-	if deps.redis != nil || deps.sqlServer != nil {
+	if deps.redis != nil || deps.sqlServer != nil || deps.objectStore != nil {
 		t.Fatal("optional failed dependencies must remain nil")
 	}
 	if !errors.Is(deps.sqlServerError, sqlServerErr) {
 		t.Fatalf("sqlServerError = %v", deps.sqlServerError)
+	}
+	if !errors.Is(deps.objectStoreError, minioErr) {
+		t.Fatalf("objectStoreError = %v", deps.objectStoreError)
 	}
 }
 
@@ -88,6 +99,32 @@ func TestOpenRuntimeDependenciesKeepsSQLPoolAfterPingFailure(t *testing.T) {
 	}
 }
 
+func TestOpenRuntimeDependenciesKeepsMinIOClientAfterTransientInitializationFailure(t *testing.T) {
+	want := errors.New("minio starting")
+	store := &objectStoreStub{}
+	openers := stubOpeners()
+	openers.minio = func(context.Context, config.MinIOConfig) (objectstore.Store, error) {
+		return store, want
+	}
+	cfg := config.Config{MinIO: config.MinIOConfig{Enabled: true}}
+
+	deps, err := openRuntimeDependencies(context.Background(), cfg, zap.NewNop(), openers)
+	if err != nil {
+		t.Fatalf("open dependencies: %v", err)
+	}
+	if deps.objectStore != store || !errors.Is(deps.objectStoreError, want) {
+		t.Fatalf("objectStore = %T, objectStoreError = %v", deps.objectStore, deps.objectStoreError)
+	}
+}
+
+type objectStoreStub struct{}
+
+func (*objectStoreStub) Put(context.Context, objectstore.PutInput) (objectstore.ObjectRef, error) {
+	return objectstore.ObjectRef{}, nil
+}
+func (*objectStoreStub) Remove(context.Context, objectstore.ObjectRef) error { return nil }
+func (*objectStoreStub) Close() error                                        { return nil }
+
 func stubOpeners() dependencyOpeners {
 	return dependencyOpeners{
 		postgres: func(context.Context, config.PostgresConfig, *zap.Logger) (*gorm.DB, func() error, error) {
@@ -96,6 +133,7 @@ func stubOpeners() dependencyOpeners {
 		unwrapPostgres: func(*gorm.DB) (*sql.DB, error) { return &sql.DB{}, nil },
 		checkMigration: func(context.Context, *sql.DB) error { return nil },
 		redis:          func(context.Context, config.RedisConfig) (*rediscli.Client, error) { return nil, nil },
+		minio:          func(context.Context, config.MinIOConfig) (objectstore.Store, error) { return nil, nil },
 		sqlServer:      func(context.Context, config.SQLServerConfig) (*sql.DB, error) { return nil, nil },
 		pingSQLServer:  func(context.Context, *sql.DB) error { return nil },
 	}

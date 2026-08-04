@@ -51,3 +51,20 @@ func TestPublisherBuildPublishingRejectsUnsupportedEvent(t *testing.T) {
 		t.Fatal("buildPublishing() accepted unsupported event type")
 	}
 }
+
+func TestPublisherBuildPublishingRoutesKnowledgeIngestion(t *testing.T) {
+	taskID := uuid.New()
+	publisher := &Publisher{config: config.RabbitMQConfig{KnowledgeIngestionRoutingKey: "knowledge.ingest"}}
+	routingKey, message, err := publisher.buildPublishing(messaging.OutboxEvent{
+		ID: uuid.New(), EventType: "knowledge.ingest", AggregateType: "knowledge_ingestion_task",
+		AggregateID: taskID, CorrelationID: uuid.New(),
+		Payload:              json.RawMessage(`{"taskId":"` + taskID.String() + `"}`),
+		PayloadSchemaVersion: 1, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("buildPublishing(): %v", err)
+	}
+	if routingKey != "knowledge.ingest" || message.Type != "knowledge.ingest" {
+		t.Fatalf("routingKey = %q, message type = %q", routingKey, message.Type)
+	}
+}
