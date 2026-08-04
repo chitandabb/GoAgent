@@ -132,6 +132,15 @@ func (p *Publisher) connectLocked() error {
 	); err != nil {
 		return cleanup(fmt.Errorf("bind rabbitmq diagnosis queue: %w", err))
 	}
+	if _, err := channel.QueueDeclare(p.config.KnowledgeIngestionQueue, true, false, false, false, nil); err != nil {
+		return cleanup(fmt.Errorf("declare rabbitmq knowledge ingestion queue: %w", err))
+	}
+	if err := channel.QueueBind(
+		p.config.KnowledgeIngestionQueue, p.config.KnowledgeIngestionRoutingKey,
+		p.config.Exchange, false, nil,
+	); err != nil {
+		return cleanup(fmt.Errorf("bind rabbitmq knowledge ingestion queue: %w", err))
+	}
 	if err := channel.Confirm(false); err != nil {
 		return cleanup(fmt.Errorf("enable rabbitmq publisher confirms: %w", err))
 	}
@@ -166,7 +175,13 @@ func (p *Publisher) buildPublishing(event messaging.OutboxEvent) (string, amqp.P
 		event.PayloadSchemaVersion < 1 || !json.Valid(event.Payload) {
 		return "", amqp.Publishing{}, errors.New("outbox event is invalid")
 	}
-	if event.EventType != "diagnosis.execute" {
+	routingKey := ""
+	switch event.EventType {
+	case "diagnosis.execute":
+		routingKey = p.config.DiagnosisRoutingKey
+	case "knowledge.ingest":
+		routingKey = p.config.KnowledgeIngestionRoutingKey
+	default:
 		return "", amqp.Publishing{}, fmt.Errorf("unsupported outbox event type %q", event.EventType)
 	}
 	var causationID *string
@@ -183,7 +198,7 @@ func (p *Publisher) buildPublishing(event messaging.OutboxEvent) (string, amqp.P
 	if err != nil {
 		return "", amqp.Publishing{}, fmt.Errorf("marshal rabbitmq message envelope: %w", err)
 	}
-	return p.config.DiagnosisRoutingKey, amqp.Publishing{
+	return routingKey, amqp.Publishing{
 		Headers: amqp.Table{
 			"schema_version": int32(event.PayloadSchemaVersion),
 			"aggregate_type": event.AggregateType,

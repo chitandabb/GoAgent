@@ -31,6 +31,17 @@ reasoningEffort = "medium"
 timeoutMillis = 120000
 maxOutputTokens = 4096
 
+[models.judge]
+enabled = false
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3-max"
+promptFile = "config/prompts/rag-judge.md"
+promptVersion = "rag-judge-v1"
+timeoutMillis = 120000
+maxOutputTokens = 2048
+
 [log]
 level = "info"
 format = "json"
@@ -64,6 +75,8 @@ urlEnv = "MESGUARD_RABBITMQ_URL"
 exchange = "mesguard.tasks"
 diagnosisQueue = "mesguard.diagnosis.execute"
 diagnosisRoutingKey = "diagnosis.execute"
+knowledgeIngestionQueue = "mesguard.knowledge.ingest"
+knowledgeIngestionRoutingKey = "knowledge.ingest"
 relayBatchSize = 10
 relayPollIntervalMillis = 1000
 relayLeaseMillis = 300000
@@ -77,6 +90,36 @@ enabled = false
 endpoint = "https://api.githubcopilot.com/mcp/"
 tokenEnv = "MESGUARD_GITHUB_MCP_TOKEN"
 timeoutMillis = 30000
+
+[webSearch]
+enabled = false
+provider = "firecrawl"
+baseURL = "https://api.firecrawl.dev"
+apiKeyEnv = "FIRECRAWL_API_KEY"
+timeoutMillis = 30000
+maxResults = 5
+maxFetchedPages = 3
+maxPageChars = 20000
+maxRounds = 2
+maxResponseBytes = 2097152
+
+[minio]
+enabled = true
+endpoint = "minio:9000"
+accessKeyEnv = "MESGUARD_MINIO_ACCESS_KEY"
+secretKeyEnv = "MESGUARD_MINIO_SECRET_KEY"
+useTLS = false
+region = "us-east-1"
+attachmentBucket = "mesguard-attachments"
+knowledgeSourceBucket = "mesguard-knowledge-sources"
+autoCreateBuckets = true
+timeoutMillis = 5000
+maxObjectBytes = 52428800
+
+[knowledge]
+pipelineVersion = "ingestion-v1"
+maxAttempts = 3
+maxUploadBytes = 52428800
 
 [sqlserver]
 enabled = true

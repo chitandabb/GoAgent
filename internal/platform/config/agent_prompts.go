@@ -16,15 +16,15 @@ type AgentPrompts struct {
 }
 
 func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
-	systemInstruction, err := loadPromptFile("system prompt", c.SystemPromptFile)
+	systemInstruction, err := loadPromptFile("agent", "system prompt", c.SystemPromptFile, maxAgentPromptBytes)
 	if err != nil {
 		return AgentPrompts{}, err
 	}
-	baselineInstruction, err := loadPromptFile("baseline prompt", c.BaselinePromptFile)
+	baselineInstruction, err := loadPromptFile("agent", "baseline prompt", c.BaselinePromptFile, maxAgentPromptBytes)
 	if err != nil {
 		return AgentPrompts{}, err
 	}
-	reportContractInstruction, err := loadPromptFile("report contract", c.ReportContractFile)
+	reportContractInstruction, err := loadPromptFile("agent", "report contract", c.ReportContractFile, maxAgentPromptBytes)
 	if err != nil {
 		return AgentPrompts{}, err
 	}
@@ -35,18 +35,18 @@ func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
 	}, nil
 }
 
-func loadPromptFile(name, path string) (string, error) {
+func loadPromptFile(owner, name, path string, maxBytes int) (string, error) {
 	path = strings.TrimSpace(path)
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read agent %s file %q: %w", name, path, err)
+		return "", fmt.Errorf("read %s %s file %q: %w", owner, name, path, err)
 	}
-	if len(content) > maxAgentPromptBytes {
-		return "", fmt.Errorf("agent %s file %q exceeds %d bytes", name, path, maxAgentPromptBytes)
+	if len(content) > maxBytes {
+		return "", fmt.Errorf("%s %s file %q exceeds %d bytes", owner, name, path, maxBytes)
 	}
 	instruction := strings.TrimSpace(string(content))
 	if instruction == "" {
-		return "", fmt.Errorf("agent %s file %q is empty", name, path)
+		return "", fmt.Errorf("%s %s file %q is empty", owner, name, path)
 	}
 	return instruction, nil
 }

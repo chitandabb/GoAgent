@@ -11,6 +11,8 @@ import (
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
@@ -28,6 +30,7 @@ type App struct {
 	db           *gorm.DB
 	dbClose      func() error
 	redis        *rediscli.Client
+	objectStore  objectstore.Store
 	sqlServer    *sql.DB
 	logger       *zap.Logger
 	shutdownWait time.Duration
@@ -88,6 +91,38 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	knowledgeRepository := platformpostgres.NewKnowledgeRepository(deps.db)
+	knowledgeObjectStore := deps.objectStore
+	if knowledgeObjectStore == nil {
+		knowledgeObjectStore = objectstore.NewUnavailableStore(deps.objectStoreError)
+	}
+	knowledgeIngestionService, err := knowledge.NewIngestionService(knowledgeObjectStore, knowledgeRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge ingestion service: %w", err)
+	}
+	knowledgeIngestionRoutes, err := httptransport.NewKnowledgeIngestionRoutes(
+		knowledgeIngestionService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+		cfg.Knowledge.MaxUploadBytes, cfg.Knowledge.PipelineVersion, cfg.Knowledge.MaxAttempts,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge ingestion routes: %w", err)
+	}
+	registrars = append(registrars, knowledgeIngestionRoutes)
+	knowledgeTaskControlService, err := knowledge.NewIngestionTaskControlService(knowledgeRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge ingestion task control service: %w", err)
+	}
+	knowledgeTaskRoutes, err := httptransport.NewKnowledgeIngestionTaskRoutes(
+		knowledgeTaskControlService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge ingestion task routes: %w", err)
+	}
+	registrars = append(registrars, knowledgeTaskRoutes)
 	diagnosisTaskRecoveryRepository := platformpostgres.NewDiagnosisTaskRecoveryRepository(deps.db)
 	diagnosisTaskRecoveryService, err := diagnosis.NewTaskRecoveryService(diagnosisTaskRecoveryRepository)
 	if err != nil {
@@ -202,6 +237,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		db:           deps.db,
 		dbClose:      deps.dbClose,
 		redis:        deps.redis,
+		objectStore:  deps.objectStore,
 		sqlServer:    deps.sqlServer,
 		logger:       log,
 		shutdownWait: 10 * time.Second,
@@ -240,18 +276,21 @@ func (a *App) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownWait)
 	defer cancel()
 	shutdownErr := a.server.Shutdown(ctx)
-	var agentErr, redisErr, sqlServerErr error
+	var agentErr, redisErr, objectStoreErr, sqlServerErr error
 	if a.agent != nil {
 		agentErr = a.agent.close()
 	}
 	if a.redis != nil {
 		redisErr = a.redis.Close()
 	}
+	if a.objectStore != nil {
+		objectStoreErr = a.objectStore.Close()
+	}
 	if a.sqlServer != nil {
 		sqlServerErr = a.sqlServer.Close()
 	}
 	dbErr := a.dbClose()
-	err := errors.Join(shutdownErr, agentErr, redisErr, sqlServerErr, dbErr)
+	err := errors.Join(shutdownErr, agentErr, redisErr, objectStoreErr, sqlServerErr, dbErr)
 	if err != nil {
 		a.logger.Error("application shutdown failed", zap.Error(err))
 		return err

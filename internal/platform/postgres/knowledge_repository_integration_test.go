@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/google/uuid"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -121,6 +122,99 @@ VALUES (?, ?, 'Knowledge Owner', 'test-hash', 'analyst'),
 	}
 	if len(otherResults) != 1 || otherResults[0].DocumentID != globalDocumentID {
 		t.Fatalf("SearchFTS(other) = %#v, want only global document", otherResults)
+	}
+}
+
+func TestKnowledgeRepositoryQueuesVersionTaskEventAndOutboxAtomically(t *testing.T) {
+	dsn := os.Getenv("MESGUARD_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("MESGUARD_TEST_POSTGRES_DSN is not configured")
+	}
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("open test postgres: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	creatorID, documentID := uuid.New(), uuid.New()
+	versionID, taskID, outboxID, correlationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	t.Cleanup(func() {
+		cleanup := db.WithContext(context.Background())
+		_ = cleanup.Exec("DELETE FROM outbox_events WHERE id = ?", outboxID).Error
+		_ = cleanup.Exec("DELETE FROM knowledge_ingestion_events WHERE task_id = ?", taskID).Error
+		_ = cleanup.Exec("DELETE FROM knowledge_ingestion_tasks WHERE id = ?", taskID).Error
+		_ = cleanup.Exec("DELETE FROM knowledge_document_versions WHERE id = ?", versionID).Error
+		_ = cleanup.Exec("DELETE FROM knowledge_documents WHERE id = ?", documentID).Error
+		_ = cleanup.Exec("DELETE FROM users WHERE id = ?", creatorID).Error
+	})
+	mustExecKnowledgeTest(t, db, ctx, `
+INSERT INTO users (id, username, display_name, password_hash, role)
+VALUES (?, ?, 'Knowledge Queue Owner', 'test-hash', 'admin')`,
+		creatorID, "knowledge_queue_"+uuid.NewString()[:8])
+	repository := NewKnowledgeRepository(db)
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	idempotencyKey := uuid.NewString()
+	requestFingerprint := knowledge.SHA256Hex("queue-version-request")
+	queued, err := repository.QueueVersion(ctx, knowledge.QueueVersionInput{
+		VersionID: versionID, TaskID: taskID, OutboxEventID: outboxID,
+		CorrelationID: correlationID, DocumentID: documentID, CreatedBy: creatorID,
+		Source: objectstore.ObjectRef{
+			Bucket:    objectstore.BucketKnowledgeSources,
+			ObjectKey: "knowledge-source/integration/" + versionID.String(),
+			VersionID: "object-version-1", ETag: "etag-1", SizeBytes: 14,
+			SHA256: knowledge.SHA256Hex("source-content"), MediaType: "application/pdf",
+			OriginalName: "manual.pdf",
+		},
+		PipelineVersion: "ingestion-v1", MaxAttempts: 3,
+		IdempotencyKey: idempotencyKey, RequestFingerprint: requestFingerprint,
+		NewDocument: &knowledge.CreateDocumentInput{
+			ID: documentID, Scope: knowledge.ScopeGlobal,
+			Title: "Queue Integration Manual", CreatedBy: creatorID,
+		},
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("QueueVersion: %v", err)
+	}
+	if queued.Version.Version != 1 || queued.Task.Status != knowledge.IngestionPending {
+		t.Fatalf("queued = %+v", queued)
+	}
+	var facts struct {
+		VersionStatus string `gorm:"column:version_status"`
+		IsCurrent     bool   `gorm:"column:is_current"`
+		TaskStatus    string `gorm:"column:task_status"`
+		TaskStage     string `gorm:"column:task_stage"`
+		EventCount    int64  `gorm:"column:event_count"`
+		OutboxCount   int64  `gorm:"column:outbox_count"`
+	}
+	if err := db.WithContext(ctx).Raw(`
+SELECT version.status AS version_status, version.is_current,
+       task.status AS task_status, task.stage AS task_stage,
+       (SELECT COUNT(*) FROM knowledge_ingestion_events event WHERE event.task_id = task.id) AS event_count,
+       (SELECT COUNT(*) FROM outbox_events outbox
+          WHERE outbox.id = ? AND outbox.event_type = 'knowledge.ingest'
+            AND outbox.aggregate_type = 'knowledge_ingestion_task') AS outbox_count
+FROM knowledge_document_versions version
+JOIN knowledge_ingestion_tasks task ON task.document_version_id = version.id
+WHERE version.id = ? AND task.id = ?`, outboxID, versionID, taskID).Scan(&facts).Error; err != nil {
+		t.Fatalf("read queued facts: %v", err)
+	}
+	if facts.VersionStatus != "queued" || facts.IsCurrent || facts.TaskStatus != "pending" ||
+		facts.TaskStage != "uploaded" || facts.EventCount != 1 || facts.OutboxCount != 1 {
+		t.Fatalf("queued facts = %+v", facts)
+	}
+	replayed, replayFingerprint, err := repository.FindQueuedVersionByIdempotency(ctx, creatorID, idempotencyKey)
+	if err != nil {
+		t.Fatalf("FindQueuedVersionByIdempotency: %v", err)
+	}
+	if replayed.Task.ID != taskID || replayed.Version.ID != versionID || replayFingerprint != requestFingerprint {
+		t.Fatalf("replayed = %+v fingerprint = %q", replayed, replayFingerprint)
 	}
 }
 

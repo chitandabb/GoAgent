@@ -327,9 +327,7 @@ Worker 进程崩溃演练仍待补充；模型重试耗尽、管理员恢复、�
 端到端 observation 仍不能冒充完整诊断效果指标。
 
 The DiagnosisTask/Outbox/Worker contract and resume item 2 SQL evaluation are
-now stable enough to start resume item 3. The next active backend slice is a
-minimal verifiable ingestion/retrieval path for mixed documents, MinIO,
-PostgreSQL FTS, and pgvector. M2-A1 now provides `knowledge_documents`, immutable
+now stable enough to continue resume item 3. M2-A1 provides `knowledge_documents`, immutable
 `knowledge_document_versions`, traceable `knowledge_chunks`, deterministic
 Markdown/text chunking, Han-bigram search normalization, and PostgreSQL FTS with
 scope filtering in SQL. A live PostgreSQL test verifies current-version switching
@@ -337,10 +335,22 @@ and global/personal visibility. The fixed `rag-retrieval-v1` corpus contains 12
 industrial documents and 24 literal/paraphrased queries. Two repeated PostgreSQL
 FTS runs produced the same hit set: Recall@5 23/24 (`95.83%`) and MRR `0.9028`;
 the missed ERP 504 paraphrase is retained for the vector-retrieval comparison.
+M2-A2 provides degradable MinIO object storage, immutable source references,
+queued knowledge versions, recoverable ingestion task/event state, and atomic
+`knowledge.ingest` Outbox creation. RabbitMQ declares a durable ingestion Queue,
+but no empty Worker consumes it yet. M2-A3 adds administrator create/version upload
+APIs, UUID `Idempotency-Key` replay/conflict semantics over a source SHA-256 request
+fingerprint, bounded temporary-file staging, supported-format signatures, task
+status/cancellation APIs, and the ingestion Worker claim/lease/heartbeat/checkpoint/
+fencing/retry state machine. Live PostgreSQL tests cover lease contention, expired
+takeover, stale-token rejection, retry delay, cancellation, ready publication, and
+the `partial_ready` publication gate. The Worker core deliberately has no running
+RabbitMQ Consumer or parser executor yet, so durable messages remain queued.
 Ingestion timing is recorded but the small local run is not a resume throughput
-metric. The next slice is Embedding plus hybrid fusion on this same dataset;
-MinIO, OCR/VLM, reranking, mixed-document throughput improvement, and the final
-resume item 3 claim remain incomplete. TaskEvent SSE
+metric. The next active backend slice is deterministic multi-format parser ports,
+safe source reads, Element Artifact persistence, and a real ingestion Consumer.
+PDF/Office parsing, OCR/VLM, Embedding, hybrid fusion, reranking, mixed-document
+throughput improvement, and the final resume item 3 claim remain incomplete. TaskEvent SSE
 reuses the JSON event identity and cursor,
 replays PostgreSQL facts, emits heartbeats, closes after terminal events, and is
 cancelled by application shutdown without treating browser disconnect as task

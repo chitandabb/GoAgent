@@ -78,6 +78,26 @@ services:
       timeout: 5s
       retries: 10
 
+  minio:
+    image: ${MESGUARD_MINIO_IMAGE:-minio/minio:latest}
+    container_name: mesguard-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
+      MINIO_ROOT_PASSWORD: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
+      TZ: Asia/Shanghai
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${MESGUARD_MINIO_PORT:-9000}:9000"
+      - "${MESGUARD_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ${MESGUARD_MINIO_DATA:-mesguard_minio-data}:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
   rabbitmq:
     image: ${MESGUARD_RABBITMQ_IMAGE:-rabbitmq:4-management}
     container_name: mesguard-rabbitmq
@@ -128,6 +148,8 @@ services:
       MESGUARD_SQLSERVER_PASSWORD: ${MESGUARD_SQLSERVER_PASSWORD:-MESGuard_Reader!2026}
       MESGUARD_STEPFUN_API_KEY: ${MESGUARD_STEPFUN_API_KEY:-}
       MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
+      MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
+      MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -177,6 +199,8 @@ services:
       MESGUARD_RABBITMQ_URL: "amqp://${MESGUARD_RABBITMQ_USER:-mesguard}:${MESGUARD_RABBITMQ_PASSWORD:-mesguard_dev_password}@rabbitmq:5672/"
       MESGUARD_STEPFUN_API_KEY: ${MESGUARD_STEPFUN_API_KEY:-}
       MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
+      MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
+      MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
     depends_on:
       postgres:
         condition: service_healthy
@@ -196,3 +220,4 @@ volumes:
   mesguard_sqlserver-data:
   mesguard_redis-data:
   mesguard_rabbitmq-data:
+  mesguard_minio-data:

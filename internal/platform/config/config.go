@@ -11,6 +11,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -35,11 +36,15 @@ type Config struct {
 	RabbitMQ  RabbitMQConfig  `toml:"rabbitmq"`  // [rabbitmq] Outbox Relay 与 Worker 消息配置
 	SQLServer SQLServerConfig `toml:"sqlserver"` // [sqlserver] 公司 ERP 工单库（可降级依赖）
 	GitHubMCP GitHubMCPConfig `toml:"githubMCP"` // [githubMCP] 官方 GitHub MCP 只读代码调查
+	WebSearch WebSearchConfig `toml:"webSearch"` // [webSearch] 公开技术资料的脱敏只读检索
+	MinIO     MinIOConfig     `toml:"minio"`     // [minio] 附件与知识原文的可降级对象存储
+	Knowledge KnowledgeConfig `toml:"knowledge"` // [knowledge] 文档入库流水线版本与恢复预算
 }
 
 // ModelsConfig 为不同模型职责保留独立配置，避免聊天模型和向量模型共享错误参数。
 type ModelsConfig struct {
-	Chat ChatModelConfig `toml:"chat"`
+	Chat  ChatModelConfig  `toml:"chat"`
+	Judge JudgeModelConfig `toml:"judge"`
 }
 
 // ChatModelConfig 定义 OpenAI 兼容聊天模型。当前生产 Provider 为 StepFun Step Plan。
@@ -91,6 +96,60 @@ func (c ChatModelConfig) Validate() error {
 }
 
 func (c ChatModelConfig) APIKey() (string, error) {
+	return requiredEnv(c.APIKeyEnv)
+}
+
+// JudgeModelConfig 定义离线 RAG 评测使用的独立 LLM Judge。
+// Judge 不参与在线回答，也不能替代人工黄金事实和确定性引用校验。
+type JudgeModelConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	Provider        string `toml:"provider"`
+	BaseURL         string `toml:"baseURL"`
+	APIKeyEnv       string `toml:"apiKeyEnv"`
+	Model           string `toml:"model"`
+	PromptFile      string `toml:"promptFile"`
+	PromptVersion   string `toml:"promptVersion"`
+	TimeoutMillis   int    `toml:"timeoutMillis"`
+	MaxOutputTokens int    `toml:"maxOutputTokens"`
+}
+
+func (c JudgeModelConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(c.Provider)) != "dashscope" {
+		return errors.New("models.judge provider must be dashscope")
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || endpoint.Host == "" || endpoint.Path == "" {
+		return errors.New("models.judge baseURL must be an absolute URL")
+	}
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
+		return errors.New("models.judge baseURL must use HTTPS unless it points to localhost")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
+		return errors.New("models.judge apiKeyEnv is invalid")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.Model)) {
+		return errors.New("models.judge model is invalid")
+	}
+	promptFile := strings.TrimSpace(c.PromptFile)
+	if promptFile == "" || len(promptFile) > 512 {
+		return errors.New("models.judge promptFile must be between 1 and 512 characters")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
+		return errors.New("models.judge promptVersion is invalid")
+	}
+	if c.TimeoutMillis < 1_000 || c.TimeoutMillis > 300_000 {
+		return errors.New("models.judge timeoutMillis must be between 1000 and 300000")
+	}
+	if c.MaxOutputTokens < 256 || c.MaxOutputTokens > 16_384 {
+		return errors.New("models.judge maxOutputTokens must be between 256 and 16384")
+	}
+	return nil
+}
+
+func (c JudgeModelConfig) APIKey() (string, error) {
 	return requiredEnv(c.APIKeyEnv)
 }
 
@@ -189,21 +248,175 @@ func (c GitHubMCPConfig) Token() (string, error) {
 	return requiredEnv(c.TokenEnv)
 }
 
+// WebSearchConfig 描述公开网页检索的供应商连接与硬预算。
+// API Key 只能通过 apiKeyEnv 引用，不得出现在 TOML、日志或 Tool 输出中。
+type WebSearchConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	Provider         string `toml:"provider"`
+	BaseURL          string `toml:"baseURL"`
+	APIKeyEnv        string `toml:"apiKeyEnv"`
+	TimeoutMillis    int    `toml:"timeoutMillis"`
+	MaxResults       int    `toml:"maxResults"`
+	MaxFetchedPages  int    `toml:"maxFetchedPages"`
+	MaxPageChars     int    `toml:"maxPageChars"`
+	MaxRounds        int    `toml:"maxRounds"`
+	MaxResponseBytes int64  `toml:"maxResponseBytes"`
+}
+
+func (c WebSearchConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(c.Provider)) != "firecrawl" {
+		return errors.New("webSearch provider must be firecrawl")
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || endpoint.Host == "" {
+		return errors.New("webSearch baseURL must be an absolute URL")
+	}
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
+		return errors.New("webSearch baseURL must use HTTPS unless it points to localhost")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
+		return errors.New("webSearch apiKeyEnv is invalid")
+	}
+	if c.TimeoutMillis < 1_000 || c.TimeoutMillis > 120_000 {
+		return errors.New("webSearch timeoutMillis must be between 1000 and 120000")
+	}
+	if c.MaxResults < 1 || c.MaxResults > 20 {
+		return errors.New("webSearch maxResults must be between 1 and 20")
+	}
+	if c.MaxFetchedPages < 1 || c.MaxFetchedPages > c.MaxResults {
+		return errors.New("webSearch maxFetchedPages must be between 1 and maxResults")
+	}
+	if c.MaxPageChars < 1_000 || c.MaxPageChars > 100_000 {
+		return errors.New("webSearch maxPageChars must be between 1000 and 100000")
+	}
+	if c.MaxRounds < 1 || c.MaxRounds > 4 {
+		return errors.New("webSearch maxRounds must be between 1 and 4")
+	}
+	if c.MaxResponseBytes < 64*1024 || c.MaxResponseBytes > 10*1024*1024 {
+		return errors.New("webSearch maxResponseBytes must be between 65536 and 10485760")
+	}
+	return nil
+}
+
+func (c WebSearchConfig) APIKey() (string, error) {
+	return requiredEnv(c.APIKeyEnv)
+}
+
+// MinIOConfig 描述附件和知识原文使用的 S3 兼容对象存储。
+// MinIO 是可降级依赖；数据库仍保存对象引用、哈希和版本事实。
+type MinIOConfig struct {
+	Enabled               bool   `toml:"enabled"`
+	Endpoint              string `toml:"endpoint"`
+	AccessKeyEnv          string `toml:"accessKeyEnv"`
+	SecretKeyEnv          string `toml:"secretKeyEnv"`
+	UseTLS                bool   `toml:"useTLS"`
+	Region                string `toml:"region"`
+	AttachmentBucket      string `toml:"attachmentBucket"`
+	KnowledgeSourceBucket string `toml:"knowledgeSourceBucket"`
+	AutoCreateBuckets     bool   `toml:"autoCreateBuckets"`
+	TimeoutMillis         int    `toml:"timeoutMillis"`
+	MaxObjectBytes        int64  `toml:"maxObjectBytes"`
+}
+
+var storageBucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+func (c MinIOConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	endpoint := strings.TrimSpace(c.Endpoint)
+	if strings.Contains(endpoint, "://") {
+		return errors.New("minio endpoint must be host:port without a scheme")
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || strings.TrimSpace(host) == "" || port == "" {
+		return errors.New("minio endpoint must be a host:port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("minio endpoint port is invalid")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.AccessKeyEnv)) {
+		return errors.New("minio accessKeyEnv is invalid")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.SecretKeyEnv)) {
+		return errors.New("minio secretKeyEnv is invalid")
+	}
+	if strings.TrimSpace(c.Region) == "" || len([]rune(c.Region)) > 64 {
+		return errors.New("minio region is required and must not exceed 64 characters")
+	}
+	for name, bucket := range map[string]string{
+		"attachmentBucket":      c.AttachmentBucket,
+		"knowledgeSourceBucket": c.KnowledgeSourceBucket,
+	} {
+		bucket = strings.TrimSpace(bucket)
+		if !storageBucketName.MatchString(bucket) || strings.Contains(bucket, "..") ||
+			strings.Contains(bucket, ".-") || strings.Contains(bucket, "-.") || net.ParseIP(bucket) != nil {
+			return fmt.Errorf("minio %s is invalid", name)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(c.AttachmentBucket), strings.TrimSpace(c.KnowledgeSourceBucket)) {
+		return errors.New("minio attachmentBucket and knowledgeSourceBucket must differ")
+	}
+	if c.TimeoutMillis < 1_000 || c.TimeoutMillis > 120_000 {
+		return errors.New("minio timeoutMillis must be between 1000 and 120000")
+	}
+	const maxConfiguredObjectBytes = 50 * 1024 * 1024
+	if c.MaxObjectBytes < 1 || c.MaxObjectBytes > maxConfiguredObjectBytes {
+		return errors.New("minio maxObjectBytes must be between 1 and 52428800")
+	}
+	return nil
+}
+
+func (c MinIOConfig) AccessKey() (string, error) {
+	return requiredEnv(c.AccessKeyEnv)
+}
+
+func (c MinIOConfig) SecretKey() (string, error) {
+	return requiredEnv(c.SecretKeyEnv)
+}
+
+// KnowledgeConfig 固定知识入库任务的可追踪流水线版本和重试上限。
+type KnowledgeConfig struct {
+	PipelineVersion string `toml:"pipelineVersion"`
+	MaxAttempts     int    `toml:"maxAttempts"`
+	MaxUploadBytes  int64  `toml:"maxUploadBytes"`
+}
+
+func (c KnowledgeConfig) Validate() error {
+	if !modelName.MatchString(strings.TrimSpace(c.PipelineVersion)) {
+		return errors.New("knowledge pipelineVersion is invalid")
+	}
+	if c.MaxAttempts < 1 || c.MaxAttempts > 10 {
+		return errors.New("knowledge maxAttempts must be between 1 and 10")
+	}
+	const maxConfiguredUploadBytes = 50 * 1024 * 1024
+	if c.MaxUploadBytes < 1 || c.MaxUploadBytes > maxConfiguredUploadBytes {
+		return errors.New("knowledge maxUploadBytes must be between 1 and 52428800")
+	}
+	return nil
+}
+
 // RabbitMQConfig 固定 M1 诊断队列拓扑和 Relay 的有界批处理参数。
 // AMQP URL 可能包含凭证，只能通过 URLEnv 指向的环境变量注入。
 type RabbitMQConfig struct {
-	Enabled                     bool   `toml:"enabled"`
-	URLEnv                      string `toml:"urlEnv"`
-	Exchange                    string `toml:"exchange"`
-	DiagnosisQueue              string `toml:"diagnosisQueue"`
-	DiagnosisRoutingKey         string `toml:"diagnosisRoutingKey"`
-	RelayBatchSize              int    `toml:"relayBatchSize"`
-	RelayPollIntervalMillis     int    `toml:"relayPollIntervalMillis"`
-	RelayLeaseMillis            int    `toml:"relayLeaseMillis"`
-	PublishConfirmTimeoutMillis int    `toml:"publishConfirmTimeoutMillis"`
-	WorkerLeaseMillis           int    `toml:"workerLeaseMillis"`
-	WorkerRenewIntervalMillis   int    `toml:"workerRenewIntervalMillis"`
-	WorkerMaxAttempts           int    `toml:"workerMaxAttempts"`
+	Enabled                      bool   `toml:"enabled"`
+	URLEnv                       string `toml:"urlEnv"`
+	Exchange                     string `toml:"exchange"`
+	DiagnosisQueue               string `toml:"diagnosisQueue"`
+	DiagnosisRoutingKey          string `toml:"diagnosisRoutingKey"`
+	KnowledgeIngestionQueue      string `toml:"knowledgeIngestionQueue"`
+	KnowledgeIngestionRoutingKey string `toml:"knowledgeIngestionRoutingKey"`
+	RelayBatchSize               int    `toml:"relayBatchSize"`
+	RelayPollIntervalMillis      int    `toml:"relayPollIntervalMillis"`
+	RelayLeaseMillis             int    `toml:"relayLeaseMillis"`
+	PublishConfirmTimeoutMillis  int    `toml:"publishConfirmTimeoutMillis"`
+	WorkerLeaseMillis            int    `toml:"workerLeaseMillis"`
+	WorkerRenewIntervalMillis    int    `toml:"workerRenewIntervalMillis"`
+	WorkerMaxAttempts            int    `toml:"workerMaxAttempts"`
 }
 
 var amqpEntityName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -217,7 +430,9 @@ func (c RabbitMQConfig) Validate() error {
 	}
 	for name, value := range map[string]string{
 		"exchange": c.Exchange, "diagnosisQueue": c.DiagnosisQueue,
-		"diagnosisRoutingKey": c.DiagnosisRoutingKey,
+		"diagnosisRoutingKey":          c.DiagnosisRoutingKey,
+		"knowledgeIngestionQueue":      c.KnowledgeIngestionQueue,
+		"knowledgeIngestionRoutingKey": c.KnowledgeIngestionRoutingKey,
 	} {
 		if !amqpEntityName.MatchString(strings.TrimSpace(value)) {
 			return fmt.Errorf("rabbitmq %s is invalid", name)
@@ -622,6 +837,9 @@ func (c Config) Validate() error {
 	if err := c.Models.Chat.Validate(); err != nil {
 		return err
 	}
+	if err := c.Models.Judge.Validate(); err != nil {
+		return err
+	}
 	if err := c.Log.Validate(); err != nil {
 		return err
 	}
@@ -642,6 +860,18 @@ func (c Config) Validate() error {
 	}
 	if err := c.GitHubMCP.Validate(); err != nil {
 		return err
+	}
+	if err := c.WebSearch.Validate(); err != nil {
+		return err
+	}
+	if err := c.MinIO.Validate(); err != nil {
+		return err
+	}
+	if err := c.Knowledge.Validate(); err != nil {
+		return err
+	}
+	if c.MinIO.Enabled && c.Knowledge.MaxUploadBytes > c.MinIO.MaxObjectBytes {
+		return errors.New("knowledge maxUploadBytes must not exceed minio maxObjectBytes")
 	}
 	if err := c.RabbitMQ.Validate(); err != nil {
 		return err

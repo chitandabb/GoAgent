@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复，以及报告反馈查询/追加；独立证据和工具执行读取接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
-- M2 知识助手、个人知识库和文档入库只保留版本空间，不在本文提前固定具体接口。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加，以及管理员知识文档创建/上传新版、入库任务查询和协作式取消；独立证据和工具执行读取接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- M2 知识助手和个人知识库仍未交付；文档入库只固定当前已实现的管理员上传与任务控制接口，解析 Consumer 和在线检索不得提前声明。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
 ## 设计原则
@@ -834,4 +834,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。下一步优先完成 Worker 进程/模型故障的可重复演练，再进入固定数据集验收；独立证据/工具执行接口仍按后续切片推进。机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消以及 Worker claim/lease/checkpoint/fencing 控制面；实际文档解析 Consumer、Element Artifact、Embedding 和在线检索仍是后续切片。机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
