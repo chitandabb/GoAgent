@@ -84,14 +84,39 @@ The `[knowledge]` block configures the current ingestion contract:
 - `pipelineVersion`: persisted with every immutable source version and task;
 - `maxAttempts`: bounded transient-failure attempts;
 - `maxUploadBytes`: API upload limit, which must not exceed `[minio].maxObjectBytes`.
+- `chunkMaxRunes` and `chunkOverlapRunes`: deterministic TXT/Markdown Chunk limits.
 
 Administrator uploads use `multipart/form-data`, a UUID `Idempotency-Key`, the
 authenticated Session, and CSRF protection. The API stages one bounded file in the
 system temporary directory, computes SHA-256, validates its first format boundary,
 uploads it to MinIO, and removes the temporary file before returning. A successful
 response means the immutable object and PostgreSQL ingestion facts are durable; it
-does not yet mean a parser consumed the RabbitMQ message. The ingestion Consumer and
-actual parser executor remain the next backend slice.
+does not yet mean parsing has completed. `mesguard-outbox-relay` publishes the task,
+and the independent `mesguard-knowledge-worker` consumes it with manual ACK and
+confirmed retry/dead-letter copies. The current Executor supports UTF-8 TXT and
+Markdown, verifies the immutable source, writes a JSON Element Artifact to MinIO,
+stages searchable Chunks under lease fencing, and then publishes `ready/current`.
+PDF, Office, OCR, and VLM parsing are not implemented yet; those uploads currently
+finish as unsupported input instead of being silently treated as text.
+
+Start or rebuild the runnable path with:
+
+```powershell
+docker compose up -d --build migrate backend outbox-relay knowledge-worker
+docker compose ps backend outbox-relay knowledge-worker
+```
+
+Run the opt-in storage and messaging integrations against the local defaults with
+`MESGUARD_TEST_POSTGRES_DSN`, `MESGUARD_TEST_RABBITMQ_URL`, and the three
+`MESGUARD_TEST_MINIO_*` variables, then execute:
+
+```powershell
+go test -tags=integration ./internal/platform/postgres ./internal/platform/rabbitmq ./internal/platform/minio -count=1
+```
+
+These tests cover Artifact/Chunk fencing, FTS visibility, Publisher Confirm before
+ACK, and MinIO Source round trips. A single local service smoke is functional proof,
+not a document-throughput benchmark.
 Increment `promptVersion` whenever a content change must be distinguishable in
 persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release

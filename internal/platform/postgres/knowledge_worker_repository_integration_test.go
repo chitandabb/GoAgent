@@ -46,10 +46,25 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 	if err != nil || !saved {
 		t.Fatalf("SaveCheckpoint = %v err=%v", saved, err)
 	}
-	completed, err := repository.Complete(ctx, *claim.Lease, knowledgeworker.ExecutionResult{
+	parsedResult := knowledgeworker.ExecutionResult{
 		ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"pages":9}`),
 		Checkpoint: json.RawMessage(`{"indexed":true}`),
-	}, now.Add(4*time.Second))
+		Artifact: objectstore.ObjectRef{
+			Bucket: objectstore.BucketKnowledgeArtifacts, ObjectKey: "knowledge-artifact/integration/" + versionID.String(),
+			ETag: "artifact-etag", SizeBytes: 12, SHA256: knowledge.SHA256Hex("artifact"),
+			MediaType: "application/json", OriginalName: "manual.elements.json",
+		},
+		Chunks: []knowledge.ChunkDraft{{
+			ElementType: knowledge.ElementText, ContentText: "parsed content",
+			SearchText:    knowledge.NormalizeSearchText("parsed content"),
+			ContentSHA256: knowledge.SHA256Hex("parsed content"),
+		}},
+	}
+	staged, err := repository.SaveParsedResult(ctx, *claim.Lease, parsedResult, now.Add(4*time.Second))
+	if err != nil || !staged {
+		t.Fatalf("SaveParsedResult = %v err=%v", staged, err)
+	}
+	completed, err := repository.Complete(ctx, *claim.Lease, parsedResult, now.Add(5*time.Second))
 	if err != nil || !completed {
 		t.Fatalf("Complete = %v err=%v", completed, err)
 	}
@@ -60,19 +75,32 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 		VersionStatus string
 		IsCurrent     bool
 		EventCount    int64
+		ChunkCount    int64
+		ArtifactSHA   string `gorm:"column:artifact_sha"`
 	}
 	if err := db.WithContext(ctx).Raw(`
 SELECT task.status AS task_status, task.stage AS task_stage, task.progress_percent,
        version.status AS version_status, version.is_current,
-       (SELECT COUNT(*) FROM knowledge_ingestion_events event WHERE event.task_id = task.id) AS event_count
+       (SELECT COUNT(*) FROM knowledge_ingestion_events event WHERE event.task_id = task.id) AS event_count,
+       (SELECT COUNT(*) FROM knowledge_chunks chunk WHERE chunk.document_version_id = version.id) AS chunk_count,
+       COALESCE(version.element_artifact_sha256, '') AS artifact_sha
 FROM knowledge_ingestion_tasks task
 JOIN knowledge_document_versions version ON version.id = task.document_version_id
 WHERE task.id = ?`, taskID).Scan(&facts).Error; err != nil {
 		t.Fatal(err)
 	}
 	if facts.TaskStatus != "succeeded" || facts.TaskStage != "completed" || facts.Progress != 100 ||
-		facts.VersionStatus != "ready" || !facts.IsCurrent || facts.EventCount != 4 {
+		facts.VersionStatus != "ready" || !facts.IsCurrent || facts.EventCount != 5 ||
+		facts.ChunkCount != 1 || facts.ArtifactSHA != knowledge.SHA256Hex("artifact") {
 		t.Fatalf("facts = %+v", facts)
+	}
+	searchResults, err := NewKnowledgeRepository(db).SearchFTS(ctx, creatorID, "parsed content", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(searchResults) != 1 || searchResults[0].DocumentVersionID != versionID ||
+		searchResults[0].ContentText != "parsed content" {
+		t.Fatalf("search results = %+v", searchResults)
 	}
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
 }
@@ -102,6 +130,30 @@ func TestKnowledgeWorkerRepositoryReclaimsExpiredLeaseAndFencesOldOwner(t *testi
 	}, now.Add(4*time.Second))
 	if err != nil || !newSaved {
 		t.Fatalf("new lease checkpoint = %v err=%v", newSaved, err)
+	}
+	oldResult := knowledgeParsedResult(versionID, "old lease content")
+	oldParsed, err := repository.SaveParsedResult(ctx, *first.Lease, oldResult, now.Add(5*time.Second))
+	if err != nil || oldParsed {
+		t.Fatalf("old lease parsed result = %v err=%v", oldParsed, err)
+	}
+	newResult := knowledgeParsedResult(versionID, "new lease content")
+	newParsed, err := repository.SaveParsedResult(ctx, *second.Lease, newResult, now.Add(5*time.Second))
+	if err != nil || !newParsed {
+		t.Fatalf("new lease parsed result = %v err=%v", newParsed, err)
+	}
+	var staged struct {
+		ContentText string
+		ArtifactSHA string `gorm:"column:artifact_sha"`
+	}
+	if err := db.WithContext(ctx).Raw(`
+SELECT chunk.content_text, version.element_artifact_sha256 AS artifact_sha
+FROM knowledge_chunks chunk
+JOIN knowledge_document_versions version ON version.id = chunk.document_version_id
+WHERE version.id = ?`, versionID).Scan(&staged).Error; err != nil {
+		t.Fatal(err)
+	}
+	if staged.ContentText != "new lease content" || staged.ArtifactSHA != newResult.Artifact.SHA256 {
+		t.Fatalf("staged result = %+v", staged)
 	}
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
 }
@@ -306,4 +358,21 @@ func cleanupKnowledgeWorkerFacts(
 	_ = cleanup.Exec("DELETE FROM knowledge_document_versions WHERE id = ?", versionID).Error
 	_ = cleanup.Exec("DELETE FROM knowledge_documents WHERE id = ?", documentID).Error
 	_ = cleanup.Exec("DELETE FROM users WHERE id = ?", creatorID).Error
+}
+
+func knowledgeParsedResult(versionID uuid.UUID, content string) knowledgeworker.ExecutionResult {
+	return knowledgeworker.ExecutionResult{
+		ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"elements":1}`),
+		Checkpoint: json.RawMessage(`{"indexed":true}`),
+		Artifact: objectstore.ObjectRef{
+			Bucket:    objectstore.BucketKnowledgeArtifacts,
+			ObjectKey: "knowledge-artifact/integration/" + versionID.String() + "/" + knowledge.SHA256Hex(content),
+			ETag:      "artifact-etag", SizeBytes: int64(len(content)), SHA256: knowledge.SHA256Hex("artifact-" + content),
+			MediaType: "application/json", OriginalName: "manual.elements.json",
+		},
+		Chunks: []knowledge.ChunkDraft{{
+			ElementType: knowledge.ElementText, ContentText: content,
+			SearchText: knowledge.NormalizeSearchText(content), ContentSHA256: knowledge.SHA256Hex(content),
+		}},
+	}
 }

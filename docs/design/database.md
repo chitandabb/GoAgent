@@ -699,7 +699,8 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
   和全局/个人权限；中文基线使用应用层确定性的 Han bigram 归一化。
 
 `00012_create_knowledge_ingestion_tasks.sql` 和
-`00013_relax_source_version_and_add_ingestion_idempotency.sql` 已继续落地可恢复入库骨架：
+`00013_relax_source_version_and_add_ingestion_idempotency.sql` 已继续落地可恢复入库骨架；
+`00014_add_knowledge_element_artifacts.sql` 增加解析事实 Artifact 引用：
 
 - `knowledge_document_versions` 保存 MinIO 逻辑 Bucket、不可变 ObjectKey、可选 VersionID、ETag、
   原文件名、上传时间和 `pipeline_version`；queued 版本不会提前成为 current；
@@ -713,12 +714,20 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
   `knowledge.ingest` Outbox；事务提交后由 Relay 发布 RabbitMQ，不在数据库事务内执行网络 I/O；
 - MinIO 上传先于数据库事务。事务失败时仅补偿删除本次服务端生成的唯一 ObjectKey，避免留下
   无引用原文；对象版本和数据库业务版本是两套不同概念。
+- `knowledge_document_versions.element_artifact_*` 保存 Element JSON Artifact 的逻辑 Bucket、ObjectKey、
+  可选 VersionID、ETag、大小和 SHA-256；约束要求这些字段全空或成组有效，并对物理对象引用建立
+  条件唯一索引；
+- `SaveParsedResult` 在持有有效 lease 时于同一事务替换版本 Chunk、写入 Artifact 引用并追加 staging
+  event。锁定条件复用 `task_id + document_version_id + claim_owner + attempt_count + lease_until`，因此
+  过期 Worker 不能覆盖接管者已经写入的解析结果。
 
 当前已验证 Markdown/纯文本、结构化表格块的 FTS 基线，以及 MinIO 原文写入和入库任务原子创建。
 管理员上传 HTTP API、幂等重放/冲突处理、任务查询/协作式取消以及 Worker
 claim/lease/heartbeat/checkpoint/fencing/退避状态转换已接入，并通过真实 PostgreSQL 集成测试。
-RabbitMQ 入库 Consumer 和实际 PDF/Office、OCR/VLM Parser Executor、Embedding 表、向量索引、
-混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条的吞吐量或最终 Recall@5 指标已经完成。
+TXT/Markdown Executor、RabbitMQ 入库 Consumer、Element Artifact 和 fenced Chunk staging 已接入；
+发布后的 `ready/current` Chunk 已由真实 PostgreSQL FTS 查询验证。PDF/Office、OCR/VLM Parser、
+Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条的吞吐量或
+最终 Recall@5 指标已经完成。
 
 ### embeddings
 

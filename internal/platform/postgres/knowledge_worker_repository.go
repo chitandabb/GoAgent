@@ -302,6 +302,86 @@ WHERE id = ? AND document_version_id = ? AND status = 'running'
 	return saved, TranslateError(err)
 }
 
+func (r *KnowledgeWorkerRepository) SaveParsedResult(
+	ctx context.Context,
+	lease knowledgeworker.Lease,
+	result knowledgeworker.ExecutionResult,
+	updatedAt time.Time,
+) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("knowledge worker repository is unavailable")
+	}
+	if err := validateKnowledgeLease(lease); err != nil {
+		return false, err
+	}
+	if err := validateParsedExecutionResult(result); err != nil {
+		return false, err
+	}
+	saved := false
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		owned, err := lockOwnedKnowledgeTask(tx, lease, updatedAt)
+		if err != nil || !owned {
+			return err
+		}
+		if err := tx.Exec(
+			"DELETE FROM knowledge_chunks WHERE document_version_id = ?", lease.DocumentVersionID,
+		).Error; err != nil {
+			return TranslateError(err)
+		}
+		for ordinal, chunk := range result.Chunks {
+			sectionPath, err := json.Marshal(chunk.SectionPath)
+			if err != nil {
+				return err
+			}
+			if chunk.SectionPath == nil {
+				sectionPath = json.RawMessage(`[]`)
+			}
+			metadata := chunk.Metadata
+			if len(metadata) == 0 {
+				metadata = json.RawMessage(`{}`)
+			}
+			if err := tx.Exec(`
+INSERT INTO knowledge_chunks
+    (id, document_version_id, ordinal, page_number, element_index, element_type,
+     section_path, content_text, search_text, content_sha256, metadata)
+VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)`,
+				uuid.New(), lease.DocumentVersionID, ordinal, chunk.PageNumber, chunk.ElementIndex,
+				chunk.ElementType, string(sectionPath), chunk.ContentText, chunk.SearchText,
+				chunk.ContentSHA256, string(metadata),
+			).Error; err != nil {
+				return TranslateError(err)
+			}
+		}
+		artifact := result.Artifact
+		if err := tx.Exec(`
+UPDATE knowledge_document_versions
+SET parser_version = ?, parser_metadata = ?::jsonb,
+    element_artifact_bucket = ?, element_artifact_object_key = ?,
+    element_artifact_object_version = ?, element_artifact_etag = ?,
+    element_artifact_size_bytes = ?, element_artifact_sha256 = ?
+WHERE id = ?`,
+			result.ParserVersion, string(result.ParserMetadata), artifact.Bucket, artifact.ObjectKey,
+			nullableTrimmedString(artifact.VersionID), artifact.ETag, artifact.SizeBytes,
+			artifact.SHA256, lease.DocumentVersionID,
+		).Error; err != nil {
+			return TranslateError(err)
+		}
+		if err := appendKnowledgeIngestionEvent(tx, lease.TaskID, "ingestion_result_staged", map[string]any{
+			"taskId": lease.TaskID.String(), "documentVersionId": lease.DocumentVersionID.String(),
+			"artifactSha256": artifact.SHA256, "chunkCount": len(result.Chunks),
+			"attemptCount": lease.AttemptCount,
+		}, updatedAt); err != nil {
+			return err
+		}
+		saved = true
+		return nil
+	})
+	if errors.Is(err, knowledgeworker.ErrLeaseLost) {
+		return false, nil
+	}
+	return saved, TranslateError(err)
+}
+
 func (r *KnowledgeWorkerRepository) Complete(
 	ctx context.Context,
 	lease knowledgeworker.Lease,
@@ -643,6 +723,28 @@ func validateKnowledgeLease(lease knowledgeworker.Lease) error {
 		strings.TrimSpace(lease.ClaimOwner) == "" || len(lease.ClaimOwner) > 128 ||
 		lease.AttemptCount < 0 || lease.MaxAttempts < 1 || lease.AttemptCount > lease.MaxAttempts {
 		return errors.New("knowledge worker lease is invalid")
+	}
+	return nil
+}
+
+func validateParsedExecutionResult(result knowledgeworker.ExecutionResult) error {
+	if strings.TrimSpace(result.ParserVersion) == "" || len(result.ParserVersion) > 128 ||
+		!validJSONObject(result.ParserMetadata) || !validJSONObject(result.Checkpoint) {
+		return errors.New("knowledge parsed result metadata is invalid")
+	}
+	if result.Artifact.Bucket != objectstore.BucketKnowledgeArtifacts {
+		return errors.New("knowledge parsed result artifact bucket is invalid")
+	}
+	if err := result.Artifact.Validate(); err != nil {
+		return err
+	}
+	if len(result.Chunks) == 0 || len(result.Chunks) > 10000 {
+		return errors.New("knowledge parsed result chunks are required and bounded")
+	}
+	for _, chunk := range result.Chunks {
+		if err := chunk.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

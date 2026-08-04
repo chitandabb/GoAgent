@@ -79,6 +79,8 @@ type ExecutionResult struct {
 	ParserVersion  string
 	ParserMetadata json.RawMessage
 	Checkpoint     json.RawMessage
+	Artifact       objectstore.ObjectRef
+	Chunks         []knowledge.ChunkDraft
 }
 
 type Repository interface {
@@ -86,6 +88,7 @@ type Repository interface {
 	Renew(context.Context, Lease, time.Time, time.Time) (RenewalResult, error)
 	LoadTask(context.Context, Lease, time.Time) (Task, error)
 	SaveCheckpoint(context.Context, Lease, CheckpointUpdate, time.Time) (bool, error)
+	SaveParsedResult(context.Context, Lease, ExecutionResult, time.Time) (bool, error)
 	Complete(context.Context, Lease, ExecutionResult, time.Time) (bool, error)
 	ReleaseForRetry(context.Context, Lease, string, string, time.Time, time.Time) (bool, error)
 	Fail(context.Context, Lease, string, string, time.Time) (bool, error)
@@ -220,6 +223,37 @@ func (w *Worker) execute(ctx context.Context, lease Lease) Outcome {
 		return nil
 	}
 	result, executionErr := w.executor.Execute(executionCtx, task, reportCheckpoint)
+	if executionErr == nil {
+		if err := validateExecutionResult(result); err != nil {
+			executionErr = fmt.Errorf("%w: %v", ErrPermanentInput, err)
+		}
+	}
+	if executionErr == nil {
+		saved, err := w.repository.SaveParsedResult(executionCtx, lease, result, w.clock().UTC())
+		if err != nil {
+			executionErr = err
+		} else if !saved {
+			executionErr = ErrLeaseLost
+		}
+	}
+	if executionErr == nil {
+		publishingCheckpoint, err := json.Marshal(map[string]any{
+			"artifactSha256": result.Artifact.SHA256, "chunkCount": len(result.Chunks),
+		})
+		if err != nil {
+			executionErr = err
+		} else {
+			saved, saveErr := w.repository.SaveCheckpoint(executionCtx, lease, CheckpointUpdate{
+				Stage: knowledge.IngestionStagePublishing, ProgressPercent: 95,
+				Checkpoint: publishingCheckpoint,
+			}, w.clock().UTC())
+			if saveErr != nil {
+				executionErr = saveErr
+			} else if !saved {
+				executionErr = ErrLeaseLost
+			}
+		}
+	}
 	cancelExecution(nil)
 	heartbeatErr := <-heartbeatDone
 
@@ -257,6 +291,33 @@ func (w *Worker) execute(ctx context.Context, lease Lease) Outcome {
 		return retryOutcome(30*time.Second, ErrLeaseLost)
 	}
 	return Outcome{Action: ActionAck, Reason: "knowledge ingestion result committed"}
+}
+
+func validateExecutionResult(result ExecutionResult) error {
+	if strings.TrimSpace(result.ParserVersion) == "" || len(result.ParserVersion) > 128 ||
+		!validJSONObject(result.ParserMetadata) || !validJSONObject(result.Checkpoint) {
+		return errors.New("parser result metadata is invalid")
+	}
+	if result.Artifact.Bucket != objectstore.BucketKnowledgeArtifacts {
+		return errors.New("parser result artifact uses an invalid bucket")
+	}
+	if err := result.Artifact.Validate(); err != nil {
+		return err
+	}
+	if len(result.Chunks) == 0 || len(result.Chunks) > 10000 {
+		return errors.New("parser result chunks are required and bounded")
+	}
+	for _, chunk := range result.Chunks {
+		if err := chunk.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validJSONObject(raw json.RawMessage) bool {
+	var object map[string]any
+	return len(raw) > 0 && json.Unmarshal(raw, &object) == nil && object != nil
 }
 
 func (w *Worker) renewLease(

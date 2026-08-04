@@ -82,6 +82,44 @@ type ChunkDraft struct {
 	Metadata      json.RawMessage
 }
 
+type DocumentElement struct {
+	Index       int
+	PageNumber  *int
+	ElementType ElementType
+	SectionPath []string
+	ContentText string
+	Metadata    json.RawMessage
+}
+
+func (e DocumentElement) Validate() error {
+	if e.Index < 0 {
+		return errors.New("knowledge document element index must not be negative")
+	}
+	if e.PageNumber != nil && *e.PageNumber < 1 {
+		return errors.New("knowledge document element page number must be positive")
+	}
+	switch e.ElementType {
+	case ElementText, ElementTable, ElementOCRText, ElementImageDescription:
+	default:
+		return errors.New("knowledge document element type is invalid")
+	}
+	if strings.TrimSpace(e.ContentText) == "" || e.ContentText != strings.TrimSpace(e.ContentText) {
+		return errors.New("knowledge document element content must be non-empty and trimmed")
+	}
+	for _, value := range e.SectionPath {
+		if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+			return errors.New("knowledge document element section path must be non-empty and trimmed")
+		}
+	}
+	if len(e.Metadata) > 0 {
+		var object map[string]any
+		if err := json.Unmarshal(e.Metadata, &object); err != nil || object == nil {
+			return errors.New("knowledge document element metadata must be a JSON object")
+		}
+	}
+	return nil
+}
+
 func (c ChunkDraft) Validate() error {
 	if c.PageNumber != nil && *c.PageNumber < 1 {
 		return errors.New("knowledge chunk page number must be positive")

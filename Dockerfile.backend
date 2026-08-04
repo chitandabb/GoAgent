@@ -11,6 +11,7 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-api ./cmd/me
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-migrate ./cmd/mesguard-migrate
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-outbox-relay ./cmd/mesguard-outbox-relay
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-diagnosis-worker ./cmd/mesguard-diagnosis-worker
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/mesguard-knowledge-worker ./cmd/mesguard-knowledge-worker
 
 FROM debian:bookworm-slim
 
@@ -24,6 +25,7 @@ COPY --from=builder /out/mesguard-api /app/mesguard-api
 COPY --from=builder /out/mesguard-migrate /app/mesguard-migrate
 COPY --from=builder /out/mesguard-outbox-relay /app/mesguard-outbox-relay
 COPY --from=builder /out/mesguard-diagnosis-worker /app/mesguard-diagnosis-worker
+COPY --from=builder /out/mesguard-knowledge-worker /app/mesguard-knowledge-worker
 COPY config /app/config
 
 EXPOSE 9090

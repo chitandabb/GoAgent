@@ -744,9 +744,9 @@ Chunk 快照和 Embedding 缓存的生命周期不同，清理器只能删除数
 5. `QueueVersion` 在一个 PostgreSQL 事务内创建 queued 版本、pending 入库任务、首个事件和
    `knowledge.ingest` Outbox；queued 版本不会提前成为 current。上传成功但事务失败时，应用服务
    使用独立 5 秒上下文补偿删除本次唯一对象。
-6. RabbitMQ Publisher 已能声明持久化 `mesguard.knowledge.ingest` Queue 并路由
-   `knowledge.ingest` Outbox；严格消息契约校验 AMQP 属性、信封和 task/version ID。当前没有启动
-   空 Worker 消费该 Queue，消息会持久等待下一切片的 ingestion Worker。
+6. RabbitMQ Publisher 声明持久化 `mesguard.knowledge.ingest` Queue 并路由
+   `knowledge.ingest` Outbox；严格消息契约校验 AMQP 属性、信封和 task/version ID。M2-A4 已接入
+   真实 Consumer，消息不再只停留在 Queue 中。
 
 M2-A2 当时不包含管理员上传 HTTP API、附件表、文件签名/杀毒、解析 Worker、PDF/Office/OCR/VLM、
 Element Artifact、Embedding 或在线 `search_knowledge`；其中上传 API、首层格式签名和 Worker 控制面
@@ -780,6 +780,40 @@ Element Artifact、Embedding 或在线 `search_knowledge`；其中上传 API、�
    `partial_ready` 保持非 current，继续等待管理员审计决策。
 
 真实 PostgreSQL 集成测试已验证 claim 竞争、过期接管、旧 fencing token 失效、checkpoint、退避、
-ready 发布、`partial_ready` 不发布以及取消；真实 MinIO 集成测试已验证无 VersionID 对象上传。当前
-仍没有启动 RabbitMQ ingestion Consumer，也没有实际 PDF/Office/OCR/VLM Parser Executor，因此上传
-产生的消息继续留在持久化 Queue，不能把本检查点描述为“文档已自动解析”。
+ready 发布、`partial_ready` 不发布以及取消；真实 MinIO 集成测试已验证无 VersionID 对象上传。
+
+### 已实现检查点：M2-A4 TXT/Markdown 可运行入库闭环
+
+2026-08-04 已完成第一条可运行解析链路，边界如下：
+
+1. `objectstore.Store.Get` 和 MinIO 实现按不可变 `ObjectRef` 读取原文。MinIO `GetObject` 后立即
+   `Stat`，校验可选 VersionID、Size 和 ETag，并由调用方关闭流；Executor 再以有界读取校验原文
+   Size 与 SHA-256，任何不一致都作为永久输入错误处理。
+2. `knowledgeparser.Router` 依赖最小 `Parse` 接口。当前只注册 UTF-8 TXT/Markdown Parser，拒绝 NUL、
+   非法 UTF-8 和未实现媒体类型；PDF/Office 即使通过上传边界校验，也会稳定进入不支持格式错误，
+   不能被误报为已解析。
+3. Parser 产出 `DocumentElement`，保留 element index、页码、类型、章节路径、正文和 JSON metadata；
+   `ChunkElements` 是独立检索投影。Element 表示解析事实，Chunk 表示可重建的检索结构，后续更换
+   Chunk/Embedding 策略不需要重新解释原文。
+4. 完整 Element 集合以 schema version 1 JSON Artifact 写入 MinIO 的逻辑
+   `knowledge-artifact` 前缀；`00014` 将 Artifact Bucket/ObjectKey/VersionID/ETag/Size/SHA-256 写入
+   `knowledge_document_versions`。原文和 Artifact 当前共用知识物理 Bucket，但 key 空间和逻辑权限
+   边界分离。
+5. PostgreSQL `SaveParsedResult` 在事务内先锁定仍有效的 `task_id + claim_owner + attempt_count + lease`，
+   再替换该版本 Chunks、保存 Artifact 引用并追加 `ingestion_result_staged`。旧 Worker 即使晚到也不能
+   覆盖新 Worker 的 Chunk、Artifact 或 current。
+6. 独立 `mesguard-knowledge-worker` 进程只装配 PostgreSQL、RabbitMQ 和 MinIO，不加载 Redis、ERP
+   SQL Server、模型或 GitHub MCP。Consumer 使用 `prefetch=1`、手动 ACK、持久化 retry/dead copy 和
+   Publisher Confirm；只有副本确认后才 ACK 原消息。
+7. Worker 只有在 fenced staging 成功后才记录 publishing checkpoint，并在终态事务中发布
+   `ready/current`；queued/indexing 版本不会被检索。任务 stage 的 `publishing` 仍映射到粗粒度版本
+   status `indexing`，需要展示发布进度时读取任务 stage。
+
+真实 PostgreSQL 测试已验证 Artifact/Chunk staging、旧 fencing token 无法覆盖、发布后 FTS 可检索；
+真实 RabbitMQ 测试已验证 retry/dead copy Confirm 后 ACK；真实 MinIO 测试已验证 Source round trip。
+服务级 smoke 使用现有管理员上传 API 投递 Markdown，经 Outbox Relay 和 Consumer 后得到
+`succeeded/completed`、`ready/current`、`markdown-elements-v1`、8 个 Chunk 与 Artifact SHA-256，
+随后清理了测试对象和数据库事实。单个 smoke 不构成吞吐量或 Recall 指标。
+
+当前仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表路由、OCR/VLM、Embedding、向量召回、
+混合融合和 Rerank。下一切片先实现受资源约束的 PDF/Office 确定性解析，再进入 OCR/VLM 分流。
