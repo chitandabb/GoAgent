@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from 'react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import * as api from '@/shared/api'
 import { caseStatusMeta, priorityMeta, taskStatusMeta } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
@@ -8,6 +8,7 @@ import { Button } from '@/shared/ui/Button'
 import { Card, CardTitle } from '@/shared/ui/Card'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { PageLoading } from '@/shared/ui/Spinner'
+import { openCaseWorkspace } from '@/features/workbench/workspace-store'
 
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -26,9 +27,13 @@ export function CaseDetailPage() {
     queryKey: ['external-case', caseId],
     queryFn: () => api.getExternalCase(caseId),
   })
-  const tasks = useQuery({
-    queryKey: ['tasks', 'all'],
-    queryFn: () => api.listTasks({}),
+  const recentEntries = api.getRecentTasks().filter((entry) => entry.externalCaseId === caseId)
+  const recentTaskQueries = useQueries({
+    queries: recentEntries.map((entry) => ({
+      queryKey: ['task', entry.taskId],
+      queryFn: () => api.getTask(entry.taskId),
+      refetchInterval: 5000,
+    })),
   })
 
   if (extCase.isPending) return <PageLoading />
@@ -36,7 +41,7 @@ export function CaseDetailPage() {
     return <p className="py-24 text-center text-ink-48">工单不存在或无权访问</p>
   }
   const c = extCase.data
-  const caseTasks = (tasks.data ?? []).filter((t) => t.externalCaseId === c.externalCaseId)
+  const caseTasks = recentTaskQueries.flatMap((query) => (query.data ? [query.data] : []))
 
   return (
     <div>
@@ -57,8 +62,11 @@ export function CaseDetailPage() {
           </span>
         }
         actions={
-          <Button onClick={() => navigate(`/cases/${c.externalCaseId}/diagnose`)}>
-            发起诊断
+          <Button onClick={() => {
+            const workspace = openCaseWorkspace(c.externalCaseId)
+            navigate(`/workbench/${workspace.workspaceId}`)
+          }}>
+            在工作台打开
           </Button>
         }
       />
@@ -74,8 +82,10 @@ export function CaseDetailPage() {
           <Card className="p-6">
             <CardTitle className="mb-2">基本信息</CardTitle>
             <div className="divide-y divide-divider">
-              <InfoRow label="客户" value={c.customerName} />
-              <InfoRow label="产品" value={`${c.productName} ${c.productVersion}`} />
+              <InfoRow label="客户" value={c.customerName || '—'} />
+              <InfoRow label="产品" value={[c.productName, c.productVersion].filter(Boolean).join(' ') || '—'} />
+              <InfoRow label="工单类型" value={c.caseType || '—'} />
+              <InfoRow label="业务模块" value={c.module || c.category || '—'} />
               <InfoRow label="上报时间" value={fmtDateTime(c.reportedAt)} />
               <InfoRow label="来源更新" value={fmtDateTime(c.sourceUpdatedAt)} />
               <InfoRow
@@ -90,9 +100,12 @@ export function CaseDetailPage() {
           </Card>
 
           <Card className="p-6">
-            <CardTitle className="mb-3">历史诊断</CardTitle>
+            <CardTitle className="mb-1">最近任务入口</CardTitle>
+            <p className="mb-3 text-[12px] leading-[1.5] text-ink-48">
+              仅记录本浏览器会话创建的任务，状态每次从后端重新读取。
+            </p>
             {caseTasks.length === 0 ? (
-              <p className="text-[13px] text-ink-48">该工单尚未发起过诊断</p>
+              <p className="text-[13px] text-ink-48">本会话没有该工单的任务记录</p>
             ) : (
               <ul className="flex flex-col gap-2.5">
                 {caseTasks.map((t) => (
