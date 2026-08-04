@@ -95,7 +95,8 @@ func (e *Executor) Execute(
 		MediaType: task.Source.MediaType, OriginalName: task.Source.OriginalName, Content: content,
 	})
 	if err != nil {
-		if errors.Is(err, knowledgeparser.ErrUnsupportedMediaType) || errors.Is(err, knowledgeparser.ErrInvalidContent) {
+		if errors.Is(err, knowledgeparser.ErrUnsupportedMediaType) || errors.Is(err, knowledgeparser.ErrInvalidContent) ||
+			errors.Is(err, knowledgeparser.ErrResourceLimit) {
 			return knowledgeworker.ExecutionResult{}, permanentError(err.Error())
 		}
 		return knowledgeworker.ExecutionResult{}, err

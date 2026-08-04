@@ -122,6 +122,13 @@ maxAttempts = 3
 maxUploadBytes = 52428800
 chunkMaxRunes = 700
 chunkOverlapRunes = 80
+parserMaxDocumentUnits = 500
+parserMaxArchiveEntries = 4096
+parserMaxExpandedBytes = 268435456
+parserMaxXMLBytes = 33554432
+parserMaxExtractedRunes = 2000000
+parserMaxSpreadsheetRows = 10000
+parserMaxSpreadsheetColumns = 512
 
 [sqlserver]
 enabled = true

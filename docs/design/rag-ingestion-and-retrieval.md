@@ -20,14 +20,18 @@
 - 唯一漏召回的 ERP 504 语义改写样本保留给向量检索补位验证。
 - MinIO 双私有 Bucket、不可变对象写入、流式 SHA-256、对象引用和上传失败补偿删除；
 - queued 知识版本、可恢复入库任务/事件、`knowledge.ingest` Outbox 与 RabbitMQ 持久化 Queue；
-- queued version、pending task、首个 event 和 Outbox 的 PostgreSQL 原子创建。
+- queued version、pending task、首个 event 和 Outbox 的 PostgreSQL 原子创建；
+- 独立 Knowledge Worker、Element Artifact、fenced Chunk staging 与原子 `ready/current` 发布；
+- UTF-8 TXT/Markdown、嵌入文本 PDF、DOCX、XLSX、PPTX 的确定性解析；
+- PDF 页数/文本预算以及 OOXML 条目、展开大小、XML、工作表行列等资源边界；
+- PDF/DOCX/XLSX/PPTX 真实服务链路 smoke，均验证 Parser 版本、Chunk 和 Artifact SHA-256。
 
 当前尚未实现：
 
 - 附件领域表以及附件上传/内容代理读取 API；
 - 内容代理读取、孤儿清理和完整对象生命周期；
-- RabbitMQ 入库 Consumer 进程与实际解析 Executor；
-- PDF/Office/图片解析、OCR、VLM 和智能分流；
+- 扫描 PDF/独立图片解析、Office 视觉元素提取、OCR、VLM 和智能分流；
+- XLSX 公式表达式、隐藏 Sheet/Slide 语义和 PPTX 演讲者备注等丰富 Office 语义；
 - Embedding、pgvector、混合融合、Query 改写和 Rerank；
 - 面向 Agent 的知识检索 Tool/Skill 与知识问答运行链路；
 - 文档处理吞吐量基线和最终第三条简历指标。
@@ -750,7 +754,9 @@ Chunk 快照和 Embedding 缓存的生命周期不同，清理器只能删除数
 
 M2-A2 当时不包含管理员上传 HTTP API、附件表、文件签名/杀毒、解析 Worker、PDF/Office/OCR/VLM、
 Element Artifact、Embedding 或在线 `search_knowledge`；其中上传 API、首层格式签名和 Worker 控制面
-已在下方 M2-A3 补齐，其余仍未实现。因此简历第三条的吞吐与最终 Recall 指标仍然是待评测目标。
+由 M2-A3 补齐，文本执行链和 Artifact 由 M2-A4 补齐，确定性 PDF/Office Parser 由 M2-A5 补齐。
+附件、杀毒/OCR/VLM、Embedding 和在线 `search_knowledge` 仍未实现，因此简历第三条的吞吐与最终
+Recall 指标仍然是待评测目标。
 
 ### 已实现检查点：M2-A3 管理员上传与可恢复 Worker 控制面
 
@@ -815,5 +821,34 @@ ready 发布、`partial_ready` 不发布以及取消；真实 MinIO 集成测试
 `succeeded/completed`、`ready/current`、`markdown-elements-v1`、8 个 Chunk 与 Artifact SHA-256，
 随后清理了测试对象和数据库事实。单个 smoke 不构成吞吐量或 Recall 指标。
 
-当前仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表路由、OCR/VLM、Embedding、向量召回、
-混合融合和 Rerank。下一切片先实现受资源约束的 PDF/Office 确定性解析，再进入 OCR/VLM 分流。
+M2-A4 收工时仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表路由、OCR/VLM、Embedding、
+向量召回、混合融合和 Rerank；其中确定性 PDF/Office 解析由下方 M2-A5 接续完成。
+
+### 已实现检查点：M2-A5 受资源约束的 PDF/Office 确定性解析
+
+2026-08-04 已把四种确定性 Parser 接入 M2-A4 的同一发布链路：
+
+1. PDF Parser 使用纯 Go 读取器逐页提取嵌入文字，每个文本页形成保留 `page_number` 的 Element；
+   加密、损坏、无页面或完全没有可提取嵌入文字的 PDF 作为永久输入错误。空白/无文本页会记录
+   `visualEnrichmentRequired`，留给后续 OCR/VLM，而不会伪造页面描述。
+2. DOCX 按文档流提取 Heading 1-6、Title、正文段落和表格，章节路径随标题层级更新；XLSX 按
+   workbook relationship 顺序读取 worksheet，把 shared string、inline string、数字、布尔值等
+   单元格值投影为 Sheet 级表格 Element；PPTX 按 presentation relationship 顺序读取 slide，提取
+   段落和表格并保留幻灯片页码。
+3. OOXML 打开时拒绝无效 ZIP、危险或重复路径、加密条目和逃逸 package root 的 relationship；
+   不跟随 `TargetMode=External`。`[Content_Types].xml` 和业务 XML 使用严格解码，图片只统计
+   `visualAssetCount` 并标记待增强，当前不生成未经视觉模型验证的文本。
+4. `[knowledge]` 配置限制 PDF 页数/XLSX Sheet 数/PPTX Slide 数、ZIP 条目数、累计展开字节、
+   单 XML 字节、累计抽取字符、单 Sheet 行列数；Parser 最多产生 10,000 个 Element。资源超限
+   使用稳定 `ErrResourceLimit` 并由 Executor 分类为永久失败，避免无意义重试。XLSX 在每行写入
+   Sheet 输出缓冲区前消费字符预算，重复 shared-string 引用不能先放大完整 Sheet 再事后拒绝。
+5. 当前 PDF 第三方读取库内部的流解压不能施加完全精确的进程内存硬上限。本阶段以 API 原文大小、
+   页数、抽取输出预算和独立 Knowledge Worker 进程隔离降低风险；生产部署仍需容器/进程级内存和
+   CPU 限额，不能把这些应用层预算描述为完整解析沙箱。
+6. 服务级 smoke 通过真实管理员上传 API 投递最小 PDF、DOCX、XLSX、PPTX，经 Outbox Relay、
+   RabbitMQ 和 Knowledge Worker 后全部得到 `succeeded/completed`、`ready/current`、对应 Parser
+   版本、非空 Chunk 和 64 位 Artifact SHA-256；随后精确删除 8 个 MinIO 对象及测试数据库事实。
+
+本检查点没有实现扫描 PDF、PNG/JPEG、Office 图片/图表提取和区域定位、OCR/VLM、XLSX 公式
+表达式、隐藏 Sheet/Slide 语义、PPTX 演讲者备注或 `partial_ready` 视觉补处理。这些属于下一切片，
+不能由 `visualAssetCount` 冒充。四个最小 fixture 也只能证明链路正确，不能构成吞吐量提升指标。

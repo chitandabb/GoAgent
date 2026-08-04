@@ -357,10 +357,24 @@ complete version to `ready/current`. Real PostgreSQL, RabbitMQ, and MinIO integr
 tests pass, and an API -> Outbox -> Consumer -> Worker smoke produced a ready Markdown
 version with eight searchable Chunks before its fixture was cleaned up.
 
-Ingestion timing is recorded, but that single local smoke is not a resume throughput
-metric. The next active backend slice is deterministic PDF and Office parsing with
-strict page/ZIP/XML/resource limits while preserving the same Element contract.
-OCR/VLM routing, Embedding, hybrid fusion, reranking, mixed-document throughput
+M2-A5 extends that same Element contract with resource-bounded deterministic parsing.
+PDF files are read page by page for embedded text and retain page numbers. DOCX extracts
+heading-aware paragraphs and tables; XLSX follows workbook relationships and extracts
+cell values by worksheet; PPTX follows presentation relationships and extracts slide
+paragraphs and tables with slide numbers. The Worker enforces configurable document-unit,
+ZIP-entry, expanded-byte, per-XML, extracted-rune, spreadsheet-row, and spreadsheet-column
+limits; invalid, encrypted, empty, or over-budget inputs are permanent failures. OOXML
+rejects unsafe/duplicate paths and does not follow external relationships. Embedded Office
+images are counted and marked for later visual enrichment rather than being described by
+the text parser.
+
+An API -> Outbox -> RabbitMQ -> Knowledge Worker smoke verified PDF, DOCX, XLSX, and PPTX
+as `succeeded/completed`, `ready/current`, with the expected parser versions, non-empty
+Chunks, and persisted Artifact SHA-256 values; all fixture objects and database rows were
+then removed. Ingestion timing from these small fixtures is functional evidence, not a
+resume throughput metric. The next active backend slice is visual-asset extraction plus
+OCR/VLM routing and partial-result semantics. Scanned PDF/image interpretation, richer
+Office semantics, Embedding, hybrid fusion, reranking, mixed-document throughput
 evaluation, and the final resume item 3 claim remain incomplete. TaskEvent SSE
 reuses the JSON event identity and cursor,
 replays PostgreSQL facts, emits heartbeats, closes after terminal events, and is
