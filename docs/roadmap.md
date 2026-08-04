@@ -337,20 +337,31 @@ FTS runs produced the same hit set: Recall@5 23/24 (`95.83%`) and MRR `0.9028`;
 the missed ERP 504 paraphrase is retained for the vector-retrieval comparison.
 M2-A2 provides degradable MinIO object storage, immutable source references,
 queued knowledge versions, recoverable ingestion task/event state, and atomic
-`knowledge.ingest` Outbox creation. RabbitMQ declares a durable ingestion Queue,
-but no empty Worker consumes it yet. M2-A3 adds administrator create/version upload
+`knowledge.ingest` Outbox creation. M2-A3 adds administrator create/version upload
 APIs, UUID `Idempotency-Key` replay/conflict semantics over a source SHA-256 request
 fingerprint, bounded temporary-file staging, supported-format signatures, task
 status/cancellation APIs, and the ingestion Worker claim/lease/heartbeat/checkpoint/
 fencing/retry state machine. Live PostgreSQL tests cover lease contention, expired
 takeover, stale-token rejection, retry delay, cancellation, ready publication, and
-the `partial_ready` publication gate. The Worker core deliberately has no running
-RabbitMQ Consumer or parser executor yet, so durable messages remain queued.
-Ingestion timing is recorded but the small local run is not a resume throughput
-metric. The next active backend slice is deterministic multi-format parser ports,
-safe source reads, Element Artifact persistence, and a real ingestion Consumer.
-PDF/Office parsing, OCR/VLM, Embedding, hybrid fusion, reranking, mixed-document
-throughput improvement, and the final resume item 3 claim remain incomplete. TaskEvent SSE
+the `partial_ready` publication gate.
+
+M2-A4 now closes the first runnable ingestion path for UTF-8 TXT and Markdown:
+the durable RabbitMQ Consumer uses manual ACK, publisher-confirmed retry/dead copies,
+and the existing 30-second/2-minute/10-minute retry schedule; the isolated Knowledge
+Worker opens only PostgreSQL, RabbitMQ, and MinIO. It verifies the immutable source
+size and SHA-256, routes to a deterministic text parser, persists a versioned JSON
+Element Artifact in MinIO, projects Elements into bounded Chunks, and stages the
+Artifact reference plus replacement Chunks under the active lease fencing token.
+Only after staging succeeds does the Worker enter publishing and atomically switch a
+complete version to `ready/current`. Real PostgreSQL, RabbitMQ, and MinIO integration
+tests pass, and an API -> Outbox -> Consumer -> Worker smoke produced a ready Markdown
+version with eight searchable Chunks before its fixture was cleaned up.
+
+Ingestion timing is recorded, but that single local smoke is not a resume throughput
+metric. The next active backend slice is deterministic PDF and Office parsing with
+strict page/ZIP/XML/resource limits while preserving the same Element contract.
+OCR/VLM routing, Embedding, hybrid fusion, reranking, mixed-document throughput
+evaluation, and the final resume item 3 claim remain incomplete. TaskEvent SSE
 reuses the JSON event identity and cursor,
 replays PostgreSQL facts, emits heartbeats, closes after terminal events, and is
 cancelled by application shutdown without treating browser disconnect as task

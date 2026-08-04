@@ -1,6 +1,7 @@
 package minio
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,19 @@ import (
 	"github.com/chitandabb/GoAgent/internal/objectstore"
 	minio "github.com/minio/minio-go/v7"
 )
+
+type fakeObjectReader struct {
+	*bytes.Reader
+	info    minio.ObjectInfo
+	statErr error
+	closed  bool
+}
+
+func (r *fakeObjectReader) Stat() (minio.ObjectInfo, error) { return r.info, r.statErr }
+func (r *fakeObjectReader) Close() error {
+	r.closed = true
+	return nil
+}
 
 type fakeObjectClient struct {
 	putInfo       minio.UploadInfo
@@ -113,5 +127,84 @@ func TestStorePutReturnsClientErrorWithoutCleanup(t *testing.T) {
 	})
 	if !errors.Is(err, want) || client.removeCalls != 0 {
 		t.Fatalf("Put error = %v, cleanup calls = %d", err, client.removeCalls)
+	}
+}
+
+func TestStoreGetStatsAndReturnsExactReferencedObject(t *testing.T) {
+	content := []byte("stored content")
+	reader := &fakeObjectReader{
+		Reader: bytes.NewReader(content),
+		info: minio.ObjectInfo{
+			Size: int64(len(content)), ETag: "etag-1", VersionID: "version-1", ContentType: "text/plain",
+		},
+	}
+	client := &fakeObjectClient{}
+	store := &Store{
+		client: client, attachmentBucket: "attachments", knowledgeBucket: "knowledge", ready: true,
+		getObject: func(_ context.Context, bucket, key string, options minio.GetObjectOptions) (objectReader, error) {
+			if bucket != "knowledge" || key != "knowledge-source/object" || options.VersionID != "version-1" {
+				t.Fatalf("GetObject(%q, %q, version=%q)", bucket, key, options.VersionID)
+			}
+			return reader, nil
+		},
+	}
+	result, err := store.Get(context.Background(), objectstore.ObjectRef{
+		Bucket: objectstore.BucketKnowledgeSources, ObjectKey: "knowledge-source/object",
+		VersionID: "version-1", ETag: "etag-1", SizeBytes: int64(len(content)),
+		SHA256: strings.Repeat("a", 64), MediaType: "text/plain", OriginalName: "manual.txt",
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, err := io.ReadAll(result.Content)
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("content=%q err=%v", got, err)
+	}
+	if err := result.Content.Close(); err != nil || !reader.closed {
+		t.Fatalf("Close err=%v closed=%v", err, reader.closed)
+	}
+}
+
+func TestStoreGetClosesReaderWhenStatMetadataMismatches(t *testing.T) {
+	reader := &fakeObjectReader{Reader: bytes.NewReader(nil), info: minio.ObjectInfo{Size: 8, ETag: "other"}}
+	store := &Store{
+		client: &fakeObjectClient{}, attachmentBucket: "attachments", knowledgeBucket: "knowledge", ready: true,
+		getObject: func(context.Context, string, string, minio.GetObjectOptions) (objectReader, error) {
+			return reader, nil
+		},
+	}
+	_, err := store.Get(context.Background(), objectstore.ObjectRef{
+		Bucket: objectstore.BucketKnowledgeSources, ObjectKey: "knowledge-source/object",
+		ETag: "etag", SizeBytes: 7, SHA256: strings.Repeat("a", 64), MediaType: "text/plain",
+	})
+	if err == nil || !reader.closed {
+		t.Fatalf("Get error=%v closed=%v", err, reader.closed)
+	}
+}
+
+func TestStoreGetRequiresExactVersionWhenReferenceIsVersioned(t *testing.T) {
+	for _, statVersion := range []string{"", "version-2"} {
+		t.Run("stat version "+statVersion, func(t *testing.T) {
+			reader := &fakeObjectReader{
+				Reader: bytes.NewReader([]byte("content")),
+				info: minio.ObjectInfo{
+					Size: 7, ETag: "etag", VersionID: statVersion, ContentType: "text/plain",
+				},
+			}
+			store := &Store{
+				client: &fakeObjectClient{}, attachmentBucket: "attachments", knowledgeBucket: "knowledge", ready: true,
+				getObject: func(context.Context, string, string, minio.GetObjectOptions) (objectReader, error) {
+					return reader, nil
+				},
+			}
+			_, err := store.Get(context.Background(), objectstore.ObjectRef{
+				Bucket: objectstore.BucketKnowledgeSources, ObjectKey: "knowledge-source/object",
+				VersionID: "version-1", ETag: "etag", SizeBytes: 7,
+				SHA256: strings.Repeat("a", 64), MediaType: "text/plain", OriginalName: "manual.txt",
+			})
+			if err == nil || !reader.closed {
+				t.Fatalf("Get error=%v closed=%v", err, reader.closed)
+			}
+		})
 	}
 }

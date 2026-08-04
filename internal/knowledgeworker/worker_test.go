@@ -18,7 +18,7 @@ func TestKnowledgeWorkerCheckpointsAndCompletesBeforeAck(t *testing.T) {
 	repo := &knowledgeWorkerRepositoryStub{
 		claim:       ClaimResult{Disposition: ClaimAcquired, Status: knowledge.IngestionRunning, Lease: &lease},
 		renewResult: RenewalResult{Owned: true}, task: validKnowledgeWorkerTask(lease),
-		checkpointSaved: true, completed: true,
+		checkpointSaved: true, parsedSaved: true, completed: true,
 	}
 	executor := knowledgeExecutorFunc(func(
 		ctx context.Context, _ Task, checkpoint func(context.Context, CheckpointUpdate) error,
@@ -29,16 +29,13 @@ func TestKnowledgeWorkerCheckpointsAndCompletesBeforeAck(t *testing.T) {
 		}); err != nil {
 			return ExecutionResult{}, err
 		}
-		return ExecutionResult{
-			ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"pages":10}`),
-			Checkpoint: json.RawMessage(`{"indexed":true}`),
-		}, nil
+		return validKnowledgeExecutionResult(), nil
 	})
 	worker := newKnowledgeTestWorker(t, repo, executor)
 	outcome := worker.Process(context.Background(), validKnowledgeIncomingMessage(t, lease.TaskID, lease.DocumentVersionID))
-	if outcome.Action != ActionAck || repo.checkpointCalls != 1 || repo.completeCalls != 1 || repo.renewCalls != 1 {
-		t.Fatalf("outcome=%+v checkpoint=%d complete=%d renew=%d", outcome,
-			repo.checkpointCalls, repo.completeCalls, repo.renewCalls)
+	if outcome.Action != ActionAck || repo.checkpointCalls != 2 || repo.parsedCalls != 1 || repo.completeCalls != 1 || repo.renewCalls != 1 {
+		t.Fatalf("outcome=%+v checkpoint=%d parsed=%d complete=%d renew=%d", outcome,
+			repo.checkpointCalls, repo.parsedCalls, repo.completeCalls, repo.renewCalls)
 	}
 }
 
@@ -143,6 +140,23 @@ func validKnowledgeWorkerTask(lease Lease) Task {
 	}
 }
 
+func validKnowledgeExecutionResult() ExecutionResult {
+	content := "parsed content"
+	return ExecutionResult{
+		ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"elements":1}`),
+		Checkpoint: json.RawMessage(`{"indexed":true}`),
+		Artifact: objectstore.ObjectRef{
+			Bucket: objectstore.BucketKnowledgeArtifacts, ObjectKey: "knowledge-artifact/object",
+			ETag: "artifact-etag", SizeBytes: 10, SHA256: knowledge.SHA256Hex("artifact"),
+			MediaType: "application/json", OriginalName: "manual.elements.json",
+		},
+		Chunks: []knowledge.ChunkDraft{{
+			ElementType: knowledge.ElementText, ContentText: content,
+			SearchText: knowledge.NormalizeSearchText(content), ContentSHA256: knowledge.SHA256Hex(content),
+		}},
+	}
+}
+
 func validKnowledgeIncomingMessage(t *testing.T, taskID, versionID uuid.UUID) IncomingMessage {
 	t.Helper()
 	messageID, correlationID := uuid.New(), uuid.New()
@@ -184,6 +198,8 @@ type knowledgeWorkerRepositoryStub struct {
 	loadErr         error
 	checkpointSaved bool
 	checkpointErr   error
+	parsedSaved     bool
+	parsedErr       error
 	completed       bool
 	completeErr     error
 	released        bool
@@ -195,6 +211,7 @@ type knowledgeWorkerRepositoryStub struct {
 	claimCalls      int
 	renewCalls      int
 	checkpointCalls int
+	parsedCalls     int
 	completeCalls   int
 	releaseCalls    int
 	failCalls       int
@@ -226,6 +243,13 @@ func (r *knowledgeWorkerRepositoryStub) SaveCheckpoint(
 ) (bool, error) {
 	r.checkpointCalls++
 	return r.checkpointSaved, r.checkpointErr
+}
+
+func (r *knowledgeWorkerRepositoryStub) SaveParsedResult(
+	context.Context, Lease, ExecutionResult, time.Time,
+) (bool, error) {
+	r.parsedCalls++
+	return r.parsedSaved, r.parsedErr
 }
 
 func (r *knowledgeWorkerRepositoryStub) Complete(

@@ -19,6 +19,7 @@ import (
 
 type Store struct {
 	client           objectClient
+	getObject        getObjectFunc
 	attachmentBucket string
 	knowledgeBucket  string
 	maxObjectBytes   int64
@@ -26,6 +27,13 @@ type Store struct {
 	readyMu          sync.Mutex
 	ready            bool
 }
+
+type objectReader interface {
+	io.ReadCloser
+	Stat() (minio.ObjectInfo, error)
+}
+
+type getObjectFunc func(context.Context, string, string, minio.GetObjectOptions) (objectReader, error)
 
 type objectClient interface {
 	BucketExists(context.Context, string) (bool, error)
@@ -63,6 +71,9 @@ func Open(ctx context.Context, cfg config.MinIOConfig) (*Store, error) {
 		client: client, attachmentBucket: cfg.AttachmentBucket,
 		knowledgeBucket: cfg.KnowledgeSourceBucket, maxObjectBytes: cfg.MaxObjectBytes,
 		config: cfg,
+	}
+	store.getObject = func(ctx context.Context, bucket, key string, options minio.GetObjectOptions) (objectReader, error) {
+		return client.GetObject(ctx, bucket, key, options)
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutMillis)*time.Millisecond)
 	defer cancel()
@@ -111,6 +122,58 @@ func (s *Store) Put(ctx context.Context, input objectstore.PutInput) (objectstor
 		return objectstore.ObjectRef{}, err
 	}
 	return ref, nil
+}
+
+func (s *Store) Get(ctx context.Context, ref objectstore.ObjectRef) (objectstore.ReadResult, error) {
+	if s == nil || s.client == nil || s.getObject == nil {
+		return objectstore.ReadResult{}, errors.New("minio store is unavailable")
+	}
+	if err := ref.Validate(); err != nil {
+		return objectstore.ReadResult{}, err
+	}
+	if err := s.ensureReady(ctx); err != nil {
+		return objectstore.ReadResult{}, fmt.Errorf("prepare minio store: %w", err)
+	}
+	bucket, err := s.bucketName(ref.Bucket)
+	if err != nil {
+		return objectstore.ReadResult{}, err
+	}
+	reader, err := s.getObject(ctx, bucket, ref.ObjectKey, minio.GetObjectOptions{
+		VersionID: strings.TrimSpace(ref.VersionID),
+	})
+	if err != nil {
+		return objectstore.ReadResult{}, fmt.Errorf("get minio object: %w", err)
+	}
+	info, err := reader.Stat()
+	if err != nil {
+		_ = reader.Close()
+		return objectstore.ReadResult{}, fmt.Errorf("stat minio object: %w", err)
+	}
+	if info.Size != ref.SizeBytes {
+		_ = reader.Close()
+		return objectstore.ReadResult{}, fmt.Errorf("stored object size %d does not match reference size %d", info.Size, ref.SizeBytes)
+	}
+	if normalizeETag(info.ETag) != normalizeETag(ref.ETag) {
+		_ = reader.Close()
+		return objectstore.ReadResult{}, errors.New("stored object ETag does not match reference")
+	}
+	if ref.VersionID != "" && info.VersionID != ref.VersionID {
+		_ = reader.Close()
+		return objectstore.ReadResult{}, errors.New("stored object version does not match reference")
+	}
+	mediaType := strings.TrimSpace(info.ContentType)
+	if mediaType == "" {
+		mediaType = ref.MediaType
+	}
+	result := objectstore.ReadResult{
+		Content: reader, SizeBytes: info.Size, VersionID: info.VersionID,
+		ETag: info.ETag, MediaType: mediaType,
+	}
+	if err := result.Validate(); err != nil {
+		_ = reader.Close()
+		return objectstore.ReadResult{}, err
+	}
+	return result, nil
 }
 
 func (s *Store) Remove(ctx context.Context, ref objectstore.ObjectRef) error {
@@ -164,11 +227,15 @@ func (s *Store) bucketName(bucket objectstore.Bucket) (string, error) {
 	switch bucket {
 	case objectstore.BucketAttachments:
 		return s.attachmentBucket, nil
-	case objectstore.BucketKnowledgeSources:
+	case objectstore.BucketKnowledgeSources, objectstore.BucketKnowledgeArtifacts:
 		return s.knowledgeBucket, nil
 	default:
 		return "", errors.New("object store bucket is invalid")
 	}
+}
+
+func normalizeETag(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "\"")
 }
 
 func (s *Store) removeVersion(ctx context.Context, bucket, key, versionID string) error {

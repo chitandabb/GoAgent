@@ -117,10 +117,45 @@ func TestOpenRuntimeDependenciesKeepsMinIOClientAfterTransientInitializationFail
 	}
 }
 
+func TestOpenSelectedRuntimeDependenciesSkipsUnselectedOptionalServices(t *testing.T) {
+	redisCalls, minioCalls, sqlServerCalls := 0, 0, 0
+	openers := stubOpeners()
+	openers.redis = func(context.Context, config.RedisConfig) (*rediscli.Client, error) {
+		redisCalls++
+		return nil, nil
+	}
+	openers.minio = func(context.Context, config.MinIOConfig) (objectstore.Store, error) {
+		minioCalls++
+		return &objectStoreStub{}, nil
+	}
+	openers.sqlServer = func(context.Context, config.SQLServerConfig) (*sql.DB, error) {
+		sqlServerCalls++
+		return nil, nil
+	}
+	cfg := config.Config{
+		MinIO:     config.MinIOConfig{Enabled: true},
+		SQLServer: config.SQLServerConfig{Enabled: true},
+	}
+
+	deps, err := openSelectedRuntimeDependencies(
+		context.Background(), cfg, zap.NewNop(), openers, dependencySelection{MinIO: true},
+	)
+	if err != nil {
+		t.Fatalf("open selected dependencies: %v", err)
+	}
+	defer deps.close()
+	if redisCalls != 0 || minioCalls != 1 || sqlServerCalls != 0 {
+		t.Fatalf("redis calls=%d minio calls=%d sqlserver calls=%d", redisCalls, minioCalls, sqlServerCalls)
+	}
+}
+
 type objectStoreStub struct{}
 
 func (*objectStoreStub) Put(context.Context, objectstore.PutInput) (objectstore.ObjectRef, error) {
 	return objectstore.ObjectRef{}, nil
+}
+func (*objectStoreStub) Get(context.Context, objectstore.ObjectRef) (objectstore.ReadResult, error) {
+	return objectstore.ReadResult{}, nil
 }
 func (*objectStoreStub) Remove(context.Context, objectstore.ObjectRef) error { return nil }
 func (*objectStoreStub) Close() error                                        { return nil }

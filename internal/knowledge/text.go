@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode"
@@ -21,13 +22,19 @@ func (o TextChunkOptions) validate() error {
 	return nil
 }
 
-// ChunkMarkdown creates a deterministic text/table baseline. Binary documents,
-// OCR and VLM descriptions enter the same ChunkDraft contract in later slices.
-func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, error) {
-	if err := options.validate(); err != nil {
-		return nil, err
-	}
-	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+// ParseMarkdownElements preserves headings and table blocks before chunking.
+func ParseMarkdownElements(content string) ([]DocumentElement, error) {
+	return parseTextElements(content, true)
+}
+
+// ParsePlainTextElements treats headings and pipe characters as ordinary text.
+func ParsePlainTextElements(content string) ([]DocumentElement, error) {
+	return parseTextElements(content, false)
+}
+
+func parseTextElements(content string, markdown bool) ([]DocumentElement, error) {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.TrimSpace(strings.ReplaceAll(content, "\r", "\n"))
 	if content == "" {
 		return nil, errors.New("knowledge document content is required")
 	}
@@ -62,7 +69,7 @@ func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, erro
 
 	for _, rawLine := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(rawLine)
-		if level, title, ok := markdownHeading(line); ok {
+		if level, title, ok := markdownHeading(line); markdown && ok {
 			flush()
 			if level > len(sectionPath)+1 {
 				level = len(sectionPath) + 1
@@ -75,7 +82,7 @@ func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, erro
 			continue
 		}
 		lineType := ElementText
-		if isMarkdownTableLine(line) {
+		if markdown && isMarkdownTableLine(line) {
 			lineType = ElementTable
 		}
 		if len(lines) > 0 && lineType != currentType {
@@ -86,20 +93,53 @@ func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, erro
 	}
 	flush()
 
-	chunks := make([]ChunkDraft, 0, len(blocks))
+	elements := make([]DocumentElement, 0, len(blocks))
 	for _, current := range blocks {
-		for _, part := range splitRunes(current.text, options.MaxRunes, options.OverlapRunes) {
-			searchSource := strings.TrimSpace(strings.Join(current.sectionPath, " ") + " " + part)
+		element := DocumentElement{
+			Index: len(elements), ElementType: current.elementType,
+			SectionPath: append([]string(nil), current.sectionPath...), ContentText: current.text,
+		}
+		if err := element.Validate(); err != nil {
+			return nil, err
+		}
+		elements = append(elements, element)
+	}
+	if len(elements) == 0 {
+		return nil, errors.New("knowledge document produced no elements")
+	}
+	return elements, nil
+}
+
+// ChunkElements creates deterministic searchable projections from parsed facts.
+func ChunkElements(elements []DocumentElement, options TextChunkOptions) ([]ChunkDraft, error) {
+	if err := options.validate(); err != nil {
+		return nil, err
+	}
+	if len(elements) == 0 || len(elements) > 10000 {
+		return nil, errors.New("knowledge document elements are required and bounded")
+	}
+
+	chunks := make([]ChunkDraft, 0, len(elements))
+	for _, element := range elements {
+		if err := element.Validate(); err != nil {
+			return nil, err
+		}
+		for _, part := range splitRunes(element.ContentText, options.MaxRunes, options.OverlapRunes) {
+			searchSource := strings.TrimSpace(strings.Join(element.SectionPath, " ") + " " + part)
 			searchText := NormalizeSearchText(searchSource)
 			if searchText == "" {
 				continue
 			}
+			elementIndex := element.Index
 			chunks = append(chunks, ChunkDraft{
-				ElementType:   current.elementType,
-				SectionPath:   append([]string(nil), current.sectionPath...),
+				PageNumber:    element.PageNumber,
+				ElementIndex:  &elementIndex,
+				ElementType:   element.ElementType,
+				SectionPath:   append([]string(nil), element.SectionPath...),
 				ContentText:   part,
 				SearchText:    searchText,
 				ContentSHA256: SHA256Hex(part),
+				Metadata:      append(json.RawMessage(nil), element.Metadata...),
 			})
 		}
 	}
@@ -107,6 +147,16 @@ func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, erro
 		return nil, errors.New("knowledge document produced no searchable chunks")
 	}
 	return chunks, nil
+}
+
+// ChunkMarkdown preserves the existing deterministic baseline while making the
+// parsed element artifact available to the asynchronous ingestion pipeline.
+func ChunkMarkdown(content string, options TextChunkOptions) ([]ChunkDraft, error) {
+	elements, err := ParseMarkdownElements(content)
+	if err != nil {
+		return nil, err
+	}
+	return ChunkElements(elements, options)
 }
 
 func markdownHeading(line string) (int, string, bool) {

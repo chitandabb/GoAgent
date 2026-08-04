@@ -381,9 +381,11 @@ func (c MinIOConfig) SecretKey() (string, error) {
 
 // KnowledgeConfig 固定知识入库任务的可追踪流水线版本和重试上限。
 type KnowledgeConfig struct {
-	PipelineVersion string `toml:"pipelineVersion"`
-	MaxAttempts     int    `toml:"maxAttempts"`
-	MaxUploadBytes  int64  `toml:"maxUploadBytes"`
+	PipelineVersion   string `toml:"pipelineVersion"`
+	MaxAttempts       int    `toml:"maxAttempts"`
+	MaxUploadBytes    int64  `toml:"maxUploadBytes"`
+	ChunkMaxRunes     int    `toml:"chunkMaxRunes"`
+	ChunkOverlapRunes int    `toml:"chunkOverlapRunes"`
 }
 
 func (c KnowledgeConfig) Validate() error {
@@ -396,6 +398,12 @@ func (c KnowledgeConfig) Validate() error {
 	const maxConfiguredUploadBytes = 50 * 1024 * 1024
 	if c.MaxUploadBytes < 1 || c.MaxUploadBytes > maxConfiguredUploadBytes {
 		return errors.New("knowledge maxUploadBytes must be between 1 and 52428800")
+	}
+	if c.ChunkMaxRunes < 128 || c.ChunkMaxRunes > 8000 {
+		return errors.New("knowledge chunkMaxRunes must be between 128 and 8000")
+	}
+	if c.ChunkOverlapRunes < 0 || c.ChunkOverlapRunes >= c.ChunkMaxRunes/2 {
+		return errors.New("knowledge chunkOverlapRunes must be non-negative and less than half chunkMaxRunes")
 	}
 	return nil
 }

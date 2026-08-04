@@ -17,12 +17,13 @@ import (
 type Bucket string
 
 const (
-	BucketAttachments      Bucket = "attachments"
-	BucketKnowledgeSources Bucket = "knowledge-source"
+	BucketAttachments        Bucket = "attachments"
+	BucketKnowledgeSources   Bucket = "knowledge-source"
+	BucketKnowledgeArtifacts Bucket = "knowledge-artifact"
 )
 
 func (b Bucket) Valid() bool {
-	return b == BucketAttachments || b == BucketKnowledgeSources
+	return b == BucketAttachments || b == BucketKnowledgeSources || b == BucketKnowledgeArtifacts
 }
 
 type PutInput struct {
@@ -71,8 +72,12 @@ type ObjectRef struct {
 }
 
 func (r ObjectRef) Validate() error {
-	if !r.Bucket.Valid() || strings.TrimSpace(r.ObjectKey) == "" {
+	if !r.Bucket.Valid() || strings.TrimSpace(r.ObjectKey) == "" || r.ObjectKey != strings.TrimSpace(r.ObjectKey) {
 		return errors.New("object store reference is incomplete")
+	}
+	if strings.HasPrefix(r.ObjectKey, "/") || strings.Contains(r.ObjectKey, "\\") ||
+		strings.Contains(r.ObjectKey, "../") || strings.Contains(r.ObjectKey, "/..") {
+		return errors.New("object store reference contains an unsafe path")
 	}
 	decodedSHA256, err := hex.DecodeString(strings.TrimSpace(r.SHA256))
 	if r.SizeBytes < 0 || err != nil || len(decodedSHA256) != 32 {
@@ -84,8 +89,24 @@ func (r ObjectRef) Validate() error {
 	return nil
 }
 
+type ReadResult struct {
+	Content   io.ReadCloser
+	SizeBytes int64
+	VersionID string
+	ETag      string
+	MediaType string
+}
+
+func (r ReadResult) Validate() error {
+	if r.Content == nil || r.SizeBytes < 0 || strings.TrimSpace(r.ETag) == "" || strings.TrimSpace(r.MediaType) == "" {
+		return errors.New("object store read result is incomplete")
+	}
+	return nil
+}
+
 type Store interface {
 	Put(context.Context, PutInput) (ObjectRef, error)
+	Get(context.Context, ObjectRef) (ReadResult, error)
 	Remove(context.Context, ObjectRef) error
 	Close() error
 }
@@ -101,6 +122,10 @@ func NewUnavailableStore(cause error) Store {
 
 func (s *unavailableStore) Put(context.Context, PutInput) (ObjectRef, error) {
 	return ObjectRef{}, s.cause
+}
+
+func (s *unavailableStore) Get(context.Context, ObjectRef) (ReadResult, error) {
+	return ReadResult{}, s.cause
 }
 
 func (s *unavailableStore) Remove(context.Context, ObjectRef) error { return s.cause }

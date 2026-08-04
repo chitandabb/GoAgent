@@ -120,6 +120,8 @@ maxObjectBytes = 52428800
 pipelineVersion = "ingestion-v1"
 maxAttempts = 3
 maxUploadBytes = 52428800
+chunkMaxRunes = 700
+chunkOverlapRunes = 80
 
 [sqlserver]
 enabled = true

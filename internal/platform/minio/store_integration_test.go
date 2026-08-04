@@ -4,6 +4,7 @@ package minio
 
 import (
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -60,6 +61,15 @@ func TestStoreCreatesPrivateBucketsAndRoundTripsImmutableObject(t *testing.T) {
 	}
 	if ref.VersionID != "" || ref.SHA256 == "" {
 		t.Fatalf("incomplete object ref: %+v", ref)
+	}
+	read, err := store.Get(ctx, ref)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	roundTrip, err := io.ReadAll(read.Content)
+	closeErr := read.Content.Close()
+	if err != nil || closeErr != nil || string(roundTrip) != content {
+		t.Fatalf("round trip content=%q readErr=%v closeErr=%v", roundTrip, err, closeErr)
 	}
 	if err := store.Remove(ctx, ref); err != nil {
 		t.Fatalf("Remove: %v", err)

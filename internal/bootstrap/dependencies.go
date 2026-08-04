@@ -40,6 +40,16 @@ type dependencyOpeners struct {
 	pingSQLServer  func(context.Context, *sql.DB) error
 }
 
+type dependencySelection struct {
+	Redis     bool
+	MinIO     bool
+	SQLServer bool
+}
+
+var allRuntimeDependencies = dependencySelection{
+	Redis: true, MinIO: true, SQLServer: true,
+}
+
 func defaultDependencyOpeners() dependencyOpeners {
 	return dependencyOpeners{
 		postgres: platformpostgres.Open, checkMigration: migration.CheckCurrent,
@@ -58,6 +68,16 @@ func openRuntimeDependencies(
 	log *zap.Logger,
 	openers dependencyOpeners,
 ) (*runtimeDependencies, error) {
+	return openSelectedRuntimeDependencies(ctx, cfg, log, openers, allRuntimeDependencies)
+}
+
+func openSelectedRuntimeDependencies(
+	ctx context.Context,
+	cfg config.Config,
+	log *zap.Logger,
+	openers dependencyOpeners,
+	selection dependencySelection,
+) (*runtimeDependencies, error) {
 	db, closeDB, err := openers.postgres(ctx, cfg.Postgres, log.Named("postgres"))
 	if err != nil {
 		return nil, err
@@ -73,12 +93,14 @@ func openRuntimeDependencies(
 		return nil, fmt.Errorf("check database migration version: %w", err)
 	}
 
-	deps.redis, err = openers.redis(ctx, cfg.Redis)
-	if err != nil {
-		log.Warn("Redis unavailable; continuing in degraded mode", zap.Error(err))
-		deps.redis = nil
+	if selection.Redis {
+		deps.redis, err = openers.redis(ctx, cfg.Redis)
+		if err != nil {
+			log.Warn("Redis unavailable; continuing in degraded mode", zap.Error(err))
+			deps.redis = nil
+		}
 	}
-	if cfg.MinIO.Enabled {
+	if selection.MinIO && cfg.MinIO.Enabled {
 		deps.objectStore, err = openers.minio(ctx, cfg.MinIO)
 		if err != nil {
 			deps.objectStoreError = err
@@ -89,7 +111,7 @@ func openRuntimeDependencies(
 			}
 		}
 	}
-	if cfg.SQLServer.Enabled {
+	if selection.SQLServer && cfg.SQLServer.Enabled {
 		deps.sqlServer, err = openers.sqlServer(ctx, cfg.SQLServer)
 		if err != nil {
 			deps.sqlServerError = err

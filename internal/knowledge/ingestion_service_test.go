@@ -26,6 +26,9 @@ func (s *ingestionStoreStub) Put(_ context.Context, input objectstore.PutInput) 
 	s.putInput = input
 	return s.ref, nil
 }
+func (s *ingestionStoreStub) Get(context.Context, objectstore.ObjectRef) (objectstore.ReadResult, error) {
+	return objectstore.ReadResult{}, errors.New("not implemented by upload test stub")
+}
 
 func TestIngestionServiceReplaysBeforeObjectUpload(t *testing.T) {
 	taskID, versionID := uuid.New(), uuid.New()
