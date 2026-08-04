@@ -1,20 +1,21 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '@/app/auth'
 import * as api from '@/shared/api'
-import type { EvidenceItem, ReviewVerdict } from '@/shared/api'
-import {
-  conclusionMeta,
-  evidenceSourceMeta,
-  riskMeta,
-  verdictMeta,
-} from '@/shared/lib/status'
-import { fmtDateTime } from '@/shared/lib/fmt'
+import type {
+  DiagnosisReportEvidence,
+  ReviewVerdict,
+} from '@/shared/api/m1-types'
+import { conclusionMeta, riskMeta, verdictMeta } from '@/shared/lib/status'
+import { fmtDateTime, shortId } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Card, CardTitle } from '@/shared/ui/Card'
+import { EmptyState } from '@/shared/ui/EmptyState'
 import { FieldLabel, TextArea } from '@/shared/ui/Field'
 import { PageLoading } from '@/shared/ui/Spinner'
+import { useToast } from '@/shared/ui/Toast'
 import { Wordmark } from '@/shared/ui/Wordmark'
 
 const verdictOptions: { value: ReviewVerdict; label: string }[] = [
@@ -23,34 +24,49 @@ const verdictOptions: { value: ReviewVerdict; label: string }[] = [
   { value: 'rejected', label: '驳回' },
 ]
 
-function BusinessItem({ label, children }: { label: string; children: React.ReactNode }) {
+const evidenceSourceLabels: Record<DiagnosisReportEvidence['sourceType'], string> = {
+  case_snapshot: '工单快照',
+  schema_catalog: 'Schema Catalog',
+  sql_object_definition: 'SQL 对象定义',
+  sql_query: 'SQL 查询',
+  code_search: '代码检索',
+  attachment: '附件',
+  knowledge_chunk: '知识片段',
+  web: '网页',
+}
+
+const confidenceLabels = { high: '高', medium: '中', low: '低' } as const
+const supportLabels = { supports: '支持', contradicts: '反驳', context: '背景' } as const
+
+function ListSection({ title, items, emptyText }: { title: string; items: string[]; emptyText: string }) {
   return (
     <Card className="p-6">
-      <CardTitle className="mb-2 text-ink-48">{label}</CardTitle>
-      <p className="text-[14px] leading-[1.7] text-ink">{children}</p>
+      <CardTitle className="mb-3">{title}</CardTitle>
+      {items.length > 0 ? (
+        <ul className="flex list-disc flex-col gap-2 pl-5 text-[13px] leading-[1.65] text-ink-80">
+          {items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+        </ul>
+      ) : (
+        <p className="text-[13px] text-ink-48">{emptyText}</p>
+      )}
     </Card>
   )
 }
 
-/** 证据的可读短名：受控查询 #1 / 案例卡片 KB-0173 / 工单快照 */
-function evidenceShortName(ev: EvidenceItem): string {
-  if (ev.sourceType === 'sql_query' || ev.sourceType === 'knowledge_case') {
-    const seg = ev.location.split('·').pop()?.trim()
-    if (seg) return seg
-  }
-  return evidenceSourceMeta[ev.sourceType].label
-}
-
-// 结论状态是报告的“判定”：用色彩层级区分，不与风险/反馈徽章混排。
-const verdictColor: Record<string, string> = {
-  conclusive: 'text-ok',
-  probable: 'text-warn',
-  inconclusive: 'text-ink-48',
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-b border-divider py-2.5 last:border-0">
+      <dt className="shrink-0 text-[12px] text-ink-48">{label}</dt>
+      <dd className="min-w-0 break-words text-right text-[12px] text-ink-80">{children}</dd>
+    </div>
+  )
 }
 
 export function ReportPage() {
   const { taskId = '' } = useParams()
-  const qc = useQueryClient()
+  const { user } = useAuth()
+  const queryClient = useQueryClient()
+  const toast = useToast()
   const [verdict, setVerdict] = useState<ReviewVerdict | null>(null)
   const [comment, setComment] = useState('')
 
@@ -58,252 +74,198 @@ export function ReportPage() {
     queryKey: ['report', taskId],
     queryFn: () => api.getReportByTask(taskId),
   })
-
+  const reviews = useQuery({
+    queryKey: ['report-reviews', report.data?.reportId],
+    queryFn: () => api.listReportReviews(report.data!.reportId),
+    enabled: !!report.data?.reportId,
+  })
   const submit = useMutation({
     mutationFn: () => api.submitReview(report.data!.reportId, verdict!, comment),
-    onSuccess: () => {
+    onSuccess: async () => {
       setVerdict(null)
       setComment('')
-      qc.invalidateQueries({ queryKey: ['report', taskId] })
+      await queryClient.invalidateQueries({ queryKey: ['report-reviews', report.data!.reportId] })
+      toast.success('复核已提交，历史记录已从服务端刷新')
     },
+    onError: (error) => toast.error(error instanceof Error ? error.message : '复核提交失败'),
   })
 
   if (report.isPending) return <PageLoading />
   if (report.isError || !report.data) {
-    return <p className="py-24 text-center text-ink-48">报告不存在或任务尚未完成</p>
+    return (
+      <EmptyState
+        title="正式报告不可读取"
+        description={report.error instanceof Error ? report.error.message : '任务可能尚未成功或当前账号无权访问'}
+        action={<Button variant="neutral" onClick={() => void report.refetch()}>重新加载</Button>}
+      />
+    )
   }
-  const r = report.data
-  const conclusion = conclusionMeta[r.conclusionStatus]
-  const risk = riskMeta[r.riskLevel]
-  const latestReview = r.reviews.at(-1)
+
+  const value = report.data
+  const conclusion = conclusionMeta[value.conclusionStatus]
+  const risk = riskMeta[value.riskLevel]
+  const history = reviews.data?.items ?? []
+  const currentReview = reviews.data?.current
 
   return (
-    <div className="mx-auto max-w-[880px]">
+    <div className="mx-auto max-w-[960px]">
       <div className="mb-4 flex items-center justify-between print:hidden">
-        <Link
-          to={`/tasks/${taskId}`}
-          className="press text-[13px] text-primary"
-        >
-          ‹ 返回任务详情
-        </Link>
-        <Button variant="neutral" size="sm" onClick={() => window.print()}>
-          打印 / 导出 PDF
-        </Button>
+        <Link to={`/tasks/${taskId}`} className="press text-[13px] text-primary">‹ 返回任务详情</Link>
+        <Button variant="neutral" size="sm" onClick={() => window.print()}>打印 / 导出 PDF</Button>
       </div>
-      {/* ── 判定条：结论状态领衔，风险与反馈降为元数据 ── */}
-      {/* print-only 页眉:PDF 脱离系统后仍可溯源 */}
+
       <div className="mb-6 hidden items-baseline justify-between border-b border-hairline pb-4 print:flex">
         <Wordmark className="text-[18px]" />
-        <span className="text-[12px] text-ink-48">
-          诊断报告 {r.reportId} · 生成于 {fmtDateTime(r.generatedAt)}
-        </span>
+        <span className="text-[12px] text-ink-48">报告 {value.reportId} · {fmtDateTime(value.generatedAt)}</span>
       </div>
 
       <header className="mb-8">
-        <p className="mb-2 text-[13px] font-semibold text-ink-48">诊断报告</p>
-        <Card className="p-8">
-          <div className="flex flex-wrap items-start justify-between gap-4">
+        <p className="mb-2 text-[13px] font-semibold text-ink-48">正式诊断报告</p>
+        <Card className="p-7 sm:p-8">
+          <div className="flex flex-wrap items-start justify-between gap-5">
             <div>
               <p className="text-[12px] font-semibold text-ink-48">结论状态</p>
-              <p
-                className={`mt-1 text-[30px] font-semibold leading-[1.15] ${verdictColor[r.conclusionStatus]}`}
-              >
-                {conclusion.label}
-              </p>
-              {r.conclusionStatus === 'inconclusive' && (
-                <p className="mt-1.5 text-[13px] text-ink-48">
-                  任务正常完成；当前证据无法支撑可靠结论，系统拒绝推测。
-                </p>
-              )}
+              <h1 className="mt-1 text-[28px] font-semibold leading-tight text-ink">{conclusion.label}</h1>
+              <p className="mt-2 text-[13px] text-ink-48">置信度 {confidenceLabels[value.confidence]} · {value.partial ? '部分报告' : '完整报告'}</p>
             </div>
-            <div className="flex items-center gap-2 pt-1.5">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge tone={risk.tone}>{risk.label}</Badge>
-              {latestReview && (
-                <Badge tone={verdictMeta[latestReview.verdict].tone}>
-                  {verdictMeta[latestReview.verdict].label}
-                </Badge>
-              )}
+              {currentReview && <Badge tone={verdictMeta[currentReview.verdict].tone}>{verdictMeta[currentReview.verdict].label}</Badge>}
             </div>
           </div>
-          {/* 业务摘要层：面向非技术人员的阅读态 */}
-          <p className="reading mt-6 border-t border-divider pt-6">
-            {r.business.overview}
-          </p>
+          <div className="mt-6 border-t border-divider pt-6">
+            <p className="mb-2 text-[12px] font-semibold text-ink-48">结论</p>
+            <p className="reading whitespace-pre-wrap">{value.conclusion}</p>
+          </div>
         </Card>
       </header>
 
-      {r.conclusionStatus === 'inconclusive' && r.inconclusiveDetail ? (
-        <div className="mb-10">
-          <div className="grid gap-5 sm:grid-cols-3">
-            {(
-              [
-                ['已检查', r.inconclusiveDetail.checked],
-                ['仍缺少', r.inconclusiveDetail.missing],
-                ['下一步建议', r.inconclusiveDetail.nextSteps],
-              ] as const
-            ).map(([label, items]) => (
-              <Card key={label} className="p-6">
-                <CardTitle className="mb-3 text-ink-48">{label}</CardTitle>
-                <ul className="flex list-disc flex-col gap-2 pl-4 text-[13px] leading-[1.65] text-ink-80">
-                  {items.map((it) => (
-                    <li key={it}>{it}</li>
-                  ))}
-                </ul>
-              </Card>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="mb-10 grid gap-5 sm:grid-cols-2">
-          <BusinessItem label="最可能原因">{r.business.likelyCause}</BusinessItem>
-          <BusinessItem label="影响范围">{r.business.impact}</BusinessItem>
-          <BusinessItem label="建议处理">{r.business.suggestion}</BusinessItem>
-          <BusinessItem label="是否需要开发介入">
-            {r.business.needDeveloper
-              ? '需要。部分结论涉及代码写入逻辑，建议由开发人员按技术证据层继续分析（L3）。'
-              : '暂不需要，可先按建议在业务或管理界面处理（L1/L2）。'}
-          </BusinessItem>
-        </div>
-      )}
+      <section className="mb-8 grid gap-5 md:grid-cols-2">
+        <Card className="p-6">
+          <CardTitle className="mb-3">业务摘要</CardTitle>
+          <p className="whitespace-pre-wrap text-[14px] leading-[1.75] text-ink-80">{value.businessSummary}</p>
+        </Card>
+        <Card className="p-6">
+          <CardTitle className="mb-3">技术摘要</CardTitle>
+          <p className="whitespace-pre-wrap text-[14px] leading-[1.75] text-ink-80">{value.technicalSummary}</p>
+        </Card>
+        <ListSection title="限制条件" items={value.limitations} emptyText="报告未声明额外限制" />
+        <ListSection title="缺失证据" items={value.missingEvidence} emptyText="报告未声明缺失证据" />
+      </section>
 
-      {/* ── 技术证据层 ── */}
-      <h2 className="mb-1 text-[21px] font-semibold text-ink">技术证据层</h2>
-      <p className="mb-5 text-[13px] text-ink-48">
-        每条结论均引用具体证据；无法定位证据的内容不会出现在结论中。
-      </p>
-
-      <div className="mb-5 flex flex-col gap-3">
-        {r.claims.map((claim, i) => (
-          <Card key={claim.claimId} className="p-5">
-            <div className="flex gap-3.5">
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-info-soft text-[12px] font-semibold text-primary">
-                {i + 1}
-              </span>
-              <div className="min-w-0">
-                <p className="text-[14px] font-semibold leading-[1.55] text-ink">
-                  {claim.statement}
-                </p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {claim.evidenceIds.map((eid) => {
-                    const ev = r.evidence.find((x) => x.evidenceId === eid)
-                    if (!ev) return null
-                    return (
-                      <a
-                        key={eid}
-                        href={`#${eid}`}
-                        className="press text-[12px] text-primary hover:underline"
-                      >
-                        证据 · {evidenceShortName(ev)}
-                      </a>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      <div className="mb-5 flex flex-col gap-3">
-        {r.evidence.map((ev) => (
-          <Card key={ev.evidenceId} className="scroll-mt-20 bg-pearl p-5" >
-            <div id={ev.evidenceId} className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="mb-1.5 flex items-center gap-2">
-                  <Badge tone={evidenceSourceMeta[ev.sourceType].tone}>
-                    {evidenceSourceMeta[ev.sourceType].label}
-                  </Badge>
-                  <span className="text-[12px] text-ink-48">{ev.location}</span>
-                </div>
-                <p className="text-[13px] leading-[1.65] text-ink-80">{ev.summary}</p>
-              </div>
-              <time className="shrink-0 text-[12px] text-ink-48">
-                {fmtDateTime(ev.collectedAt)}
-              </time>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      {r.limitations.length > 0 && (
-        <div className="mb-10 rounded-card border border-warn/25 bg-warn-soft px-6 py-5">
-          <p className="mb-2 text-[13px] font-semibold text-warn">限制条件</p>
-          <ul className="flex list-disc flex-col gap-1 pl-5 text-[13px] leading-[1.65] text-ink-80">
-            {r.limitations.map((l) => (
-              <li key={l}>{l}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* ── 反馈 ── */}
-      <h2 className="mb-1 text-[21px] font-semibold text-ink">报告反馈</h2>
-      <p className="mb-5 text-[13px] text-ink-48">
-        反馈用于评估诊断效果，不会回写 MES/ERP，也不会自动进入知识库。
-      </p>
-
-      <Card className="mb-5 p-6">
-        {r.reviews.length > 0 && (
-          <div className="mb-6 flex flex-col gap-3">
-            {r.reviews
-              .slice()
-              .reverse()
-              .map((rv) => (
-                <div key={rv.reviewId} className="rounded-capsule bg-pearl px-4 py-3">
-                  <div className="mb-1 flex items-center gap-2.5">
-                    <Badge tone={verdictMeta[rv.verdict].tone}>
-                      {verdictMeta[rv.verdict].label}
-                    </Badge>
-                    <span className="text-[12px] text-ink-48">
-                      {rv.reviewedBy} · {fmtDateTime(rv.reviewedAt)}
-                    </span>
+      <section className="mb-8">
+        <h2 className="mb-1 text-[19px] font-semibold text-ink">有序证据声明</h2>
+        <p className="mb-4 text-[13px] leading-[1.6] text-ink-48">这里只展示后端返回的证据声明与溯源元数据，不包含也不补造原始证据正文。</p>
+        {value.evidence.length === 0 ? (
+          <Card><EmptyState title="没有证据声明" description="正式报告未返回证据声明。" /></Card>
+        ) : (
+          <ol className="flex flex-col gap-3">
+            {value.evidence.map((evidence, index) => (
+              <li key={`${evidence.evidenceId}-${evidence.claimKey}-${index}`}>
+                <Card className="p-5">
+                  <div className="flex items-start gap-3.5">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-info-soft text-[12px] font-semibold text-primary">{index + 1}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <Badge tone="blue">{evidenceSourceLabels[evidence.sourceType]}</Badge>
+                        <Badge tone={evidence.supportType === 'contradicts' ? 'red' : evidence.supportType === 'supports' ? 'green' : 'gray'}>{supportLabels[evidence.supportType]}</Badge>
+                        <Badge tone={evidence.validityStatus === 'valid' ? 'green' : 'orange'}>{evidence.validityStatus}</Badge>
+                      </div>
+                      <p className="text-[14px] font-semibold leading-[1.6] text-ink">{evidence.claim}</p>
+                      <dl className="mt-3 grid gap-x-5 gap-y-1 text-[12px] text-ink-48 sm:grid-cols-2">
+                        <div className="break-all">声明键：{evidence.claimKey}</div>
+                        <div className="break-all">来源引用：{evidence.sourceRef}</div>
+                        <div className="break-all">来源工具：{evidence.sourceTool}</div>
+                        <div className="break-all">位置：{evidence.location || '未提供'}</div>
+                        <div className="break-all">内容哈希：{shortId(evidence.contentHash.replace('sha256:', ''))}</div>
+                        <div>采集时间：{fmtDateTime(evidence.collectedAt)}</div>
+                        <div>脱敏：{evidence.redactionStatus === 'redacted' ? '已脱敏' : '不需要'}</div>
+                        <div>截断：{evidence.truncated ? '是' : '否'}</div>
+                      </dl>
+                    </div>
                   </div>
-                  {rv.comment && (
-                    <p className="text-[13px] leading-[1.6] text-ink-80">{rv.comment}</p>
-                  )}
+                </Card>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+
+      <section className="mb-8 grid gap-5 sm:grid-cols-2">
+        <Card className="p-6">
+          <CardTitle className="mb-2">Token 使用</CardTitle>
+          <dl>
+            <MetaRow label="模型调用">{value.usage.modelCalls}</MetaRow>
+            <MetaRow label="Prompt Token">{value.usage.promptTokens}</MetaRow>
+            <MetaRow label="Completion Token">{value.usage.completionTokens}</MetaRow>
+            <MetaRow label="总 Token">{value.usage.totalTokens}</MetaRow>
+            <MetaRow label="缓存 / 推理">{value.usage.cachedTokens} / {value.usage.reasoningTokens}</MetaRow>
+          </dl>
+        </Card>
+        <Card className="p-6">
+          <CardTitle className="mb-2">运行版本</CardTitle>
+          <dl>
+            <MetaRow label="模型">{value.modelProvider} / {value.modelId}</MetaRow>
+            <MetaRow label="Prompt">{value.promptVersion}</MetaRow>
+            <MetaRow label="选择技能">{value.selectedSkill}</MetaRow>
+            <MetaRow label="执行技能">{value.executedSkills.join('、') || '无'}</MetaRow>
+            <MetaRow label="Agent 运行">{value.agentRuns}</MetaRow>
+            <MetaRow label="停止原因">{value.stopReason || '未提供'}</MetaRow>
+          </dl>
+        </Card>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="mb-1 text-[19px] font-semibold text-ink">人工复核</h2>
+        <p className="mb-4 text-[13px] text-ink-48">复核只评价本报告，不会回写 MES/ERP，也不会自动进入知识库。</p>
+        <Card className="p-6">
+          {reviews.isPending ? (
+            <PageLoading />
+          ) : reviews.isError ? (
+            <EmptyState
+              title="复核历史读取失败"
+              description={reviews.error instanceof Error ? reviews.error.message : '请稍后重试'}
+              action={<Button variant="neutral" onClick={() => void reviews.refetch()}>重新加载</Button>}
+            />
+          ) : history.length > 0 ? (
+            <div className="mb-6 flex flex-col gap-3">
+              {history.map((review) => (
+                <div key={review.id} className="rounded-utility bg-pearl px-4 py-3">
+                  <div className="mb-1 flex flex-wrap items-center gap-2.5">
+                    <Badge tone={verdictMeta[review.verdict].tone}>{verdictMeta[review.verdict].label}</Badge>
+                    <span className="text-[12px] text-ink-48">用户 {shortId(review.reviewedBy)} · {fmtDateTime(review.createdAt)}</span>
+                  </div>
+                  {review.comment && <p className="text-[13px] leading-[1.6] text-ink-80">{review.comment}</p>}
                 </div>
               ))}
-          </div>
-        )}
+            </div>
+          ) : (
+            <p className="mb-6 text-[13px] text-ink-48">还没有复核记录</p>
+          )}
 
-        <div className="print:hidden">
-        <FieldLabel>提交新反馈</FieldLabel>
-        <div className="mb-4 flex gap-2">
-          {verdictOptions.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => setVerdict(o.value)}
-              className={`press focus-ring h-9 rounded-full border px-5 text-[13px] ${
-                verdict === o.value
-                  ? 'border-2 border-primary-focus font-semibold text-ink'
-                  : 'border-hairline text-ink-80 hover:bg-pearl'
-              }`}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-        <TextArea
-          placeholder="补充说明（可选）"
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-          className="mb-4"
-        />
-        <div className="flex justify-end">
-          <Button
-            disabled={!verdict || submit.isPending}
-            onClick={() => submit.mutate()}
-          >
-            {submit.isPending ? '提交中…' : '提交反馈'}
-          </Button>
-        </div>
-        </div>
-      </Card>
+          {user?.role === 'admin' ? (
+            <div className="rounded-utility bg-pearl px-4 py-3 text-[13px] text-ink-48">管理员可查看复核历史，但不能代替任务创建者提交复核。</div>
+          ) : (
+            <div className="border-t border-divider pt-5 print:hidden">
+              <FieldLabel>提交复核</FieldLabel>
+              <div className="mb-4 flex flex-wrap gap-3" role="radiogroup" aria-label="复核结论">
+                {verdictOptions.map((option) => (
+                  <label key={option.value} className="flex h-10 items-center gap-2 rounded-utility border border-hairline px-4 text-[13px]">
+                    <input type="radio" name="review-verdict" value={option.value} checked={verdict === option.value} onChange={() => setVerdict(option.value)} className="size-4 accent-primary" />
+                    {option.label}
+                  </label>
+                ))}
+              </div>
+              <TextArea placeholder="评论（可选）" maxLength={2000} value={comment} onChange={(event) => setComment(event.target.value)} className="mb-4" />
+              <div className="flex justify-end">
+                <Button disabled={!verdict || submit.isPending} onClick={() => submit.mutate()}>{submit.isPending ? '提交中…' : '提交复核'}</Button>
+              </div>
+            </div>
+          )}
+        </Card>
+      </section>
 
-      <p className="pb-4 text-[12px] text-ink-48">
-        报告 {r.reportId} · 生成于 {fmtDateTime(r.generatedAt)} · 模型 {r.modelVersion}
-      </p>
+      <p className="pb-4 text-[12px] text-ink-48">报告 {value.reportId} · 生成于 {fmtDateTime(value.generatedAt)} · Schema v{value.reportSchemaVersion}</p>
     </div>
   )
 }

@@ -5,10 +5,8 @@ import { NotFoundPage } from './NotFoundPage'
 import { WorkbenchLayout } from './layouts/WorkbenchLayout'
 import { ChangePasswordPage } from '@/features/auth/ChangePasswordPage'
 import { LoginPage } from '@/features/auth/LoginPage'
-import { AssistantPage } from '@/features/assistant/AssistantPage'
 import { CaseDetailPage } from '@/features/cases/CaseDetailPage'
 import { CasesPage } from '@/features/cases/CasesPage'
-import { DiagnosePage } from '@/features/cases/DiagnosePage'
 import { TaskDetailPage } from '@/features/diagnosis/TaskDetailPage'
 import { TasksPage } from '@/features/diagnosis/TasksPage'
 import { KnowledgePage } from '@/features/knowledge/KnowledgePage'
@@ -16,6 +14,8 @@ import { ReportPage } from '@/features/reports/ReportPage'
 import { DataSourcesPage } from '@/features/admin/DataSourcesPage'
 import { SystemPage } from '@/features/admin/SystemPage'
 import { UsersPage } from '@/features/admin/UsersPage'
+import { CaseWorkbenchRedirect } from '@/features/workbench/CaseWorkbenchRedirect'
+import { WorkbenchPage } from '@/features/workbench/WorkbenchPage'
 
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
@@ -26,14 +26,16 @@ export const router = createBrowserRouter([
       {
         element: <WorkbenchLayout />,
         children: [
-          { path: '/', element: <Navigate to="/cases" replace /> },
+          { path: '/', element: <Navigate to="/workbench" replace /> },
+          { path: '/workbench', element: <WorkbenchPage /> },
+          { path: '/workbench/:workspaceId', element: <WorkbenchPage /> },
           { path: '/cases', element: <CasesPage /> },
           { path: '/cases/:caseId', element: <CaseDetailPage /> },
-          { path: '/cases/:caseId/diagnose', element: <DiagnosePage /> },
+          { path: '/cases/:caseId/diagnose', element: <CaseWorkbenchRedirect /> },
           { path: '/tasks', element: <TasksPage /> },
           { path: '/tasks/:taskId', element: <TaskDetailPage /> },
           { path: '/tasks/:taskId/report', element: <ReportPage /> },
-          { path: '/assistant', element: <AssistantPage /> },
+          { path: '/assistant', element: <Navigate to="/workbench" replace /> },
           { path: '/knowledge', element: <KnowledgePage /> },
           {
             element: <RequireAdmin />,
