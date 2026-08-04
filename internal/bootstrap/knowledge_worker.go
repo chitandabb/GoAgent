@@ -48,7 +48,26 @@ func NewKnowledgeWorkerApp(ctx context.Context, cfg config.Config, log *zap.Logg
 		return nil, fmt.Errorf("knowledge worker object store unavailable: %w", deps.objectStoreError)
 	}
 
-	parser, err := knowledgeparser.NewRouter(knowledgeparser.TextParser{})
+	parserLimits := knowledgeparser.Limits{
+		MaxDocumentUnits:      cfg.Knowledge.ParserMaxDocumentUnits,
+		MaxArchiveEntries:     cfg.Knowledge.ParserMaxArchiveEntries,
+		MaxExpandedBytes:      cfg.Knowledge.ParserMaxExpandedBytes,
+		MaxXMLBytes:           cfg.Knowledge.ParserMaxXMLBytes,
+		MaxExtractedRunes:     cfg.Knowledge.ParserMaxExtractedRunes,
+		MaxSpreadsheetRows:    cfg.Knowledge.ParserMaxSpreadsheetRows,
+		MaxSpreadsheetColumns: cfg.Knowledge.ParserMaxSpreadsheetColumns,
+	}
+	pdfParser, err := knowledgeparser.NewPDFParser(parserLimits)
+	if err != nil {
+		closeDependencies()
+		return nil, err
+	}
+	ooxmlParser, err := knowledgeparser.NewOOXMLParser(parserLimits)
+	if err != nil {
+		closeDependencies()
+		return nil, err
+	}
+	parser, err := knowledgeparser.NewRouter(knowledgeparser.TextParser{}, pdfParser, ooxmlParser)
 	if err != nil {
 		closeDependencies()
 		return nil, err

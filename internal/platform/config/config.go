@@ -381,11 +381,18 @@ func (c MinIOConfig) SecretKey() (string, error) {
 
 // KnowledgeConfig 固定知识入库任务的可追踪流水线版本和重试上限。
 type KnowledgeConfig struct {
-	PipelineVersion   string `toml:"pipelineVersion"`
-	MaxAttempts       int    `toml:"maxAttempts"`
-	MaxUploadBytes    int64  `toml:"maxUploadBytes"`
-	ChunkMaxRunes     int    `toml:"chunkMaxRunes"`
-	ChunkOverlapRunes int    `toml:"chunkOverlapRunes"`
+	PipelineVersion             string `toml:"pipelineVersion"`
+	MaxAttempts                 int    `toml:"maxAttempts"`
+	MaxUploadBytes              int64  `toml:"maxUploadBytes"`
+	ChunkMaxRunes               int    `toml:"chunkMaxRunes"`
+	ChunkOverlapRunes           int    `toml:"chunkOverlapRunes"`
+	ParserMaxDocumentUnits      int    `toml:"parserMaxDocumentUnits"`
+	ParserMaxArchiveEntries     int    `toml:"parserMaxArchiveEntries"`
+	ParserMaxExpandedBytes      int64  `toml:"parserMaxExpandedBytes"`
+	ParserMaxXMLBytes           int64  `toml:"parserMaxXMLBytes"`
+	ParserMaxExtractedRunes     int    `toml:"parserMaxExtractedRunes"`
+	ParserMaxSpreadsheetRows    int    `toml:"parserMaxSpreadsheetRows"`
+	ParserMaxSpreadsheetColumns int    `toml:"parserMaxSpreadsheetColumns"`
 }
 
 func (c KnowledgeConfig) Validate() error {
@@ -404,6 +411,27 @@ func (c KnowledgeConfig) Validate() error {
 	}
 	if c.ChunkOverlapRunes < 0 || c.ChunkOverlapRunes >= c.ChunkMaxRunes/2 {
 		return errors.New("knowledge chunkOverlapRunes must be non-negative and less than half chunkMaxRunes")
+	}
+	if c.ParserMaxDocumentUnits < 1 || c.ParserMaxDocumentUnits > 5000 {
+		return errors.New("knowledge parserMaxDocumentUnits must be between 1 and 5000")
+	}
+	if c.ParserMaxArchiveEntries < 1 || c.ParserMaxArchiveEntries > 20000 {
+		return errors.New("knowledge parserMaxArchiveEntries must be between 1 and 20000")
+	}
+	if c.ParserMaxExpandedBytes < 1024*1024 || c.ParserMaxExpandedBytes > 1024*1024*1024 {
+		return errors.New("knowledge parserMaxExpandedBytes must be between 1048576 and 1073741824")
+	}
+	if c.ParserMaxXMLBytes < 64*1024 || c.ParserMaxXMLBytes > c.ParserMaxExpandedBytes {
+		return errors.New("knowledge parserMaxXMLBytes must be between 65536 and parserMaxExpandedBytes")
+	}
+	if c.ParserMaxExtractedRunes < 1000 || c.ParserMaxExtractedRunes > 10_000_000 {
+		return errors.New("knowledge parserMaxExtractedRunes must be between 1000 and 10000000")
+	}
+	if c.ParserMaxSpreadsheetRows < 1 || c.ParserMaxSpreadsheetRows > 1_000_000 {
+		return errors.New("knowledge parserMaxSpreadsheetRows must be between 1 and 1000000")
+	}
+	if c.ParserMaxSpreadsheetColumns < 1 || c.ParserMaxSpreadsheetColumns > 16384 {
+		return errors.New("knowledge parserMaxSpreadsheetColumns must be between 1 and 16384")
 	}
 	return nil
 }

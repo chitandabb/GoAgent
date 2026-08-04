@@ -725,9 +725,11 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
 管理员上传 HTTP API、幂等重放/冲突处理、任务查询/协作式取消以及 Worker
 claim/lease/heartbeat/checkpoint/fencing/退避状态转换已接入，并通过真实 PostgreSQL 集成测试。
 TXT/Markdown Executor、RabbitMQ 入库 Consumer、Element Artifact 和 fenced Chunk staging 已接入；
-发布后的 `ready/current` Chunk 已由真实 PostgreSQL FTS 查询验证。PDF/Office、OCR/VLM Parser、
-Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能用该基线声称简历第三条的吞吐量或
-最终 Recall@5 指标已经完成。
+发布后的 `ready/current` Chunk 已由真实 PostgreSQL FTS 查询验证。受资源约束的嵌入文本 PDF、
+DOCX、XLSX、PPTX Parser 已接入同一 Artifact/Chunk 发布事务，并通过 HTTP -> Outbox -> RabbitMQ
+-> Worker -> MinIO/PostgreSQL smoke 验证 Parser 版本、Chunk 和 Artifact SHA-256。Office 图片当前
+只记录待视觉增强元数据；OCR/VLM、Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能
+用该基线声称简历第三条的吞吐量或最终 Recall@5 指标已经完成。
 
 ### embeddings
 

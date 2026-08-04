@@ -85,6 +85,11 @@ The `[knowledge]` block configures the current ingestion contract:
 - `maxAttempts`: bounded transient-failure attempts;
 - `maxUploadBytes`: API upload limit, which must not exceed `[minio].maxObjectBytes`.
 - `chunkMaxRunes` and `chunkOverlapRunes`: deterministic TXT/Markdown Chunk limits.
+- `parserMaxDocumentUnits`: maximum PDF pages, XLSX worksheets, or PPTX slides;
+- `parserMaxArchiveEntries`, `parserMaxExpandedBytes`, and `parserMaxXMLBytes`: OOXML
+  archive and XML expansion limits;
+- `parserMaxExtractedRunes`: per-document extracted-text budget;
+- `parserMaxSpreadsheetRows` and `parserMaxSpreadsheetColumns`: per-worksheet limits.
 
 Administrator uploads use `multipart/form-data`, a UUID `Idempotency-Key`, the
 authenticated Session, and CSRF protection. The API stages one bounded file in the
@@ -93,11 +98,15 @@ uploads it to MinIO, and removes the temporary file before returning. A successf
 response means the immutable object and PostgreSQL ingestion facts are durable; it
 does not yet mean parsing has completed. `mesguard-outbox-relay` publishes the task,
 and the independent `mesguard-knowledge-worker` consumes it with manual ACK and
-confirmed retry/dead-letter copies. The current Executor supports UTF-8 TXT and
-Markdown, verifies the immutable source, writes a JSON Element Artifact to MinIO,
-stages searchable Chunks under lease fencing, and then publishes `ready/current`.
-PDF, Office, OCR, and VLM parsing are not implemented yet; those uploads currently
-finish as unsupported input instead of being silently treated as text.
+confirmed retry/dead-letter copies. The current Executor supports UTF-8 TXT/Markdown,
+embedded-text PDF, and deterministic DOCX/XLSX/PPTX extraction. It verifies the immutable
+source, writes a JSON Element Artifact to MinIO, stages searchable Chunks under lease
+fencing, and then publishes `ready/current`. PDF pages and PPTX slides retain page numbers;
+DOCX headings, paragraphs and tables and XLSX worksheet cell values use the same Element
+contract. Office ZIP paths, entry counts, expanded bytes and XML sizes are bounded, and
+encrypted or malformed inputs fail permanently. Office images are currently counted and
+marked for visual enrichment only. Scanned PDFs, standalone images, OCR/VLM descriptions,
+formula expressions, speaker notes, and hidden Sheet/Slide handling are not implemented yet.
 
 Start or rebuild the runnable path with:
 
@@ -115,8 +124,9 @@ go test -tags=integration ./internal/platform/postgres ./internal/platform/rabbi
 ```
 
 These tests cover Artifact/Chunk fencing, FTS visibility, Publisher Confirm before
-ACK, and MinIO Source round trips. A single local service smoke is functional proof,
-not a document-throughput benchmark.
+ACK, MinIO Source round trips, PDF page extraction, OOXML ordering, and parser resource
+limits. Local service smoke tests have covered TXT/Markdown and all four deterministic
+PDF/Office paths; they are functional proof, not a document-throughput benchmark.
 Increment `promptVersion` whenever a content change must be distinguishable in
 persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release

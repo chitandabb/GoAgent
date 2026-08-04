@@ -76,6 +76,23 @@ func TestExecutorRejectsIntegrityMismatchAndUnsupportedParserPermanently(t *test
 	}
 }
 
+func TestExecutorClassifiesParserResourceLimitAsPermanentInput(t *testing.T) {
+	content := []byte("content")
+	executor, err := NewExecutor(&memoryStore{source: content}, parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{}, errors.Join(knowledgeparser.ErrResourceLimit, errors.New("too many pages"))
+	}), Config{
+		MaxSourceBytes: 1024, MaxArtifactBytes: 4096,
+		ChunkOptions: knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Execute(context.Background(), executorTask(content, "application/pdf"), func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil })
+	if !errors.Is(err, knowledgeworker.ErrPermanentInput) {
+		t.Fatalf("Execute error = %v", err)
+	}
+}
+
 func executorTask(content []byte, mediaType string) knowledgeworker.Task {
 	return knowledgeworker.Task{
 		ID: uuid.New(), DocumentVersionID: uuid.New(), DocumentID: uuid.New(), CreatedBy: uuid.New(),
@@ -91,6 +108,12 @@ func executorTask(content []byte, mediaType string) knowledgeworker.Task {
 type memoryStore struct {
 	source   []byte
 	artifact []byte
+}
+
+type parserFunc func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error)
+
+func (f parserFunc) Parse(ctx context.Context, input knowledgeparser.Input) (knowledgeparser.Result, error) {
+	return f(ctx, input)
 }
 
 func (s *memoryStore) Put(_ context.Context, input objectstore.PutInput) (objectstore.ObjectRef, error) {
