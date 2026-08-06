@@ -627,12 +627,18 @@ the plan, four stable statuses, prompt version and provider token usage.
 
 Query Rewrite remains disabled by default. Three bounded StepFun smoke calls proved the
 contract and policy fallback, but included a 10-second timeout and do not establish a
-Recall/MRR/Context Precision gain. Multi-chunk context quality evaluation, relevance
-compression, and bounded Agentic second retrieval remain unfinished.
+Recall/MRR/Context Precision gain. The strict paired evaluation contract and offline
+`mesguard-rag-paired-eval` aggregator now separate original/rewrite and child/parent arms,
+pin gold chunks by document/ordinal/hash, reject mixed retrieval profiles, and report quality,
+query amplification, context growth, latency and rewrite usage. Each pair changes exactly one axis.
+The runtime Search observer records stable chunks, degradations and failed runs without binding a
+provider. The offline command performs no provider calls. The real fixture command, expanded gold
+set, multi-chunk quality result, relevance compression, and bounded Agentic second retrieval remain
+unfinished.
 
 ## Target Milestones, Not Yet Implemented
 
-- M2-B1: fixed-set quality evaluation and bounded Agentic second retrieval; controlled query rewrite and logical parent-child context expansion are implemented but remain disabled/unproven where applicable;
+- M2-B1: real paired fixture command, expanded fixed-set quality evaluation and bounded Agentic second retrieval; the strict observer/aggregator, controlled query rewrite and logical parent-child context expansion are implemented but remain unproven where applicable;
 - M2-B2: 公开技术 Web Search 降级链路；公网 Query 出口策略已实现，Provider、引用和失败降级待完成；
 - M2-B3: knowledge-qa HTTP/SSE conversation API, citation preview and attachment content access;
 - M2-C: expanded scanned-table/chart/screenshot quality set and full upload-to-publish throughput baseline;

@@ -778,6 +778,29 @@ protected signals 不完整被门禁拒绝；将服务端提取的信号显式�
 17.6 秒。这只证明结构化契约和回退门禁可用，也说明延迟/稳定性不足以默认开启；没有
 Recall/MRR/Context Precision 净收益证据。详细边界见 `docs/evaluations/query-rewrite-v1.md`。
 
+### 当前实现检查点：M2-B1 Advanced RAG paired 评测合同
+
+`AdvancedRetrievalEvaluationCase` 现在把人工黄金标签固定到文档键以及
+`documentKey + chunk ordinal + content SHA-256`，Chunk 内容或分块顺序漂移会使 observation 校验失败，
+不会静默沿用旧标签。每个 Case 必须且只能提供 baseline/experiment 一对 observation，并固定相同
+Retriever、Embedding profile、Rerank profile 和 K；Query 轴记录 `original/rewrite`，上下文轴记录
+`child/parent`，因此可以做 original-child、rewrite-child、original-parent、rewrite-parent 的受控对照。
+
+离线汇总器 `cmd/mesguard-rag-paired-eval` 严格读取 JSONL，拒绝未知字段、混合 K、缺失 pair、重复
+Chunk 位置、底层 profile 漂移以及同时改变两个实验轴的混杂 pair。每对实验只能按固定方向比较
+`original -> rewrite` 或 `child -> parent`。输出 Hit Rate@K、Document Recall@K/MRR、Context Precision/Recall、查询放大
+倍数、上下文 rune 变化率、延迟变化率、改写状态和供应商 Token。Hit Rate 表示每个问题是否至少
+命中一个相关文档，Document Recall 则按该问题召回的相关文档比例计算，两者不混用。
+
+领域层 `AdvancedRetrievalObserver` 已把两个真实 `SearchService` arm 的结果转换成严格 observation：
+固定文档键映射，记录 Hit/邻接 Chunk 的 ordinal、SHA-256、rune 数，按启用通道统计 QueryPlan 查询数，
+并保留降级通道、改写状态、Prompt/Provider/Model 元数据和供应商 Usage。Query Rewrite Provider 失败但
+基础检索成功时保留回退结果；检索本身失败时写入 `search_failed/not_observed` 并按零质量进入汇总，
+避免只统计成功请求；调用方取消或超时仍立即中止。Observer 只依赖稳定 Search 接口，不创建具体模型。
+
+离线命令本身不连接数据库或模型；真实 PostgreSQL/Provider fixture 命令和 `rag-advanced-v1` 扩展黄金集
+尚未完成，所以本检查点没有新增质量数字。
+
 上线前固定集至少新增三类对照：口语/省略/多轮指代的可独立问题改写，错误码/版本/否定条件保真，
 以及一个问题需要两个不同 Chunk 才能回答的多跳样本。比较 original-only 与 rewrite 的 Recall@K、MRR、
 nDCG@10、Context Precision、查询放大倍数、P50/P95、Token 和费用；没有净收益时保持默认关闭。

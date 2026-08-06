@@ -54,5 +54,11 @@ go test -tags=integration ./internal/platform/queryrewrite `
 - P50/P95、超时率、策略拒绝率、回退后基础检索成功率；
 - 每千次查询估算成本，并把模型、Prompt version 和数据集版本固定。
 
+paired 数据合同、运行时 Search observer 和纯离线汇总器已经实现：黄金 Chunk 使用文档键、ordinal
+和内容 SHA-256 固定，baseline/experiment 必须使用相同底层检索 profile、通道与 K，且每次只改变
+Query 或 Context 一个轴；`cmd/mesguard-rag-paired-eval` 负责汇总 Document/Context 质量和
+查询/上下文/延迟放大。真实 PostgreSQL/Provider fixture 命令与扩展黄金集仍未完成，因此这里继续
+只记录 contract smoke，不新增质量结论。
+
 在这些指标没有净收益前，只能表述为“实现了受控改写和可靠回退”，不能表述为“提升召回率”或
 “降低 Token 消耗”。

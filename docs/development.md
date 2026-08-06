@@ -267,6 +267,30 @@ does not claim a monetary cost. Methodology and the 2026-08-06 result table are 
 `docs/evaluations/rag-retrieval-v1.md`. This fixed set is correctness evidence, not a production
 throughput or SLA benchmark.
 
+### M2-B1 paired Advanced RAG aggregation
+
+After a versioned advanced dataset and its baseline/experiment observations have been generated,
+validate and summarize them without making any provider or database call:
+
+```powershell
+go run ./cmd/mesguard-rag-paired-eval `
+  -dataset <versioned-cases.jsonl> `
+  -input <paired-observations.jsonl> `
+  -output output/evaluation/rag-advanced.summary.json
+```
+
+The dataset labels relevant evidence by stable document key, chunk ordinal and content SHA-256.
+Every case must contain exactly one baseline and one experiment with the same retriever, embedding
+profile, rerank profile, channels and K. A pair must change exactly one axis in the fixed direction:
+`original -> rewrite` with unchanged context, or `child -> parent` with unchanged query mode. The
+summary reports Hit Rate@K, document Recall@K/MRR, Context Precision/Recall, query amplification,
+context-rune and duration changes, rewrite statuses and provider-reported rewrite Token usage.
+
+The domain `AdvancedRetrievalObserver` now converts two runtime Search arms into strict observations
+and counts non-cancellation search failures instead of dropping them. The offline aggregator still
+does not create PostgreSQL fixtures or call providers. Do not report a metric until the real fixture
+command and expanded gold set are checked in and reviewed.
+
 `[knowledge.layout]` may be enabled only after `modelPath`, `manifestPath` and
 `runtimeLibraryPath` resolve inside the Knowledge Worker environment. Artifact schema v5
 then records model, renderer, requested/effective DPI, bbox, crop and explicit OCR/VLM routing
