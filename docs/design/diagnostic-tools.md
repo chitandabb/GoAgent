@@ -4,7 +4,7 @@
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
 - 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
-- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索，以及受 QueryGuard、Catalog 和资源限制保护的 `execute_readonly_query` Tool；Docker PostgreSQL + SQL Server 的真实跨数据库联调和运行时 EvidenceItem 已验证。Catalog 扫描/发布管理、Query Store、RAG、Web Search、附件正文、运行日志 Tool 和正式证据持久化仍未实现，本文是工程边界，不能把目标能力当作已验证结果。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及后端拥有的 `search_knowledge` Tool。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。Catalog 扫描/发布管理、Query Store、Web Search、附件正文和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
 
 ## 总体原则
 
@@ -283,11 +283,11 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 
 | Skill | 主要 Tool | 说明 |
 | --- | --- | --- |
-| `ticket-diagnosis` | `read_external_case` | 读取工单、整理线索和规划调查 |
+| `ticket-diagnosis` | `read_external_case`、`search_knowledge` | 读取工单、按证据缺口查询企业知识并规划调查 |
 | `sql-investigation` | 对象定义、`search_schema_catalog`、`execute_readonly_query`（窄版本当前） | 核对业务数据和数据库执行证据 |
 | `code-investigation` | GitHub MCP 只读 Tool | 定位代码与提交 |
 | `attachment-investigation` | `read_attachment`、OCR/VLM 结果读取 | 按需分析截图、PDF和日志附件 |
-| `knowledge-qa` | `search_knowledge`、`get_knowledge_chunk` | 全局与个人知识库问答 |
+| `knowledge-qa` | `search_knowledge` | 全局与个人知识库问答；不获得诊断数据源能力，结果必须携带文档/版本/Chunk/哈希定位 |
 | `web-research` | `web_search`、`fetch_public_page` | 只查询公开、脱敏问题并保留引用 |
 | `log-investigation` | `search_logs`、`get_log_context` | 接入可用的只读日志源 |
 | `sql-optimization-lab` | LAB 查询、计划比较和清理流程 | 后续受控优化实验 |

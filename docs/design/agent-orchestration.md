@@ -6,8 +6,8 @@
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
 - 生产系统指令、评测 baseline 指令和 Evidence Gate 报告契约已外置到 `config/prompts/`，由 `[agent]` 配置启动期一次加载并缓存；`promptVersion` 是随正式报告保存的人工发布标签。当前不做热更新、内容哈希或 Nacos Prompt 发布。
-- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据；Diagnosis Worker 会把通过门禁或明确降级的报告及其证据引用正式落库，可复现效果评测仍待补齐。
-- P7 正式任务链路已接通任务创建、TaskEvent JSON 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer/三级重试/死信，以及 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence 和 DiagnosisReport 的 fenced 事务提交。正式报告读取 API 与 SSE 仍待实现。
+- 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，知识检索结果还必须通过文档/版本/Chunk/内容哈希校验并映射为 `knowledge_chunk`；Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据，Diagnosis Worker 会把通过门禁或明确降级的报告及其证据引用正式落库。
+- P7 正式任务链路已接通任务创建、TaskEvent JSON/SSE 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer/三级重试/死信，以及 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence 和 DiagnosisReport 的 fenced 事务提交；正式报告读取、管理员失败恢复和报告反馈也已接入。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构
@@ -100,7 +100,7 @@ ADK `ChatModelAgent` 负责多轮 Model -> Tool -> Model 循环。目标装配�
 - usage、超时、重试、Tool 策略和轨迹 Middleware/Callback；
 - `MaxIterations` 与任务总预算。
 
-入口任务由程序直接附加 `ticket-diagnosis` 或未来 `knowledge-qa` 的完整入口指南，避免为了选择入口 Skill 额外调用一次模型。后续能力由 Agent 在同一循环内根据证据缺口选择。
+入口任务由程序直接附加 `ticket-diagnosis` 或未来 `knowledge-qa` 的完整入口指南，避免为了选择入口 Skill 额外调用一次模型。诊断任务的 `knowledge` capability 由后端自动写入并冻结，前端不提供 Tool 选择。后续能力由 Agent 在同一循环内根据证据缺口选择。
 
 ### Graph：外层状态与门禁
 
@@ -121,7 +121,7 @@ Evidence Gate 可以在固定上限内把“缺少哪些证据”作为补充指
 - SQL 解析、只读校验、授权校验、执行和结果截断；
 - Query 改写、向量/FTS 混合召回、融合和重排；
 - 文档解析、OCR/VLM 路由、切块和索引；
-- 结构化报告解析、Evidence 引用校验和持久化；当前 P6 只完成运行时快照，正式持久化留在 DiagnosisTask/Worker。
+- 结构化报告解析、Evidence 引用校验和持久化；知识 Chunk 证据还要求可复核的文档版本、Chunk、哈希和定位字段。
 
 Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实现步骤。
 

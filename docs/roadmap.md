@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: P7 Admin Recovery Complete, Failure Drills Next
+## Current Stage: M2-A8 Retrieval and Diagnosis Knowledge Integration Complete
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -307,7 +307,7 @@ Compose 提供持久化 RabbitMQ 主交换机/诊断队列；PostgreSQL 到 Rabb
 同一 `message_id` 发布并在 Confirm 后写入 `published_at`。Diagnosis Worker 现已接入严格信封
 校验、`prefetch=1`、手动 ACK、30 秒/2 分钟/10 分钟 TTL 重试队列和最终死信队列；Worker
 领取任务后使用创建时冻结的 CaseSnapshot、数据源和 `requestScope.allowedCapabilities` 构造
-`TaskScope`，执行现有 ADK Agent + Evidence Gate。`case/code/sql` 能力白名单与 Runtime
+`TaskScope`，执行现有 ADK Agent + Evidence Gate。`case/code/sql/knowledge` 能力白名单与 Runtime
 探测的依赖健康状态分离，GitHub MCP 或 SQL Server 在线不会自动扩大任务 Tool 集合；Worker
 定时续租，并在 fencing 条件下把 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence、
 正式 DiagnosisReport、TaskEvent 和 `succeeded` 终态作为一个 PostgreSQL 事务提交。
@@ -372,15 +372,175 @@ An API -> Outbox -> RabbitMQ -> Knowledge Worker smoke verified PDF, DOCX, XLSX,
 as `succeeded/completed`, `ready/current`, with the expected parser versions, non-empty
 Chunks, and persisted Artifact SHA-256 values; all fixture objects and database rows were
 then removed. Ingestion timing from these small fixtures is functional evidence, not a
-resume throughput metric. The next active backend slice is visual-asset extraction plus
-OCR/VLM routing and partial-result semantics. Scanned PDF/image interpretation, richer
-Office semantics, Embedding, hybrid fusion, reranking, mixed-document throughput
-evaluation, and the final resume item 3 claim remain incomplete. TaskEvent SSE
+resume throughput metric. At this checkpoint M2-A6 became the active visual-asset slice;
+scanned PDF/image interpretation, richer Office semantics, Embedding, hybrid fusion, reranking,
+mixed-document throughput evaluation, and the final resume item 3 claim were still incomplete. TaskEvent SSE
 reuses the JSON event identity and cursor,
 replays PostgreSQL facts, emits heartbeats, closes after terminal events, and is
 cancelled by application shutdown without treating browser disconnect as task
 cancellation. Worker process-crash drills remain a smaller reliability follow-up
 and do not displace the resume-driven RAG target.
+
+### M2-A6: Bounded Visual Assets and Configurable OCR/VLM Routing
+
+The backend now extracts a bounded visual contract alongside deterministic text Elements:
+
+- PDF pages with no embedded text become `document_page` candidates that retain the page
+  number and source SHA-256; standalone PNG/JPEG uploads become `source_image` candidates;
+  DOCX/XLSX/PPTX media is extracted only from package media roots.
+- Office relationship XML is resolved only within its package root. Each referenced image
+  occurrence retains `sourcePart`, `relationshipId`, and, for PPTX, presentation-order page
+  number. Reused images therefore remain separately traceable; orphan media is retained as
+  an audit record with `unreferenced_asset` and is skipped before model invocation.
+- Per-document media count, per-asset bytes, total unique-media bytes, visual occurrences,
+  enrichment count, and minimum pixel thresholds are enforced before provider calls. Tiny
+  raster images are skipped as decorative; supported actionable rasters route to OCR+VLM,
+  and PDF page candidates route to OCR.
+- Element Artifact schema v2 stores visual location, dimensions, media type, SHA-256,
+  route/status/reason, provider/model metadata, and output Element indexes. It never stores
+  raw visual bytes. Native text plus missing visual enrichment publishes `partial_ready`; a
+  visual-only source fails permanently with `invalid_ingestion_input` rather than publishing
+  an empty searchable version.
+- OCR and Vision endpoints are configured independently through `[models.ocr]` and
+  `[models.vision]`, including provider, model, prompt file, prompt version, timeout and
+  output budget. The current DashScope adapter accepts only bounded strict JSON output and
+  passes the API key to the Knowledge Worker only. Bounded PNG smokes completed both the
+  Vision path and the isolated DashScope `qwen-vl-ocr-latest` path through API -> Outbox ->
+  RabbitMQ -> Knowledge Worker. OCR returned the expected text Element and persisted
+  provider/model/Prompt metadata. Direct PDF `file_url` input was tested separately and is
+  unsupported by the current Eino OpenAI adapter; that error is now permanent instead of
+  entering the retry queues. No OCR quality or scanned-document metric is claimed yet.
+
+The isolated smoke users, sessions, objects, documents, versions, tasks, events, chunks and
+Outbox rows were removed after verification. Targeted tests, full `go test ./...`,
+`go vet ./...`, parser/enrichment/ingestion/bootstrap race tests, storage/messaging
+integration tests and `docker compose config --quiet` passed after cleanup. M2-A6 is closed.
+Embedding, hybrid fusion, reranking, Web Search, and the final resume item 3 metric were
+deferred from this checkpoint to later slices.
+
+### M2-A7: Local ONNX Page and Region Routing
+
+The accepted 2026-08-05 implementation target is a focused local layout router, not a
+replacement Python document-processing pipeline:
+
+- keep deterministic Go parsing as the fast path and combine native-text quality signals
+  with a pre-trained ONNX document-layout detector;
+- classify pages as native digital, scanned, or mixed, then retain bounded regions with
+  type, bounding box, confidence, model/version, and stable route reason;
+- route text regions to native extraction or cloud OCR, scanned tables to table recovery,
+  and charts/screenshots/diagrams to cloud VLM; perform retrieval chunking only after region
+  recognition, merge, and de-duplication;
+- expose an optional Eino Document Transformer/callback adapter without making Eino
+  `schema.Document` the persisted Element contract;
+- use Docling as a design/reference baseline rather than a required runtime dependency;
+- keep DashScope OCR cloud-hosted. Compare StepFun `step-3.7-flash` at low reasoning with
+  the current DashScope `qwen3-vl-plus` Vision baseline over identical cropped regions;
+  Google `gemini-3.5-flash-lite` is an optional speed reference, not an immediate dependency;
+- report routing Macro-F1, high-value visual miss rate, avoided cloud calls, CPU/RAM,
+  end-to-end region P50/P95, valid JSON, semantic accuracy, provider failures, and cost per
+  successful region. Vendor TPS claims are not project evidence.
+
+The detailed boundary and completion checklist are recorded in
+`docs/decisions/003-local-onnx-layout-routing.md`.
+
+Current M2-A7 implementation state:
+
+- `[knowledge.layout]` now holds the disabled-by-default model/runtime identity, rendering,
+  inference, concurrency, native-text, confidence, crop-padding and resource limits.
+- parsers emit ordered page observations. PDF visual-candidate state is explicitly `unknown`
+  because embedded-text extraction cannot prove a page has no vector table/chart; standalone
+  PNG/JPEG state is known and contains one visual candidate.
+- `LayoutRouter`, `RoutePlanner`, `PageRenderer`, `PageAnalyzer`, bounded region cropper and
+  Parse-output `LayoutStage` now execute inside the Knowledge Worker when enabled. PDFium-WASM
+  rendering, ONNX Runtime 1.28.0, PP-DocLayout-M conversion/manifest checks, explicit region
+  OCR/VLM plans, document-level crop budgets, duplicate whole-page suppression and Artifact
+  schema v5 provenance with provider Token usage are implemented. Confirmed text-only pages skip rendering; only
+  actionable routes within the count/byte budgets retain crops.
+- pinned scripts reproduce the ONNX model and Windows/Linux runtime. A real upstream fixture
+  passed the Go adapter with table/caption/text detections; no route-quality metric is inferred.
+- the versioned `layout-routing-public-v1` manifest pins seven real public PDF/DOCX files by
+  URL, usage basis, byte length and SHA-256; eight reviewed PDF pages now have page/route and
+  high-value-region annotations. Bounded PDFium native-text recovery and class-aware
+  low-confidence fallback corrected the NIST native page and scanned-prose VLM false route.
+  The current Windows run records page-class Macro-F1 1.0000, actionable-route Macro-F1
+  1.0000, 0/7 high-value misses and 74.03% cloud-bound-region avoidance against the explicitly
+  documented all-regions-cloud routing baseline. No cloud provider was called in this run.
+- real scanned patent pages exposed oversized-raster task failure. PDFium now adaptively lowers
+  effective DPI and persists requested/effective DPI. A 20M/8M pixel paired run kept route
+  quality unchanged while cutting P95 from 6.59 s to 2.62 s and peak working set from 786.5 MiB
+  to 584.1 MiB. One 72-DPI prose page now has paired OCR evidence, but 8M is not promoted until
+  small-font, scanned-table and degraded-scan quality is measured.
+- `element-merge-v1` now runs before Chunk creation. It keeps all raw Elements in Artifact v5
+  but removes explainable same-page duplicates from the searchable projection: exact normalized
+  duplicates, OCR fully covered by native text, and highly contained overlapping OCR. It does
+  not fuzzy-deduplicate VLM descriptions.
+- configurable small decorative/picture arbitration removed one duplicate NASA-logo cloud
+  candidate without changing actionable-route Macro-F1 or the 0/7 high-value miss result;
+- nine real local PPTX files (752 slides) now pass the production-limit parser. Three fresh
+  process runs have median 9.55 MiB/s and 378.72 slides/s. This is parser-only throughput,
+  not upload-to-publish throughput;
+- an independently reviewed eight-slide PPTX structure set now verifies 21 page anchors, nine
+  DrawingML tables, 15 picture uses and 14 distinct slide relationships at 100% on the fixed set.
+  It does not yet prove SmartArt/chart semantics or cloud-enriched Element merge quality;
+- a three-run Windows ONNX thread A/B kept route quality unchanged. Intra-op 1/2/4 produced
+  median average page times of 1457.09/1389.57/1283.88 ms at the 8M raster limit; two threads
+  retain the best median P95 and remain the default while four is a throughput candidate;
+- one explicitly enabled two-call OCR pair compared USPTO page 8 at 113 and 72 DPI. Both passed
+  strict JSON; paired character similarity was 99.54%, 72-DPI provider latency was 30.6% lower,
+  and total measured cost was about CNY 0.00631. One clean prose page does not promote 8M.
+- a bounded three-region VLM pair compared `qwen3-vl-plus` with `step-3.7-flash` low reasoning
+  using identical crops, Prompt, strict JSON and a 2,048 output-Token limit. Both completed 3/3,
+  reached 100% text-anchor recall and 8/9 reviewed relation-fact recall, but manual review found
+  one relation error per provider, so each had only 2/3 fully correct cases. Qwen averaged
+  5.35 seconds and 2,206 total Tokens versus StepFun's 7.87 seconds and 4,740 Tokens; its three
+  calls cost about CNY 0.00684. The current production Vision profile remains Qwen, while StepFun
+  stays a candidate rather than being rejected from one small set.
+- an optional enhanced Knowledge Worker image now packages only the SHA-pinned Linux x64 ONNX
+  Runtime, PP-DocLayout-M model and license notices through an ignored BuildKit context. The
+  default Compose build remains lightweight; the layout overlay runs non-root with a read-only
+  root filesystem and no capabilities. A no-network 2 CPU/2 GiB Linux fixed-set run retained the
+  quality metrics, averaged 1.18 seconds per page, had 2.59-second P95 and 638.06 MiB peak RSS.
+
+The production profile still keeps layout disabled. Broader chart/screenshot/scanned-table
+fixtures and cloud-enriched merge-quality evidence remain. M2-A7 must not be described as fully evaluated
+operational routing, and the current region-avoidance metric must not be presented as measured
+Token/cost reduction. See `docs/evaluations/layout-routing-public-v1.md` and
+`docs/evaluations/knowledge-ingestion-quality-v1.md`.
+
+### M2-A8: Embedding, Vector Search and RRF Baseline
+
+M2-A8 now connects the parsed Chunk projection to a versioned vector index:
+
+- `[models.embedding]` is independent from ChatModel and uses the validated DashScope
+  `text-embedding-v4` profile with query/document input types, 1024 dimensions, normalization,
+  batch size and bounded concurrency;
+- `00016_create_knowledge_embeddings.sql` creates `knowledge_embedding_profiles` and
+  `knowledge_chunk_embeddings`, with one active profile, stable fingerprint identity, content
+  SHA-256 consistency and Chunk cascade cleanup;
+- Knowledge Worker computes bounded batch Embeddings after parsing/chunking and writes Artifact,
+  Chunk and vectors under the same fenced publication transaction. An Embedding failure blocks
+  publication and follows the existing retry/dead-letter path;
+- PostgreSQL Vector Search applies active profile, current/ready, deleted and global/personal scope
+  filters in SQL. Hybrid retrieval runs FTS and Vector candidates concurrently, fuses them with
+  `RRF k=60`, deduplicates by content hash and reports degraded channels when one path fails;
+- the `rag-retrieval-v1` fixed set now compares FTS, Vector and RRF. FTS reached 23/24 Recall@5,
+  Vector 24/24 with MRR 1.0, and RRF 24/24 with MRR 0.9792. Vector/RRF consumed 796 provider
+  Embedding Tokens on this 24-query set. This is a bounded correctness baseline, not a production
+  throughput or cost claim; full methodology is in `docs/evaluations/rag-retrieval-v1.md`.
+
+M2-A8 is complete at the persistence/retrieval layer and the knowledge-qa and diagnosis Runners now receive a
+single backend-owned `search_knowledge` Tool. The Tool accepts only a bounded business query and
+result limit; it injects the actor identity, hides FTS/Vector/RRF selection, and returns source
+location plus `degraded/missingChannels` when Embedding is unavailable. A disabled-by-default
+`[models.rerank]` profile, `qwen3-rerank` native HTTP adapter, candidate-to-result reordering,
+Token propagation and retrieval-order fallback are also implemented and covered by contract tests.
+The live 24-case `qwen3-rerank` run succeeded with Recall@5 24/24 and MRR 0.9792, matching the current
+RRF quality baseline; the provider response did not expose usable rerank token usage, so cost remains
+unknown. New diagnosis tasks automatically receive the backend-managed knowledge capability and the
+frontend does not choose this Tool. Knowledge results now pass a deterministic citation gate: empty or
+malformed results do not become EvidenceItems, and valid results are tagged as `knowledge_chunk` with
+document/version/Chunk/hash location metadata. The next resume-driven slice is query rewrite, bounded
+Agentic re-retrieval and Web Search fallback.
 
 ### Completed Backend Checkpoint: Formal Diagnosis Report Read API
 
@@ -433,8 +593,10 @@ evaluation without fabricating duplicate reports or overwriting fenced results.
 
 ## Target Milestones, Not Yet Implemented
 
-- M1: evidence-based ticket diagnosis;
-- M2: knowledge assistant, RAG, and mixed-document ingestion;
+- M2-B1: query normalization/rewrite, parent-child context expansion and bounded Agentic second retrieval;
+- M2-B2: 公开技术 Web Search 降级链路，包含脱敏、引用和失败降级；
+- M2-B3: knowledge-qa HTTP/SSE conversation API, citation preview and attachment content access;
+- M2-C: expanded scanned-table/chart/screenshot quality set and full upload-to-publish throughput baseline;
 - M4: isolated SQL performance laboratory.
 
 Do not mark a target milestone as complete here until its acceptance criteria

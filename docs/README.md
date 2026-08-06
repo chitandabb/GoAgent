@@ -8,6 +8,7 @@ This directory is the single location for project documentation.
 | --- | --- |
 | [Resume](简历.md) | Resume source of truth; only verified project outcomes may be written as metrics |
 | [Resume Project Points 1-2](resume-project-points-1-2.md) | Business, architecture, implementation, evidence, and interview narrative for the first two MESGuard resume items |
+| [Resume Project Point 3](resume-project-point-3.md) | Business, architecture, implementation, evidence, and interview boundary for mixed-document parsing and Agentic RAG |
 | [Development](development.md) | Local configuration, Docker, tests, and volume operation |
 | [Roadmap](roadmap.md) | Current delivery state and ordered next milestones |
 | [Agent Orchestration](design/agent-orchestration.md) | Single-Agent loop, thin Graph, Skill/Tool boundaries, GitHub MCP, and evaluation metrics |
@@ -24,6 +25,7 @@ This directory is the single location for project documentation.
 | [Messaging Design](design/messaging.md) | Outbox, RabbitMQ topology, retries, dead letters, acknowledgements, and worker recovery |
 | [API Design](design/api.md) | HTTP resources, authentication, authorization, idempotency, errors, and SSE contracts |
 | [Diagnostic Tools](design/diagnostic-tools.md) | Remote SQL Server, database evidence, logs, and diagnostic Tool governance |
+| [RAG Ingestion and Retrieval](design/rag-ingestion-and-retrieval.md) | Mixed-document ingestion, local layout routing, retrieval, Agentic RAG, Web Search boundary, and evaluation contract |
 | [Frontend Design](design/frontend.md) | React workbench structure, design-token decisions, state-machine-to-UI mapping, and mock replacement |
 | [Target OpenAPI](design/openapi.json) | Target machine-readable contract; implemented contract remains `api/openapi.yaml` |
 
@@ -33,10 +35,21 @@ This directory is the single location for project documentation.
 | --- | --- |
 | [ADR 001](decisions/001-modular-monolith-architecture.md) | Why MESGuard uses a modular monolith and manual dependency injection |
 | [ADR 002](decisions/002-prefer-open-source-components.md) | Prefer mature open-source components; hand-write only thin contract glue |
+| [ADR 003](decisions/003-local-onnx-layout-routing.md) | Why local ONNX handles bounded page/region routing while OCR/VLM remain configurable cloud capabilities |
+
+## Evaluation Records
+
+| Document | Purpose |
+| --- | --- |
+| [Evaluations](evaluations/) | Reproducible fixed-set methods and measured observations; raw provider output stays ignored |
 
 Documentation rules:
 
 - `README.md` at the repository root is only the project entry point.
+- `简历.md` is the only resume fact source. Supporting resume documents explain evidence and
+  boundaries but do not silently change resume metrics.
+- `resume-project-points-1-2.md` and `resume-project-point-3.md` are interview/engineering
+  explainers; measured results must link to an evaluation record and state dataset scope.
 - Operational instructions belong in `development.md`.
 - Current implementation progress belongs in `roadmap.md`; Agent execution order
   belongs in `design/agent-implementation-plan.md`.
