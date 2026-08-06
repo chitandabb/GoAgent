@@ -102,4 +102,6 @@ go run ./cmd/mesguard-rag-retrieval-eval `
 变化、查询改写的质量对照、逻辑 parent 展开的上下文质量、Web Search 或 HNSW；Rerank 也没有 nDCG@10 所需的多相关文档
 分级排序标注。下一轮应补充带 graded relevance 的评测集，并记录 nDCG@10、MRR、Recall@5、
 P50/P95、超时率和每千次查询成本。Query Rewrite 当前只有结构化契约 smoke，见
-[`query-rewrite-v1.md`](query-rewrite-v1.md)，不能与本表质量指标合并。
+[`query-rewrite-v1.md`](query-rewrite-v1.md)，不能与本表质量指标合并。Advanced RAG paired 数据
+合同、运行时 Search observer 与离线汇总器已经完成，但没有扩展黄金集或真实 Provider observations，
+同样不能据此补写增幅。
