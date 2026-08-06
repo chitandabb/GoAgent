@@ -80,7 +80,7 @@ VALUES (?, ?, 'Knowledge Owner', 'test-hash', 'analyst'),
 	if err != nil || oldVersion.Version != 1 {
 		t.Fatalf("PublishVersion(old) = %#v, %v", oldVersion, err)
 	}
-	newContent := "# 报工超时\n\n设备 E-100 报工失败时，应核对事务日志和 ERP 接口状态。"
+	newContent := "# 故障处理\n\n设备 E-100 报工失败时，应核对事务日志和 ERP 接口状态。\n\n处理前应记录连接池指标并保留现场时间窗口。"
 	newChunks, err := knowledge.ChunkMarkdown(newContent, knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16})
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +115,24 @@ VALUES (?, ?, 'Knowledge Owner', 'test-hash', 'analyst'),
 		if result.DocumentVersionID == oldVersionID || result.ContentText == "设备报工失败时先检查旧版缓存。" {
 			t.Fatalf("SearchFTS(owner) returned retired version: %#v", result)
 		}
+	}
+	var globalHit knowledge.SearchResult
+	for _, result := range ownerResults {
+		if result.DocumentID == globalDocumentID {
+			globalHit = result
+			break
+		}
+	}
+	if globalHit.ChunkID == uuid.Nil {
+		t.Fatalf("SearchFTS(owner) did not return the global hit: %#v", ownerResults)
+	}
+	contextGroups, err := repository.ExpandContext(ctx, ownerID, []knowledge.SearchResult{globalHit}, 1, 1800)
+	if err != nil {
+		t.Fatalf("ExpandContext(owner): %v", err)
+	}
+	if len(contextGroups) != 1 || len(contextGroups[0].Chunks) != 1 ||
+		contextGroups[0].Chunks[0].ContentText != "处理前应记录连接池指标并保留现场时间窗口。" {
+		t.Fatalf("ExpandContext(owner) = %#v", contextGroups)
 	}
 	otherResults, err := repository.SearchFTS(ctx, otherID, "报工失败", 10)
 	if err != nil {

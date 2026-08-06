@@ -99,6 +99,7 @@ go run ./cmd/mesguard-rag-retrieval-eval `
 ## 未覆盖事项
 
 当前固定集没有覆盖同义词冲突、数值/否定条件、多文档答案、个人 scope 隔离、Chunk 边界
-变化、查询改写、parent 展开、Web Search 或 HNSW；Rerank 也没有 nDCG@10 所需的多相关文档
+变化、查询改写的质量对照、逻辑 parent 展开的上下文质量、Web Search 或 HNSW；Rerank 也没有 nDCG@10 所需的多相关文档
 分级排序标注。下一轮应补充带 graded relevance 的评测集，并记录 nDCG@10、MRR、Recall@5、
-P50/P95、超时率和每千次查询成本。
+P50/P95、超时率和每千次查询成本。Query Rewrite 当前只有结构化契约 smoke，见
+[`query-rewrite-v1.md`](query-rewrite-v1.md)，不能与本表质量指标合并。

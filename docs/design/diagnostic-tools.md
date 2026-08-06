@@ -4,7 +4,7 @@
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
 - 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
-- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及后端拥有的 `search_knowledge` Tool。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。Catalog 扫描/发布管理、Query Store、Web Search、附件正文和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及后端拥有的 `search_knowledge` Tool。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。Web Search 已完成公网 Query 脱敏/拒绝边界，但 Provider、Tool 和网页引用链仍未实现；Catalog 扫描/发布管理、Query Store、附件正文和运行日志 Tool 也仍未实现，本文不把目标能力当作已验证结果。
 
 ## 总体原则
 
@@ -293,6 +293,12 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 | `sql-optimization-lab` | LAB 查询、计划比较和清理流程 | 后续受控优化实验 |
 
 Web Search 不默认获得工单原文。进入 `web-research` 前必须把公司名、客户名、工单号、内部地址、SQL/日志原文和代码片段移除，只允许搜索通用产品概念、公开错误码和公开依赖资料。
+
+当前 `internal/webresearch` 已把这一要求固化为服务端出口策略：工单字段和管理员词典执行确定性
+替换，凭证、连接串和结构化私有内容直接拒绝，脱敏后技术信号不足也拒绝。Provider 客户端以后
+只能接收策略构造的 `PublicQuery`，不能接收任意字符串。LLM 改写不参与安全判定，命中审计只记录
+类别和数量，不能把敏感原值写入日志。Firecrawl 调用、URL 复验、SSRF、页面清洗、网页提示注入
+隔离和 `web_evidence` 固化仍是 M2-B2 后续工作。
 
 代码调查不维护应用内逐仓库、组织或分支授权表。fine-grained PAT 或 GitHub App Installation 决定 GitHub 返回的可见范围；`search_repositories` 用于按查询发现候选仓库，后续 Tool 直接使用选中的 owner/repo/ref/sha。MESGuard 只保留代码相关的只读 Tool，不把凭据在 GitHub 侧拥有的范围缩窄为单仓库。最终证据记录实际仓库、Commit SHA、文件和行号。
 

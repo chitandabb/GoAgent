@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -564,6 +565,174 @@ LIMIT ?`
 		return nil, fmt.Errorf("search knowledge chunk vectors: %w", TranslateError(err))
 	}
 	return mapKnowledgeSearchRows(rows)
+}
+
+func (r *KnowledgeRepository) ExpandContext(
+	ctx context.Context,
+	actorID uuid.UUID,
+	hits []knowledge.SearchResult,
+	window, maxRunes int,
+) ([]knowledge.SearchContextGroup, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("knowledge repository is unavailable")
+	}
+	if actorID == uuid.Nil || len(hits) == 0 || len(hits) > knowledge.MaxKnowledgeSearchLimit ||
+		window < 1 || window > 3 || maxRunes < 128 || maxRunes > 8000 {
+		return nil, errors.New("knowledge context expansion request is invalid")
+	}
+
+	type groupKey struct {
+		documentID uuid.UUID
+		versionID  uuid.UUID
+		section    string
+	}
+	type groupBuilder struct {
+		group       knowledge.SearchContextGroup
+		hitOrdinals []int
+		hitSet      map[uuid.UUID]struct{}
+		candidates  map[uuid.UUID]knowledge.SearchContextChunk
+		truncated   bool
+	}
+	builders := make(map[groupKey]*groupBuilder, len(hits))
+	order := make([]groupKey, 0, len(hits))
+	clauses := make([]string, 0, len(hits))
+	args := make([]any, 0, 1+len(hits)*4)
+	args = append(args, actorID)
+	for _, hit := range hits {
+		if err := hit.Validate(); err != nil {
+			return nil, errors.New("knowledge context expansion hit is invalid")
+		}
+		sectionJSON, err := json.Marshal(hit.SectionPath)
+		if err != nil {
+			return nil, errors.New("encode knowledge context section path")
+		}
+		key := groupKey{documentID: hit.DocumentID, versionID: hit.DocumentVersionID, section: string(sectionJSON)}
+		builder := builders[key]
+		if builder == nil {
+			builder = &groupBuilder{
+				group: knowledge.SearchContextGroup{
+					DocumentID: hit.DocumentID, DocumentVersionID: hit.DocumentVersionID,
+					SectionPath: append([]string(nil), hit.SectionPath...),
+				},
+				hitSet: make(map[uuid.UUID]struct{}), candidates: make(map[uuid.UUID]knowledge.SearchContextChunk),
+			}
+			builders[key] = builder
+			order = append(order, key)
+		}
+		if _, exists := builder.hitSet[hit.ChunkID]; !exists {
+			builder.hitSet[hit.ChunkID] = struct{}{}
+			builder.group.HitChunkIDs = append(builder.group.HitChunkIDs, hit.ChunkID)
+			builder.hitOrdinals = append(builder.hitOrdinals, hit.Ordinal)
+		}
+		lowerOrdinal := hit.Ordinal - window
+		if lowerOrdinal < 0 {
+			lowerOrdinal = 0
+		}
+		clauses = append(clauses, "(c.document_version_id = ? AND c.section_path = ?::jsonb AND c.ordinal BETWEEN ? AND ?)")
+		args = append(args, hit.DocumentVersionID, string(sectionJSON), lowerOrdinal, hit.Ordinal+window)
+	}
+
+	query := `
+SELECT d.id AS document_id, v.id AS document_version_id, c.id AS chunk_id,
+       d.title, d.scope, c.ordinal, c.page_number, c.element_type,
+       c.section_path::text AS section_path_json, c.content_text, c.content_sha256,
+       0::double precision AS score
+FROM knowledge_chunks AS c
+JOIN knowledge_document_versions AS v ON v.id = c.document_version_id
+JOIN knowledge_documents AS d ON d.id = v.document_id
+WHERE d.deleted_at IS NULL
+  AND v.status = 'ready'
+  AND v.is_current = true
+  AND (d.scope = 'global' OR (d.scope = 'personal' AND d.owner_user_id = ?))
+  AND (` + strings.Join(clauses, " OR ") + `)
+ORDER BY d.id, v.id, c.ordinal, c.id`
+	var rows []knowledgeSearchRow
+	if err := ResolveDB(ctx, r.db).Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("expand knowledge search context: %w", TranslateError(err))
+	}
+	for _, row := range rows {
+		var sectionPath []string
+		if err := json.Unmarshal([]byte(row.SectionPathJSON), &sectionPath); err != nil {
+			return nil, fmt.Errorf("decode knowledge context section path: %w", err)
+		}
+		sectionJSON, err := json.Marshal(sectionPath)
+		if err != nil {
+			return nil, fmt.Errorf("encode knowledge context section path: %w", err)
+		}
+		key := groupKey{documentID: row.DocumentID, versionID: row.DocumentVersionID, section: string(sectionJSON)}
+		builder := builders[key]
+		if builder == nil {
+			continue
+		}
+		if _, isHit := builder.hitSet[row.ChunkID]; isHit {
+			continue
+		}
+		builder.candidates[row.ChunkID] = knowledge.SearchContextChunk{
+			ChunkID: row.ChunkID, Ordinal: row.Ordinal, PageNumber: row.PageNumber,
+			ElementType: row.ElementType, ContentText: row.ContentText, ContentSHA256: row.ContentSHA256,
+		}
+	}
+
+	groups := make([]knowledge.SearchContextGroup, 0, len(order))
+	for _, key := range order {
+		builder := builders[key]
+		candidates := make([]knowledge.SearchContextChunk, 0, len(builder.candidates))
+		for _, candidate := range builder.candidates {
+			candidates = append(candidates, candidate)
+		}
+		sort.SliceStable(candidates, func(left, right int) bool {
+			leftDistance := nearestOrdinalDistance(candidates[left].Ordinal, builder.hitOrdinals)
+			rightDistance := nearestOrdinalDistance(candidates[right].Ordinal, builder.hitOrdinals)
+			if leftDistance != rightDistance {
+				return leftDistance < rightDistance
+			}
+			if candidates[left].Ordinal != candidates[right].Ordinal {
+				return candidates[left].Ordinal < candidates[right].Ordinal
+			}
+			return candidates[left].ChunkID.String() < candidates[right].ChunkID.String()
+		})
+		usedRunes := 0
+		selected := make([]knowledge.SearchContextChunk, 0, len(candidates))
+		for _, candidate := range candidates {
+			candidateRunes := len([]rune(candidate.ContentText))
+			if usedRunes+candidateRunes > maxRunes {
+				builder.truncated = true
+				continue
+			}
+			usedRunes += candidateRunes
+			selected = append(selected, candidate)
+		}
+		if len(selected) == 0 {
+			continue
+		}
+		sort.SliceStable(selected, func(left, right int) bool {
+			if selected[left].Ordinal != selected[right].Ordinal {
+				return selected[left].Ordinal < selected[right].Ordinal
+			}
+			return selected[left].ChunkID.String() < selected[right].ChunkID.String()
+		})
+		builder.group.Chunks = selected
+		builder.group.Truncated = builder.truncated
+		if err := builder.group.Validate(hits); err != nil {
+			return nil, err
+		}
+		groups = append(groups, builder.group)
+	}
+	return groups, nil
+}
+
+func nearestOrdinalDistance(ordinal int, hits []int) int {
+	best := int(^uint(0) >> 1)
+	for _, hit := range hits {
+		distance := ordinal - hit
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < best {
+			best = distance
+		}
+	}
+	return best
 }
 
 func mapKnowledgeSearchRows(rows []knowledgeSearchRow) ([]knowledge.SearchResult, error) {

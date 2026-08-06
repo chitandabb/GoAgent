@@ -151,6 +151,12 @@ maxPageChars = 20000
 maxRounds = 2
 maxResponseBytes = 2097152
 
+[webSearch.redaction]
+maxInputRunes = 1024
+maxOutputRunes = 384
+minOutputRunes = 8
+sensitiveTermsEnv = ""
+
 [minio]
 enabled = true
 endpoint = "127.0.0.1:9000"
@@ -182,6 +188,19 @@ parserMaxVisualAssetBytes = 16777216
 parserMaxTotalVisualBytes = 67108864
 maxVisualEnrichments = 30
 minVisualPixels = 4096
+
+[knowledge.retrieval]
+contextExpansionEnabled = true
+contextWindow = 1
+contextMaxRunes = 1800
+
+[knowledge.retrieval.queryRewrite]
+enabled = false
+promptFile = "config/prompts/query-rewrite.md"
+promptVersion = "query-rewrite-v1"
+timeoutMillis = 10000
+maxSubqueries = 2
+maxOutputRunes = 2048
 
 [knowledge.layout]
 enabled = false

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -310,7 +311,10 @@ func TestToolTraceMiddlewareCapturesKnowledgeChunkEvidence(t *testing.T) {
 	documentVersionID, chunkID := uuid.New(), uuid.New()
 	content := "事务超时需要检查连接池。"
 	snapshot, err := json.Marshal(searchKnowledgeResponse{
-		Query: "事务超时", Results: []searchKnowledgeResult{{
+		Query: "事务超时", QueryPlan: searchKnowledgeQueryPlan{
+			OriginalQuery: "事务超时", LexicalQuery: "事务超时", SemanticQuery: "事务超时",
+			RewriteStatus: knowledge.QueryRewriteDisabled,
+		}, Results: []searchKnowledgeResult{{
 			DocumentID: uuid.NewString(), DocumentVersionID: documentVersionID.String(), ChunkID: chunkID.String(),
 			Title: "生产手册", Scope: knowledge.ScopeGlobal, Ordinal: 2, ElementType: knowledge.ElementText,
 			SectionPath: []string{"网络", "超时"}, ContentText: content, ContentSHA256: knowledge.SHA256Hex(content),
@@ -336,12 +340,15 @@ func TestToolTraceMiddlewareCapturesKnowledgeChunkEvidence(t *testing.T) {
 }
 
 func TestToolTraceMiddlewareDoesNotCiteEmptyOrMalformedKnowledgeSearch(t *testing.T) {
+	content := "内容"
+	contentHash := knowledge.SHA256Hex(content)
 	for _, test := range []struct {
 		name     string
 		snapshot string
 	}{
 		{name: "empty", snapshot: `{"query":"问题","results":[]}`},
 		{name: "missing chunk", snapshot: `{"query":"问题","results":[{"documentId":"00000000-0000-0000-0000-000000000001","documentVersionId":"00000000-0000-0000-0000-000000000002","title":"手册","scope":"global","ordinal":0,"elementType":"text","contentText":"内容","contentSha256":""}]}`},
+		{name: "malformed context hash", snapshot: fmt.Sprintf(`{"query":"问题","results":[{"documentId":"00000000-0000-0000-0000-000000000001","documentVersionId":"00000000-0000-0000-0000-000000000002","chunkId":"00000000-0000-0000-0000-000000000003","title":"手册","scope":"global","ordinal":1,"elementType":"text","sectionPath":["章节"],"contentText":%q,"contentSha256":%q}],"contextExpanded":true,"contextGroups":[{"documentId":"00000000-0000-0000-0000-000000000001","documentVersionId":"00000000-0000-0000-0000-000000000002","sectionPath":["章节"],"hitChunkIds":["00000000-0000-0000-0000-000000000003"],"chunks":[{"chunkId":"00000000-0000-0000-0000-000000000004","ordinal":2,"elementType":"text","contentText":"邻接内容","contentSha256":"bad"}]}]}`, content, contentHash)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			trace := &executionTrace{}

@@ -8,6 +8,7 @@ func TestWebSearchConfigValidate(t *testing.T) {
 		APIKeyEnv: "FIRECRAWL_API_KEY", TimeoutMillis: 30_000,
 		MaxResults: 5, MaxFetchedPages: 3, MaxPageChars: 20_000,
 		MaxRounds: 2, MaxResponseBytes: 2 * 1024 * 1024,
+		Redaction: WebSearchRedactionConfig{MaxInputRunes: 1024, MaxOutputRunes: 384, MinOutputRunes: 8},
 	}
 	tests := []struct {
 		name    string
@@ -22,6 +23,8 @@ func TestWebSearchConfigValidate(t *testing.T) {
 		{name: "reject invalid API key env", mutate: func(c *WebSearchConfig) { c.APIKeyEnv = "secret-value" }, wantErr: true},
 		{name: "reject fetched pages over results", mutate: func(c *WebSearchConfig) { c.MaxFetchedPages = 6 }, wantErr: true},
 		{name: "reject unbounded page size", mutate: func(c *WebSearchConfig) { c.MaxPageChars = 100_001 }, wantErr: true},
+		{name: "reject unbounded public query", mutate: func(c *WebSearchConfig) { c.Redaction.MaxInputRunes = 4097 }, wantErr: true},
+		{name: "reject invalid sensitive terms env", mutate: func(c *WebSearchConfig) { c.Redaction.SensitiveTermsEnv = "private terms" }, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -32,6 +35,17 @@ func TestWebSearchConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestWebSearchRedactionSensitiveTermsReadsConfiguredEnvironment(t *testing.T) {
+	t.Setenv("MESGUARD_WEB_TERMS_TEST", "Company A,Private Product\nCustomer Group")
+	values, err := (WebSearchRedactionConfig{SensitiveTermsEnv: "MESGUARD_WEB_TERMS_TEST"}).SensitiveTerms()
+	if err != nil {
+		t.Fatalf("SensitiveTerms() error = %v", err)
+	}
+	if len(values) != 3 || values[0] != "Company A" || values[2] != "Customer Group" {
+		t.Fatalf("SensitiveTerms() = %v", values)
 	}
 }
 

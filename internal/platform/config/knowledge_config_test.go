@@ -12,6 +12,13 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		ParserMaxSpreadsheetColumns: 512, ParserMaxVisualAssets: 256,
 		ParserMaxVisualAssetBytes: 16 * 1024 * 1024, ParserMaxTotalVisualBytes: 64 * 1024 * 1024,
 		MaxVisualEnrichments: 30, MinVisualPixels: 4096,
+		Retrieval: KnowledgeRetrievalConfig{
+			ContextExpansionEnabled: true, ContextWindow: 1, ContextMaxRunes: 1800,
+			QueryRewrite: KnowledgeQueryRewriteConfig{
+				Enabled: true, PromptFile: "config/prompts/query-rewrite.md", PromptVersion: "query-rewrite-v1",
+				TimeoutMillis: 10000, MaxSubqueries: 2, MaxOutputRunes: 2048,
+			},
+		},
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate valid config: %v", err)
@@ -42,6 +49,10 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		{name: "total visual bytes below one asset", mutate: func(c *KnowledgeConfig) { c.ParserMaxTotalVisualBytes = c.ParserMaxVisualAssetBytes - 1 }},
 		{name: "zero visual enrichments", mutate: func(c *KnowledgeConfig) { c.MaxVisualEnrichments = 0 }},
 		{name: "zero visual pixels", mutate: func(c *KnowledgeConfig) { c.MinVisualPixels = 0 }},
+		{name: "zero context window", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextWindow = 0 }},
+		{name: "context budget too small", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextMaxRunes = 127 }},
+		{name: "query rewrite timeout too small", mutate: func(c *KnowledgeConfig) { c.Retrieval.QueryRewrite.TimeoutMillis = 999 }},
+		{name: "query rewrite too many subqueries", mutate: func(c *KnowledgeConfig) { c.Retrieval.QueryRewrite.MaxSubqueries = 3 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,5 +62,20 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 				t.Fatal("Validate accepted invalid config")
 			}
 		})
+	}
+}
+
+func TestKnowledgeQueryRewriteConfigLoadsPrompt(t *testing.T) {
+	path := writePromptFileForTest(t, t.TempDir(), "query-rewrite.md", " strict query rewrite prompt \n")
+	cfg := KnowledgeQueryRewriteConfig{
+		Enabled: true, PromptFile: path, PromptVersion: "query-rewrite-v1",
+		TimeoutMillis: 10000, MaxSubqueries: 2, MaxOutputRunes: 2048,
+	}
+	prompt, err := cfg.LoadPrompt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt != "strict query rewrite prompt" {
+		t.Fatalf("prompt = %q", prompt)
 	}
 }

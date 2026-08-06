@@ -315,6 +315,56 @@ GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
 If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
 `code-investigation` is removed from the compiled Graph.
 
+Public Web Search remains disabled by default. `[webSearch.redaction]` configures the
+public-query input/output rune budgets. To add company or internal product names to
+the deterministic dictionary, set `sensitiveTermsEnv` to an environment-variable
+name and store comma/newline-separated terms in that variable; do not write the
+terms themselves into TOML. Current ticket identifiers are added dynamically.
+Credentials, connection strings, raw SQL/log/stack/JSON content, and over-redacted
+queries are rejected rather than sent. The Firecrawl client and Tool are not wired
+yet, so enabling the config at this checkpoint does not perform a public request.
+
+`[knowledge.retrieval]` controls small-to-big context expansion. With
+`contextExpansionEnabled=true`, retrieval and optional Rerank still operate on child
+chunks; only final hits receive neighboring chunks from the same document version and
+section. `contextWindow` is limited to 1-3 and `contextMaxRunes` to 128-8000. These are
+server budgets, not Tool arguments. Expansion failure is reported as a degraded
+`context` channel and does not discard the original hits.
+
+`[knowledge.retrieval.queryRewrite]` controls the optional LLM Query Plan. It is disabled
+by default. When enabled, the service loads `promptFile`, records `promptVersion`, applies
+a 1-30 second internal timeout, accepts at most two subqueries, and bounds JSON output by
+`maxOutputRunes`. The original query remains available to retrieval; deterministic policy
+rejects rewrites that change protected error codes, versions, numbers, time constraints or
+explicit negation. Provider failure, malformed JSON, policy rejection, or the rewriter's own
+timeout falls back to the original query and marks only `query_rewrite` degraded. A canceled
+caller context still stops the whole search. Prompt edits require a version increment.
+
+The real-provider test below performs one billable chat-model request and forces Query Rewrite
+on for the test even though production configuration remains disabled:
+
+```powershell
+go test -tags=integration ./internal/platform/queryrewrite `
+  -run TestStepFunQueryRewritePreservesProtectedSignals -count=1
+```
+
+It verifies the strict JSON/protected-signal contract, not Recall, ranking quality, latency SLA,
+or cost reduction. See `docs/evaluations/query-rewrite-v1.md` for the current smoke observations.
+
+Model configuration is not currently a universal hot-plug layer. `[models.chat]` accepts only
+`stepfun`; Judge, Embedding, Rerank, OCR and Vision accept only their registered DashScope path.
+The domain interfaces are replaceable, but adding another provider still requires a Bootstrap
+adapter and contract tests. In particular, do not point the current Chat config at DeepSeek and
+assume `reasoningEffort` has the same meaning. Provider adapters must explicitly map or omit
+reasoning controls and verify Tool Calling plus structured output.
+
+Token accounting consumes provider Usage normalized by Eino. Prompt, completion and total values
+are portable only when the provider returns them. Cached and reasoning values may remain zero when
+the provider omits those details; zero is not yet an availability indicator. Embedding model changes
+also require a new persisted profile and reindex rather than an in-place configuration swap. The
+full role matrix and acceptance boundary are documented in
+`docs/design/rag-ingestion-and-retrieval.md` under "模型 Provider 可替换性边界".
+
 After configuring the StepFun key, run the provider smoke test once:
 
 ```powershell
