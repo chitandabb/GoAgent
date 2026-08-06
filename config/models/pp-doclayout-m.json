@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "name": "PP-DocLayout-M",
+  "provider": "PaddlePaddle",
+  "license": "Apache-2.0",
+  "source": {
+    "repository": "PaddlePaddle/PP-DocLayout-M",
+    "revision": "7dbfcce3154a55776dc71ca026a4a2a8388dad8d",
+    "baseUrl": "https://huggingface.co/PaddlePaddle/PP-DocLayout-M/resolve/7dbfcce3154a55776dc71ca026a4a2a8388dad8d",
+    "files": [
+      {
+        "name": "config.json",
+        "bytes": 4715,
+        "sha256": "9df54fc342938f75aede57997c751e9868c7ce502a42eba9716dbfdcec6abfa9"
+      },
+      {
+        "name": "inference.json",
+        "bytes": 390085,
+        "sha256": "5b2ec6d403904d40b21ba261ad6d1a41e12e3fab256d075c1c7362d4742a8fb7"
+      },
+      {
+        "name": "inference.pdiparams",
+        "bytes": 23370814,
+        "sha256": "f374bb0269d91ab2eed393a5a2da6d73d98896ac5eeae4f9f585eba19bcbba74"
+      },
+      {
+        "name": "inference.yml",
+        "bytes": 1579,
+        "sha256": "76aeb103310f432ea773d4a6d187e15b26d92c051c5e2875598e1d49f725d70d"
+      },
+      {
+        "name": "README.md",
+        "bytes": 7365,
+        "sha256": "d5a6854aac16fe4b9598419aa760511566657fea12b44695761c391ace9a0221"
+      }
+    ]
+  },
+  "conversion": {
+    "python": "3.12",
+    "paddle2onnx": "2.1.0",
+    "paddlepaddle": "3.4.0.dev20260407",
+    "onnx": "1.17.0",
+    "opset": 17,
+    "autoUpdateOpset": false,
+    "checker": true,
+    "outputFile": "pp-doclayout-m.onnx",
+    "bytes": 23499360,
+    "sha256": "b237c7e4aef235de8f45778ff2dd96dc21480cade40f01435f640b0ff68ee010"
+  },
+  "preprocess": {
+    "version": "pp-doclayout-pre-v1",
+    "inputWidth": 640,
+    "inputHeight": 640,
+    "keepAspectRatio": false,
+    "colorOrder": "RGB",
+    "tensorLayout": "NCHW",
+    "scale": 0.00392156862745098,
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225]
+  },
+  "postprocess": {
+    "version": "pp-doclayout-post-v1",
+    "scoreThreshold": 0.3,
+    "nmsThreshold": 0.5,
+    "nmsTopK": 1000,
+    "keepTopK": 100
+  },
+  "labels": [
+    "paragraph_title",
+    "image",
+    "text",
+    "number",
+    "abstract",
+    "content",
+    "figure_title",
+    "formula",
+    "table",
+    "table_title",
+    "reference",
+    "doc_title",
+    "footnote",
+    "header",
+    "algorithm",
+    "footer",
+    "seal",
+    "chart_title",
+    "chart",
+    "formula_number",
+    "header_image",
+    "footer_image",
+    "aside_text"
+  ],
+  "domainMapping": {
+    "text": [
+      "paragraph_title",
+      "text",
+      "number",
+      "abstract",
+      "content",
+      "reference",
+      "doc_title",
+      "footnote",
+      "header",
+      "algorithm",
+      "footer",
+      "aside_text"
+    ],
+    "caption": ["figure_title", "table_title", "chart_title"],
+    "table": ["table"],
+    "picture": ["image", "seal", "chart"],
+    "formula": ["formula", "formula_number"],
+    "decorative": ["header_image", "footer_image"]
+  }
+}

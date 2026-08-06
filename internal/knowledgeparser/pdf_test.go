@@ -29,6 +29,11 @@ func TestPDFParserExtractsEmbeddedTextPerPage(t *testing.T) {
 		!strings.Contains(result.Elements[0].ContentText, "Connection pool timeout") {
 		t.Fatalf("result = %+v", result)
 	}
+	if len(result.Pages) != 1 || result.Pages[0].NativeTextRunes == 0 ||
+		result.Pages[0].NonWhitespaceRunes == 0 || result.Pages[0].PrintableRatio != 1 ||
+		!result.Pages[0].ExtractionComplete || result.Pages[0].VisualCandidatesKnown {
+		t.Fatalf("page observations = %+v", result.Pages)
+	}
 }
 
 func TestPDFParserRejectsPageCountAboveLimit(t *testing.T) {
@@ -54,6 +59,25 @@ func TestPDFParserRejectsExtractedTextAboveLimit(t *testing.T) {
 	})
 	if !errors.Is(err, ErrResourceLimit) {
 		t.Fatalf("Parse error = %v", err)
+	}
+}
+
+func TestPDFParserRoutesPageWithoutEmbeddedTextToVisualEnrichment(t *testing.T) {
+	parser, _ := NewPDFParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: "application/pdf", OriginalName: "scan.pdf", Content: buildTestPDF(""),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.Elements) != 0 || len(result.VisualAssets) != 1 ||
+		result.VisualAssets[0].Kind != VisualAssetDocumentPage ||
+		result.VisualAssets[0].PageNumber == nil || *result.VisualAssets[0].PageNumber != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Pages) != 1 || result.Pages[0].NativeTextRunes != 0 ||
+		result.Pages[0].VisualCandidatesKnown {
+		t.Fatalf("page observations = %+v", result.Pages)
 	}
 }
 

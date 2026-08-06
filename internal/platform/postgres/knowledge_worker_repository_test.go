@@ -16,7 +16,7 @@ func TestDocumentVersionStatusForStage(t *testing.T) {
 		{name: "parsing", stage: knowledge.IngestionStageParsing, want: "parsing"},
 		{name: "chunking", stage: knowledge.IngestionStageChunking, want: "chunking"},
 		{name: "indexing", stage: knowledge.IngestionStageIndexing, want: "indexing"},
-		{name: "publishing projects to indexing", stage: knowledge.IngestionStagePublishing, want: "indexing"},
+		{name: "publishing remains visible", stage: knowledge.IngestionStagePublishing, want: "publishing"},
 		{name: "uploaded defaults to processing", stage: knowledge.IngestionStageUploaded, want: "processing"},
 	}
 

@@ -73,3 +73,17 @@ func TestNewTaskScopeRejectsInvalidBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestNewTaskScopeAllowsKnowledgeForDiagnosis(t *testing.T) {
+	scope, err := NewTaskScope(TaskScopeConfig{
+		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
+		DataSources:         []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
+		AllowedCapabilities: []ToolCapability{ToolCapabilityCase, ToolCapabilityKnowledge},
+	})
+	if err != nil {
+		t.Fatalf("NewTaskScope rejected backend-managed knowledge capability: %v", err)
+	}
+	if !scope.CapabilityAllowed(ToolCapabilityKnowledge) {
+		t.Fatal("diagnosis scope does not retain knowledge capability")
+	}
+}

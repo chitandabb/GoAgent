@@ -50,6 +50,13 @@ func TestToolCatalogFiltersByScope(t *testing.T) {
 			want: []string{testToolReadCase},
 		},
 		{
+			name: "diagnosis receives knowledge when dependency is healthy",
+			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
+				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
+			}}, ToolDependencyExternalCase, ToolDependencyKnowledge),
+			want: []string{testToolKnowledge, testToolReadCase},
+		},
+		{
 			name: "production admin cannot receive lab tool",
 			scope: mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
 				ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
@@ -98,7 +105,7 @@ func TestToolCatalogEvaluationBaselineUsesRoleAndTaskToolSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluationBaselineToolsFor: %v", err)
 	}
-	want := []string{testToolGitHub, testToolReadCase, testToolReadSQL}
+	want := []string{testToolGitHub, testToolKnowledge, testToolReadCase, testToolReadSQL}
 	if got := toolNamesForTest(t, tools); !slices.Equal(got, want) {
 		t.Fatalf("baseline tool names = %v, want %v", got, want)
 	}
@@ -230,7 +237,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 		},
 		{
 			Tool:         newNamedToolForTest(t, testToolKnowledge),
-			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeKnowledge},
+			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
 		},
@@ -261,7 +268,7 @@ func mustTaskScope(
 	dependencies ...ToolDependency,
 ) TaskScope {
 	t.Helper()
-	capabilities := []ToolCapability{ToolCapabilityCase}
+	capabilities := []ToolCapability{ToolCapabilityCase, ToolCapabilityKnowledge}
 	if taskType == TaskTypeKnowledge {
 		capabilities = []ToolCapability{ToolCapabilityKnowledge}
 	} else {

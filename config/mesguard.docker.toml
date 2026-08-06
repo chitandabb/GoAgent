@@ -42,6 +42,54 @@ promptVersion = "rag-judge-v1"
 timeoutMillis = 120000
 maxOutputTokens = 2048
 
+[models.embedding]
+enabled = true
+profileKey = "knowledge-v1"
+provider = "dashscope"
+endpoint = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "text-embedding-v4"
+dimensions = 1024
+distanceMetric = "cosine"
+queryInputType = "query"
+documentInputType = "document"
+normalize = true
+configVersion = "embedding-v1"
+batchSize = 10
+maxConcurrent = 2
+timeoutMillis = 30000
+
+[models.rerank]
+enabled = false
+provider = "dashscope"
+endpoint = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3-rerank"
+maxCandidates = 30
+timeoutMillis = 30000
+
+[models.ocr]
+enabled = true
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen-vl-ocr-latest"
+promptFile = "/app/config/prompts/ocr-extraction.md"
+promptVersion = "ocr-extraction-v1"
+timeoutMillis = 120000
+maxOutputTokens = 2048
+
+[models.vision]
+enabled = true
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3-vl-plus"
+promptFile = "/app/config/prompts/visual-description.md"
+promptVersion = "visual-description-v2"
+timeoutMillis = 120000
+maxOutputTokens = 2048
+
 [log]
 level = "info"
 format = "json"
@@ -129,6 +177,45 @@ parserMaxXMLBytes = 33554432
 parserMaxExtractedRunes = 2000000
 parserMaxSpreadsheetRows = 10000
 parserMaxSpreadsheetColumns = 512
+parserMaxVisualAssets = 256
+parserMaxVisualAssetBytes = 16777216
+parserMaxTotalVisualBytes = 67108864
+maxVisualEnrichments = 30
+minVisualPixels = 4096
+
+[knowledge.layout]
+enabled = false
+provider = "onnxruntime"
+modelName = "PP-DocLayout-M"
+modelVersion = "7dbfcce3154a55776dc71ca026a4a2a8388dad8d"
+modelPath = "/app/models/pp-doclayout-m.onnx"
+modelSHA256 = "b237c7e4aef235de8f45778ff2dd96dc21480cade40f01435f640b0ff68ee010"
+manifestPath = "/app/config/models/pp-doclayout-m.json"
+runtimeLibraryPath = "/app/runtime/libonnxruntime.so"
+preprocessVersion = "pp-doclayout-pre-v1"
+postprocessVersion = "pp-doclayout-post-v1"
+inputWidth = 640
+inputHeight = 640
+intraOpThreads = 2
+interOpThreads = 1
+inferenceTimeoutMillis = 5000
+maxConcurrentPages = 1
+renderDPI = 144
+rendererProvider = "pdfium-wasm"
+rendererVersion = "go-pdfium-v1.19.6"
+rendererAcquireMillis = 5000
+rendererTimeoutMillis = 30000
+minNativeTextRunes = 64
+minNativePrintableRatio = 0.85
+minRegionConfidence = 0.65
+suppressDecorativePictureDuplicates = true
+decorativePictureMinIoU = 0.85
+decorativePictureMaxAreaRatio = 0.02
+decorativePictureMinConfidenceMargin = 0.15
+regionPaddingRatio = 0.01
+maxRegions = 256
+maxRasterPixels = 20000000
+maxRasterBytes = 16777216
 
 [sqlserver]
 enabled = true

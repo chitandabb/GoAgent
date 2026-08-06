@@ -9,7 +9,9 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		ParserMaxDocumentUnits: 500, ParserMaxArchiveEntries: 4096,
 		ParserMaxExpandedBytes: 256 * 1024 * 1024, ParserMaxXMLBytes: 32 * 1024 * 1024,
 		ParserMaxExtractedRunes: 2_000_000, ParserMaxSpreadsheetRows: 10_000,
-		ParserMaxSpreadsheetColumns: 512,
+		ParserMaxSpreadsheetColumns: 512, ParserMaxVisualAssets: 256,
+		ParserMaxVisualAssetBytes: 16 * 1024 * 1024, ParserMaxTotalVisualBytes: 64 * 1024 * 1024,
+		MaxVisualEnrichments: 30, MinVisualPixels: 4096,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate valid config: %v", err)
@@ -35,6 +37,11 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		{name: "extracted runes too small", mutate: func(c *KnowledgeConfig) { c.ParserMaxExtractedRunes = 999 }},
 		{name: "zero spreadsheet rows", mutate: func(c *KnowledgeConfig) { c.ParserMaxSpreadsheetRows = 0 }},
 		{name: "too many spreadsheet columns", mutate: func(c *KnowledgeConfig) { c.ParserMaxSpreadsheetColumns = 16385 }},
+		{name: "zero visual assets", mutate: func(c *KnowledgeConfig) { c.ParserMaxVisualAssets = 0 }},
+		{name: "visual asset exceeds expanded bytes", mutate: func(c *KnowledgeConfig) { c.ParserMaxVisualAssetBytes = c.ParserMaxExpandedBytes + 1 }},
+		{name: "total visual bytes below one asset", mutate: func(c *KnowledgeConfig) { c.ParserMaxTotalVisualBytes = c.ParserMaxVisualAssetBytes - 1 }},
+		{name: "zero visual enrichments", mutate: func(c *KnowledgeConfig) { c.MaxVisualEnrichments = 0 }},
+		{name: "zero visual pixels", mutate: func(c *KnowledgeConfig) { c.MinVisualPixels = 0 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

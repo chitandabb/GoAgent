@@ -71,7 +71,7 @@ func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testi
 		t.Fatalf("decode persisted request scope: %v", err)
 	}
 	capabilities, err := TaskCapabilitiesFromRequestScope(persistedScope)
-	if err != nil || len(capabilities) != 1 || capabilities[0] != TaskCapabilityCase {
+	if err != nil || len(capabilities) != 2 || capabilities[0] != TaskCapabilityCase || capabilities[1] != TaskCapabilityKnowledge {
 		t.Fatalf("default capabilities = %v, err=%v", capabilities, err)
 	}
 }
@@ -83,29 +83,30 @@ func TestNormalizeTaskRequestScopeValidatesCapabilitiesAndSkill(t *testing.T) {
 		want    []TaskCapability
 		wantErr bool
 	}{
-		{name: "defaults to case", scope: nil, want: []TaskCapability{TaskCapabilityCase}},
+		{name: "defaults to case and backend knowledge", scope: nil, want: []TaskCapability{TaskCapabilityCase, TaskCapabilityKnowledge}},
 		{
 			name:  "legacy code skill infers capability",
 			scope: map[string]any{RequestScopeKeyRequestedSkill: RequestedSkillCodeInvestigation},
-			want:  []TaskCapability{TaskCapabilityCase, TaskCapabilityCode},
+			want:  []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilityKnowledge},
 		},
 		{
 			name: "sql investigation", scope: map[string]any{
 				RequestScopeKeyRequestedSkill:      RequestedSkillSQLInvestigation,
 				RequestScopeKeyAllowedCapabilities: []string{"sql", "case"},
 			},
-			want: []TaskCapability{TaskCapabilityCase, TaskCapabilitySQL},
+			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityKnowledge, TaskCapabilitySQL},
 		},
 		{
 			name: "broad ticket diagnosis", scope: map[string]any{
 				RequestScopeKeyRequestedSkill:      RequestedSkillTicketDiagnosis,
 				RequestScopeKeyAllowedCapabilities: []string{"sql", "code", "case"},
 			},
-			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilitySQL},
+			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilityKnowledge, TaskCapabilitySQL},
 		},
 		{name: "missing case", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"sql"}}, wantErr: true},
 		{name: "duplicate", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "case"}}, wantErr: true},
 		{name: "unknown", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "shell"}}, wantErr: true},
+		{name: "knowledge is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "knowledge"}}, wantErr: true},
 		{
 			name: "code skill without capability", scope: map[string]any{
 				RequestScopeKeyRequestedSkill:      RequestedSkillCodeInvestigation,

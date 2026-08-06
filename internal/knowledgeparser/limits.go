@@ -18,6 +18,9 @@ type Limits struct {
 	MaxExtractedRunes     int
 	MaxSpreadsheetRows    int
 	MaxSpreadsheetColumns int
+	MaxVisualAssets       int
+	MaxVisualAssetBytes   int64
+	MaxTotalVisualBytes   int64
 }
 
 func (l Limits) Validate() error {
@@ -27,7 +30,10 @@ func (l Limits) Validate() error {
 		l.MaxXMLBytes < 64*1024 || l.MaxXMLBytes > l.MaxExpandedBytes ||
 		l.MaxExtractedRunes < 1000 || l.MaxExtractedRunes > 10_000_000 ||
 		l.MaxSpreadsheetRows < 1 || l.MaxSpreadsheetRows > 1_000_000 ||
-		l.MaxSpreadsheetColumns < 1 || l.MaxSpreadsheetColumns > 16384 {
+		l.MaxSpreadsheetColumns < 1 || l.MaxSpreadsheetColumns > 16384 ||
+		l.MaxVisualAssets < 1 || l.MaxVisualAssets > 10_000 ||
+		l.MaxVisualAssetBytes < 1024 || l.MaxVisualAssetBytes > l.MaxExpandedBytes ||
+		l.MaxTotalVisualBytes < l.MaxVisualAssetBytes || l.MaxTotalVisualBytes > l.MaxExpandedBytes {
 		return errors.New("knowledge parser limits are invalid")
 	}
 	return nil

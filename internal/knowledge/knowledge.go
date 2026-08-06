@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -311,13 +312,61 @@ type SearchResult struct {
 	ElementType       ElementType
 	SectionPath       []string
 	ContentText       string
+	ContentSHA256     string
 	Score             float64
+	FTSRank           int
+	VectorRank        int
+	FusedScore        float64
+}
+
+// Validate checks the identity and content fields required for a result to be
+// used as a retrievable knowledge citation.
+func (r SearchResult) Validate() error {
+	if r.DocumentID == uuid.Nil || r.DocumentVersionID == uuid.Nil || r.ChunkID == uuid.Nil {
+		return errors.New("knowledge search result identity is required")
+	}
+	if strings.TrimSpace(r.Title) == "" || r.Title != strings.TrimSpace(r.Title) {
+		return errors.New("knowledge search result title is invalid")
+	}
+	switch r.Scope {
+	case ScopeGlobal, ScopePersonal:
+	default:
+		return errors.New("knowledge search result scope is invalid")
+	}
+	if r.Ordinal < 0 {
+		return errors.New("knowledge search result ordinal must not be negative")
+	}
+	if r.PageNumber != nil && *r.PageNumber < 1 {
+		return errors.New("knowledge search result page number must be positive")
+	}
+	switch r.ElementType {
+	case ElementText, ElementTable, ElementOCRText, ElementImageDescription:
+	default:
+		return errors.New("knowledge search result element type is invalid")
+	}
+	if strings.TrimSpace(r.ContentText) == "" || r.ContentText != strings.TrimSpace(r.ContentText) {
+		return errors.New("knowledge search result content is invalid")
+	}
+	if !validSHA256Hex(r.ContentSHA256) || r.ContentSHA256 != SHA256Hex(r.ContentText) {
+		return errors.New("knowledge search result content hash is invalid")
+	}
+	for _, value := range r.SectionPath {
+		if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+			return errors.New("knowledge search result section path is invalid")
+		}
+	}
+	if math.IsNaN(r.Score) || math.IsInf(r.Score, 0) ||
+		math.IsNaN(r.FusedScore) || math.IsInf(r.FusedScore, 0) || r.FTSRank < 0 || r.VectorRank < 0 {
+		return errors.New("knowledge search result ranking is invalid")
+	}
+	return nil
 }
 
 type Repository interface {
 	CreateDocument(context.Context, CreateDocumentInput) (Document, error)
 	PublishVersion(context.Context, PublishVersionInput) (DocumentVersion, error)
 	SearchFTS(context.Context, uuid.UUID, string, int) ([]SearchResult, error)
+	SearchVector(context.Context, uuid.UUID, uuid.UUID, []float32, int) ([]SearchResult, error)
 }
 
 type IngestionRepository interface {

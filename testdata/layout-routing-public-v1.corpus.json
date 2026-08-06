@@ -1,0 +1,103 @@
+{
+  "datasetVersion": "layout-routing-public-v1",
+  "documents": [
+    {
+      "documentId": "nist-ir-8107",
+      "title": "Current Standards Landscape for Smart Manufacturing Systems",
+      "publisher": "National Institute of Standards and Technology",
+      "sourceUrl": "https://www.nist.gov/publications/current-standards-landscape-smart-manufacturing-systems",
+      "downloadUrl": "https://nvlpubs.nist.gov/nistpubs/ir/2016/nist.ir.8107.pdf",
+      "usageBasis": "Official public NIST download retained only as a local evaluation copy. Do not redistribute bundled third-party material without a separate rights review.",
+      "fileName": "nist-ir-8107-smart-manufacturing-standards.pdf",
+      "mediaType": "application/pdf",
+      "sizeBytes": 2517634,
+      "sha256": "54a760fa71e1de52b7c5c50456b8eccbf508203459a7c747ec5cc2b2d965a569",
+      "pageCount": 39,
+      "coverage": ["native-text", "dense-table", "manufacturing-diagram", "mixed-page"]
+    },
+    {
+      "documentId": "nist-ir-8108",
+      "title": "Performance Challenges Identification Method for Smart Manufacturing Systems",
+      "publisher": "National Institute of Standards and Technology",
+      "sourceUrl": "https://www.nist.gov/publications/performance-challenges-identification-method-smart-manufacturing-systems",
+      "downloadUrl": "https://nvlpubs.nist.gov/nistpubs/ir/2016/NIST.IR.8108.pdf",
+      "usageBasis": "Official public NIST download retained only as a local evaluation copy. Do not redistribute bundled third-party material without a separate rights review.",
+      "fileName": "nist-ir-8108-performance-challenges.pdf",
+      "mediaType": "application/pdf",
+      "sizeBytes": 1872790,
+      "sha256": "37d8bc4381bbc56ad1d5e3322d7ad810d760f120c59ba233f07413dfec899289",
+      "pageCount": 27,
+      "coverage": ["native-text", "manufacturing-process", "table", "mixed-page"]
+    },
+    {
+      "documentId": "nist-sp-800-82r2",
+      "title": "Guide to Industrial Control Systems Security, Revision 2",
+      "publisher": "National Institute of Standards and Technology",
+      "sourceUrl": "https://csrc.nist.gov/pubs/sp/800/82/r2/final",
+      "downloadUrl": "https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-82r2.pdf",
+      "usageBasis": "Official public NIST download retained only as a local evaluation copy. Do not redistribute bundled third-party material without a separate rights review.",
+      "fileName": "nist-sp-800-82r2-ics-security.pdf",
+      "mediaType": "application/pdf",
+      "sizeBytes": 4278961,
+      "sha256": "271b26039c16651f8737e23faf158400d366e8fa08adf2f15558f0bdad82fb8b",
+      "pageCount": 248,
+      "coverage": ["native-text", "industrial-control", "network-diagram", "dense-table", "mixed-page"]
+    },
+    {
+      "documentId": "nasa-20180003506",
+      "title": "An Overview of NASA's In-Space Manufacturing Project",
+      "publisher": "NASA Technical Reports Server",
+      "sourceUrl": "https://ntrs.nasa.gov/citations/20180003506",
+      "downloadUrl": "https://ntrs.nasa.gov/api/citations/20180003506/downloads/20180003506.pdf?attachment=true",
+      "usageBasis": "NASA metadata marks this public record PUBLIC_USE_PERMITTED. The file is retained only as a local evaluation copy.",
+      "fileName": "nasa-in-space-manufacturing-overview.pdf",
+      "mediaType": "application/pdf",
+      "sizeBytes": 2416949,
+      "sha256": "e9bccab76aebaa251a4a99df7fa03019a2a694ded187bdb296b94ba60b5cfad7",
+      "pageCount": 27,
+      "coverage": ["presentation-pdf", "equipment-photo", "process-diagram", "mixed-page"]
+    },
+    {
+      "documentId": "uspto-us4575330",
+      "title": "Apparatus for Production of Three-Dimensional Objects by Stereolithography",
+      "publisher": "United States Patent and Trademark Office",
+      "sourceUrl": "https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/4575330",
+      "downloadUrl": "https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/4575330",
+      "usageBasis": "Official public patent record retained only as a local evaluation copy. Patent text and drawings are used as a real scanned-document routing fixture.",
+      "fileName": "uspto-us4575330-stereolithography.pdf",
+      "mediaType": "application/pdf",
+      "sizeBytes": 1260586,
+      "sha256": "c9620c75f2867a38d7a7a8107ed7f4f87109add748e4e6f5b9ea3e0dfee57ef5",
+      "pageCount": 16,
+      "coverage": ["scanned-page", "scanned-text", "engineering-drawing", "two-column-text"]
+    },
+    {
+      "documentId": "microsoft-analysis-services-guide",
+      "title": "Analysis Services MOLAP Performance Guide for SQL Server 2012 and 2014",
+      "publisher": "Microsoft Download Center",
+      "sourceUrl": "https://download.microsoft.com/download/d/2/0/d20e1c5f-72ea-4505-9f26-fef9550efd44/analysis%20services%20molap%20performance%20guide%20for%20sql%20server%202012%20and%202014.docx",
+      "downloadUrl": "https://download.microsoft.com/download/d/2/0/d20e1c5f-72ea-4505-9f26-fef9550efd44/analysis%20services%20molap%20performance%20guide%20for%20sql%20server%202012%20and%202014.docx",
+      "usageBasis": "Official public Microsoft download retained only as a local parser evaluation copy; the corpus manifest does not grant redistribution rights.",
+      "fileName": "microsoft-analysis-services-performance-guide.docx",
+      "mediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "sizeBytes": 1597246,
+      "sha256": "cc44def4ad59d8b4ab2b971e5134f6265d6caf72db693e64399f1a377c2c8bd9",
+      "embeddedMediaCount": 44,
+      "coverage": ["docx", "database-operations", "embedded-screenshot", "embedded-diagram"]
+    },
+    {
+      "documentId": "microsoft-ssis-guide",
+      "title": "SSIS Operational and Tuning Guide",
+      "publisher": "Microsoft Download Center",
+      "sourceUrl": "https://download.microsoft.com/download/d/2/0/d20e1c5f-72ea-4505-9f26-fef9550efd44/ssis%20operational%20and%20tuning%20guide.docx",
+      "downloadUrl": "https://download.microsoft.com/download/d/2/0/d20e1c5f-72ea-4505-9f26-fef9550efd44/ssis%20operational%20and%20tuning%20guide.docx",
+      "usageBasis": "Official public Microsoft download retained only as a local parser evaluation copy; the corpus manifest does not grant redistribution rights.",
+      "fileName": "microsoft-ssis-operational-tuning-guide.docx",
+      "mediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "sizeBytes": 1744050,
+      "sha256": "9ede95af481fdb180552517157257b967b0e4118dbe92def232f387926b3c2da",
+      "embeddedMediaCount": 35,
+      "coverage": ["docx", "database-operations", "embedded-screenshot", "embedded-diagram"]
+    }
+  ]
+}

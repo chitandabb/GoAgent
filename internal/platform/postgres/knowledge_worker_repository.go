@@ -13,6 +13,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/google/uuid"
+	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 )
 
@@ -23,6 +24,71 @@ func NewKnowledgeWorkerRepository(db *gorm.DB) *KnowledgeWorkerRepository {
 }
 
 var _ knowledgeworker.Repository = (*KnowledgeWorkerRepository)(nil)
+
+func (r *KnowledgeWorkerRepository) EnsureEmbeddingProfile(
+	ctx context.Context,
+	profile knowledge.EmbeddingProfile,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("knowledge worker repository is unavailable")
+	}
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext('mesguard_knowledge_embedding_profile'))").Error; err != nil {
+			return err
+		}
+		var active struct {
+			ID          uuid.UUID
+			Fingerprint string
+		}
+		query := tx.Raw(`
+SELECT id, fingerprint
+FROM knowledge_embedding_profiles
+WHERE status = 'active'
+FOR UPDATE`).Scan(&active)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 1 {
+			if active.ID == profile.ID && active.Fingerprint == profile.Fingerprint {
+				return nil
+			}
+			return errors.New("a different embedding profile is active; stage and backfill it before switching")
+		}
+
+		var existingStatus string
+		existing := tx.Raw(
+			"SELECT status FROM knowledge_embedding_profiles WHERE id = ? AND fingerprint = ? FOR UPDATE",
+			profile.ID, profile.Fingerprint,
+		).Scan(&existingStatus)
+		if existing.Error != nil {
+			return existing.Error
+		}
+		if existing.RowsAffected == 1 {
+			return tx.Exec(`
+UPDATE knowledge_embedding_profiles
+SET status = 'active', activated_at = ?
+WHERE id = ? AND fingerprint = ?`, now, profile.ID, profile.Fingerprint).Error
+		}
+		return tx.Exec(`
+INSERT INTO knowledge_embedding_profiles
+    (id, profile_key, provider, model, dimensions, distance_metric,
+     query_input_type, document_input_type, normalized, config_version,
+     fingerprint, status, activated_at, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+			profile.ID, profile.Key, profile.Provider, profile.Model, profile.Dimensions,
+			profile.DistanceMetric, profile.QueryInputType, profile.DocumentInputType,
+			profile.Normalize, profile.ConfigVersion, profile.Fingerprint, now, now,
+		).Error
+	})
+	if err != nil {
+		return fmt.Errorf("ensure active knowledge embedding profile: %w", TranslateError(err))
+	}
+	return nil
+}
 
 func (r *KnowledgeWorkerRepository) Claim(
 	ctx context.Context,
@@ -114,10 +180,12 @@ WHERE id = ? AND document_version_id = ? AND status = ? AND attempt_count = ?`,
 		if updated.RowsAffected != 1 {
 			return knowledgeworker.ErrLeaseLost
 		}
+		// A reclaimed task may still have its version in publishing after a
+		// process interruption, before Complete commits the final publication.
 		if err := tx.Exec(`
 UPDATE knowledge_document_versions
 SET status = 'processing'
-WHERE id = ? AND status IN ('queued', 'processing', 'scanning', 'parsing', 'chunking', 'indexing')`,
+WHERE id = ? AND status IN ('queued', 'processing', 'scanning', 'parsing', 'chunking', 'indexing', 'publishing')`,
 			documentVersionID).Error; err != nil {
 			return TranslateError(err)
 		}
@@ -329,6 +397,7 @@ func (r *KnowledgeWorkerRepository) SaveParsedResult(
 			return TranslateError(err)
 		}
 		for ordinal, chunk := range result.Chunks {
+			chunkID := uuid.New()
 			sectionPath, err := json.Marshal(chunk.SectionPath)
 			if err != nil {
 				return err
@@ -345,11 +414,23 @@ INSERT INTO knowledge_chunks
     (id, document_version_id, ordinal, page_number, element_index, element_type,
      section_path, content_text, search_text, content_sha256, metadata)
 VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)`,
-				uuid.New(), lease.DocumentVersionID, ordinal, chunk.PageNumber, chunk.ElementIndex,
+				chunkID, lease.DocumentVersionID, ordinal, chunk.PageNumber, chunk.ElementIndex,
 				chunk.ElementType, string(sectionPath), chunk.ContentText, chunk.SearchText,
 				chunk.ContentSHA256, string(metadata),
 			).Error; err != nil {
 				return TranslateError(err)
+			}
+			if result.EmbeddingProfile != nil {
+				embedding := result.Embeddings[ordinal]
+				if err := tx.Exec(`
+INSERT INTO knowledge_chunk_embeddings
+    (chunk_id, profile_id, content_sha256, embedding, created_at)
+VALUES (?, ?, ?, ?, ?)`,
+					chunkID, result.EmbeddingProfile.ID, embedding.ContentSHA256,
+					pgvector.NewVector(embedding.Vector), updatedAt.UTC(),
+				).Error; err != nil {
+					return TranslateError(err)
+				}
 			}
 		}
 		artifact := result.Artifact
@@ -746,12 +827,32 @@ func validateParsedExecutionResult(result knowledgeworker.ExecutionResult) error
 			return err
 		}
 	}
+	if result.EmbeddingProfile == nil {
+		if len(result.Embeddings) != 0 || result.EmbeddingUsage.TotalTokens != 0 {
+			return errors.New("knowledge parsed result has embeddings without a profile")
+		}
+		return nil
+	}
+	if err := result.EmbeddingProfile.Validate(); err != nil {
+		return err
+	}
+	if len(result.Embeddings) != len(result.Chunks) || result.EmbeddingUsage.TotalTokens < 0 {
+		return errors.New("knowledge parsed result embedding count is invalid")
+	}
+	for ordinal, embedding := range result.Embeddings {
+		if embedding.ChunkOrdinal != ordinal || embedding.ContentSHA256 != result.Chunks[ordinal].ContentSHA256 {
+			return errors.New("knowledge parsed result embedding does not match its chunk")
+		}
+		if err := embedding.Validate(*result.EmbeddingProfile); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // documentVersionStatusForStage projects the fine-grained task stage onto the
-// coarser knowledge_document_versions lifecycle. Publishing remains indexing
-// until Complete atomically promotes the version to ready or partial_ready.
+// knowledge_document_versions lifecycle. Publishing remains non-terminal until
+// Complete atomically promotes the version to ready or partial_ready.
 func documentVersionStatusForStage(stage knowledge.IngestionStage) string {
 	switch stage {
 	case knowledge.IngestionStageScanning:
@@ -760,8 +861,10 @@ func documentVersionStatusForStage(stage knowledge.IngestionStage) string {
 		return "parsing"
 	case knowledge.IngestionStageChunking:
 		return "chunking"
-	case knowledge.IngestionStageIndexing, knowledge.IngestionStagePublishing:
+	case knowledge.IngestionStageIndexing:
 		return "indexing"
+	case knowledge.IngestionStagePublishing:
+		return "publishing"
 	default:
 		return "processing"
 	}

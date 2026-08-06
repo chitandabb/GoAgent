@@ -1,0 +1,17 @@
+{
+  "version": "pptx-element-quality-local-v1",
+  "documents": [
+    {
+      "id": "os-filesystem",
+      "name": "新-CH7-文件系统 -V2.0.pptx",
+      "sizeBytes": 1053955,
+      "sha256": "09ccb8f04d30a619e8e009836d10e60dfa744bc0a8e7d8efd1197a89d8f46c6e"
+    },
+    {
+      "id": "os-device-management",
+      "name": "新-CH8-设备管理-V2.0 .pptx",
+      "sizeBytes": 2789781,
+      "sha256": "95d0989f3eef4212d9b4d42bdde58279bdd51a605bff1e6bc6ff562ce8ce4525"
+    }
+  ]
+}

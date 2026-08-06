@@ -13,6 +13,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -300,6 +301,61 @@ func TestToolTraceMiddlewareCapturesEvidenceReferenceAndHash(t *testing.T) {
 	}
 	if envelope.EvidenceRef != item.SourceRef || !json.Valid(envelope.Data) {
 		t.Fatalf("wrapped evidence reference = %+v, item=%+v", envelope, item)
+	}
+}
+
+func TestToolTraceMiddlewareCapturesKnowledgeChunkEvidence(t *testing.T) {
+	trace := &executionTrace{}
+	ctx := withExecutionTrace(context.Background(), trace)
+	documentVersionID, chunkID := uuid.New(), uuid.New()
+	content := "事务超时需要检查连接池。"
+	snapshot, err := json.Marshal(searchKnowledgeResponse{
+		Query: "事务超时", Results: []searchKnowledgeResult{{
+			DocumentID: uuid.NewString(), DocumentVersionID: documentVersionID.String(), ChunkID: chunkID.String(),
+			Title: "生产手册", Scope: knowledge.ScopeGlobal, Ordinal: 2, ElementType: knowledge.ElementText,
+			SectionPath: []string{"网络", "超时"}, ContentText: content, ContentSHA256: knowledge.SHA256Hex(content),
+		}}, Sources: []string{"fts"},
+	})
+	if err != nil {
+		t.Fatalf("marshal knowledge result: %v", err)
+	}
+	output, err := newToolTraceMiddleware(4096).Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: string(snapshot)}, nil
+	})(ctx, &compose.ToolInput{Name: ToolSearchKnowledge, Arguments: `{"query":"事务超时"}`})
+	if err != nil {
+		t.Fatalf("invoke middleware: %v", err)
+	}
+	items := trace.evidenceSnapshot()
+	if len(items) != 1 || items[0].SourceType != EvidenceSourceKnowledgeChunk ||
+		!strings.Contains(items[0].Location, documentVersionID.String()) || !strings.Contains(items[0].Location, chunkID.String()) {
+		t.Fatalf("knowledge evidence = %+v", items)
+	}
+	if !strings.Contains(output.Result, `"sourceType":"knowledge_chunk"`) {
+		t.Fatalf("wrapped knowledge result = %s", output.Result)
+	}
+}
+
+func TestToolTraceMiddlewareDoesNotCiteEmptyOrMalformedKnowledgeSearch(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		snapshot string
+	}{
+		{name: "empty", snapshot: `{"query":"问题","results":[]}`},
+		{name: "missing chunk", snapshot: `{"query":"问题","results":[{"documentId":"00000000-0000-0000-0000-000000000001","documentVersionId":"00000000-0000-0000-0000-000000000002","title":"手册","scope":"global","ordinal":0,"elementType":"text","contentText":"内容","contentSha256":""}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := &executionTrace{}
+			ctx := withExecutionTrace(context.Background(), trace)
+			_, err := newToolTraceMiddleware(4096).Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+				return &compose.ToolOutput{Result: test.snapshot}, nil
+			})(ctx, &compose.ToolInput{Name: ToolSearchKnowledge, Arguments: `{"query":"问题"}`})
+			if err != nil {
+				t.Fatalf("invoke middleware: %v", err)
+			}
+			if items := trace.evidenceSnapshot(); len(items) != 0 {
+				t.Fatalf("invalid knowledge response became evidence: %+v", items)
+			}
+		})
 	}
 }
 

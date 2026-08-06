@@ -81,6 +81,118 @@ func TestOOXMLParserExtractsPPTXInPresentationOrder(t *testing.T) {
 	}
 }
 
+func TestOOXMLParserExtractsEmbeddedVisualAssetsDeterministically(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: DOCXMediaType, OriginalName: "manual.docx",
+		Content: officeFixtureBytes(map[string][]byte{
+			"word/document.xml":     []byte(`<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>`),
+			"word/media/image2.png": rasterFixture(t, "png", 80, 60),
+			"word/media/image1.jpg": rasterFixture(t, "jpeg", 120, 90),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.VisualAssets) != 2 ||
+		result.VisualAssets[0].SourcePath != "word/media/image1.jpg" ||
+		result.VisualAssets[1].SourcePath != "word/media/image2.png" ||
+		result.VisualAssets[0].SHA256 == "" {
+		t.Fatalf("visual assets = %+v", result.VisualAssets)
+	}
+}
+
+func TestOOXMLParserLocatesPPTXImageByPresentationOrder(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: PPTXMediaType, OriginalName: "slides.pptx",
+		Content: officeFixtureBytes(map[string][]byte{
+			"ppt/presentation.xml":             []byte(`<p:presentation xmlns:p="p" xmlns:r="relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>`),
+			"ppt/_rels/presentation.xml.rels":  []byte(`<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>`),
+			"ppt/slides/slide1.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/_rels/slide2.xml.rels": []byte(`<Relationships><Relationship Id="rIdImage" Target="../media/image1.png"/></Relationships>`),
+			"ppt/media/image1.png":             rasterFixture(t, "png", 100, 100),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.VisualAssets) != 1 || result.VisualAssets[0].RelationshipID != "rIdImage" ||
+		result.VisualAssets[0].SourcePart != "ppt/slides/slide2.xml" ||
+		result.VisualAssets[0].PageNumber == nil || *result.VisualAssets[0].PageNumber != 1 {
+		t.Fatalf("visual assets = %+v", result.VisualAssets)
+	}
+}
+
+func TestOOXMLParserPreservesRepeatedPPTXImageOccurrences(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: PPTXMediaType, OriginalName: "slides.pptx",
+		Content: officeFixtureBytes(map[string][]byte{
+			"ppt/presentation.xml":             []byte(`<p:presentation xmlns:p="p" xmlns:r="relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>`),
+			"ppt/_rels/presentation.xml.rels":  []byte(`<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>`),
+			"ppt/slides/slide1.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/_rels/slide1.xml.rels": []byte(`<Relationships><Relationship Id="rIdShared" Target="../media/shared.png"/></Relationships>`),
+			"ppt/slides/_rels/slide2.xml.rels": []byte(`<Relationships><Relationship Id="rIdShared" Target="../media/shared.png"/></Relationships>`),
+			"ppt/media/shared.png":             rasterFixture(t, "png", 100, 100),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.VisualAssets) != 2 || result.VisualAssets[0].PageNumber == nil ||
+		*result.VisualAssets[0].PageNumber != 1 || result.VisualAssets[1].PageNumber == nil ||
+		*result.VisualAssets[1].PageNumber != 2 || result.VisualAssets[0].SourcePart != "ppt/slides/slide2.xml" ||
+		result.VisualAssets[1].SourcePart != "ppt/slides/slide1.xml" ||
+		&result.VisualAssets[0].Content[0] != &result.VisualAssets[1].Content[0] {
+		t.Fatalf("visual assets = %+v", result.VisualAssets)
+	}
+}
+
+func TestOOXMLParserRejectsIncompletePPTXPresentationRelationships(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	_, err := parser.Parse(context.Background(), Input{
+		MediaType: DOCXMediaType, OriginalName: "manual.docx",
+		Content: officeFixture(map[string]string{
+			"word/document.xml":    `<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>text</w:t></w:r></w:p></w:body></w:document>`,
+			"ppt/presentation.xml": `<p:presentation xmlns:p="p"/>`,
+		}),
+	})
+	if !errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("Parse error = %v", err)
+	}
+}
+
+func TestOOXMLParserAcceptsCanonicalDirectoryEntries(t *testing.T) {
+	parts := map[string][]byte{
+		"ppt/":                            nil,
+		"ppt/_rels/":                      nil,
+		"ppt/slides/":                     nil,
+		"ppt/presentation.xml":            []byte(`<p:presentation xmlns:p="p" xmlns:r="relationships"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>`),
+		"ppt/_rels/presentation.xml.rels": []byte(`<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/></Relationships>`),
+		"ppt/slides/slide1.xml":           []byte(`<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Canonical package</a:t></a:r></a:p></p:sld>`),
+	}
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: PPTXMediaType, OriginalName: "slides.pptx", Content: officeFixtureBytes(parts),
+	})
+	if err != nil || len(result.Elements) != 1 {
+		t.Fatalf("Parse = %+v, %v", result, err)
+	}
+}
+
+func TestOOXMLParserRejectsDirectoryFileAliases(t *testing.T) {
+	_, err := newOOXMLArchive(officeFixtureBytes(map[string][]byte{
+		"ppt/": nil,
+		"ppt":  []byte("not a directory"),
+	}), testParserLimits())
+	if !errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("newOOXMLArchive error = %v", err)
+	}
+}
+
 func TestOOXMLParserRejectsExpandedArchiveAndWorksheetLimits(t *testing.T) {
 	t.Run("archive entries", func(t *testing.T) {
 		limits := testParserLimits()
@@ -162,6 +274,25 @@ func TestSpreadsheetColumnIndexValidatesCompleteCellReference(t *testing.T) {
 	}
 }
 
+func TestOOXMLRelationshipsAllowNestedPackagePathsButRejectRootEscape(t *testing.T) {
+	relationships, err := parseOOXMLRelationships(
+		context.Background(),
+		[]byte(`<Relationships><Relationship Id="image" Target="../media/image1.png"/></Relationships>`),
+		"ppt/slides",
+	)
+	if err != nil || relationships["image"] != "ppt/media/image1.png" {
+		t.Fatalf("relationships = %+v, %v", relationships, err)
+	}
+	_, err = parseOOXMLRelationships(
+		context.Background(),
+		[]byte(`<Relationships><Relationship Id="escape" Target="../../outside.xml"/></Relationships>`),
+		"ppt/slides",
+	)
+	if !errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("escape error = %v", err)
+	}
+}
+
 func TestParseWorksheetEnforcesRuneBudgetWhileBuildingOutput(t *testing.T) {
 	parser, _ := NewOOXMLParser(testParserLimits())
 	content := []byte(`<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>timeout</t></is></c></row></sheetData></worksheet>`)
@@ -177,15 +308,24 @@ func testParserLimits() Limits {
 		MaxDocumentUnits: 20, MaxArchiveEntries: 100,
 		MaxExpandedBytes: 2 * 1024 * 1024, MaxXMLBytes: 1024 * 1024,
 		MaxExtractedRunes: 100_000, MaxSpreadsheetRows: 100,
-		MaxSpreadsheetColumns: 32,
+		MaxSpreadsheetColumns: 32, MaxVisualAssets: 20,
+		MaxVisualAssetBytes: 512 * 1024, MaxTotalVisualBytes: 1024 * 1024,
 	}
 }
 
 func officeFixture(parts map[string]string) []byte {
+	binaryParts := make(map[string][]byte, len(parts))
+	for name, content := range parts {
+		binaryParts[name] = []byte(content)
+	}
+	return officeFixtureBytes(binaryParts)
+}
+
+func officeFixtureBytes(parts map[string][]byte) []byte {
 	var output bytes.Buffer
 	writer := zip.NewWriter(&output)
-	allParts := map[string]string{
-		"[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>`,
+	allParts := map[string][]byte{
+		"[Content_Types].xml": []byte(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>`),
 	}
 	for name, content := range parts {
 		allParts[name] = content
@@ -195,7 +335,7 @@ func officeFixture(parts map[string]string) []byte {
 		if err != nil {
 			panic(err)
 		}
-		if _, err := entry.Write([]byte(content)); err != nil {
+		if _, err := entry.Write(content); err != nil {
 			panic(err)
 		}
 	}

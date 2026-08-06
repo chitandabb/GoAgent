@@ -1,0 +1,16 @@
+services:
+  knowledge-worker:
+    platform: linux/amd64
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=268435456,mode=1777
+    build:
+      context: .
+      dockerfile: Dockerfile.knowledge-worker
+      target: final
+      additional_contexts:
+        knowledge_assets: ./output/docker/knowledge-worker-assets

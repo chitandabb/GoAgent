@@ -11,11 +11,27 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/google/uuid"
+	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 )
 
 type KnowledgeRepository struct {
 	db *gorm.DB
+}
+
+type knowledgeSearchRow struct {
+	DocumentID        uuid.UUID
+	DocumentVersionID uuid.UUID
+	ChunkID           uuid.UUID
+	Title             string
+	Scope             knowledge.Scope
+	Ordinal           int
+	PageNumber        *int
+	ElementType       knowledge.ElementType
+	SectionPathJSON   string
+	ContentText       string
+	ContentSHA256     string
+	Score             float64
 }
 
 func NewKnowledgeRepository(db *gorm.DB) *KnowledgeRepository {
@@ -476,27 +492,14 @@ func (r *KnowledgeRepository) SearchFTS(
 	if limit > 50 {
 		limit = 50
 	}
-	type searchRow struct {
-		DocumentID        uuid.UUID
-		DocumentVersionID uuid.UUID
-		ChunkID           uuid.UUID
-		Title             string
-		Scope             knowledge.Scope
-		Ordinal           int
-		PageNumber        *int
-		ElementType       knowledge.ElementType
-		SectionPathJSON   string
-		ContentText       string
-		Score             float64
-	}
-	var rows []searchRow
+	var rows []knowledgeSearchRow
 	searchSQL := `
 WITH search_query AS (
     SELECT to_tsquery('simple', ?) AS query
 )
 SELECT d.id AS document_id, v.id AS document_version_id, c.id AS chunk_id,
        d.title, d.scope, c.ordinal, c.page_number, c.element_type,
-       c.section_path::text AS section_path_json, c.content_text,
+	   c.section_path::text AS section_path_json, c.content_text, c.content_sha256,
        ts_rank_cd(c.search_vector, q.query) AS score
 FROM knowledge_chunks AS c
 JOIN knowledge_document_versions AS v ON v.id = c.document_version_id
@@ -512,6 +515,58 @@ LIMIT ?`
 	if err := ResolveDB(ctx, r.db).Raw(searchSQL, tsQuery, actorID, limit).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("search knowledge chunks: %w", TranslateError(err))
 	}
+	return mapKnowledgeSearchRows(rows)
+}
+
+func (r *KnowledgeRepository) SearchVector(
+	ctx context.Context,
+	actorID, profileID uuid.UUID,
+	queryVector []float32,
+	limit int,
+) ([]knowledge.SearchResult, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("knowledge repository is unavailable")
+	}
+	if actorID == uuid.Nil || profileID == uuid.Nil {
+		return nil, errors.New("knowledge vector search actor and profile are required")
+	}
+	if err := knowledge.ValidateEmbeddingVector(queryVector, 1024, true); err != nil {
+		return nil, err
+	}
+	if limit < 1 {
+		limit = 5
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	vector := pgvector.NewVector(queryVector)
+	var rows []knowledgeSearchRow
+	searchSQL := `
+SELECT d.id AS document_id, v.id AS document_version_id, c.id AS chunk_id,
+       d.title, d.scope, c.ordinal, c.page_number, c.element_type,
+       c.section_path::text AS section_path_json, c.content_text, c.content_sha256,
+       1 - (embedding.embedding <=> ?) AS score
+FROM knowledge_chunk_embeddings AS embedding
+JOIN knowledge_embedding_profiles AS profile
+  ON profile.id = embedding.profile_id AND profile.status = 'active'
+JOIN knowledge_chunks AS c ON c.id = embedding.chunk_id
+JOIN knowledge_document_versions AS v ON v.id = c.document_version_id
+JOIN knowledge_documents AS d ON d.id = v.document_id
+WHERE embedding.profile_id = ?
+  AND embedding.content_sha256 = c.content_sha256
+  AND d.deleted_at IS NULL
+  AND v.status = 'ready'
+  AND v.is_current = true
+  AND (d.scope = 'global' OR (d.scope = 'personal' AND d.owner_user_id = ?))
+ORDER BY score DESC, d.id, c.ordinal
+LIMIT ?`
+	if err := ResolveDB(ctx, r.db).Raw(searchSQL, vector, profileID, actorID, limit).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("search knowledge chunk vectors: %w", TranslateError(err))
+	}
+	return mapKnowledgeSearchRows(rows)
+}
+
+func mapKnowledgeSearchRows(rows []knowledgeSearchRow) ([]knowledge.SearchResult, error) {
 	results := make([]knowledge.SearchResult, 0, len(rows))
 	for _, row := range rows {
 		var sectionPath []string
@@ -522,7 +577,8 @@ LIMIT ?`
 			DocumentID: row.DocumentID, DocumentVersionID: row.DocumentVersionID,
 			ChunkID: row.ChunkID, Title: row.Title, Scope: row.Scope,
 			Ordinal: row.Ordinal, PageNumber: row.PageNumber, ElementType: row.ElementType,
-			SectionPath: sectionPath, ContentText: row.ContentText, Score: row.Score,
+			SectionPath: sectionPath, ContentText: row.ContentText,
+			ContentSHA256: row.ContentSHA256, Score: row.Score,
 		})
 	}
 	return results, nil

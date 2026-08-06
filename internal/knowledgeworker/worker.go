@@ -75,12 +75,15 @@ type CheckpointUpdate struct {
 }
 
 type ExecutionResult struct {
-	Partial        bool
-	ParserVersion  string
-	ParserMetadata json.RawMessage
-	Checkpoint     json.RawMessage
-	Artifact       objectstore.ObjectRef
-	Chunks         []knowledge.ChunkDraft
+	Partial          bool
+	ParserVersion    string
+	ParserMetadata   json.RawMessage
+	Checkpoint       json.RawMessage
+	Artifact         objectstore.ObjectRef
+	Chunks           []knowledge.ChunkDraft
+	EmbeddingProfile *knowledge.EmbeddingProfile
+	Embeddings       []knowledge.ChunkEmbeddingDraft
+	EmbeddingUsage   knowledge.EmbeddingUsage
 }
 
 type Repository interface {
@@ -309,6 +312,26 @@ func validateExecutionResult(result ExecutionResult) error {
 	}
 	for _, chunk := range result.Chunks {
 		if err := chunk.Validate(); err != nil {
+			return err
+		}
+	}
+	if result.EmbeddingProfile == nil {
+		if len(result.Embeddings) != 0 || result.EmbeddingUsage.TotalTokens != 0 {
+			return errors.New("parser result has embeddings without a profile")
+		}
+		return nil
+	}
+	if err := result.EmbeddingProfile.Validate(); err != nil {
+		return err
+	}
+	if len(result.Embeddings) != len(result.Chunks) || result.EmbeddingUsage.TotalTokens < 0 {
+		return errors.New("parser result embedding count is invalid")
+	}
+	for ordinal, embedding := range result.Embeddings {
+		if embedding.ChunkOrdinal != ordinal || embedding.ContentSHA256 != result.Chunks[ordinal].ContentSHA256 {
+			return errors.New("parser result embedding does not match its chunk")
+		}
+		if err := embedding.Validate(*result.EmbeddingProfile); err != nil {
 			return err
 		}
 	}
