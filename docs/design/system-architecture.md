@@ -197,13 +197,18 @@ Ingestion Worker在M2引入，负责：
 - 从MinIO读取待处理文档；
 - 拆分文本、表格、截图、图表和示意图；
 - 执行OCR与表格结构恢复；
-- 使用规则和可选ONNX分类器进行元素路由；
+- 使用规则和本地ONNX版面模型进行页面/区域两级路由；
 - 调用VLM生成结构化图片描述；
 - 创建KnowledgeDocument、KnowledgeChunk和解析版本；
 - 调用Embedding并写入pgvector；
 - 记录处理耗时、错误、模型版本和成本。
 
 它使用独立RabbitMQ队列和资源限制，避免大型文档处理阻塞工单诊断。
+
+M2-A7 中的 ONNX 能力是专用 `LayoutRouter`，不是完整 Docling 运行时，也不承担 OCR/VLM。
+它在 Knowledge Worker 内结合原生文本质量与页面区域检测结果，输出带 bounding box、类型、置信度
+和 reason code 的路由决策；OCR 与 VLM 继续通过云端配置端口执行。Eino 可以提供 Transformer 与
+Callback 适配，但持久化事实仍使用 MESGuard 的 Element/Artifact 契约。
 
 ### PostgreSQL与pgvector
 
@@ -546,13 +551,13 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | PostgreSQL与Redis连接 | 已实现关键/降级依赖语义 | M1持续验证 |
 | Zap结构化日志 | 已实现 | M1增加任务和模型字段 |
 | SQL Server演示容器与工单只读适配器 | M1-A1已实现并验证数据库拒写；受 QueryGuard/Catalog/资源限制的窄查询 Tool 已接入；SQL v3/v4 paired 运行已验证对象定义、Catalog 检索、只读查询和运行时 EvidenceItem | M1-D Catalog 扫描/审核/发布管理、正式 EvidenceItem 持久化与更多诊断查询 |
-| RabbitMQ与Outbox | PostgreSQL Outbox事实表、任务创建原子写入、`SKIP LOCKED` Relay、有限租约、失败退避、持久主队列和 Publisher Confirm 已实现并通过真实集成测试；Consumer 重试/死信链待实现 | M1 |
-| MinIO与附件 | 未实现 | M1 |
-| Diagnosis Worker | PostgreSQL Claim、续租和 fencing 基础已实现；RabbitMQ Consumer、Agent执行、取消收尾和结果持久化未实现 | M1 |
+| RabbitMQ与Outbox | PostgreSQL Outbox事实表、任务创建原子写入、`SKIP LOCKED` Relay、有限租约、失败退避、持久主队列和 Publisher Confirm 已实现并通过真实集成测试；诊断与知识入库 Consumer 均已接入有界重试/死信 | M1 |
+| MinIO与附件 | 已实现附件/知识原文/Element Artifact引用与有界对象访问 | M1持续扩展 |
+| Diagnosis Worker | RabbitMQ Consumer、严格 ACK/重试、Claim/续租/fencing、Agent 执行、取消收尾、EvidenceItem/ReportEvidence/DiagnosisReport 持久化已实现并通过真实 PostgreSQL 联调；进程崩溃演练仍是后续质量门 | M1 |
 | React + Nginx | 未实现 | M1 |
-| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入任务创建/查询、事件补读、取消、Claim 和报告反馈基础链路，正式 Worker 执行与报告生成待实现 | M1 |
-| 知识助手与pgvector RAG | 未实现 | M2 |
-| Ingestion Worker与ONNX | 未实现 | M2 |
+| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入正式 Worker 执行、报告生成/读取、TaskEvent 补读、SSE、取消、恢复和报告反馈基础链路 | M1 |
+| 知识助手与pgvector RAG | M2-A1 至 M2-A8 已实现版本化文档、MinIO 入库、PDF/Office 解析、ONNX 页面/区域路由、Embedding、FTS/Vector/RRF、可选 Rerank、`search_knowledge` 和知识 Chunk 引用门禁；Query 改写、Agentic 二次检索、Web Search 和公开知识问答 API 仍待实现 | M2 |
+| Ingestion Worker与ONNX | Knowledge Worker、云OCR/VLM、PDFium-WASM、PP-DocLayout-M ONNX Router、区域显式路由、自适应DPI、确定性Element合并和Artifact v5 provenance已实现且默认关闭；公开路由集、Windows/Linux资源、OCR像素对照、三图VLM成对测评和非root专用镜像已记录，扩充语料与合并质量测评待完成 | M2 |
 | GitHub MCP代码调查工具 | 已实现只读接入、凭据握手、仓库搜索、仓库树候选读取、固定SHA文件读取、提交追溯和不完整搜索降级；v2 工具级评测覆盖私有C#、GoAgent、GoChat和公开仓库共6条样本，2条真实不完整响应均恢复成功；Agent paired 已覆盖工单、代码调查和 GitHub 降级三类样本，完整数据集仍待扩展 | M1 |
 | SQL性能实验室 | 未实现 | M4 |
 | Prometheus/Grafana/Trace平台 | 未实现 | 业务埋点后按需接入 |

@@ -593,12 +593,8 @@ X-CSRF-Token: <token>
 }
 ```
 
-`requestScope.allowedCapabilities` 是任务创建时冻结的能力白名单，可选值为 `case`、`code`、
-`sql`。它与服务健康状态分离：声明 `sql` 不代表 SQL Server 当前可用，未声明 `sql` 时即使
-SQL Server 健康也不会向模型暴露 SQL Tool。未提供该字段时，后端先按 `requestedSkill` 推导；
-两者都未提供时默认 `case`。`code-investigation` 必须包含 `case + code`，
-`sql-investigation` 必须包含 `case + sql`；常规 `ticket-diagnosis` 可以按调查需求选择
-`case`、`case + code`、`case + sql` 或三者组合。
+`requestScope.allowedCapabilities` 是任务创建时冻结的能力白名单，可由调用方声明的值为 `case`、`code`、`sql`，后端会始终为新建诊断任务追加 `knowledge`。用户不得显式提交 `knowledge`，因此前端不应提供该 Tool 开关。它与服务健康状态分离：声明 `sql` 不代表 SQL Server 当前可用，未声明 `sql` 时即使 SQL Server 健康也不会向模型暴露 SQL Tool。未提供该字段时，后端按 `requestedSkill` 推导 `case`/`code`/`sql`，再附加 `knowledge`。
+`code-investigation` 必须包含 `case + code`，`sql-investigation` 必须包含 `case + sql`；常规 `ticket-diagnosis` 可以声明 `case`、`case + code`、`case + sql` 或三者组合，但始终会同时拥有后端策略追加的 `knowledge`。
 
 API 在创建前重新只读查询 SQL Server 并计算 fingerprint：
 
@@ -834,4 +830,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消以及 Worker claim/lease/checkpoint/fencing 控制面；实际文档解析 Consumer、Element Artifact、Embedding 和在线检索仍是后续切片。机器可读契约随已实现 Handler 更新在 `api/openapi.yaml`，不得提前声明未实现接口。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测以及知识问答 Runner 内部的 `search_knowledge` Tool。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。公开的知识对话/消息 HTTP API 和引用预览接口仍未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`，内部 Tool 不能提前伪装成公开 API。

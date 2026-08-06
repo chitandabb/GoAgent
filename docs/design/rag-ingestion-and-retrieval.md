@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：`已完成设计确认 / 分阶段实施中`
+- 状态：`M2-A1 至 M2-A8 后端链路已完成 / 高层能力继续实施`
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
@@ -23,18 +23,26 @@
 - queued version、pending task、首个 event 和 Outbox 的 PostgreSQL 原子创建；
 - 独立 Knowledge Worker、Element Artifact、fenced Chunk staging 与原子 `ready/current` 发布；
 - UTF-8 TXT/Markdown、嵌入文本 PDF、DOCX、XLSX、PPTX 的确定性解析；
+- PDF 无文本页、PNG/JPEG 独立图片和 Office media 的受限视觉资产提取、引用定位及后端路由；
+- Artifact schema v5 的视觉/版面/provider usage/Element合并 provenance、`partial_ready` 降级和视觉-only 永久失败语义；
+- 固定 PP-DocLayout-M/ONNX Runtime 契约、PDFium-WASM 页面渲染、区域级 OCR/VLM 显式路由与整页重复调用抑制；
 - PDF 页数/文本预算以及 OOXML 条目、展开大小、XML、工作表行列等资源边界；
 - PDF/DOCX/XLSX/PPTX 真实服务链路 smoke，均验证 Parser 版本、Chunk 和 Artifact SHA-256。
+- Embedding Profile、批量 Embedding、pgvector 精确向量检索、FTS/Vector 并行召回和 RRF 融合；
+- 可选 DashScope `qwen3-rerank` 适配器、Rerank Token/延迟观测和失败时保留 RRF 的降级；
+- 后端自动授权诊断任务使用知识库，统一 `search_knowledge` Tool 隐藏检索通道、候选预算和对象存储细节；
+- Knowledge Chunk 结果的文档/版本/Chunk UUID、内容哈希、标题、页码和章节路径校验；空结果或损坏结果不会生成可引用 EvidenceItem；
+- `rag-retrieval-v1` 固定集的 FTS、Vector、RRF 和 RRF+Rerank 对照结果，以及布局/OCR/VLM/PPTX 的独立质量记录。
 
 当前尚未实现：
 
 - 附件领域表以及附件上传/内容代理读取 API；
 - 内容代理读取、孤儿清理和完整对象生命周期；
-- 扫描 PDF/独立图片解析、Office 视觉元素提取、OCR、VLM 和智能分流；
+- 更大规模 OCR/VLM provider 配对测评、扫描表格/小字体/退化扫描质量、复杂图表区域语义和丰富 Office 视觉语义；
 - XLSX 公式表达式、隐藏 Sheet/Slide 语义和 PPTX 演讲者备注等丰富 Office 语义；
-- Embedding、pgvector、混合融合、Query 改写和 Rerank；
-- 面向 Agent 的知识检索 Tool/Skill 与知识问答运行链路；
-- 文档处理吞吐量基线和最终第三条简历指标。
+- Query 改写、parent 展开、Agentic 二次检索和面向用户的知识问答 HTTP/SSE 运行链路；
+- Web Search Tool、公开页面抓取与企业知识引用之间的升级边界；
+- MinIO/RabbitMQ/PostgreSQL/pgvector 全链路的文档处理吞吐量基线和最终第三条简历指标；当前 parser-only 吞吐与 routing avoidance 不能直接写成端到端提升。
 
 ## 目标边界
 
@@ -119,8 +127,7 @@
     能在验证集上调整。权限、范围和版本过滤必须进入 SQL，禁止全库召回后在 Go 层补过滤。
 36. FTS 或 Vector 单路失败时允许降级并返回 `degraded` 与缺失通道；两路均失败才是系统失败，
     通道正常但无命中是业务空结果。Embedding Cache 仅复用相同 profile 下完全相同的规范化内容。
-37. 诊断任务可由后端策略授予 `knowledge` capability，但前端和用户不选择 Tool；独立知识问答只
-    获得 knowledge/attachment，不获得 SQL、GitHub 或工单能力。
+37. 新建诊断任务由后端策略自动授予并冻结 `knowledge` capability，前端和用户不选择 Tool；独立知识问答只获得 knowledge/attachment，不获得 SQL、GitHub 或工单能力。知识库依赖不健康时只隐藏对应 Tool，不改写任务快照。
 38. Agent 只调用高层 `search_knowledge` Tool；Query 改写、FTS/Vector、RRF、Rerank、去重和
     parent 展开封装在 Tool 内，最多 2 轮检索、每轮最多 3 个子查询。
 39. Query 改写采用规则保护关键字后由配置化模型生成独立问题；对话只提供最近消息和版本化摘要，
@@ -144,6 +151,22 @@
     评分，不允许生成模型自评，也不能因 Judge 不可用而改变核心指标。
 48. 公开评测语料优先选择官方、可下载、许可边界明确的大型技术文档；派生 Office/扫描变体必须
     记录父内容哈希、生成器版本和许可证，不允许同一内容的不同格式跨 train/dev/test 泄漏。
+49. 自部署能力限定为本地 ONNX 版面路由器，不自部署完整 Docling、OCR 或 VLM。Go 领域接口和
+    RoutePlanner 负责规则/模型融合；Eino 仅提供可选 Transformer/Callback 适配，不成为 Artifact
+    的事实模型。
+50. 页面区域分割先于 OCR/VLM 识别，检索 Chunk 分割晚于所有 Element 识别、合并与去重。页面
+    先判定 native/scanned/mixed，再按 text/table/picture/caption/formula 等区域细分流。
+51. Docling 作为版面/表格设计参考、离线对照基线和可选低置信度兜底，不作为 M2-A7 的必需
+    Python 运行时；布局模型权重、标签、许可证、SHA-256、预后处理版本和 ONNX Runtime 版本必须固定。
+52. OCR 首版继续使用云端 `qwen-vl-ocr-latest`，本地 OCR 仅保留端口，不阻塞简历第三条；VLM
+    第一轮在相同裁剪区域上比较 `step-3.7-flash` low reasoning 与 `qwen3-vl-plus`，不按厂商 TPS
+    宣传直接切换生产模型。三张真实图示的首轮成对测评中，两者在 2,048 输出 Token 下都通过
+    3/3 严格 JSON、100% 文本锚点和 8/9 关系事实；人工复核各发现一处关系错误。Qwen 平均延迟
+    低 32.1%、总 Token 少 53.5%，因此继续作为生产 Vision 配置，StepFun 保留候选。
+53. VLM 主指标是端到端区域吞吐、P50/P95、严格 JSON 首次成功率、图表/关系语义准确率、限流、
+    错误率和单个成功区域成本；`gemini-3.5-flash-lite` 仅在凭证可用时作为速度参考。
+54. ONNX Router 需要单独报告页面/区域 Macro-F1、高价值视觉元素漏检率、CPU/RAM 和避免的
+    OCR/VLM 调用数；路由降本不能以降低最终 Recall@5 或引用完整性为代价。
 
 ## 第一轮：产品与部署边界
 
@@ -455,6 +478,9 @@ Embedding 不但成本高，还可能把表格、错误栈和步骤列表切坏�
 | 2026-08-04 | 公开技术语料按内容家族切分并记录许可与派生链 | 扩充格式与规模且防止跨格式数据泄漏 | 下载前仍需逐项确认 LICENSE/NOTICE | 已确认 |
 | 2026-08-04 | 入库任务复用 PostgreSQL/Outbox/RabbitMQ 可靠异步基础 | 与诊断任务保持一致的事实源、租约和恢复语义 | 需要独立 Queue、状态和阶段 checkpoint | 已确认 |
 | 2026-08-04 | 自有 MinIO Bucket 首版关闭 Versioning/Object Lock | 唯一不可变 key 与业务版本足够，避免双重版本事实 | 依赖备份和延迟 GC，未来 WORM 需求再评估 | 已确认 |
+| 2026-08-04 | 自部署 Go+ONNX 版面路由，OCR/VLM 继续云端 | 在 Windows CPU 上低成本完成页面/区域分流，不引入完整 Python 解析运行时 | 需要打包 ONNX Runtime、固定模型权重并实现预后处理 | 已确认 |
+| 2026-08-04 | Eino 只做 LayoutRouter 适配和 Callback，不拥有 Element 事实 | 保留框架观测能力，同时避免 Artifact 与 Eino schema 强耦合 | 需要维护一层薄适配器 | 已确认 |
+| 2026-08-04 | Step 3.7 Flash 与 Qwen3-VL-Plus 做同图配对评测 | 厂商峰值 TPS 不能代表图片端到端吞吐和结构化输出质量 | 需要保存 profile、限流、成本和质量 Observation | 已确认 |
 
 ## 第九轮：吞吐量与 RAG 效果评测
 
@@ -590,7 +616,10 @@ iterative scan、分区或部分索引，不能仅报告未过滤性能。
 ### 第六轮结论
 
 - 已确认 Embedding 独立配置和真实 POC、单 active profile、精确余弦基线、RRF 双路融合、SQL 内
-  权限过滤、单路降级和严格内容哈希缓存。
+  权限过滤、单路降级和严格内容哈希缓存。`rag-retrieval-v1` 固定集已完成 FTS/Vector/RRF
+  配对运行：FTS Recall@5 为 95.83%，Vector 和 RRF 均为 100%；Vector MRR 为 1.0，RRF MRR
+  为 0.9792。结果和 Token/耗时口径记录在 `docs/evaluations/rag-retrieval-v1.md`，不能把
+  该小样本直接外推为生产效果。
 - HNSW 是规模驱动的性能优化，不是首版正确性的前置条件；任何近似索引结果都必须和精确检索在
   同一带权限过滤的固定查询集上比较，不能只测未过滤的全库延迟。
 - Embedding 模型升级与文档内容换版是两个正交维度，不能因为换模型而创建伪业务文档版本。
@@ -628,13 +657,11 @@ Tool 输入只允许业务查询和有限筛选，例如 `query`、可选 `docum
 注入。Tool 输出统一包含 chunks、引用定位、融合/重排分数、degraded/missingChannels、查询改写
 摘要和是否仍缺证据，不向模型暴露原始向量或对象存储地址。
 
-### 当前代码冲突
+### 诊断任务与知识库授权
 
-当前 `TaskScope` 明确禁止 diagnosis 任务获得 `knowledge` capability，并规定 knowledge task 只能拥有
-knowledge capability。这适合早期隔离测试，但不满足“诊断 Agent 根据证据缺口自主查询企业制度、
-手册和历史知识”的目标。推荐保留 ToolCatalog 授权事实源，但由后端策略为诊断任务冻结
-`case + 可选 sql/code/attachment/knowledge`，前端和普通用户不直接勾选 Tool；Agent 只能在获授权
-能力中自主决策。独立知识问答仍只获得 knowledge/attachment，不获得 SQL 或代码能力。
+`NormalizeTaskRequestScope` 在任务创建时保留用户对 `code`/`sql` 的有限声明，然后始终追加 `knowledge` 并写入冻结的 `requestScope`。用户显式提交 `knowledge` 会被拒绝，这表示它是后端策略而不是前端开关。Worker 根据已持久化的能力构造 `TaskScope`，因此旧任务仍按当时快照执行。
+
+Agent 的 `ticket-diagnosis` Skill 规定从工单开始，根据证据缺口在业务 SQL、企业知识和 GitHub 代码之间自主升级；Tool 的实际可见性仍同时受角色、数据源、依赖健康和只读政策约束。
 
 ### 第七轮结论
 
@@ -646,9 +673,8 @@ knowledge capability。这适合早期隔离测试，但不满足“诊断 Agent
 
 ### Rerank 云服务建议（2026-08-04 查证）
 
-首选阿里云百炼 `qwen3-rerank`：官方当前文档显示支持中文及 100+ 语言、单条 Query/Document
-最多 4,000 tokens、最多 500 个候选，并返回 `usage.total_tokens`；它和拟用的
-`text-embedding-v4` 可减少供应商和密钥管理面。`gte-rerank` 系列已进入下线迁移，不作为新接入
+首选阿里云百炼 `qwen3-rerank`：已完成真实供应商请求验证，请求契约包含 Query、Documents、`top_n`、以及结果的 `index/relevance_score`。
+本次实际响应未返回可解析的 `usage.total_tokens`，适配器会透传该字段，但不用字符数估算并冒充为供应商用量。它和已接入的 `text-embedding-v4` 可减少供应商和密钥管理面。`gte-rerank` 系列已进入下线迁移，不作为新接入
 首选。仍需使用 MESGuard 固定中文工业语料与以下备选做同口径对比：
 
 - Jina `jina-reranker-v3.5`：多语言，单文档最大输入可配置到 8,192 tokens；
@@ -657,6 +683,22 @@ knowledge capability。这适合早期隔离测试，但不满足“诊断 Agent
 
 POC 至少记录 nDCG@10、MRR、Recall@5、中文数值/否定条件排序准确率、P50/P95、超时率和每千次
 查询成本。供应商公开描述或排行榜不能替代项目固定集结果。
+
+### 当前实现检查点：M2-A8 Embedding、混合召回与 Rerank
+
+M2-A8 已经完成后端基础链路：独立 `[models.embedding]` 配置、`EmbeddingProfile` 稳定指纹、
+DashScope `text-embedding-v4` 适配器、`knowledge_embedding_profiles`/`knowledge_chunk_embeddings`
+持久化、Worker 中的批量 Embedding、Chunk/向量同事务写入、active profile 防静默切换、精确
+余弦 Vector Search 和 RRF 融合。检索查询仍在 SQL 内执行 current、ready、deleted、global/personal
+scope 和内容哈希校验。
+
+固定集观测还会区分文档 Embedding 与查询 Embedding 的调用数、供应商 Token 和耗时；评测命令不
+从字符数推算 Token，只有显式提供价格参数时才写入估算成本。高层 `search_knowledge` Tool
+已经接入知识问答 Runner，负责服务端封装召回和降级结果。可选 `[models.rerank]` 与 DashScope
+`qwen3-rerank` HTTP 适配器已实现，默认关闭；启用后从最多 30 个候选重排到 Tool 请求的结果数，
+`qwen3-rerank` HTTP 适配器已完成真实固定集评测：24/24 请求成功，Recall@5 为 24/24，MRR 为 0.9792，与当前 RRF 质量相同。本次供应商响应未返回可解析的 `total_tokens`，因此不估算或虚构成本；测试中 Rerank 平均约 81.9ms，独立运行的整体查询均值为 258.8ms，相对 RRF 文档中 211.3ms 的观测增加约 22.5%。这是两次运行的差异，不作严格因果结论。
+剩余高层边界是 Query 改写、parent/child 上下文扩展、Agentic 二次检索、Web Search 和公开知识问答 API；
+知识 Chunk 的引用门禁已落地，新建诊断任务已自动冻结 knowledge capability，不由前端或用户勾选。
 
 ## 第八轮：Web Search 公开技术调查
 
@@ -755,8 +797,8 @@ Chunk 快照和 Embedding 缓存的生命周期不同，清理器只能删除数
 M2-A2 当时不包含管理员上传 HTTP API、附件表、文件签名/杀毒、解析 Worker、PDF/Office/OCR/VLM、
 Element Artifact、Embedding 或在线 `search_knowledge`；其中上传 API、首层格式签名和 Worker 控制面
 由 M2-A3 补齐，文本执行链和 Artifact 由 M2-A4 补齐，确定性 PDF/Office Parser 由 M2-A5 补齐。
-附件、杀毒/OCR/VLM、Embedding 和在线 `search_knowledge` 仍未实现，因此简历第三条的吞吐与最终
-Recall 指标仍然是待评测目标。
+在 M2-A2 检查点，附件、杀毒/OCR/VLM、Embedding 和在线 `search_knowledge` 仍未实现；因此该
+检查点的吞吐与最终 Recall 指标仍然是待评测目标。
 
 ### 已实现检查点：M2-A3 管理员上传与可恢复 Worker 控制面
 
@@ -801,7 +843,7 @@ ready 发布、`partial_ready` 不发布以及取消；真实 MinIO 集成测试
 3. Parser 产出 `DocumentElement`，保留 element index、页码、类型、章节路径、正文和 JSON metadata；
    `ChunkElements` 是独立检索投影。Element 表示解析事实，Chunk 表示可重建的检索结构，后续更换
    Chunk/Embedding 策略不需要重新解释原文。
-4. 完整 Element 集合以 schema version 1 JSON Artifact 写入 MinIO 的逻辑
+4. 在 M2-A4 检查点，完整 Element 集合以 schema version 1 JSON Artifact 写入 MinIO 的逻辑
    `knowledge-artifact` 前缀；`00014` 将 Artifact Bucket/ObjectKey/VersionID/ETag/Size/SHA-256 写入
    `knowledge_document_versions`。原文和 Artifact 当前共用知识物理 Bucket，但 key 空间和逻辑权限
    边界分离。
@@ -849,6 +891,102 @@ M2-A4 收工时仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表
    RabbitMQ 和 Knowledge Worker 后全部得到 `succeeded/completed`、`ready/current`、对应 Parser
    版本、非空 Chunk 和 64 位 Artifact SHA-256；随后精确删除 8 个 MinIO 对象及测试数据库事实。
 
-本检查点没有实现扫描 PDF、PNG/JPEG、Office 图片/图表提取和区域定位、OCR/VLM、XLSX 公式
-表达式、隐藏 Sheet/Slide 语义、PPTX 演讲者备注或 `partial_ready` 视觉补处理。这些属于下一切片，
-不能由 `visualAssetCount` 冒充。四个最小 fixture 也只能证明链路正确，不能构成吞吐量提升指标。
+本检查点当时没有实现扫描 PDF、PNG/JPEG、Office 图片/图表提取和区域定位、OCR/VLM、XLSX
+公式表达式、隐藏 Sheet/Slide 语义、PPTX 演讲者备注或 `partial_ready` 视觉补处理；这些事项
+在 M2-A6 中按视觉资产和降级语义继续实现，M2-A5 的四个最小 fixture 仍只能证明确定性链路，
+不能构成吞吐量提升指标。
+
+### 已实现检查点：M2-A6 视觉资产与可配置 OCR/VLM 路由
+
+2026-08-04 在不破坏 M2-A5 确定性文本事实的前提下接入视觉资产阶段：
+
+1. PDF 无嵌入文本页产出 `document_page`，保留页码和源文件 SHA-256；PNG/JPEG 产出
+   `source_image`；DOCX/XLSX/PPTX 从包内 `media` 目录提取支持的视觉文件。所有视觉资产先做
+   文件签名、尺寸、SHA-256、单项/总量预算校验，原始字节只存在受限执行和模型请求内。
+2. Office relationship 只允许解析到同一 package root。图片记录 `sourcePart`、
+   `relationshipId`、媒体路径和页码；同一图片被多个 PPTX slide 引用时保留多个可追溯 occurrence。
+   没有关系引用的孤立媒体仍写入 Artifact 审计记录，但路由为 `unreferenced_asset`，不调用模型。
+3. 路由由后端确定：小图片 `decorative_small_image` 跳过；可识别但暂不支持模型输入的媒体
+   `unsupported_media_type` 跳过；PDF 页面缺少嵌入文本时走 OCR；足够大的 PNG/JPEG 走 OCR+VLM。
+   每个任务还有独立的 `maxVisualEnrichments` 上限，超限资产只记录 `budget_exceeded`。
+4. Element Artifact 从 schema v1 升为 v2，记录视觉位置、媒体类型、尺寸、内容哈希、路由、
+   状态、原因、provider/model 和输出 Element 索引，禁止写入原始图片字节。原生文本存在但视觉
+   处理不可用时版本发布为 `partial_ready` 且 `is_current=false`；纯视觉文档没有可检索文本时
+   返回永久 `invalid_ingestion_input`，不生成空 Chunk。
+5. `[models.ocr]` 与 `[models.vision]` 独立配置 provider、模型、Prompt 文件、Prompt version、
+   超时和输出预算。DashScope 适配器只接受严格单对象 JSON，拒绝未知字段、尾随内容、NUL 和
+   超大输出；凭证只注入 Knowledge Worker。最小 PNG 已完成真实 Vision 链路烟测，隔离的
+   `qwen-vl-ocr-latest` PNG 烟测也已完成并保存 provider/model/Prompt metadata；直接 PDF
+   `file_url` 输入单独验证为当前 Eino OpenAI adapter 不支持，现归类为永久输入能力错误，
+   不再进入无意义重试。不能声称 OCR 质量、扫描文档召回或吞吐提升。
+
+已通过视觉 Parser/路由/Artifact 单测、全量 `go test ./...`、`go vet ./...`、关键包 race
+测试、PostgreSQL/RabbitMQ/MinIO integration 测试和 `docker compose config --quiet`；烟测
+对象、任务事实和临时文件已清理。M2-A6 已收口。当前基于 MIME、原生文本存在性、尺寸和引用
+关系的 M2-A6 路由仍是粗粒度 fallback，不能描述为区域级智能分流。
+
+### 实施中检查点：M2-A7 本地 ONNX 页面/区域路由
+
+2026-08-05 开始实现以下边界：
+
+1. 新增 Go `LayoutRouter` 领域端口、页面/区域输入输出、bounding box、置信度、稳定 reason code
+   和模型追踪元数据；Eino Document Transformer 仅在外层适配并通过 Callback 采集观测。
+2. 原生文本质量规则先执行；明显数字文档保留现有 Go 快速路径，扫描/混合/低置信度页面才渲染并
+   调用本地 ONNX 版面模型。模型 Session 常驻，线程、页数、像素、超时和并发有界。
+3. text 区域在原生文本不足时走云端 OCR，table 区域进入表格恢复，picture/diagram/chart/screenshot
+   区域进入云端 VLM；先做区域识别和多来源去重，最后才创建检索 Chunk。
+4. 首轮不部署完整 Docling，也不本地化 OCR/VLM。Docling 用作离线对照；布局模型必须先完成
+   许可证、标签、权重哈希、Windows/Linux ONNX Runtime 和预后处理契约审核。
+5. VLM 固定相同区域、Prompt、严格 JSON schema、超时和输出上限，比较 StepFun
+   `step-3.7-flash` low reasoning 与当前 DashScope `qwen3-vl-plus`；模型选择使用成功区域成本和
+   端到端质量/吞吐，不使用厂商峰值 TPS 作为项目结论。
+6. 固定集至少覆盖原生文本、扫描文本、原生/扫描表格、截图、统计图、流程图和混合页。先验证
+   路由 Macro-F1、高价值漏检、CPU/RAM 和云调用降幅，再进入 Embedding、混合召回和 Rerank。
+
+当前已经固定 PP-DocLayout-M commit、23 类映射、`640x640` 预处理、opset 17 和转换后 SHA-256；
+PDFium-WASM、ONNX Runtime 1.28.0、常驻 Session/取消/并发边界均已实现。`LayoutStage` 已在开关
+启用时接入 Knowledge Worker Executor，actionable crop 转为 `layout_region` 并显式路由 OCR 或
+OCR+VLM，整页资产标记 superseded 以避免重复调用；Artifact schema v5 持久化 bbox、置信度、
+reason、模型/渲染器、crop 哈希和 provider Token usage。文档级区域数和 crop 总字节预算在云调用前抑制超限区域并保留
+suppression reason。上游语义样例已检出 table/caption/text，但这只证明接线正确。
+真实公开固定集 `layout-routing-public-v1` 已固定 7 份 PDF/DOCX 的来源、使用依据、大小和哈希，
+其中 8 个 PDF 页面完成了页面/路由及 7 个高价值区域人工标注。PDFium-WASM 现在会在主 Go Parser
+返回空文本时先计数、再受限提取原生文字，并与主 Parser 共用文档字符预算；低置信 text/caption/table
+不再直接升级到 VLM。Windows 本地运行得到页面类型 Macro-F1 1.0000、可执行路由 Macro-F1 1.0000、
+高价值漏检 0/7；相对“所有检测区域均送云端”的路由基线，云端区域规避率为 73.08%。本轮没有调用
+云 OCR/VLM，该口径不等于真实 API 调用、Token 或成本降幅。超大扫描页现会自适应降低实际 DPI 并
+记录请求/实际 DPI，不再因为像素超限导致整任务失败。20M/8M 像素成对运行中，8M 保持本小样本
+路由结果不变并降低 P95/内存。一次严格受限的 USPTO 扫描文字页 OCR 对比显示 72 DPI 与 113 DPI
+输出字符相似度 99.54%，72 DPI provider 延迟低约 30.6%，但单页不足以覆盖小字、扫描表格和退化
+图像，因此生产配置暂不切换。跨类别重叠框使用小面积、近同框和置信差三重门槛仲裁，固定集只
+移除了 NASA logo 的重复 picture，云端区域规避率 73.08% 提升到 74.03%，高价值漏检仍为 0/7。
+
+`element-merge-v1` 已在 Chunk 前执行：同页完全归一化重复、被原生文本完整覆盖的 OCR、以及
+至少 85% 包含的重叠 OCR 会从检索投影中抑制；结构化 table/原生 text 优先，VLM 描述不做模糊
+语义去重。原始 Element、winner index 和 reason 全部保留在 Artifact v5，避免为了少量 Token
+丢失可审计证据。
+
+`vlm-quality-local-v1` 已把三个真实课件图示裁成 SHA 固定区域，并用相同 Prompt、严格 JSON、
+超时和 2,048 输出-Token 上限比较 `qwen3-vl-plus` 与 `step-3.7-flash` low reasoning。两者最终
+都完成 3/3；自动关系事实均为 8/9，人工完整正确均为 2/3。StepFun 在 1,024 Token 试跑时出现
+一次空 final content，提升到 2,048 后恢复；Qwen 最终轮平均 5.35 秒、2,206 Token、三次约
+0.00684 元，StepFun 平均 7.87 秒、4,740 Token且计入 Step Plan 套餐额度。该小样本只支持当前
+继续使用 Qwen 的工程决策，不支持宣称通用 VLM 精度领先。
+
+本地 ONNX 资产现通过独立 BuildKit context 进入可选 Knowledge Worker 镜像，默认后端构建不携带
+模型和 Runtime。staging、Docker build 和 Worker 初始化分别校验字节长度/SHA；Linux x64 镜像
+携带模型 README、ONNX Runtime license 和 third-party notices，并以非 root、只读根文件系统、
+无 capabilities 运行。2 CPU/2 GiB、禁网的八页固定集保持路由质量，平均页耗时 1.18 秒、P95
+2.59 秒、峰值 RSS 638.06 MiB。该数据来自 Docker Desktop Linux VM，只证明可部署性和资源量级，
+不能替代目标服务器容量测试。
+
+9 份真实课程 PPTX 共 752 页已形成纯本地 Parser 基线：9/9 成功，三轮中位数 9.55 MiB/s、378.72 页/s，
+并暴露且修复了合法 OOXML 零字节目录项被误判为不安全路径的问题。另有 2 份课件的 8 页经渲染与
+独立 OOXML 人工复核，21 个页序文字锚点、9 个 DrawingML 表格、15 个图片使用点和 14 个 distinct
+slide relationship 在固定集上全部通过；同一 relationship 的重复 picture 使用按关系级去重。三轮
+Windows ONNX 线程 A/B 中，1/2/4 intra-op 的中位平均页时延分别为 1457.09/1389.57/1283.88 ms，
+但 2 线程 P95 最稳，默认值暂不调整。上述数据均不含上传、云识别、数据库或向量索引。默认开关仍关闭。
+后续还需补图表、软件截图/错误态和扫描表格，并完成云增强后的合并质量证据。详细口径与
+结果位于 `docs/evaluations/layout-routing-public-v1.md` 与
+`docs/evaluations/knowledge-ingestion-quality-v1.md`，架构决策位于
+`docs/decisions/003-local-onnx-layout-routing.md`。

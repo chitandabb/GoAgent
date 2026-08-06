@@ -90,6 +90,18 @@ The `[knowledge]` block configures the current ingestion contract:
   archive and XML expansion limits;
 - `parserMaxExtractedRunes`: per-document extracted-text budget;
 - `parserMaxSpreadsheetRows` and `parserMaxSpreadsheetColumns`: per-worksheet limits.
+- `parserMaxVisualAssets`, `parserMaxVisualAssetBytes`, and `parserMaxTotalVisualBytes`:
+  bounded visual candidates and unique embedded-media bytes;
+- `maxVisualEnrichments` and `minVisualPixels`: per-task visual-model budget and the
+  decorative-image threshold.
+- `[models.embedding]`: independent DashScope `text-embedding-v4` profile, 1024 dimensions,
+  query/document input modes, batch size and bounded concurrency. The active profile is created
+  by the Knowledge Worker and a different active profile cannot silently replace it.
+- `[models.rerank]`: optional DashScope `qwen3-rerank` post-retrieval stage. It is disabled by
+  default. `maxCandidates` is capped at 50; provider failure preserves retrieval order and marks
+  the Tool result degraded. The fixed-set live probe is available through the evaluator's
+  `-retriever rrf-rerank` mode; this run succeeded but the provider response did not expose a
+  parseable `usage.total_tokens`, so cost remains unknown rather than estimated.
 
 Administrator uploads use `multipart/form-data`, a UUID `Idempotency-Key`, the
 authenticated Session, and CSRF protection. The API stages one bounded file in the
@@ -99,14 +111,23 @@ response means the immutable object and PostgreSQL ingestion facts are durable; 
 does not yet mean parsing has completed. `mesguard-outbox-relay` publishes the task,
 and the independent `mesguard-knowledge-worker` consumes it with manual ACK and
 confirmed retry/dead-letter copies. The current Executor supports UTF-8 TXT/Markdown,
-embedded-text PDF, and deterministic DOCX/XLSX/PPTX extraction. It verifies the immutable
-source, writes a JSON Element Artifact to MinIO, stages searchable Chunks under lease
-fencing, and then publishes `ready/current`. PDF pages and PPTX slides retain page numbers;
-DOCX headings, paragraphs and tables and XLSX worksheet cell values use the same Element
-contract. Office ZIP paths, entry counts, expanded bytes and XML sizes are bounded, and
-encrypted or malformed inputs fail permanently. Office images are currently counted and
-marked for visual enrichment only. Scanned PDFs, standalone images, OCR/VLM descriptions,
-formula expressions, speaker notes, and hidden Sheet/Slide handling are not implemented yet.
+embedded-text PDF, deterministic DOCX/XLSX/PPTX extraction, and bounded PNG/JPEG visual
+assets. It verifies the immutable source, writes a JSON Element Artifact to MinIO, stages
+searchable Chunks under lease fencing, and then publishes `ready/current` or `partial_ready`.
+PDF pages and PPTX slides retain page numbers; DOCX headings, paragraphs and tables and
+XLSX worksheet cell values use the same Element contract. PDF pages without embedded text
+become page-level visual candidates; Office media keeps source-part, relationship, page,
+dimensions and SHA-256 metadata, while unreferenced media is recorded but never sent to a
+model. Office ZIP paths, entry counts, expanded bytes, XML sizes, visual bytes and visual
+occurrences are bounded, and encrypted or malformed inputs fail permanently. OCR/VLM
+processing is configuration-driven through `[models.ocr]` and `[models.vision]`. When
+unavailable, native text is retained as `partial_ready`, while a visual-only source fails
+instead of creating an empty searchable version. Bounded PNG smokes completed both the live
+DashScope Vision path and the isolated `qwen-vl-ocr-latest` path. Direct PDF `file_url`
+input was separately proven unsupported by the Eino OpenAI adapter and is now classified as
+a permanent input-capability error; M2-A7 renders PDF pages locally before image-based
+OCR/VLM. No OCR/VLM quality metric is claimed. Formula expressions, speaker notes and hidden
+Sheet/Slide handling are not implemented.
 
 Start or rebuild the runnable path with:
 
@@ -124,9 +145,163 @@ go test -tags=integration ./internal/platform/postgres ./internal/platform/rabbi
 ```
 
 These tests cover Artifact/Chunk fencing, FTS visibility, Publisher Confirm before
-ACK, MinIO Source round trips, PDF page extraction, OOXML ordering, and parser resource
-limits. Local service smoke tests have covered TXT/Markdown and all four deterministic
-PDF/Office paths; they are functional proof, not a document-throughput benchmark.
+ACK, MinIO Source round trips, PDF page extraction, OOXML ordering and relationship
+locations, visual routing, standalone-image validation, and parser resource limits. Local
+service smoke tests have covered TXT/Markdown, all four deterministic PDF/Office paths,
+and disabled visual enrichment behavior; they are functional proof, not a document-throughput
+benchmark. OCR/Vision blocks require the configured API-key environment variable. Rebuild the
+Knowledge Worker after profile changes and run a bounded provider smoke before using a new
+provider/model combination in ingestion. M2-A7 keeps OCR/VLM cloud-hosted; see
+`docs/decisions/003-local-onnx-layout-routing.md`.
+
+### M2-A7 local layout development
+
+The local page/region routing code path is connected to the Knowledge Worker but remains
+disabled by default. Prepare verified local artifacts with:
+
+```powershell
+.\scripts\models\fetch_and_convert_pp_doclayout.ps1
+.\scripts\runtime\fetch_onnxruntime.ps1 -Platform windows-x64
+```
+
+The model command verifies source artifacts, builds the pinned Linux converter, checks the
+opset-17 ONNX output and rejects a SHA mismatch. The runtime command verifies the official
+1.28.0 archive. For a native semantic smoke test:
+
+```powershell
+$env:MESGUARD_TEST_ONNX_RUNTIME_LIBRARY = '<absolute path to onnxruntime.dll>'
+$env:MESGUARD_TEST_LAYOUT_MODEL = '<absolute path to pp-doclayout-m.onnx>'
+$env:MESGUARD_TEST_LAYOUT_IMAGE = '<optional upstream or approved fixture JPEG>'
+go test ./internal/platform/onnxlayout -run TestORTIntegration -v -count=1
+```
+
+Fetch the pinned public evaluation corpus and run the route/resource benchmark with:
+
+```powershell
+.\scripts\evaluation\fetch_layout_routing_corpus.ps1
+.\scripts\evaluation\run_layout_routing_eval.ps1
+```
+
+The downloaded PDF/DOCX files, observations, summaries, logs, executable and resource samples
+stay under ignored `output/evaluation/`. Git tracks the corpus contract in
+`testdata/layout-routing-public-v1.corpus.json`, page annotations in
+`testdata/layout-routing-public-v1.jsonl`, and the dated result interpretation in
+`docs/evaluations/layout-routing-public-v1.md`. The evaluator also accepts
+`-max-raster-pixels`, `-render-dpi`, `-intra-op-threads`, and `-inter-op-threads` overrides for
+paired resource runs without changing the production profile.
+
+Run a parser-only PPTX compatibility and throughput baseline against an approved local folder:
+
+```powershell
+.\scripts\evaluation\run_pptx_parse_eval.ps1 -InputRoot '<approved PPTX folder>'
+```
+
+This command performs no provider calls. It records file/slide/Element/table/media counts,
+duration and allocation metrics under ignored `output/evaluation/`. For one-page OCR comparison,
+the default is also dry-run and only renders the 20M and 8M candidates:
+
+```powershell
+go run ./cmd/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8
+```
+
+Run the SHA-pinned, manually reviewed PPTX structure set separately:
+
+```powershell
+.\scripts\evaluation\run_pptx_element_quality_eval.ps1 `
+  -InputRoot '<folder containing the reviewed PPTX files>'
+```
+
+It validates page-specific text anchors, DrawingML table counts/content, distinct slide image
+relationships and relationship completeness. The source decks and rendered review images are not
+committed. Repeated picture uses of the same relationship are counted separately in the review
+metadata but intentionally collapse to one visual asset per slide relationship.
+
+Adding `-execute-provider` performs exactly two OCR calls. Review current provider pricing and,
+if necessary, override `-input-price-per-million-cny` and
+`-output-price-per-million-cny`. Never use this evaluator for an unbounded VLM run.
+
+The reviewed VLM region evaluator is also dry-run by default. It verifies the three source
+SHA-256 values, writes only the bounded crops under ignored `output/evaluation/`, and reports a
+maximum of six provider calls:
+
+```powershell
+.\scripts\evaluation\run_vlm_quality_eval.ps1 `
+  -InputRoot '<folder containing the reviewed slide renders>'
+```
+
+Only add `-ExecuteProvider` after reviewing current prices and the printed budget. The command
+uses the configured Qwen Vision endpoint and StepFun low-reasoning endpoint, the same Prompt and
+strict JSON contract, and stops one provider after its first error. Raw provider text remains in
+the ignored report. The fixed set and its manual-review caveats are recorded in
+`docs/evaluations/knowledge-ingestion-quality-v1.md`.
+
+### M2-A8 retrieval evaluation
+
+The fixed retrieval set uses 12 industrial documents, 24 chunks and 24 literal/paraphrased
+queries. It runs inside a rolled-back PostgreSQL transaction. Compare all three retrieval paths:
+
+```powershell
+go run ./cmd/mesguard-rag-retrieval-eval -retriever fts `
+  -corpus testdata/rag-retrieval-v1.corpus.jsonl `
+  -dataset testdata/rag-retrieval-v1.jsonl `
+  -output output/evaluation/rag-retrieval-v1-fts.observations.jsonl `
+  -summary output/evaluation/rag-retrieval-v1-fts.summary.json
+
+go run ./cmd/mesguard-rag-retrieval-eval -retriever vector `
+  -corpus testdata/rag-retrieval-v1.corpus.jsonl `
+  -dataset testdata/rag-retrieval-v1.jsonl `
+  -output output/evaluation/rag-retrieval-v1-vector.observations.jsonl `
+  -summary output/evaluation/rag-retrieval-v1-vector.summary.json
+
+go run ./cmd/mesguard-rag-retrieval-eval -retriever rrf `
+  -corpus testdata/rag-retrieval-v1.corpus.jsonl `
+  -dataset testdata/rag-retrieval-v1.jsonl `
+  -output output/evaluation/rag-retrieval-v1-rrf.observations.jsonl `
+  -summary output/evaluation/rag-retrieval-v1-rrf.summary.json
+```
+
+Vector/RRF call the configured Embedding provider, so keep the corpus bounded and review the
+printed/provider-reported Token usage before larger runs. Use
+`-embedding-price-cny-per-million` only with the current provider price; without it the summary
+does not claim a monetary cost. Methodology and the 2026-08-06 result table are recorded in
+`docs/evaluations/rag-retrieval-v1.md`. This fixed set is correctness evidence, not a production
+throughput or SLA benchmark.
+
+`[knowledge.layout]` may be enabled only after `modelPath`, `manifestPath` and
+`runtimeLibraryPath` resolve inside the Knowledge Worker environment. Artifact schema v5
+then records model, renderer, requested/effective DPI, bbox, crop and explicit OCR/VLM routing
+provenance plus `element-merge-v1` keep/suppress decisions. The first eight-page public run is
+recorded, but its cloud-bound-region avoidance is a routing proxy rather than measured API/Token
+savings. One bounded OCR pair, a nine-file PPTX parser benchmark, an eight-slide PPTX structure
+set and a three-candidate ONNX thread A/B are recorded in
+`docs/evaluations/knowledge-ingestion-quality-v1.md`; remaining work is broader OCR/VLM fixtures,
+and cloud-enriched merge quality.
+
+Prepare and build the optional Linux/amd64 layout Worker without placing model assets in Git or
+the default backend build context:
+
+```powershell
+.\scripts\runtime\fetch_onnxruntime.ps1 -Platform linux-x64
+.\scripts\models\fetch_and_convert_pp_doclayout.ps1
+.\scripts\runtime\prepare_knowledge_worker_assets.ps1
+docker compose -f docker-compose.yml -f docker-compose.layout.yml build knowledge-worker
+```
+
+The staging script verifies extracted file lengths and SHA-256 values and copies only the model,
+runtime, asset manifest, and license notices into ignored `output/docker/knowledge-worker-assets`.
+The Dockerfile verifies the binary hashes again. The overlay uses `linux/amd64`, a non-root user,
+read-only root filesystem, dropped capabilities and `no-new-privileges`; it does not change the
+default Compose path or turn `[knowledge.layout].enabled` on automatically.
+
+Run the Linux fixed-set/resource gate with no network and 2 CPU/2 GiB limits:
+
+```powershell
+.\scripts\evaluation\run_linux_layout_routing_eval.ps1
+```
+
+The script writes summary, observations, GNU time output and machine-readable resources only
+under ignored `output/evaluation/linux-layout-routing/`.
+
 Increment `promptVersion` whenever a content change must be distinguishable in
 persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release

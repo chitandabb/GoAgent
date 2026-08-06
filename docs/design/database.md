@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard 业务数据库的目标结构、约束、索引、事务边界和迁移方式。
-- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence、反馈与失败恢复审计表，以及知识文档、不可变版本、Chunk 和入库任务/事件的持久化骨架；Embedding 与完整评测表仍未实现。
+- 当前仓库已实现用户、Session、数据源、外部工单身份、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、DiagnosisStep、ToolExecution、EvidenceItem、DiagnosisReport、ReportEvidence、反馈与失败恢复审计表，以及知识文档、不可变版本、Chunk、入库任务/事件、Embedding Profile、Chunk 向量持久化和知识问答用的高层 `search_knowledge` Tool；可选 Rerank 适配器默认关闭，已用真实 `qwen3-rerank` 运行 24 条固定集评测，评测结果先以版本化 JSONL/JSON 文件保存；独立评测结果表与公开知识对话 API 仍未实现。
 - PostgreSQL 是 MESGuard 的事实来源。外部 MES/ERP SQL Server 只读访问，不把外部业务表复制成可写主数据。
 - 本文先固定数据库边界，具体 SQL 文件、Go 结构体和 Repository 实现随后按 M0/M1 纵向切片落地。
 
@@ -18,7 +18,7 @@ PostgreSQL 保存 MESGuard 自己产生和需要追溯的事实：
 - 诊断任务、步骤、工具调用、证据、报告和人工反馈；
 - TaskEvent 和 OutboxEvent；
 - 附件元数据与权限关系；
-- M2 的会话消息、知识文档、切块、向量和评测结果。
+- M2 的会话消息、知识文档、切块、向量和评测观测摘要。
 
 PostgreSQL 不保存：
 
@@ -94,7 +94,7 @@ data_sources ── external_cases ── case_snapshots
        └─ schema_catalog_versions ── schema_catalog_entries
 
 knowledge_documents ── knowledge_document_versions ── knowledge_chunks
-                                                        └─ embeddings（M2）
+                                                         └─ knowledge_chunk_embeddings ── knowledge_embedding_profiles
 ```
 
 ## 表设计
@@ -684,7 +684,7 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
 文档逻辑身份、解析版本和检索块分开保存：
 
 - `knowledge_documents`保存范围：`global` 或 `personal`、所有者和删除状态；
-- `knowledge_document_versions`保存解析器、OCR、VLM和Embedding版本；
+- `knowledge_document_versions`保存解析器、OCR、VLM和Embedding版本及发布状态；
 - `knowledge_chunks`保存文本、页码、章节、元素类型、attachment_id、内容哈希和解析元数据。
 
 文档重新解析或更换Embedding模型时创建新版本，不能覆盖已经被历史报告引用的旧版本。
@@ -706,9 +706,9 @@ CONSTRAINT conversation_summary_schema_version_ck CHECK (
   原文件名、上传时间和 `pipeline_version`；queued 版本不会提前成为 current；
 - `knowledge_ingestion_tasks` 保存 stage、attempt、claim/lease/heartbeat、checkpoint、进度、取消、
   错误与终态，`idempotency_key/request_fingerprint` 已建立成对约束和创建者范围唯一索引；
-- 入库任务 `stage` 是细粒度执行阶段并包含 `publishing`；文档版本 `status` 是粗粒度可用性状态，
-  publishing checkpoint 仍投影为 `indexing`，直到 Worker 终态事务原子切换为 `ready` 或
-  `partial_ready`。前端和运维若要展示“正在发布”必须读取任务 stage，不能从版本 status 推断；
+- 入库任务 `stage` 是细粒度执行阶段并包含 `publishing`；文档版本 `status` 保留同名的
+  `publishing` 非终态，直到 Worker 终态事务原子切换为 `ready` 或 `partial_ready`。
+  前端和运维可以同时读取版本 status 和任务 stage，不能把任一字段当作另一个字段的替代；
 - `knowledge_ingestion_events` 使用 `(task_id, seq)` 保存有序、追加式入库事件；
 - 应用服务在一个 PostgreSQL 事务中创建 queued version、pending task、首个 event 和
   `knowledge.ingest` Outbox；事务提交后由 Relay 发布 RabbitMQ，不在数据库事务内执行网络 I/O；
@@ -727,21 +727,31 @@ claim/lease/heartbeat/checkpoint/fencing/退避状态转换已接入，并通过
 TXT/Markdown Executor、RabbitMQ 入库 Consumer、Element Artifact 和 fenced Chunk staging 已接入；
 发布后的 `ready/current` Chunk 已由真实 PostgreSQL FTS 查询验证。受资源约束的嵌入文本 PDF、
 DOCX、XLSX、PPTX Parser 已接入同一 Artifact/Chunk 发布事务，并通过 HTTP -> Outbox -> RabbitMQ
--> Worker -> MinIO/PostgreSQL smoke 验证 Parser 版本、Chunk 和 Artifact SHA-256。Office 图片当前
-只记录待视觉增强元数据；OCR/VLM、Embedding 表、向量索引、混合融合与 Rerank 尚未接入，不能
-用该基线声称简历第三条的吞吐量或最终 Recall@5 指标已经完成。
+-> Worker -> MinIO/PostgreSQL smoke 验证 Parser 版本、Chunk 和 Artifact SHA-256。M2-A6 已增加
+视觉资产的受限提取、引用定位、Artifact schema v2 和可配置 OCR/VLM 路由；Artifact 只保存
+视觉摘要元数据与输出 Element 索引，不保存原始图片字节。OCR/VLM 默认关闭。`00016` 已落地
+Embedding Profile 与 Chunk 向量表，Worker 在解析、分块后按批次生成 Embedding，并在写入 Artifact、
+Chunk 与向量时使用同一事务和 lease fencing。当前只启用一个 active profile，向量查询使用精确余弦
+距离，FTS/Vector/RRF 固定集结果记录在 `docs/evaluations/rag-retrieval-v1.md`；Rerank 和在线
+高层 `search_knowledge` Tool 已接入知识问答 Runner 和诊断 Runner；它不接受 FTS/Vector/RRF 选择、向量或对象
+存储地址参数，只返回带 Chunk/版本/页码/章节定位的证据和降级通道。新建诊断任务由后端自动冻结 knowledge capability，用户不选择 Tool；依赖不健康时只隐藏对应 Tool。固定集仍是检索正确性基线，不是生产覆盖率或成本承诺。
 
-### embeddings
+### knowledge_embedding_profiles、knowledge_chunk_embeddings
 
-向量表保存：
+`00016_create_knowledge_embeddings.sql` 已固定当前 Embedding 兼容性边界：
 
-- `chunk_id`；
-- `embedding_model`；
-- `embedding_dimensions`；
-- `embedding vector(n)`；
-- `created_at`。
+- `knowledge_embedding_profiles` 保存 profile key、provider、model、1024 维度、cosine 距离、
+  query/document 输入类型、归一化、配置版本、指纹和 `staging/active/retired/failed` 状态；
+- profile 指纹唯一，数据库通过部分唯一索引保证同一时刻只有一个 active profile；
+- `knowledge_chunk_embeddings` 以 `(chunk_id, profile_id)` 为主键，保存内容 SHA-256 和
+  `vector(1024)`；Chunk 删除会级联删除向量，Profile 删除被引用时受限；
+- 检索必须同时满足向量 profile active、向量内容哈希等于 Chunk 当前哈希、版本为 `ready/current`、
+  文档未删除且 scope 对当前用户可见；
+- Worker 启动时确保配置 profile 已存在并激活；如果数据库已有不同 active profile，拒绝静默切换，
+  后续模型升级必须先 staging、回填、固定集验证，再做原子切换和旧 profile 保留。
 
-向量维度由实际启用的Embedding模型和输出配置决定，经过POC确认后再在迁移中固定为`vector(n)`。单独保存`embedding_dimensions`不能让一个近似索引兼容任意维度；未来同时使用不同维度时，应使用独立表、分区或按模型建立的表达式索引。
+当前 profile 为 DashScope `text-embedding-v4`、1024 维、L2 归一化。Embedding API 返回的
+`usage.total_tokens` 由 Worker 和固定集评测分别累计，数据库不保存模型原始响应。
 
 M2采用渐进策略：
 

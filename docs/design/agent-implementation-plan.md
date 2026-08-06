@@ -27,9 +27,11 @@ P0 已于 2026-07-30 验收：隔离的 ADK `ChatModelAgent` POC 在不替换现
 
 Eino `v0.9.13` 的 `adk/filesystem.InMemoryBackend` 在 Windows 下存在 Skill glob/read 路径分隔符不一致，P0 曾使用局部适配器封装。P2 已替换为项目只读目录 Backend，并保留 Windows slash/backslash 回归测试。
 
-P1 已于 2026-07-31 验收：新增不可变 `TaskScope`、启动期只读 `ToolCatalog` 和 ADK `BeforeAgent` 授权 Middleware。Catalog 根据角色、任务类型、同一数据源的 role/safety mode 组合及依赖可用性过滤 Tool；2026-08-03 又将任务级 `allowedCapabilities` 与 Runtime 依赖健康拆分，任务创建时冻结 `case/code/sql` 白名单，Worker 不再因 GitHub MCP 或 SQL Server 在线而自动向所有诊断任务暴露对应 Tool。60 个并发 Run 证明授权状态不串用，production 不能获得 bounded-LAB Tool，GitHub MCP 不可用只移除对应 Tool。GCC 到位后的 `-race` 检测发现 Eino `v0.9.13` 的同一 `ChatModelAgent` 实例不能被并发 Run；因此共享 Catalog、Middleware、Tool 和模型客户端，但每次 Run 创建独立 Agent 实例。P3 已将这套生命周期接入正式 Runner。
+P1 已于 2026-07-31 验收：新增不可变 `TaskScope`、启动期只读 `ToolCatalog` 和 ADK `BeforeAgent` 授权 Middleware。Catalog 根据角色、任务类型、同一数据源的 role/safety mode 组合及依赖可用性过滤 Tool；2026-08-03 又将任务级 `allowedCapabilities` 与 Runtime 依赖健康拆分，任务创建时冻结 `case/code/sql/knowledge` 白名单，其中诊断任务的 `knowledge` 由后端自动追加。Worker 不再因 GitHub MCP、SQL Server 或 Knowledge Worker 在线而自动向所有任务暴露对应 Tool。60 个并发 Run 证明授权状态不串用，production 不能获得 bounded-LAB Tool，GitHub MCP 不可用只移除对应 Tool。GCC 到位后的 `-race` 检测发现 Eino `v0.9.13` 的同一 `ChatModelAgent` 实例不能被并发 Run；因此共享 Catalog、Middleware、Tool 和模型客户端，但每次 Run 创建独立 Agent 实例。P3 已将这套生命周期接入正式 Runner。
 
 P2 已于 2026-07-31 验收：两个 Skill 已迁移为 Eino 原生 `SKILL.md + references`，旧 TOML/Prompt 文件删除；项目只读 filesystem Backend 统一拒绝写入、路径逃逸、symbolic link 和 Windows Junction/reparse point，`read_skill_reference` 只允许按行读取 `references/*.md` 并限制行数/字节数。测试证明初始 Tool 描述只包含 Skill 元数据，完整指南和 reference 分别按需进入模型上下文。脚本执行仍未开放。
+
+策略同步：新建诊断任务的 `knowledge` capability 由后端追加并冻结，前端不提供知识 Tool 选择；旧任务仍按已持久化快照执行，Agent 只根据证据缺口自主调查。
 
 旧的每 Skill ReAct/Handoff 过渡实现已在 P3 删除。后续 SQL、RAG 或 Web 调查继续接入当前单 Agent 内循环，不再恢复 Dispatcher。
 
@@ -96,7 +98,7 @@ type AgentToolProvider interface {
 ~~~
 
 `TaskScope` 至少包含用户角色、任务类型、数据源、生产/产品库环境、任务允许的能力和可用依赖。
-`allowedCapabilities` 决定本任务是否允许 `case/code/sql`，`availableDependencies` 只描述外部服务
+`allowedCapabilities` 决定本任务是否允许 `case/code/sql/knowledge`，其中诊断任务的 `knowledge` 由后端自动写入；`availableDependencies` 只描述外部服务
 当前是否健康，两者同时满足时 Tool 才可见。Catalog 注册不等于向模型暴露；授权 Middleware 在
 ADK `BeforeAgent` 阶段读取 `TaskScope`，把 `ToolsFor` 的结果写入本次运行的 Tool 配置。
 Catalog、Middleware 和 Tool 可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 每次 Run 独立创建，
