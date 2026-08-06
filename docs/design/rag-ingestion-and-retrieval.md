@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：`M2-A1 至 M2-A8 后端链路已完成 / 高层能力继续实施`
+- 状态：`M2-A1 至 M2-A8 后端链路已完成 / M2-B1 部分完成`
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
@@ -30,6 +30,8 @@
 - PDF/DOCX/XLSX/PPTX 真实服务链路 smoke，均验证 Parser 版本、Chunk 和 Artifact SHA-256。
 - Embedding Profile、批量 Embedding、pgvector 精确向量检索、FTS/Vector 并行召回和 RRF 融合；
 - 可选 DashScope `qwen3-rerank` 适配器、Rerank Token/延迟观测和失败时保留 RRF 的降级；
+- 最终 child 命中后的同版本/同章节有界上下文扩展，独立返回邻接 Chunk 身份与哈希；
+- 受控 Query Plan、protected signals 门禁、多 Query 通道内合并和失败时回退原 Query；
 - 后端自动授权诊断任务使用知识库，统一 `search_knowledge` Tool 隐藏检索通道、候选预算和对象存储细节；
 - Knowledge Chunk 结果的文档/版本/Chunk UUID、内容哈希、标题、页码和章节路径校验；空结果或损坏结果不会生成可引用 EvidenceItem；
 - `rag-retrieval-v1` 固定集的 FTS、Vector、RRF 和 RRF+Rerank 对照结果，以及布局/OCR/VLM/PPTX 的独立质量记录。
@@ -40,7 +42,8 @@
 - 内容代理读取、孤儿清理和完整对象生命周期；
 - 更大规模 OCR/VLM provider 配对测评、扫描表格/小字体/退化扫描质量、复杂图表区域语义和丰富 Office 视觉语义；
 - XLSX 公式表达式、隐藏 Sheet/Slide 语义和 PPTX 演讲者备注等丰富 Office 语义；
-- Query 改写、parent 展开、Agentic 二次检索和面向用户的知识问答 HTTP/SSE 运行链路；
+- 物化 Parent 索引、Agentic 二次检索和面向用户的知识问答 HTTP/SSE 运行链路；受控 Query
+  Rewrite 与逻辑 Parent 邻接扩展已实现，但尚未完成 paired 检索和多 Chunk 上下文质量评测；
 - Web Search Tool、公开页面抓取与企业知识引用之间的升级边界；
 - MinIO/RabbitMQ/PostgreSQL/pgvector 全链路的文档处理吞吐量基线和最终第三条简历指标；当前 parser-only 吞吐与 routing avoidance 不能直接写成端到端提升。
 
@@ -167,6 +170,36 @@
     错误率和单个成功区域成本；`gemini-3.5-flash-lite` 仅在凭证可用时作为速度参考。
 54. ONNX Router 需要单独报告页面/区域 Macro-F1、高价值视觉元素漏检率、CPU/RAM 和避免的
     OCR/VLM 调用数；路由降本不能以降低最终 Recall@5 或引用完整性为代价。
+
+## 模型 Provider 可替换性边界
+
+“配置里有 provider/model/baseURL”不等于已经热插拔。MESGuard 只在下面三个条件同时满足时宣称
+某个角色支持配置切换：领域层依赖稳定接口、Bootstrap 已注册目标 Provider 适配器、目标模型通过
+该角色的真实契约 smoke 和 paired 质量评测。当前状态如下：
+
+| 模型角色 | 当前实现 | 只改配置可换 Provider | 切换时必须处理 |
+| --- | --- | --- | --- |
+| Agent Chat / Query Rewrite | Eino `ToolCallingChatModel` 接口，Bootstrap 固定 `NewStepFun` | 否 | Tool Calling、严格 JSON、推理参数映射、Usage 完整性和 Agent paired baseline |
+| LLM Judge | 只有默认关闭的 DashScope 配置骨架 | 否 | 独立适配器、Judge Prompt/Schema、与人工黄金事实的一致性校准 |
+| Embedding | `Embedder` 接口，DashScope `text-embedding-v4` 适配器 | 否，且不能原地换向量空间 | 新 `EmbeddingProfile`、全量回填、固定集评测、原子 active 切换和旧 profile 回滚 |
+| Rerank | `Reranker` 接口，DashScope `qwen3-rerank` 适配器 | 否 | 请求/分数契约、候选上限、超时降级和排序质量/成本 paired 评测；不需要重建向量 |
+| OCR / VLM | 通用 Generator/Processor 端口，Bootstrap 固定 DashScope | 否 | 图片输入格式、严格 JSON、Prompt、视觉质量、限流和 Token/费用字段映射 |
+| Layout Router | `LayoutRouter` 接口，固定 ONNX Runtime/PP-DocLayout-M 契约 | 否 | 权重许可证/SHA、标签映射、预后处理、固定集 Macro-F1 和资源门禁 |
+
+Chat 的 ReAct 循环、TaskScope、Tool 参数策略和 Evidence Gate 不依赖 StepFun；换模型不会获得额外
+权限，也不会改变确定性门禁。Provider 差异集中在模型能力：有的模型支持 `reasoning_effort`，有的
+通过模型 ID 或其他字段控制推理，有的完全不支持该旋钮。适配器必须显式映射、忽略或拒绝，不能
+把 `low/medium/high` 盲传给所有 OpenAI-compatible endpoint。Eino OpenAI 扩展提供自定义 `BaseURL`、
+`ReasoningEffort` 和额外请求字段，这证明可以实现适配器，不证明任意兼容端点语义相同。
+
+Prompt/Completion/Total Token 继续以供应商 Usage 为准，不从字符数估算。Cached/Reasoning Token
+只有供应商返回对应明细且适配器完成映射时才可用于指标；当前值为 0 还不能区分“真实为 0”和
+“未报告”。总 Token 预算是收到每次调用 Usage 后结算并阻止后续运行的运行时预算，不是跨 Provider
+精确预分词或费用预授权。切换 Chat Provider 后必须创建新的 model/provider baseline，不能和 StepFun
+旧样本直接合并比较。
+
+参考：CloudWeGo Eino Extension 官方 OpenAI ChatModel 文档：
+`https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/README.md`。
 
 ## 第一轮：产品与部署边界
 
@@ -443,6 +476,9 @@ Embedding 不但成本高，还可能把表格、错误栈和步骤列表切坏�
   单版本 Chunk 总量门禁和固定语料消融评测。
 - 语义切割是结构分块后的可选增强，不是所有句子必经的云端模型步骤；父块只在召回后按需展开，
   不能把每个命中的 300-500 token child 无条件放大成 800-1500 token 上下文。
+- 首个实现采用逻辑父级而不是新增父表：`document_version_id + section_path` 标识父级范围，检索和
+  Rerank 仍针对 child，最终命中后才读取同章节相邻 Chunk。这样不增加 Embedding 数量，后续只有
+  在多 Chunk 固定集证明局部窗口不足时才物化 Parent Chunk。
 - 超过 10,000 Chunk 表示当前解析或容量策略不适合该文档，必须失败并允许管理员调整，不能用
   静默截断换取表面上的 `ready`。
 
@@ -697,8 +733,54 @@ scope 和内容哈希校验。
 已经接入知识问答 Runner，负责服务端封装召回和降级结果。可选 `[models.rerank]` 与 DashScope
 `qwen3-rerank` HTTP 适配器已实现，默认关闭；启用后从最多 30 个候选重排到 Tool 请求的结果数，
 `qwen3-rerank` HTTP 适配器已完成真实固定集评测：24/24 请求成功，Recall@5 为 24/24，MRR 为 0.9792，与当前 RRF 质量相同。本次供应商响应未返回可解析的 `total_tokens`，因此不估算或虚构成本；测试中 Rerank 平均约 81.9ms，独立运行的整体查询均值为 258.8ms，相对 RRF 文档中 211.3ms 的观测增加约 22.5%。这是两次运行的差异，不作严格因果结论。
-剩余高层边界是 Query 改写、parent/child 上下文扩展、Agentic 二次检索、Web Search 和公开知识问答 API；
+剩余高层边界是 Agentic 二次检索、Web Search 和公开知识问答 API；逻辑 parent/child
+上下文扩展与受控 Query Plan 已实现，但还没有在扩展固定集上证明质量净收益，逻辑 Parent 也不是物化 Parent 索引；
 知识 Chunk 的引用门禁已落地，新建诊断任务已自动冻结 knowledge capability，不由前端或用户勾选。
+
+### 当前实现检查点：M2-B1 逻辑 Parent 上下文扩展
+
+`search_knowledge` 现在采用 small-to-big 顺序：FTS/Vector 召回 child，RRF 去重，配置启用时先完成
+Rerank，再只围绕最终 top K 结果扩展上下文。PostgreSQL 在 current/ready/scope 权限条件内，按
+同一 `document_version_id + section_path` 批量读取前后有界窗口；默认窗口为 1、每个逻辑父级的
+邻接内容预算为 1800 rune。窗口和预算由 `[knowledge.retrieval]` 配置，不能由模型参数覆盖。
+
+Tool 输出把命中结果和 `contextGroups` 分开。命中 child 的 ID、原文和 SHA-256 保持不变；每个邻接
+Chunk 也携带自己的 ID、ordinal、页面、类型和内容哈希。Tool 和 Evidence 边界会再次校验父级所属
+版本、章节、命中引用、顺序和哈希。扩展失败只增加 `missingChannels=context` 并保留原召回结果；
+没有邻接 Chunk 不算故障。本检查点没有额外模型调用、Embedding 或 Rerank 费用。
+
+这不是完整 Advanced RAG：当前父级是由章节路径和邻接窗口重建，不是独立持久化/向量化的 Parent；
+受控 Query Rewrite 和最多两个子查询已实现，但还没有上下文相关性压缩或 Evidence Gate 驱动的第二次检索。是否物化
+Parent 必须由多段落、多 Chunk 答案集的 Context Recall/Precision、延迟和上下文膨胀率决定。
+
+### 当前实现检查点：M2-B1 受控 Query Plan
+
+Query Rewrite 不直接替换用户原问题。服务端先确定性提取错误码、版本、编号、数值、时间和否定词
+等 protected signals，再让可配置改写器返回结构化 `QueryPlan`：原 Query、面向 FTS 的 lexical query、
+面向 Vector 的 semantic query，以及最多 2 个必要子查询。原 Query 始终保存在计划中，在 512 rune
+FTS 预算内进入关键词通道，并始终进入 Vector 查询集合。lexical/semantic 改写必须保留全部 protected
+signals，子查询可以聚焦部分信号但不能新增信号；空值、控制字符、超长、重复和不一致 Token usage
+都会被拒绝并回退原 Query。单字“未”不作为信号，避免把“未来版本”误判为否定；使用“未能”、
+“未完成”等明确短语。
+
+多 Query 不能把预算乘到不可控：每次 Tool 调用仍共享一个候选上限、Embedding/延迟预算和去重池，
+FTS/Vector 各自先按最佳 rank、原 Query 顺序、通道分数和 Chunk ID 合并，再进入统一 RRF、可选 Rerank
+和逻辑 Parent 展开；不同 Query 的原始 `ts_rank`/相似度不直接横向比较。改写器内部超时、无效或不可用
+只标记 `missingChannels=query_rewrite`，继续执行基础 FTS/Vector；只有调用方上下文真正取消才中止检索。
+
+`[knowledge.retrieval.queryRewrite]` 配置 Prompt 文件、Prompt version、1-30 秒超时、最多 2 个子查询和
+输出 rune 上限，默认 `enabled=false`。Tool 输出记录完整 QueryPlan、`disabled/accepted/provider_failed/
+policy_rejected` 状态、Prompt version 和供应商 Token usage；严格 JSON 解码要求 `subqueries` 必须存在
+且为数组。Prompt 位于 `config/prompts/query-rewrite.md`，修改内容时必须同步提升版本。
+
+真实 StepFun smoke 共进行了三次短 Query 调用：10 秒预算出现内部超时；30 秒预算第一次返回后因
+protected signals 不完整被门禁拒绝；将服务端提取的信号显式提供给模型后通过，测试总耗时观测约
+17.6 秒。这只证明结构化契约和回退门禁可用，也说明延迟/稳定性不足以默认开启；没有
+Recall/MRR/Context Precision 净收益证据。详细边界见 `docs/evaluations/query-rewrite-v1.md`。
+
+上线前固定集至少新增三类对照：口语/省略/多轮指代的可独立问题改写，错误码/版本/否定条件保真，
+以及一个问题需要两个不同 Chunk 才能回答的多跳样本。比较 original-only 与 rewrite 的 Recall@K、MRR、
+nDCG@10、Context Precision、查询放大倍数、P50/P95、Token 和费用；没有净收益时保持默认关闭。
 
 ## 第八轮：Web Search 公开技术调查
 
@@ -730,9 +812,17 @@ Web 页面是不可信数据。抓取内容不能成为系统指令，不能触�
 
 - 已确认 Web Search 的后端授权和自动升级条件、Firecrawl 首个适配器、来源分级、调用预算、引用
   格式、Evidence 快照边界和故障降级策略。
-- 已新增可禁用 `[webSearch]` 配置骨架，默认 provider 为 `firecrawl`、base URL 为
-  `https://api.firecrawl.dev`、密钥只通过 `FIRECRAWL_API_KEY` 读取；当前未实现客户端或 Tool，
-  `enabled=false` 不改变运行行为。
+- 已实现 Web Search 的公网 Query 出口策略和 `[webSearch.redaction]` 配置：输入先执行字段最小化，
+  再移除邮箱、电话、身份号、内网地址、内部主机/路径、URL、业务编号、哈希和管理员/任务动态词典；
+  Bearer Token、API Key、密码、连接串、私钥、JWT 等凭证，以及 SQL、日志、堆栈、JSON 等结构化
+  私有内容直接拒绝外发。脱敏后技术信息不足也拒绝，不把“只剩空壳”的 Query 发给供应商。
+- `PublicQuery` 只能通过策略构造，命中记录只保留类别和数量，不保留敏感原值。当前工单动态词典
+  来自客户、工单、生产标识、数据库别名和附件标识；公开产品/模块术语不自动删除，内部产品名由
+  管理员通过 `sensitiveTermsEnv` 配置。规则、词典和最小化是安全边界，LLM 改写、NER 或云 DLP
+  以后只能作为增强，不能绕开拒绝策略。
+- 可禁用 `[webSearch]` 默认 provider 为 `firecrawl`、base URL 为 `https://api.firecrawl.dev`，密钥
+  只通过 `FIRECRAWL_API_KEY` 读取。Firecrawl 客户端、`web_search`/`fetch_public_page` Tool、网页
+  引用固化、SSRF 防护和 Prompt Injection 隔离仍未实现；本检查点没有真实公网请求或调用费用。
 - 网页抓取必须实施 SSRF 防护、重定向复验、响应大小/类型限制、脚本不执行和 Prompt Injection
   数据隔离。这些是 Web Tool 的实现门禁，不因供应商已抓取页面而省略。
 
@@ -854,8 +944,8 @@ ready 发布、`partial_ready` 不发布以及取消；真实 MinIO 集成测试
    SQL Server、模型或 GitHub MCP。Consumer 使用 `prefetch=1`、手动 ACK、持久化 retry/dead copy 和
    Publisher Confirm；只有副本确认后才 ACK 原消息。
 7. Worker 只有在 fenced staging 成功后才记录 publishing checkpoint，并在终态事务中发布
-   `ready/current`；queued/indexing 版本不会被检索。任务 stage 的 `publishing` 仍映射到粗粒度版本
-   status `indexing`，需要展示发布进度时读取任务 stage。
+   `ready/current`；queued/indexing 版本不会被检索。任务 stage 与版本 status 都会区分
+   `publishing`，避免监控把制品发布误判为仍在索引。
 
 真实 PostgreSQL 测试已验证 Artifact/Chunk staging、旧 fencing token 无法覆盖、发布后 FTS 可检索；
 真实 RabbitMQ 测试已验证 retry/dead copy Confirm 后 ACK；真实 MinIO 测试已验证 Source round trip。

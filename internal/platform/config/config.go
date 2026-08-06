@@ -255,16 +255,60 @@ func (c GitHubMCPConfig) Token() (string, error) {
 // WebSearchConfig 描述公开网页检索的供应商连接与硬预算。
 // API Key 只能通过 apiKeyEnv 引用，不得出现在 TOML、日志或 Tool 输出中。
 type WebSearchConfig struct {
-	Enabled          bool   `toml:"enabled"`
-	Provider         string `toml:"provider"`
-	BaseURL          string `toml:"baseURL"`
-	APIKeyEnv        string `toml:"apiKeyEnv"`
-	TimeoutMillis    int    `toml:"timeoutMillis"`
-	MaxResults       int    `toml:"maxResults"`
-	MaxFetchedPages  int    `toml:"maxFetchedPages"`
-	MaxPageChars     int    `toml:"maxPageChars"`
-	MaxRounds        int    `toml:"maxRounds"`
-	MaxResponseBytes int64  `toml:"maxResponseBytes"`
+	Enabled          bool                     `toml:"enabled"`
+	Provider         string                   `toml:"provider"`
+	BaseURL          string                   `toml:"baseURL"`
+	APIKeyEnv        string                   `toml:"apiKeyEnv"`
+	TimeoutMillis    int                      `toml:"timeoutMillis"`
+	MaxResults       int                      `toml:"maxResults"`
+	MaxFetchedPages  int                      `toml:"maxFetchedPages"`
+	MaxPageChars     int                      `toml:"maxPageChars"`
+	MaxRounds        int                      `toml:"maxRounds"`
+	MaxResponseBytes int64                    `toml:"maxResponseBytes"`
+	Redaction        WebSearchRedactionConfig `toml:"redaction"`
+}
+
+type WebSearchRedactionConfig struct {
+	MaxInputRunes     int    `toml:"maxInputRunes"`
+	MaxOutputRunes    int    `toml:"maxOutputRunes"`
+	MinOutputRunes    int    `toml:"minOutputRunes"`
+	SensitiveTermsEnv string `toml:"sensitiveTermsEnv"`
+}
+
+func (c WebSearchRedactionConfig) Validate() error {
+	if c.MaxInputRunes < 64 || c.MaxInputRunes > 4096 {
+		return errors.New("webSearch redaction maxInputRunes must be between 64 and 4096")
+	}
+	if c.MaxOutputRunes < 32 || c.MaxOutputRunes > c.MaxInputRunes {
+		return errors.New("webSearch redaction maxOutputRunes must be between 32 and maxInputRunes")
+	}
+	if c.MinOutputRunes < 4 || c.MinOutputRunes > c.MaxOutputRunes {
+		return errors.New("webSearch redaction minOutputRunes must be between 4 and maxOutputRunes")
+	}
+	if c.SensitiveTermsEnv != "" && !environmentVariableName.MatchString(strings.TrimSpace(c.SensitiveTermsEnv)) {
+		return errors.New("webSearch redaction sensitiveTermsEnv is invalid")
+	}
+	return nil
+}
+
+func (c WebSearchRedactionConfig) SensitiveTerms() ([]string, error) {
+	if strings.TrimSpace(c.SensitiveTermsEnv) == "" {
+		return nil, nil
+	}
+	value, err := requiredEnv(c.SensitiveTermsEnv)
+	if err != nil {
+		return nil, err
+	}
+	values := strings.FieldsFunc(value, func(current rune) bool {
+		return current == ',' || current == '\r' || current == '\n'
+	})
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result, nil
 }
 
 func (c WebSearchConfig) Validate() error {
@@ -301,6 +345,9 @@ func (c WebSearchConfig) Validate() error {
 	}
 	if c.MaxResponseBytes < 64*1024 || c.MaxResponseBytes > 10*1024*1024 {
 		return errors.New("webSearch maxResponseBytes must be between 65536 and 10485760")
+	}
+	if err := c.Redaction.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -383,26 +430,91 @@ func (c MinIOConfig) SecretKey() (string, error) {
 	return requiredEnv(c.SecretKeyEnv)
 }
 
+type KnowledgeRetrievalConfig struct {
+	ContextExpansionEnabled bool                        `toml:"contextExpansionEnabled"`
+	ContextWindow           int                         `toml:"contextWindow"`
+	ContextMaxRunes         int                         `toml:"contextMaxRunes"`
+	QueryRewrite            KnowledgeQueryRewriteConfig `toml:"queryRewrite"`
+}
+
+func (c KnowledgeRetrievalConfig) Validate() error {
+	if c.ContextExpansionEnabled {
+		if c.ContextWindow < 1 || c.ContextWindow > 3 {
+			return errors.New("knowledge retrieval contextWindow must be between 1 and 3")
+		}
+		if c.ContextMaxRunes < 128 || c.ContextMaxRunes > 8000 {
+			return errors.New("knowledge retrieval contextMaxRunes must be between 128 and 8000")
+		}
+	}
+	if err := c.QueryRewrite.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+type KnowledgeQueryRewriteConfig struct {
+	Enabled        bool   `toml:"enabled"`
+	PromptFile     string `toml:"promptFile"`
+	PromptVersion  string `toml:"promptVersion"`
+	TimeoutMillis  int    `toml:"timeoutMillis"`
+	MaxSubqueries  int    `toml:"maxSubqueries"`
+	MaxOutputRunes int    `toml:"maxOutputRunes"`
+}
+
+func (c KnowledgeQueryRewriteConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	promptFile := strings.TrimSpace(c.PromptFile)
+	if promptFile == "" || len(promptFile) > 512 {
+		return errors.New("knowledge query rewrite promptFile must be between 1 and 512 characters")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
+		return errors.New("knowledge query rewrite promptVersion is invalid")
+	}
+	if c.TimeoutMillis < 1000 || c.TimeoutMillis > 30000 {
+		return errors.New("knowledge query rewrite timeoutMillis must be between 1000 and 30000")
+	}
+	if c.MaxSubqueries < 0 || c.MaxSubqueries > 2 {
+		return errors.New("knowledge query rewrite maxSubqueries must be between 0 and 2")
+	}
+	if c.MaxOutputRunes < 128 || c.MaxOutputRunes > 4096 {
+		return errors.New("knowledge query rewrite maxOutputRunes must be between 128 and 4096")
+	}
+	return nil
+}
+
+func (c KnowledgeQueryRewriteConfig) LoadPrompt() (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
+	}
+	if !c.Enabled {
+		return "", errors.New("knowledge query rewrite is disabled")
+	}
+	return loadPromptFile("knowledge.retrieval.queryRewrite", "prompt", c.PromptFile, 16*1024)
+}
+
 // KnowledgeConfig 固定知识入库任务的可追踪流水线版本和重试上限。
 type KnowledgeConfig struct {
-	PipelineVersion             string                `toml:"pipelineVersion"`
-	MaxAttempts                 int                   `toml:"maxAttempts"`
-	MaxUploadBytes              int64                 `toml:"maxUploadBytes"`
-	ChunkMaxRunes               int                   `toml:"chunkMaxRunes"`
-	ChunkOverlapRunes           int                   `toml:"chunkOverlapRunes"`
-	ParserMaxDocumentUnits      int                   `toml:"parserMaxDocumentUnits"`
-	ParserMaxArchiveEntries     int                   `toml:"parserMaxArchiveEntries"`
-	ParserMaxExpandedBytes      int64                 `toml:"parserMaxExpandedBytes"`
-	ParserMaxXMLBytes           int64                 `toml:"parserMaxXMLBytes"`
-	ParserMaxExtractedRunes     int                   `toml:"parserMaxExtractedRunes"`
-	ParserMaxSpreadsheetRows    int                   `toml:"parserMaxSpreadsheetRows"`
-	ParserMaxSpreadsheetColumns int                   `toml:"parserMaxSpreadsheetColumns"`
-	ParserMaxVisualAssets       int                   `toml:"parserMaxVisualAssets"`
-	ParserMaxVisualAssetBytes   int64                 `toml:"parserMaxVisualAssetBytes"`
-	ParserMaxTotalVisualBytes   int64                 `toml:"parserMaxTotalVisualBytes"`
-	MaxVisualEnrichments        int                   `toml:"maxVisualEnrichments"`
-	MinVisualPixels             int64                 `toml:"minVisualPixels"`
-	Layout                      KnowledgeLayoutConfig `toml:"layout"`
+	PipelineVersion             string                   `toml:"pipelineVersion"`
+	MaxAttempts                 int                      `toml:"maxAttempts"`
+	MaxUploadBytes              int64                    `toml:"maxUploadBytes"`
+	ChunkMaxRunes               int                      `toml:"chunkMaxRunes"`
+	ChunkOverlapRunes           int                      `toml:"chunkOverlapRunes"`
+	ParserMaxDocumentUnits      int                      `toml:"parserMaxDocumentUnits"`
+	ParserMaxArchiveEntries     int                      `toml:"parserMaxArchiveEntries"`
+	ParserMaxExpandedBytes      int64                    `toml:"parserMaxExpandedBytes"`
+	ParserMaxXMLBytes           int64                    `toml:"parserMaxXMLBytes"`
+	ParserMaxExtractedRunes     int                      `toml:"parserMaxExtractedRunes"`
+	ParserMaxSpreadsheetRows    int                      `toml:"parserMaxSpreadsheetRows"`
+	ParserMaxSpreadsheetColumns int                      `toml:"parserMaxSpreadsheetColumns"`
+	ParserMaxVisualAssets       int                      `toml:"parserMaxVisualAssets"`
+	ParserMaxVisualAssetBytes   int64                    `toml:"parserMaxVisualAssetBytes"`
+	ParserMaxTotalVisualBytes   int64                    `toml:"parserMaxTotalVisualBytes"`
+	MaxVisualEnrichments        int                      `toml:"maxVisualEnrichments"`
+	MinVisualPixels             int64                    `toml:"minVisualPixels"`
+	Layout                      KnowledgeLayoutConfig    `toml:"layout"`
+	Retrieval                   KnowledgeRetrievalConfig `toml:"retrieval"`
 }
 
 func (c KnowledgeConfig) Validate() error {
@@ -460,6 +572,9 @@ func (c KnowledgeConfig) Validate() error {
 		return errors.New("knowledge minVisualPixels must be between 1 and 100000000")
 	}
 	if err := c.Layout.Validate(); err != nil {
+		return err
+	}
+	if err := c.Retrieval.Validate(); err != nil {
 		return err
 	}
 	return nil

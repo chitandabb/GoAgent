@@ -539,8 +539,9 @@ RRF quality baseline; the provider response did not expose usable rerank token u
 unknown. New diagnosis tasks automatically receive the backend-managed knowledge capability and the
 frontend does not choose this Tool. Knowledge results now pass a deterministic citation gate: empty or
 malformed results do not become EvidenceItems, and valid results are tagged as `knowledge_chunk` with
-document/version/Chunk/hash location metadata. The next resume-driven slice is query rewrite, bounded
-Agentic re-retrieval and Web Search fallback.
+document/version/Chunk/hash location metadata. Logical Parent context expansion and controlled Query Plan
+are now implemented as the first M2-B1 slices; the next resume-driven slice is their fixed-set quality
+comparison followed by bounded Agentic re-retrieval.
 
 ### Completed Backend Checkpoint: Formal Diagnosis Report Read API
 
@@ -591,10 +592,48 @@ The next backend checkpoint is repeatable process interruption, temporary model
 failure, retry/dead-letter and recovered-success drills, followed by fixed-dataset
 evaluation without fabricating duplicate reports or overwriting fenced results.
 
+### Partial Backend Checkpoint: Public Web Query Egress Policy
+
+The first M2-B2 safety gate now exists in `internal/webresearch`. A provider query is
+created only after deterministic removal of direct identifiers, private network/file
+locations, business IDs, hashes, administrator terms, and current-ticket terms.
+Credentials, connection strings, raw SQL/log/stack/JSON content, invalid input, and
+queries with too little technical signal fail closed. Findings retain category/count
+only, and the future provider boundary accepts `PublicQuery` rather than arbitrary
+text. `[webSearch.redaction]` controls rune budgets and an optional environment-backed
+dictionary.
+
+This does not complete M2-B2. There is still no Firecrawl client, Web Search Tool,
+public-page fetcher, SSRF/redirect gate, untrusted-page isolation, WebEvidence
+persistence, or real public-provider invocation/cost.
+
+### Partial Backend Checkpoint: Small-to-Big Context Expansion and Controlled Query Plan
+
+The first M2-B1 retrieval-context slice is implemented without adding a duplicate
+parent vector index. Child chunks remain the FTS/vector/RRF/rerank unit. After final
+top-K selection, PostgreSQL batch-loads a bounded neighboring window from the same
+current document version and `section_path`, under the same actor scope filters.
+`[knowledge.retrieval]` owns the window and per-parent rune budget. Tool output keeps
+matched chunks separate from context groups, preserves IDs and hashes for every
+chunk, and degrades only the `context` channel on expansion failure.
+
+This is a logical parent reconstructed from section structure, not a materialized
+parent index. A configurable Query Rewriter now produces a strict lexical/semantic/
+subquery plan while always retaining the original query. Deterministic protected-signal
+validation rejects changed error codes, versions, numbers, time constraints and explicit
+negation. FTS and Vector merge query variants by rank and original-query priority before
+RRF; provider failure or internal timeout degrades only `query_rewrite`. The Tool exposes
+the plan, four stable statuses, prompt version and provider token usage.
+
+Query Rewrite remains disabled by default. Three bounded StepFun smoke calls proved the
+contract and policy fallback, but included a 10-second timeout and do not establish a
+Recall/MRR/Context Precision gain. Multi-chunk context quality evaluation, relevance
+compression, and bounded Agentic second retrieval remain unfinished.
+
 ## Target Milestones, Not Yet Implemented
 
-- M2-B1: query normalization/rewrite, parent-child context expansion and bounded Agentic second retrieval;
-- M2-B2: 公开技术 Web Search 降级链路，包含脱敏、引用和失败降级；
+- M2-B1: fixed-set quality evaluation and bounded Agentic second retrieval; controlled query rewrite and logical parent-child context expansion are implemented but remain disabled/unproven where applicable;
+- M2-B2: 公开技术 Web Search 降级链路；公网 Query 出口策略已实现，Provider、引用和失败降级待完成；
 - M2-B3: knowledge-qa HTTP/SSE conversation API, citation preview and attachment content access;
 - M2-C: expanded scanned-table/chart/screenshot quality set and full upload-to-publish throughput baseline;
 - M4: isolated SQL performance laboratory.

@@ -319,6 +319,88 @@ type SearchResult struct {
 	FusedScore        float64
 }
 
+type SearchContextChunk struct {
+	ChunkID       uuid.UUID
+	Ordinal       int
+	PageNumber    *int
+	ElementType   ElementType
+	ContentText   string
+	ContentSHA256 string
+}
+
+type SearchContextGroup struct {
+	DocumentID        uuid.UUID
+	DocumentVersionID uuid.UUID
+	SectionPath       []string
+	HitChunkIDs       []uuid.UUID
+	Chunks            []SearchContextChunk
+	Truncated         bool
+}
+
+func (g SearchContextGroup) Validate(results []SearchResult) error {
+	if g.DocumentID == uuid.Nil || g.DocumentVersionID == uuid.Nil || len(g.HitChunkIDs) == 0 || len(g.HitChunkIDs) > 20 ||
+		len(g.Chunks) == 0 || len(g.Chunks) > 120 {
+		return errors.New("knowledge search context dimensions are invalid")
+	}
+	for _, value := range g.SectionPath {
+		if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+			return errors.New("knowledge search context section path is invalid")
+		}
+	}
+	availableHits := make(map[uuid.UUID]struct{}, len(results))
+	for _, result := range results {
+		if result.DocumentID == g.DocumentID && result.DocumentVersionID == g.DocumentVersionID &&
+			equalSectionPath(result.SectionPath, g.SectionPath) {
+			availableHits[result.ChunkID] = struct{}{}
+		}
+	}
+	seen := make(map[uuid.UUID]struct{}, len(g.HitChunkIDs)+len(g.Chunks))
+	for _, chunkID := range g.HitChunkIDs {
+		if chunkID == uuid.Nil {
+			return errors.New("knowledge search context hit identity is invalid")
+		}
+		if _, exists := availableHits[chunkID]; !exists {
+			return errors.New("knowledge search context references an unknown hit")
+		}
+		if _, exists := seen[chunkID]; exists {
+			return errors.New("knowledge search context contains a duplicate hit")
+		}
+		seen[chunkID] = struct{}{}
+	}
+	previousOrdinal := -1
+	for _, chunk := range g.Chunks {
+		if chunk.ChunkID == uuid.Nil || chunk.Ordinal < 0 || chunk.Ordinal < previousOrdinal ||
+			(chunk.PageNumber != nil && *chunk.PageNumber < 1) ||
+			strings.TrimSpace(chunk.ContentText) == "" || chunk.ContentText != strings.TrimSpace(chunk.ContentText) ||
+			!validSHA256Hex(chunk.ContentSHA256) || chunk.ContentSHA256 != SHA256Hex(chunk.ContentText) {
+			return errors.New("knowledge search context chunk is invalid")
+		}
+		switch chunk.ElementType {
+		case ElementText, ElementTable, ElementOCRText, ElementImageDescription:
+		default:
+			return errors.New("knowledge search context element type is invalid")
+		}
+		if _, exists := seen[chunk.ChunkID]; exists {
+			return errors.New("knowledge search context contains a duplicate chunk")
+		}
+		seen[chunk.ChunkID] = struct{}{}
+		previousOrdinal = chunk.Ordinal
+	}
+	return nil
+}
+
+func equalSectionPath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 // Validate checks the identity and content fields required for a result to be
 // used as a retrievable knowledge citation.
 func (r SearchResult) Validate() error {
@@ -367,6 +449,10 @@ type Repository interface {
 	PublishVersion(context.Context, PublishVersionInput) (DocumentVersion, error)
 	SearchFTS(context.Context, uuid.UUID, string, int) ([]SearchResult, error)
 	SearchVector(context.Context, uuid.UUID, uuid.UUID, []float32, int) ([]SearchResult, error)
+}
+
+type ContextExpander interface {
+	ExpandContext(context.Context, uuid.UUID, []SearchResult, int, int) ([]SearchContextGroup, error)
 }
 
 type IngestionRepository interface {

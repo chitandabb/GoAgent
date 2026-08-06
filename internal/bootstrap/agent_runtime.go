@@ -17,6 +17,7 @@ import (
 	platformrerank "github.com/chitandabb/GoAgent/internal/platform/dashscopererank"
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
+	platformqueryrewrite "github.com/chitandabb/GoAgent/internal/platform/queryrewrite"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
 
 	"github.com/cloudwego/eino/components/model"
@@ -43,7 +44,7 @@ type agentRuntimeBuilders struct {
 	sqlObjectDefinitions func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
 	schemaCatalog        func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error)
 	readonlyQuery        func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
-	knowledgeSearch      func(context.Context, *gorm.DB, config.Config, *zap.Logger) (tool.BaseTool, error)
+	knowledgeSearch      func(context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger) (tool.BaseTool, error)
 }
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
@@ -180,7 +181,7 @@ func buildAgentRuntime(
 		if builder == nil {
 			builder = defaultAgentRuntimeBuilders().knowledgeSearch
 		}
-		knowledgeSearch, err = builder(ctx, postgresDB, cfg, log.Named("knowledge_search"))
+		knowledgeSearch, err = builder(ctx, postgresDB, cfg, chatModel, log.Named("knowledge_search"))
 		if err != nil {
 			log.Warn("knowledge search Tool unavailable; continuing with other Agent capabilities", zap.Error(err))
 			knowledgeSearch = nil
@@ -229,6 +230,7 @@ func buildKnowledgeSearchTool(
 	ctx context.Context,
 	db *gorm.DB,
 	cfg config.Config,
+	chatModel model.ToolCallingChatModel,
 	log *zap.Logger,
 ) (tool.BaseTool, error) {
 	if db == nil {
@@ -264,8 +266,38 @@ func buildKnowledgeSearchTool(
 	if rerankCandidateN > retrievalCandidateN {
 		retrievalCandidateN = rerankCandidateN
 	}
-	service, err := knowledge.NewSearchServiceWithReranker(
-		repository, embedder, profile, retrievalCandidateN, reranker, rerankCandidateN,
+	var contextExpander knowledge.ContextExpander
+	if cfg.Knowledge.Retrieval.ContextExpansionEnabled {
+		contextExpander = repository
+	}
+	var queryRewriter knowledge.QueryRewriter
+	rewriteConfig := cfg.Knowledge.Retrieval.QueryRewrite
+	if rewriteConfig.Enabled {
+		prompt, promptErr := rewriteConfig.LoadPrompt()
+		if promptErr != nil {
+			log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(promptErr))
+		} else if chatModel == nil {
+			log.Warn("knowledge query rewrite unavailable; chat model is nil")
+		} else {
+			queryRewriter, promptErr = platformqueryrewrite.New(
+				chatModel, prompt, strings.TrimSpace(rewriteConfig.PromptVersion),
+				time.Duration(rewriteConfig.TimeoutMillis)*time.Millisecond,
+				rewriteConfig.MaxSubqueries, rewriteConfig.MaxOutputRunes,
+			)
+			if promptErr != nil {
+				log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(promptErr))
+				queryRewriter = nil
+			}
+		}
+	}
+	service, err := knowledge.NewSearchServiceWithOptions(
+		repository, embedder, profile, retrievalCandidateN, knowledge.SearchServiceOptions{
+			Reranker: reranker, RerankCandidateN: rerankCandidateN,
+			ContextExpander: contextExpander,
+			ContextWindow:   cfg.Knowledge.Retrieval.ContextWindow,
+			ContextMaxRunes: cfg.Knowledge.Retrieval.ContextMaxRunes,
+			QueryRewriter:   queryRewriter, MaxSubqueries: rewriteConfig.MaxSubqueries,
+		},
 	)
 	if err != nil {
 		return nil, err

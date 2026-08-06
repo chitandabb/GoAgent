@@ -13,12 +13,18 @@ import (
 const defaultRRFK = 60
 
 type HybridSearch struct {
-	Results         []SearchResult
-	Degraded        bool
-	Sources         []string
-	MissingChannels []string
-	RerankApplied   bool
-	RerankUsage     RerankUsage
+	Results                   []SearchResult
+	ContextGroups             []SearchContextGroup
+	QueryPlan                 QueryPlan
+	Degraded                  bool
+	Sources                   []string
+	MissingChannels           []string
+	RerankApplied             bool
+	RerankUsage               RerankUsage
+	ContextExpanded           bool
+	QueryRewriteStatus        QueryRewriteStatus
+	QueryRewritePromptVersion string
+	QueryRewriteUsage         QueryRewriteUsage
 }
 
 type HybridRetriever struct {
@@ -43,42 +49,53 @@ func NewHybridRetriever(repository Repository, embedder Embedder, profile Embedd
 }
 
 func (r *HybridRetriever) Search(ctx context.Context, actorID uuid.UUID, query string, limit int) (HybridSearch, error) {
+	plan, err := OriginalQueryPlan(query)
+	if err != nil {
+		return HybridSearch{}, err
+	}
+	return r.SearchPlan(ctx, actorID, plan, limit)
+}
+
+func (r *HybridRetriever) SearchPlan(ctx context.Context, actorID uuid.UUID, plan QueryPlan, limit int) (HybridSearch, error) {
 	if r == nil || r.repository == nil || r.embedder == nil {
 		return HybridSearch{}, errors.New("hybrid retriever is unavailable")
 	}
 	if actorID == uuid.Nil || limit < 1 || limit > 50 {
 		return HybridSearch{}, errors.New("hybrid retrieval request is invalid")
 	}
+	if err := plan.Validate(); err != nil {
+		return HybridSearch{}, err
+	}
 	var (
-		ftsResults   []SearchResult
-		ftsErr       error
-		embedding    EmbeddingResult
-		embeddingErr error
+		ftsResults    []SearchResult
+		ftsErr        error
+		ftsPartial    bool
+		vectorResults []SearchResult
+		vectorErr     error
+		vectorPartial bool
 	)
 	var group sync.WaitGroup
 	group.Add(2)
 	go func() {
 		defer group.Done()
-		ftsResults, ftsErr = r.repository.SearchFTS(ctx, actorID, query, r.vectorTopN)
+		ftsResults, ftsPartial, ftsErr = searchFTSQueries(
+			ctx, r.repository, actorID, plan.FTSQueries(), r.vectorTopN,
+		)
 	}()
 	go func() {
 		defer group.Done()
-		embedding, embeddingErr = r.embedder.Embed(ctx, EmbeddingRequest{
-			Texts: []string{query}, InputType: r.profile.QueryInputType,
-		})
-		if embeddingErr == nil {
-			embeddingErr = embedding.Validate(1, r.profile.Dimensions, r.profile.Normalize)
-		}
+		vectorResults, vectorPartial, vectorErr = r.searchVectorQueries(ctx, actorID, plan.VectorQueries())
 	}()
 	group.Wait()
 
-	var vectorResults []SearchResult
-	var vectorErr error
-	if embeddingErr == nil {
-		vectorResults, vectorErr = r.repository.SearchVector(ctx, actorID, r.profile.ID, embedding.Vectors[0], r.vectorTopN)
+	if errors.Is(ftsErr, context.Canceled) || errors.Is(ftsErr, context.DeadlineExceeded) {
+		return HybridSearch{}, ftsErr
 	}
-	if ftsErr != nil && (embeddingErr != nil || vectorErr != nil) {
-		return HybridSearch{}, fmt.Errorf("hybrid retrieval failed: fts=%v vector=%v embedding=%v", ftsErr, vectorErr, embeddingErr)
+	if errors.Is(vectorErr, context.Canceled) || errors.Is(vectorErr, context.DeadlineExceeded) {
+		return HybridSearch{}, vectorErr
+	}
+	if ftsErr != nil && vectorErr != nil {
+		return HybridSearch{}, fmt.Errorf("hybrid retrieval failed: fts=%v vector=%v", ftsErr, vectorErr)
 	}
 	if ftsErr != nil {
 		return HybridSearch{
@@ -86,13 +103,129 @@ func (r *HybridRetriever) Search(ctx context.Context, actorID uuid.UUID, query s
 			Sources: []string{"vector"}, MissingChannels: []string{"fts"},
 		}, nil
 	}
-	if embeddingErr != nil || vectorErr != nil {
+	if vectorErr != nil {
 		return HybridSearch{
 			Results: limitResults(ftsResults, limit), Degraded: true,
 			Sources: []string{"fts"}, MissingChannels: []string{"vector"},
 		}, nil
 	}
-	return HybridSearch{Results: fuseRRF(ftsResults, vectorResults, r.rrfK, limit), Sources: []string{"fts", "vector"}}, nil
+	result := HybridSearch{
+		Results: fuseRRF(ftsResults, vectorResults, r.rrfK, limit), Sources: []string{"fts", "vector"},
+	}
+	if ftsPartial {
+		result.Degraded = true
+		result.MissingChannels = append(result.MissingChannels, "fts_partial")
+	}
+	if vectorPartial {
+		result.Degraded = true
+		result.MissingChannels = append(result.MissingChannels, "vector_partial")
+	}
+	return result, nil
+}
+
+func searchFTSQueries(
+	ctx context.Context, repository Repository, actorID uuid.UUID, queries []string, limit int,
+) ([]SearchResult, bool, error) {
+	if len(queries) == 0 {
+		return nil, false, errors.New("knowledge FTS query plan is empty")
+	}
+	groups := make([][]SearchResult, 0, len(queries))
+	var failures []error
+	for _, query := range queries {
+		results, err := repository.SearchFTS(ctx, actorID, query, limit)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, false, err
+			}
+			failures = append(failures, err)
+			continue
+		}
+		groups = append(groups, results)
+	}
+	if len(groups) == 0 {
+		return nil, false, errors.Join(failures...)
+	}
+	return mergeQueryResults(groups, limit), len(failures) > 0, nil
+}
+
+func (r *HybridRetriever) searchVectorQueries(
+	ctx context.Context, actorID uuid.UUID, queries []string,
+) ([]SearchResult, bool, error) {
+	if len(queries) == 0 {
+		return nil, false, errors.New("knowledge vector query plan is empty")
+	}
+	embedding, err := r.embedder.Embed(ctx, EmbeddingRequest{Texts: queries, InputType: r.profile.QueryInputType})
+	if err != nil {
+		return nil, false, err
+	}
+	if err := embedding.Validate(len(queries), r.profile.Dimensions, r.profile.Normalize); err != nil {
+		return nil, false, err
+	}
+	groups := make([][]SearchResult, 0, len(queries))
+	var failures []error
+	for index := range queries {
+		results, err := r.repository.SearchVector(
+			ctx, actorID, r.profile.ID, embedding.Vectors[index], r.vectorTopN,
+		)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, false, err
+			}
+			failures = append(failures, err)
+			continue
+		}
+		groups = append(groups, results)
+	}
+	if len(groups) == 0 {
+		return nil, false, errors.Join(failures...)
+	}
+	return mergeQueryResults(groups, r.vectorTopN), len(failures) > 0, nil
+}
+
+func mergeQueryResults(groups [][]SearchResult, limit int) []SearchResult {
+	type rankedResult struct {
+		result     SearchResult
+		bestRank   int
+		queryIndex int
+	}
+	merged := make(map[string]rankedResult)
+	for queryIndex, results := range groups {
+		for index, result := range results {
+			rank := index + 1
+			key := result.ContentSHA256
+			if key == "" {
+				key = result.ChunkID.String()
+			}
+			current, exists := merged[key]
+			if !exists || rank < current.bestRank ||
+				(rank == current.bestRank && (queryIndex < current.queryIndex ||
+					(queryIndex == current.queryIndex && (result.Score > current.result.Score ||
+						(result.Score == current.result.Score && result.ChunkID.String() < current.result.ChunkID.String()))))) {
+				merged[key] = rankedResult{result: result, bestRank: rank, queryIndex: queryIndex}
+			}
+		}
+	}
+	ranked := make([]rankedResult, 0, len(merged))
+	for _, result := range merged {
+		ranked = append(ranked, result)
+	}
+	sort.SliceStable(ranked, func(left, right int) bool {
+		if ranked[left].bestRank != ranked[right].bestRank {
+			return ranked[left].bestRank < ranked[right].bestRank
+		}
+		if ranked[left].queryIndex != ranked[right].queryIndex {
+			return ranked[left].queryIndex < ranked[right].queryIndex
+		}
+		if ranked[left].result.Score != ranked[right].result.Score {
+			return ranked[left].result.Score > ranked[right].result.Score
+		}
+		return ranked[left].result.ChunkID.String() < ranked[right].result.ChunkID.String()
+	})
+	results := make([]SearchResult, 0, len(ranked))
+	for _, result := range ranked {
+		results = append(results, result.result)
+	}
+	return limitResults(results, limit)
 }
 
 func fuseRRF(fts, vector []SearchResult, rrfK, limit int) []SearchResult {

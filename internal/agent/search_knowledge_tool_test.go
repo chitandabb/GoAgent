@@ -26,8 +26,13 @@ func (s *knowledgeSearcherStub) Search(_ context.Context, actorID uuid.UUID, que
 }
 
 func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing.T) {
-	actorID, documentID, versionID, chunkID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	actorID, documentID, versionID, chunkID, contextChunkID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	page := 4
+	contextContent := "同时核对事务日志中的超时错误码。"
+	queryPlan, err := knowledge.OriginalQueryPlan("事务超时")
+	if err != nil {
+		t.Fatal(err)
+	}
 	searcher := &knowledgeSearcherStub{result: knowledge.HybridSearch{
 		Results: []knowledge.SearchResult{{
 			DocumentID: documentID, DocumentVersionID: versionID, ChunkID: chunkID,
@@ -35,7 +40,17 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 			ElementType: knowledge.ElementText, SectionPath: []string{"网络", "超时"},
 			ContentText: "事务超时需要检查连接池。", ContentSHA256: knowledge.SHA256Hex("事务超时需要检查连接池。"),
 			Score: 0.92, FTSRank: 1, VectorRank: 2, FusedScore: 0.03,
-		}}, Degraded: true, Sources: []string{"fts"}, MissingChannels: []string{"vector"},
+		}},
+		ContextGroups: []knowledge.SearchContextGroup{{
+			DocumentID: documentID, DocumentVersionID: versionID, SectionPath: []string{"网络", "超时"},
+			HitChunkIDs: []uuid.UUID{chunkID}, Chunks: []knowledge.SearchContextChunk{{
+				ChunkID: contextChunkID, Ordinal: 3, PageNumber: &page, ElementType: knowledge.ElementText,
+				ContentText: contextContent, ContentSHA256: knowledge.SHA256Hex(contextContent),
+			}},
+		}},
+		QueryPlan: queryPlan, QueryRewriteStatus: knowledge.QueryRewriteDisabled,
+		ContextExpanded: true, Degraded: true,
+		Sources: []string{"fts"}, MissingChannels: []string{"vector"},
 	}}
 	tool, err := NewSearchKnowledgeTool(searcher)
 	if err != nil {
@@ -54,17 +69,24 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 		t.Fatalf("InvokableRun: %v", err)
 	}
 	var response struct {
-		Query           string           `json:"query"`
+		Query     string `json:"query"`
+		QueryPlan struct {
+			OriginalQuery string `json:"originalQuery"`
+		} `json:"queryPlan"`
 		Results         []map[string]any `json:"results"`
 		Degraded        bool             `json:"degraded"`
 		Sources         []string         `json:"sources"`
 		MissingChannels []string         `json:"missingChannels"`
+		ContextExpanded bool             `json:"contextExpanded"`
+		ContextGroups   []map[string]any `json:"contextGroups"`
 	}
 	if err := json.Unmarshal([]byte(encoded), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Query != "事务超时" || len(response.Results) != 1 || !response.Degraded ||
-		len(response.Sources) != 1 || response.Sources[0] != "fts" || len(response.MissingChannels) != 1 {
+	if response.Query != "事务超时" || response.QueryPlan.OriginalQuery != "事务超时" ||
+		len(response.Results) != 1 || !response.Degraded ||
+		len(response.Sources) != 1 || response.Sources[0] != "fts" || len(response.MissingChannels) != 1 ||
+		!response.ContextExpanded || len(response.ContextGroups) != 1 {
 		t.Fatalf("response = %s", encoded)
 	}
 	if searcher.actorID != actorID || searcher.query != "事务超时" || searcher.limit != 3 {
@@ -78,8 +100,13 @@ func TestSearchKnowledgeToolRejectsMalformedCitationFields(t *testing.T) {
 		Title: "生产手册", Scope: knowledge.ScopeGlobal, ElementType: knowledge.ElementText,
 		ContentText: "事务超时需要检查连接池。", ContentSHA256: knowledge.SHA256Hex("other"),
 	}
+	queryPlan, err := knowledge.OriginalQueryPlan("事务超时")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{result: knowledge.HybridSearch{
-		Results: []knowledge.SearchResult{result},
+		Results: []knowledge.SearchResult{result}, QueryPlan: queryPlan,
+		QueryRewriteStatus: knowledge.QueryRewriteDisabled,
 	}})
 	if err != nil {
 		t.Fatalf("NewSearchKnowledgeTool: %v", err)
@@ -105,6 +132,19 @@ func TestSearchKnowledgeToolRequiresKnowledgeDependency(t *testing.T) {
 	}
 	if _, err := tool.InvokableRun(context.Background(), `{"query":"问题"}`); !errors.Is(err, ErrTaskScopeRequired) {
 		t.Fatalf("unscoped InvokableRun error = %v, want ErrTaskScopeRequired", err)
+	}
+}
+
+func TestQueryRewriteObservationRejectsInconsistentTokenUsage(t *testing.T) {
+	plan, err := knowledge.OriginalQueryPlan("connection timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validQueryRewriteObservation(
+		plan, knowledge.QueryRewritePolicyRejected, "query-rewrite-v1",
+		knowledge.QueryRewriteUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 10},
+	) {
+		t.Fatal("query rewrite observation accepted inconsistent token usage")
 	}
 }
 
