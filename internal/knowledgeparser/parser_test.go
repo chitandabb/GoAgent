@@ -3,6 +3,7 @@ package knowledgeparser
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -29,6 +30,20 @@ func TestTextParserRoutesMarkdownAndPreservesElementTypes(t *testing.T) {
 	}
 	if strings.Join(result.Elements[0].SectionPath, "/") != "故障手册" {
 		t.Fatalf("section path = %#v", result.Elements[0].SectionPath)
+	}
+}
+
+func TestPageObservationRejectsInvalidValues(t *testing.T) {
+	tests := []PageObservation{
+		{},
+		{PageNumber: 1, NativeTextRunes: 1, NonWhitespaceRunes: 2},
+		{PageNumber: 1, PrintableRatio: math.NaN()},
+		{PageNumber: 1, VisualCandidateCount: 1},
+	}
+	for _, page := range tests {
+		if err := page.Validate(); err == nil {
+			t.Fatalf("Validate accepted %+v", page)
+		}
 	}
 }
 

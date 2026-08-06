@@ -43,8 +43,12 @@ type Config struct {
 
 // ModelsConfig 为不同模型职责保留独立配置，避免聊天模型和向量模型共享错误参数。
 type ModelsConfig struct {
-	Chat  ChatModelConfig  `toml:"chat"`
-	Judge JudgeModelConfig `toml:"judge"`
+	Chat      ChatModelConfig       `toml:"chat"`
+	Judge     JudgeModelConfig      `toml:"judge"`
+	Embedding EmbeddingModelConfig  `toml:"embedding"`
+	Rerank    RerankModelConfig     `toml:"rerank"`
+	OCR       MultimodalModelConfig `toml:"ocr"`
+	Vision    MultimodalModelConfig `toml:"vision"`
 }
 
 // ChatModelConfig 定义 OpenAI 兼容聊天模型。当前生产 Provider 为 StepFun Step Plan。
@@ -381,18 +385,24 @@ func (c MinIOConfig) SecretKey() (string, error) {
 
 // KnowledgeConfig 固定知识入库任务的可追踪流水线版本和重试上限。
 type KnowledgeConfig struct {
-	PipelineVersion             string `toml:"pipelineVersion"`
-	MaxAttempts                 int    `toml:"maxAttempts"`
-	MaxUploadBytes              int64  `toml:"maxUploadBytes"`
-	ChunkMaxRunes               int    `toml:"chunkMaxRunes"`
-	ChunkOverlapRunes           int    `toml:"chunkOverlapRunes"`
-	ParserMaxDocumentUnits      int    `toml:"parserMaxDocumentUnits"`
-	ParserMaxArchiveEntries     int    `toml:"parserMaxArchiveEntries"`
-	ParserMaxExpandedBytes      int64  `toml:"parserMaxExpandedBytes"`
-	ParserMaxXMLBytes           int64  `toml:"parserMaxXMLBytes"`
-	ParserMaxExtractedRunes     int    `toml:"parserMaxExtractedRunes"`
-	ParserMaxSpreadsheetRows    int    `toml:"parserMaxSpreadsheetRows"`
-	ParserMaxSpreadsheetColumns int    `toml:"parserMaxSpreadsheetColumns"`
+	PipelineVersion             string                `toml:"pipelineVersion"`
+	MaxAttempts                 int                   `toml:"maxAttempts"`
+	MaxUploadBytes              int64                 `toml:"maxUploadBytes"`
+	ChunkMaxRunes               int                   `toml:"chunkMaxRunes"`
+	ChunkOverlapRunes           int                   `toml:"chunkOverlapRunes"`
+	ParserMaxDocumentUnits      int                   `toml:"parserMaxDocumentUnits"`
+	ParserMaxArchiveEntries     int                   `toml:"parserMaxArchiveEntries"`
+	ParserMaxExpandedBytes      int64                 `toml:"parserMaxExpandedBytes"`
+	ParserMaxXMLBytes           int64                 `toml:"parserMaxXMLBytes"`
+	ParserMaxExtractedRunes     int                   `toml:"parserMaxExtractedRunes"`
+	ParserMaxSpreadsheetRows    int                   `toml:"parserMaxSpreadsheetRows"`
+	ParserMaxSpreadsheetColumns int                   `toml:"parserMaxSpreadsheetColumns"`
+	ParserMaxVisualAssets       int                   `toml:"parserMaxVisualAssets"`
+	ParserMaxVisualAssetBytes   int64                 `toml:"parserMaxVisualAssetBytes"`
+	ParserMaxTotalVisualBytes   int64                 `toml:"parserMaxTotalVisualBytes"`
+	MaxVisualEnrichments        int                   `toml:"maxVisualEnrichments"`
+	MinVisualPixels             int64                 `toml:"minVisualPixels"`
+	Layout                      KnowledgeLayoutConfig `toml:"layout"`
 }
 
 func (c KnowledgeConfig) Validate() error {
@@ -432,6 +442,25 @@ func (c KnowledgeConfig) Validate() error {
 	}
 	if c.ParserMaxSpreadsheetColumns < 1 || c.ParserMaxSpreadsheetColumns > 16384 {
 		return errors.New("knowledge parserMaxSpreadsheetColumns must be between 1 and 16384")
+	}
+	if c.ParserMaxVisualAssets < 1 || c.ParserMaxVisualAssets > 10_000 {
+		return errors.New("knowledge parserMaxVisualAssets must be between 1 and 10000")
+	}
+	if c.ParserMaxVisualAssetBytes < 1024 || c.ParserMaxVisualAssetBytes > c.ParserMaxExpandedBytes {
+		return errors.New("knowledge parserMaxVisualAssetBytes must be between 1024 and parserMaxExpandedBytes")
+	}
+	if c.ParserMaxTotalVisualBytes < c.ParserMaxVisualAssetBytes ||
+		c.ParserMaxTotalVisualBytes > c.ParserMaxExpandedBytes {
+		return errors.New("knowledge parserMaxTotalVisualBytes must be between parserMaxVisualAssetBytes and parserMaxExpandedBytes")
+	}
+	if c.MaxVisualEnrichments < 1 || c.MaxVisualEnrichments > 100 {
+		return errors.New("knowledge maxVisualEnrichments must be between 1 and 100")
+	}
+	if c.MinVisualPixels < 1 || c.MinVisualPixels > 100_000_000 {
+		return errors.New("knowledge minVisualPixels must be between 1 and 100000000")
+	}
+	if err := c.Layout.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -874,6 +903,18 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Models.Judge.Validate(); err != nil {
+		return err
+	}
+	if err := c.Models.Embedding.Validate(); err != nil {
+		return err
+	}
+	if err := c.Models.Rerank.Validate(); err != nil {
+		return err
+	}
+	if err := c.Models.OCR.Validate("models.ocr"); err != nil {
+		return err
+	}
+	if err := c.Models.Vision.Validate("models.vision"); err != nil {
 		return err
 	}
 	if err := c.Log.Validate(); err != nil {

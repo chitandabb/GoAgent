@@ -18,6 +18,12 @@ func TestTaskCapabilitiesFromScopeSeparatesAuthorizationFromDependencyHealth(t *
 	if len(capabilities) != 2 || capabilities[0] != agent.ToolCapabilityCase || capabilities[1] != agent.ToolCapabilityCode {
 		t.Fatalf("capabilities = %v", capabilities)
 	}
+	capabilities, err = taskCapabilitiesFromScope(map[string]any{
+		diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case", "knowledge"},
+	})
+	if err != nil || len(capabilities) != 2 || capabilities[0] != agent.ToolCapabilityCase || capabilities[1] != agent.ToolCapabilityKnowledge {
+		t.Fatalf("knowledge capabilities = %v, err=%v", capabilities, err)
+	}
 }
 
 func TestTaskCapabilitiesFromScopeRejectsInvalidPersistedScope(t *testing.T) {

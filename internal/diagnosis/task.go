@@ -109,13 +109,14 @@ const (
 type TaskCapability string
 
 const (
-	TaskCapabilityCase TaskCapability = "case"
-	TaskCapabilityCode TaskCapability = "code"
-	TaskCapabilitySQL  TaskCapability = "sql"
+	TaskCapabilityCase      TaskCapability = "case"
+	TaskCapabilityCode      TaskCapability = "code"
+	TaskCapabilitySQL       TaskCapability = "sql"
+	TaskCapabilityKnowledge TaskCapability = "knowledge"
 )
 
 func (c TaskCapability) Valid() bool {
-	return c == TaskCapabilityCase || c == TaskCapabilityCode || c == TaskCapabilitySQL
+	return c == TaskCapabilityCase || c == TaskCapabilityCode || c == TaskCapabilitySQL || c == TaskCapabilityKnowledge
 }
 
 // TaskActor 是任务查询和创建所需的最小权限上下文。
@@ -339,7 +340,7 @@ func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTas
 }
 
 // NormalizeTaskRequestScope 复制并校验任务创建时可由调用方声明的窄调查范围。
-// 缺省只允许工单能力；代码和 SQL 能力必须显式声明，且仍受角色、数据源和依赖健康约束。
+// 代码和 SQL 能力由调用方在已授权范围内声明；knowledge 由后端策略自动授予并写入任务快照。
 func NormalizeTaskRequestScope(scope map[string]any) (map[string]any, error) {
 	if scope == nil {
 		scope = map[string]any{}
@@ -360,6 +361,11 @@ func NormalizeTaskRequestScope(scope map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if slicesContainsCapability(capabilities, TaskCapabilityKnowledge) {
+		return nil, errors.New("knowledge capability is managed by backend policy")
+	}
+	capabilities = append(capabilities, TaskCapabilityKnowledge)
+	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	capabilityValues := make([]string, len(capabilities))
 	for index, capability := range capabilities {
 		capabilityValues[index] = string(capability)
@@ -409,8 +415,8 @@ func TaskCapabilitiesFromRequestScope(scope map[string]any) ([]TaskCapability, e
 			return nil, errors.New("allowedCapabilities must be an array")
 		}
 	}
-	if len(values) == 0 || len(values) > 3 {
-		return nil, errors.New("allowedCapabilities must contain between one and three values")
+	if len(values) == 0 || len(values) > 4 {
+		return nil, errors.New("allowedCapabilities must contain between one and four values")
 	}
 	capabilities := make([]TaskCapability, 0, len(values))
 	seen := make(map[TaskCapability]struct{}, len(values))

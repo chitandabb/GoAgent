@@ -23,6 +23,16 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 	defer cleanup()
 	creatorID, documentID, versionID, taskID, outboxID := insertQueuedKnowledgeTask(t, db, ctx, nil, 3)
 	repository := NewKnowledgeWorkerRepository(db)
+	profile, err := knowledge.NewEmbeddingProfile(
+		"knowledge-v1", "dashscope", "text-embedding-v4", 1024, "cosine",
+		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "embedding-v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.EnsureEmbeddingProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	claim, err := repository.Claim(ctx, taskID, versionID, "worker-a", now, now.Add(time.Minute))
 	if err != nil {
@@ -59,39 +69,62 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 			SearchText:    knowledge.NormalizeSearchText("parsed content"),
 			ContentSHA256: knowledge.SHA256Hex("parsed content"),
 		}},
+		EmbeddingProfile: &profile,
+		Embeddings: []knowledge.ChunkEmbeddingDraft{{
+			ChunkOrdinal: 0, ContentSHA256: knowledge.SHA256Hex("parsed content"),
+			Vector: unitEmbeddingVector(1024, 0),
+		}},
+		EmbeddingUsage: knowledge.EmbeddingUsage{TotalTokens: 2},
 	}
 	staged, err := repository.SaveParsedResult(ctx, *claim.Lease, parsedResult, now.Add(4*time.Second))
 	if err != nil || !staged {
 		t.Fatalf("SaveParsedResult = %v err=%v", staged, err)
 	}
-	completed, err := repository.Complete(ctx, *claim.Lease, parsedResult, now.Add(5*time.Second))
+	publishing, err := repository.SaveCheckpoint(ctx, *claim.Lease, knowledgeworker.CheckpointUpdate{
+		Stage: knowledge.IngestionStagePublishing, ProgressPercent: 95,
+		Checkpoint: json.RawMessage(`{"artifactStaged":true}`),
+	}, now.Add(5*time.Second))
+	if err != nil || !publishing {
+		t.Fatalf("SaveCheckpoint publishing = %v err=%v", publishing, err)
+	}
+	var publishingStatus string
+	if err := db.WithContext(ctx).Raw(
+		"SELECT status FROM knowledge_document_versions WHERE id = ?", versionID,
+	).Scan(&publishingStatus).Error; err != nil || publishingStatus != "publishing" {
+		t.Fatalf("publishing version status = %q err=%v", publishingStatus, err)
+	}
+	completed, err := repository.Complete(ctx, *claim.Lease, parsedResult, now.Add(6*time.Second))
 	if err != nil || !completed {
 		t.Fatalf("Complete = %v err=%v", completed, err)
 	}
 	var facts struct {
-		TaskStatus    string
-		TaskStage     string
-		Progress      int `gorm:"column:progress_percent"`
-		VersionStatus string
-		IsCurrent     bool
-		EventCount    int64
-		ChunkCount    int64
-		ArtifactSHA   string `gorm:"column:artifact_sha"`
+		TaskStatus     string
+		TaskStage      string
+		Progress       int `gorm:"column:progress_percent"`
+		VersionStatus  string
+		IsCurrent      bool
+		EventCount     int64
+		ChunkCount     int64
+		EmbeddingCount int64
+		ArtifactSHA    string `gorm:"column:artifact_sha"`
 	}
 	if err := db.WithContext(ctx).Raw(`
 SELECT task.status AS task_status, task.stage AS task_stage, task.progress_percent,
        version.status AS version_status, version.is_current,
        (SELECT COUNT(*) FROM knowledge_ingestion_events event WHERE event.task_id = task.id) AS event_count,
        (SELECT COUNT(*) FROM knowledge_chunks chunk WHERE chunk.document_version_id = version.id) AS chunk_count,
+       (SELECT COUNT(*) FROM knowledge_chunk_embeddings embedding
+        JOIN knowledge_chunks chunk ON chunk.id = embedding.chunk_id
+        WHERE chunk.document_version_id = version.id AND embedding.profile_id = ?) AS embedding_count,
        COALESCE(version.element_artifact_sha256, '') AS artifact_sha
 FROM knowledge_ingestion_tasks task
 JOIN knowledge_document_versions version ON version.id = task.document_version_id
-WHERE task.id = ?`, taskID).Scan(&facts).Error; err != nil {
+WHERE task.id = ?`, profile.ID, taskID).Scan(&facts).Error; err != nil {
 		t.Fatal(err)
 	}
 	if facts.TaskStatus != "succeeded" || facts.TaskStage != "completed" || facts.Progress != 100 ||
-		facts.VersionStatus != "ready" || !facts.IsCurrent || facts.EventCount != 5 ||
-		facts.ChunkCount != 1 || facts.ArtifactSHA != knowledge.SHA256Hex("artifact") {
+		facts.VersionStatus != "ready" || !facts.IsCurrent || facts.EventCount != 6 ||
+		facts.ChunkCount != 1 || facts.EmbeddingCount != 1 || facts.ArtifactSHA != knowledge.SHA256Hex("artifact") {
 		t.Fatalf("facts = %+v", facts)
 	}
 	searchResults, err := NewKnowledgeRepository(db).SearchFTS(ctx, creatorID, "parsed content", 5)
@@ -103,6 +136,12 @@ WHERE task.id = ?`, taskID).Scan(&facts).Error; err != nil {
 		t.Fatalf("search results = %+v", searchResults)
 	}
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
+}
+
+func unitEmbeddingVector(dimensions, index int) []float32 {
+	vector := make([]float32, dimensions)
+	vector[index] = 1
+	return vector
 }
 
 func TestKnowledgeWorkerRepositoryReclaimsExpiredLeaseAndFencesOldOwner(t *testing.T) {

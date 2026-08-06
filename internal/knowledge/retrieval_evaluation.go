@@ -109,6 +109,20 @@ type RetrievalEvaluationSummary struct {
 	IngestionDurationMillis    float64 `json:"ingestionDurationMillis"`
 	DocumentsPerSecond         float64 `json:"documentsPerSecond"`
 	ChunksPerSecond            float64 `json:"chunksPerSecond"`
+	EmbeddingDocumentRequests  int     `json:"embeddingDocumentRequests,omitempty"`
+	EmbeddingQueryRequests     int     `json:"embeddingQueryRequests,omitempty"`
+	EmbeddingDocumentTokens    int     `json:"embeddingDocumentTokens,omitempty"`
+	EmbeddingQueryTokens       int     `json:"embeddingQueryTokens,omitempty"`
+	EmbeddingTotalTokens       int     `json:"embeddingTotalTokens,omitempty"`
+	EmbeddingDocumentDuration  float64 `json:"embeddingDocumentDurationMillis,omitempty"`
+	EmbeddingQueryDuration     float64 `json:"embeddingQueryDurationMillis,omitempty"`
+	EmbeddingPricePerMillion   float64 `json:"embeddingPricePerMillionTokensCNY,omitempty"`
+	EmbeddingEstimatedCostCNY  float64 `json:"embeddingEstimatedCostCNY,omitempty"`
+	RerankRequests             int     `json:"rerankRequests,omitempty"`
+	RerankTotalTokens          int     `json:"rerankTotalTokens,omitempty"`
+	RerankDurationMillis       float64 `json:"rerankDurationMillis,omitempty"`
+	RerankPricePerMillion      float64 `json:"rerankPricePerMillionTokensCNY,omitempty"`
+	RerankEstimatedCostCNY     float64 `json:"rerankEstimatedCostCNY,omitempty"`
 }
 
 func EvaluateRetrieval(

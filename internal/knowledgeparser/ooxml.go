@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -67,6 +68,11 @@ func (p OOXMLParser) Parse(ctx context.Context, input Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	visualAssets, err := archive.extractVisualAssets(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	result.VisualAssets = visualAssets
 	var metadata map[string]any
 	if err := json.Unmarshal(result.Metadata, &metadata); err != nil {
 		return Result{}, err
@@ -74,10 +80,92 @@ func (p OOXMLParser) Parse(ctx context.Context, input Input) (Result, error) {
 	metadata["mediaType"] = input.MediaType
 	metadata["archiveEntries"] = len(archive.files)
 	metadata["expandedBytes"] = archive.expandedBytes
-	metadata["visualAssetCount"] = archive.visualAssetCount
-	metadata["visualEnrichmentRequired"] = archive.visualAssetCount > 0
+	metadata["visualAssetCount"] = len(visualAssets)
+	metadata["embeddedMediaCount"] = len(archive.visualMediaNames())
+	metadata["unreferencedVisualAssetCount"] = countUnreferencedVisualAssets(visualAssets)
+	metadata["visualEnrichmentRequired"] = len(visualAssets) > 0
 	result.Metadata, err = json.Marshal(metadata)
 	return result, err
+}
+
+func (a *ooxmlArchive) extractVisualAssets(ctx context.Context) ([]VisualAsset, error) {
+	names := a.visualMediaNames()
+	if len(names) > a.limits.MaxVisualAssets {
+		return nil, fmt.Errorf("%w: visual asset count %d exceeds limit %d", ErrResourceLimit, len(names), a.limits.MaxVisualAssets)
+	}
+	assets := make([]VisualAsset, 0, len(names))
+	references, err := a.visualReferences(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var totalBytes int64
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		file := a.files[name]
+		if file.UncompressedSize64 > uint64(a.limits.MaxVisualAssetBytes) {
+			return nil, fmt.Errorf("%w: visual asset %q exceeds configured byte limit", ErrResourceLimit, name)
+		}
+		if totalBytes > a.limits.MaxTotalVisualBytes-int64(file.UncompressedSize64) {
+			return nil, fmt.Errorf("%w: total visual asset bytes exceed configured limit", ErrResourceLimit)
+		}
+		content, err := a.readBinary(name, a.limits.MaxVisualAssetBytes)
+		if err != nil {
+			return nil, err
+		}
+		totalBytes += int64(len(content))
+		baseAsset, err := newEmbeddedVisualAsset(0, name, content)
+		if err != nil {
+			return nil, err
+		}
+		occurrences := references[name]
+		if len(occurrences) == 0 {
+			if len(assets) >= a.limits.MaxVisualAssets {
+				return nil, fmt.Errorf("%w: visual asset occurrence count exceeds limit %d", ErrResourceLimit, a.limits.MaxVisualAssets)
+			}
+			baseAsset.Index = len(assets)
+			assets = append(assets, baseAsset)
+			continue
+		}
+		for _, reference := range occurrences {
+			if len(assets) >= a.limits.MaxVisualAssets {
+				return nil, fmt.Errorf("%w: visual asset occurrence count exceeds limit %d", ErrResourceLimit, a.limits.MaxVisualAssets)
+			}
+			asset := baseAsset
+			asset.Index = len(assets)
+			asset.RelationshipID = reference.RelationshipID
+			asset.SourcePart = reference.SourcePart
+			asset.PageNumber = clonePageNumber(reference.PageNumber)
+			if err := asset.Validate(); err != nil {
+				return nil, err
+			}
+			assets = append(assets, asset)
+		}
+	}
+	return assets, nil
+}
+
+func (a *ooxmlArchive) visualMediaNames() []string {
+	names := make([]string, 0, a.visualAssetCount)
+	for name := range a.files {
+		if (strings.HasPrefix(name, "word/media/") || strings.HasPrefix(name, "xl/media/") ||
+			strings.HasPrefix(name, "ppt/media/")) && officeVisualMediaType(name) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func countUnreferencedVisualAssets(assets []VisualAsset) int {
+	count := 0
+	for _, asset := range assets {
+		if asset.Kind == VisualAssetEmbeddedImage && asset.RelationshipID == "" {
+			count++
+		}
+	}
+	return count
 }
 
 type ooxmlArchive struct {
@@ -99,12 +187,20 @@ func newOOXMLArchive(content []byte, limits Limits) (*ooxmlArchive, error) {
 		return nil, fmt.Errorf("%w: archive entry count %d exceeds limit %d", ErrResourceLimit, len(reader.File), limits.MaxArchiveEntries)
 	}
 	result := &ooxmlArchive{files: make(map[string]*zip.File, len(reader.File)), limits: limits}
+	canonicalNames := make(map[string]struct{}, len(reader.File))
 	for _, file := range reader.File {
 		name := file.Name
-		if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") ||
-			path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") {
+		validationName := strings.TrimSuffix(name, "/")
+		if name == "" || validationName == "" || strings.Contains(name, "\\") ||
+			strings.HasPrefix(name, "/") || path.Clean(validationName) != validationName ||
+			validationName == ".." || strings.HasPrefix(validationName, "../") ||
+			(strings.HasSuffix(name, "/") && (!file.FileInfo().IsDir() || file.UncompressedSize64 != 0)) {
 			return nil, fmt.Errorf("%w: Office package contains an unsafe entry name", ErrInvalidContent)
 		}
+		if _, exists := canonicalNames[validationName]; exists {
+			return nil, fmt.Errorf("%w: Office package contains duplicate entries", ErrInvalidContent)
+		}
+		canonicalNames[validationName] = struct{}{}
 		if file.Flags&0x1 != 0 {
 			return nil, fmt.Errorf("%w: encrypted Office packages are not supported", ErrInvalidContent)
 		}
@@ -144,6 +240,26 @@ func (a *ooxmlArchive) readXML(name string) ([]byte, error) {
 	}
 	if int64(len(content)) > a.limits.MaxXMLBytes {
 		return nil, fmt.Errorf("%w: Office XML part %q exceeds configured limit", ErrResourceLimit, name)
+	}
+	return content, nil
+}
+
+func (a *ooxmlArchive) readBinary(name string, limit int64) ([]byte, error) {
+	file := a.files[name]
+	if file == nil {
+		return nil, fmt.Errorf("%w: Office part %q is missing", ErrInvalidContent, name)
+	}
+	reader, err := file.Open()
+	if err != nil {
+		return nil, fmt.Errorf("%w: open Office part %q: %v", ErrInvalidContent, name, err)
+	}
+	defer reader.Close()
+	content, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read Office part %q: %v", ErrInvalidContent, name, err)
+	}
+	if int64(len(content)) > limit {
+		return nil, fmt.Errorf("%w: Office part %q exceeds configured limit", ErrResourceLimit, name)
 	}
 	return content, nil
 }
@@ -190,6 +306,11 @@ func xmlAttribute(attributes []xml.Attr, localName string) string {
 }
 
 func parseOOXMLRelationships(ctx context.Context, content []byte, baseDir string) (map[string]string, error) {
+	baseDir = strings.Trim(path.Clean(baseDir), "/")
+	packageRoot := strings.SplitN(baseDir, "/", 2)[0]
+	if baseDir == "." || packageRoot == "" || packageRoot == "." {
+		return nil, fmt.Errorf("%w: Office relationship base directory is invalid", ErrInvalidContent)
+	}
 	decoder := newStrictXMLDecoder(content)
 	result := make(map[string]string)
 	for {
@@ -217,7 +338,7 @@ func parseOOXMLRelationships(ctx context.Context, content []byte, baseDir string
 		} else {
 			resolved = path.Clean(path.Join(baseDir, target))
 		}
-		if resolved == baseDir || !strings.HasPrefix(resolved, strings.TrimSuffix(baseDir, "/")+"/") {
+		if resolved == packageRoot || !strings.HasPrefix(resolved, packageRoot+"/") {
 			return nil, fmt.Errorf("%w: Office relationship escapes its package root", ErrInvalidContent)
 		}
 		if _, exists := result[id]; exists {

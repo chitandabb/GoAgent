@@ -25,6 +25,7 @@ type DefaultRunnerDependencies struct {
 	SQLObjectDefinitions  tool.BaseTool
 	SchemaCatalog         tool.BaseTool
 	ReadonlyQuery         tool.BaseTool
+	KnowledgeSearch       tool.BaseTool
 	Logger                *zap.Logger
 }
 
@@ -35,6 +36,7 @@ type DefaultToolCatalogDependencies struct {
 	SQLObjectDefinitions tool.BaseTool
 	SchemaCatalog        tool.BaseTool
 	ReadonlyQuery        tool.BaseTool
+	KnowledgeSearch      tool.BaseTool
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -54,6 +56,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		ExternalCases: dependencies.ExternalCases, SkillReference: skillRuntime.ReferenceTool,
 		GitHubTools: dependencies.GitHubTools, SQLObjectDefinitions: dependencies.SQLObjectDefinitions,
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
+		KnowledgeSearch: dependencies.KnowledgeSearch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -92,6 +95,14 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 		registrations = append(registrations, ToolRegistration{
 			Tool: dependencies.SkillReference, AllowedRoles: roles,
 			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+		})
+	}
+	if dependencies.KnowledgeSearch != nil {
+		registrations = append(registrations, ToolRegistration{
+			Tool: dependencies.KnowledgeSearch, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
+			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
 		})
 	}
 	for _, sqlTool := range []tool.BaseTool{

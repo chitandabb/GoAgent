@@ -16,11 +16,12 @@ import (
 type EvidenceSourceType string
 
 const (
-	EvidenceSourceCaseSnapshot  EvidenceSourceType = "case_snapshot"
-	EvidenceSourceSchemaCatalog EvidenceSourceType = "schema_catalog"
-	EvidenceSourceSQLDefinition EvidenceSourceType = "sql_object_definition"
-	EvidenceSourceSQLQuery      EvidenceSourceType = "sql_query"
-	EvidenceSourceCodeSearch    EvidenceSourceType = "code_search"
+	EvidenceSourceCaseSnapshot   EvidenceSourceType = "case_snapshot"
+	EvidenceSourceSchemaCatalog  EvidenceSourceType = "schema_catalog"
+	EvidenceSourceSQLDefinition  EvidenceSourceType = "sql_object_definition"
+	EvidenceSourceSQLQuery       EvidenceSourceType = "sql_query"
+	EvidenceSourceCodeSearch     EvidenceSourceType = "code_search"
+	EvidenceSourceKnowledgeChunk EvidenceSourceType = "knowledge_chunk"
 )
 
 // EvidenceItem 是一次 Agent 运行中成功工具结果的不可变快照元数据。
@@ -47,6 +48,13 @@ func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceIte
 	if !ok || strings.TrimSpace(snapshot) == "" || isGitHubCodeSearchIndexPendingResult(toolName, snapshot) {
 		return EvidenceItem{}, false
 	}
+	location := "tool-output"
+	if toolName == ToolSearchKnowledge {
+		location, ok = knowledgeSearchEvidenceLocation(snapshot)
+		if !ok {
+			return EvidenceItem{}, false
+		}
+	}
 
 	collectedAt := time.Now().UTC()
 	sourceRef := "evidence:" + uuid.NewString()
@@ -62,7 +70,7 @@ func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceIte
 		ContentHash: "sha256:" + hex.EncodeToString(digest[:]),
 		Redacted:    false,
 		Truncated:   truncated || toolResultTruncated(snapshot),
-		Location:    "tool-output",
+		Location:    location,
 	}, true
 }
 
@@ -90,6 +98,8 @@ func evidenceSourceTypeForTool(toolName string) (EvidenceSourceType, bool) {
 		return EvidenceSourceSQLDefinition, true
 	case ToolExecuteReadonlyQuery:
 		return EvidenceSourceSQLQuery, true
+	case ToolSearchKnowledge:
+		return EvidenceSourceKnowledgeChunk, true
 	}
 	for _, readOnlyTool := range GitHubReadOnlyTools {
 		if toolName == readOnlyTool {

@@ -229,6 +229,7 @@ services:
       MESGUARD_RABBITMQ_URL: "amqp://${MESGUARD_RABBITMQ_USER:-mesguard}:${MESGUARD_RABBITMQ_PASSWORD:-mesguard_dev_password}@rabbitmq:5672/"
       MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
       MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -9,8 +9,12 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
+	platformrerank "github.com/chitandabb/GoAgent/internal/platform/dashscopererank"
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
@@ -39,6 +43,7 @@ type agentRuntimeBuilders struct {
 	sqlObjectDefinitions func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
 	schemaCatalog        func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error)
 	readonlyQuery        func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
+	knowledgeSearch      func(context.Context, *gorm.DB, config.Config, *zap.Logger) (tool.BaseTool, error)
 }
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
@@ -72,6 +77,7 @@ func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
 			}
 			return mesagent.NewExecuteReadonlyQueryTool(executor)
 		},
+		knowledgeSearch: buildKnowledgeSearchTool,
 	}
 }
 
@@ -100,11 +106,10 @@ func buildAgentRuntime(
 		return nil, fmt.Errorf("load Agent prompts: %w", err)
 	}
 	if externalCases == nil {
-		runtime.unavailable = errors.New("external case service is unavailable")
-		log.Warn("Agent unavailable; continuing without Agent runtime", zap.Error(runtime.unavailable))
-		return runtime, nil
+		externalCases = unavailableExternalCaseGetter{}
+	} else {
+		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyExternalCase)
 	}
-	runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyExternalCase)
 	chatModel, err := builders.chatModel(ctx, cfg.Models.Chat)
 	if err != nil {
 		runtime.unavailable = fmt.Errorf("build chat model: %w", err)
@@ -169,6 +174,21 @@ func buildAgentRuntime(
 		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencySQLServer)
 	}
 
+	var knowledgeSearch tool.BaseTool
+	if postgresDB != nil {
+		builder := builders.knowledgeSearch
+		if builder == nil {
+			builder = defaultAgentRuntimeBuilders().knowledgeSearch
+		}
+		knowledgeSearch, err = builder(ctx, postgresDB, cfg, log.Named("knowledge_search"))
+		if err != nil {
+			log.Warn("knowledge search Tool unavailable; continuing with other Agent capabilities", zap.Error(err))
+			knowledgeSearch = nil
+		} else if knowledgeSearch != nil {
+			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyKnowledge)
+		}
+	}
+
 	runtime.runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel:             chatModel,
 		ExternalCases:         externalCases,
@@ -180,6 +200,7 @@ func buildAgentRuntime(
 		SQLObjectDefinitions:  sqlObjectDefinitions,
 		SchemaCatalog:         schemaCatalog,
 		ReadonlyQuery:         readonlyQuery,
+		KnowledgeSearch:       knowledgeSearch,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
@@ -202,6 +223,60 @@ func buildAgentRuntime(
 		zap.String("prompt_version", runtime.promptVersion),
 	)
 	return runtime, nil
+}
+
+func buildKnowledgeSearchTool(
+	ctx context.Context,
+	db *gorm.DB,
+	cfg config.Config,
+	log *zap.Logger,
+) (tool.BaseTool, error) {
+	if db == nil {
+		return nil, errors.New("knowledge search PostgreSQL database is nil")
+	}
+	repository := platformpostgres.NewKnowledgeRepository(db)
+	var embedder knowledge.Embedder
+	var profile knowledge.EmbeddingProfile
+	if cfg.Models.Embedding.Enabled {
+		client, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+		if err != nil {
+			log.Warn("knowledge vector search unavailable; using FTS fallback", zap.Error(err))
+		} else if profile, err = cfg.Models.Embedding.Profile(); err != nil {
+			log.Warn("knowledge vector profile unavailable; using FTS fallback", zap.Error(err))
+		} else if err := platformpostgres.NewKnowledgeWorkerRepository(db).EnsureEmbeddingProfile(ctx, profile); err != nil {
+			log.Warn("knowledge vector profile is not active; using FTS fallback", zap.Error(err))
+		} else {
+			embedder = client
+		}
+	}
+	var reranker knowledge.Reranker
+	rerankCandidateN := 0
+	if cfg.Models.Rerank.Enabled {
+		client, err := platformrerank.NewClient(cfg.Models.Rerank, nil)
+		if err != nil {
+			log.Warn("knowledge rerank unavailable; using retrieval order", zap.Error(err))
+		} else {
+			reranker = client
+			rerankCandidateN = cfg.Models.Rerank.MaxCandidates
+		}
+	}
+	retrievalCandidateN := 20
+	if rerankCandidateN > retrievalCandidateN {
+		retrievalCandidateN = rerankCandidateN
+	}
+	service, err := knowledge.NewSearchServiceWithReranker(
+		repository, embedder, profile, retrievalCandidateN, reranker, rerankCandidateN,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return mesagent.NewSearchKnowledgeTool(service)
+}
+
+type unavailableExternalCaseGetter struct{}
+
+func (unavailableExternalCaseGetter) Get(context.Context, uuid.UUID) (*externalcase.ExternalCase, error) {
+	return nil, errors.New("external case service is unavailable")
 }
 
 func (r *agentRuntime) close() error {

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "name": "onnxruntime",
+  "version": "1.28.0",
+  "releaseUrl": "https://github.com/microsoft/onnxruntime/releases/tag/v1.28.0",
+  "platforms": {
+    "windows-x64": {
+      "archive": "onnxruntime-win-x64-1.28.0.zip",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip",
+      "bytes": 78796801,
+      "sha256": "abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc",
+      "format": "zip",
+      "libraryPath": "onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll",
+      "libraryBytes": 15809848,
+      "librarySHA256": "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
+      "noticeFiles": [
+        {
+          "path": "onnxruntime-win-x64-1.28.0/LICENSE",
+          "bytes": 1094,
+          "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+        },
+        {
+          "path": "onnxruntime-win-x64-1.28.0/ThirdPartyNotices.txt",
+          "bytes": 331175,
+          "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+        }
+      ]
+    },
+    "linux-x64": {
+      "archive": "onnxruntime-linux-x64-1.28.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz",
+      "bytes": 9125960,
+      "sha256": "a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407",
+      "format": "tgz",
+      "libraryPath": "onnxruntime-linux-x64-1.28.0/lib/libonnxruntime.so.1.28.0",
+      "libraryBytes": 24268848,
+      "librarySHA256": "1461ef7cc3d9e49982591721683cc3e3a55580aeca9a5254e7aac47b75ee4bab",
+      "noticeFiles": [
+        {
+          "path": "onnxruntime-linux-x64-1.28.0/LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "path": "onnxruntime-linux-x64-1.28.0/ThirdPartyNotices.txt",
+          "bytes": 325054,
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
+        }
+      ]
+    }
+  }
+}

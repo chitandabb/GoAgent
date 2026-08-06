@@ -1,0 +1,66 @@
+{
+  "version": "vlm-quality-local-v1",
+  "cases": [
+    {
+      "id": "io-four-level-structure",
+      "sourcePath": "devices/slide-2.png",
+      "sourceSha256": "774d3ce0ba8fac3102588ee68b278238f97f01d8975b202893a8849db06175ba",
+      "crop": {"x": 800, "y": 320, "width": 740, "height": 500},
+      "textAnchors": ["CPU", "I/O通道1", "I/O通道2", "控制器", "设备"],
+      "semanticFacts": [
+        {
+          "id": "cpu-channel-controller-device-chain",
+          "terms": [["CPU"], ["I/O通道", "通道", "I/O channel"], ["控制器", "controller"], ["设备", "device"], ["连接", "经过", "通过", "分支", "connect", "through", "branch"]]
+        },
+        {
+          "id": "channel-fans-out-to-controllers",
+          "terms": [["I/O通道", "通道", "I/O channel"], ["控制器", "controller"], ["多个", "两个", "多级", "分支", "分别", "two", "multiple", "branch", "each"]]
+        }
+      ],
+      "minimumTextAnchorRate": 0.8,
+      "minimumSemanticRate": 1.0
+    },
+    {
+      "id": "spooling-print-path",
+      "sourcePath": "devices/slide-44.png",
+      "sourceSha256": "72534e79639f0b82610c5c6e03c19174143c7b008824ef539494e877aae650a4",
+      "crop": {"x": 850, "y": 250, "width": 700, "height": 450},
+      "textAnchors": ["输入进程", "输出进程", "输入缓冲区", "输出缓冲区", "输入井", "输出井", "用户进程"],
+      "semanticFacts": [
+        {
+          "id": "input-buffer-to-input-well",
+          "terms": [["输入进程", "input process"], ["输入缓冲区", "input buffer"], ["输入井", "input well"], ["送入", "写入", "流向", "连接", "进入", "connect", "contain", "flow", "write"]]
+        },
+        {
+          "id": "output-well-buffer-printer-path",
+          "terms": [["输出井", "output well"], ["输出缓冲区", "output buffer"], ["打印机", "打印", "printer"], ["取出", "读取", "流向", "连接", "输出", "connect", "read", "flow", "output"]]
+        }
+      ],
+      "minimumTextAnchorRate": 0.85,
+      "minimumSemanticRate": 1.0
+    },
+    {
+      "id": "disk-physical-logical-structure",
+      "sourcePath": "devices/slide-54.png",
+      "sourceSha256": "d6d664e3a7edb5af9527407a9ffdf763fe7fe8753fba0e1c2a574cbcb0a2b07e",
+      "crop": {"x": 530, "y": 190, "width": 1000, "height": 480},
+      "textAnchors": ["磁道", "扇区", "柱面", "磁盘面", "读写磁头"],
+      "semanticFacts": [
+        {
+          "id": "aligned-tracks-form-cylinder",
+          "terms": [["磁道", "track"], ["柱面", "cylinder"], ["同一位置", "垂直", "上下", "对应", "aligned", "same position", "vertical"], ["磁盘面", "盘片", "盘面", "platter", "surface"]]
+        },
+        {
+          "id": "track-divided-into-sectors",
+          "terms": [["磁道", "track"], ["扇区", "sector"], ["划分", "分成", "组成", "divide", "split"]]
+        },
+        {
+          "id": "inner-sector-density",
+          "terms": [["内侧", "内圈", "inner"], ["扇区", "sector"], ["面积", "area"], ["数据", "容量", "data", "capacity"], ["密度", "density"]]
+        }
+      ],
+      "minimumTextAnchorRate": 0.8,
+      "minimumSemanticRate": 0.66
+    }
+  ]
+}

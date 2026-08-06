@@ -207,6 +207,8 @@ func taskCapabilitiesFromScope(scope map[string]any) ([]agent.ToolCapability, er
 			result = append(result, agent.ToolCapabilityCode)
 		case diagnosis.TaskCapabilitySQL:
 			result = append(result, agent.ToolCapabilitySQL)
+		case diagnosis.TaskCapabilityKnowledge:
+			result = append(result, agent.ToolCapabilityKnowledge)
 		default:
 			return nil, fmt.Errorf("%w: unsupported task capability %q", diagnosis.ErrInvalidTask, value)
 		}

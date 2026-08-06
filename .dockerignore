@@ -4,6 +4,7 @@
 .env
 .firecrawl
 logs
+output
 web/dist
 web/node_modules
 *.exe
