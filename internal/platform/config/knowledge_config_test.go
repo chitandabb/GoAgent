@@ -5,7 +5,7 @@ import "testing"
 func TestKnowledgeConfigValidate(t *testing.T) {
 	valid := KnowledgeConfig{
 		PipelineVersion: "ingestion-v1", MaxAttempts: 3, MaxUploadBytes: 50 * 1024 * 1024,
-		ChunkMaxRunes: 700, ChunkOverlapRunes: 80,
+		ChunkMaxRunes: 700, ChunkOverlapRunes: 80, ChunkWriteBatchSize: 100,
 		ParserMaxDocumentUnits: 500, ParserMaxArchiveEntries: 4096,
 		ParserMaxExpandedBytes: 256 * 1024 * 1024, ParserMaxXMLBytes: 32 * 1024 * 1024,
 		ParserMaxExtractedRunes: 2_000_000, ParserMaxSpreadsheetRows: 10_000,
@@ -14,8 +14,11 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		MaxVisualEnrichments: 30, MinVisualPixels: 4096,
 		Retrieval: KnowledgeRetrievalConfig{
 			ContextExpansionEnabled: true, ContextWindow: 1, ContextMaxRunes: 1800,
+			ContextCompression: KnowledgeContextCompressionConfig{
+				Enabled: true, MaxChunks: 6, MaxRunes: 3000, MinScore: 0.05,
+			},
 			QueryRewrite: KnowledgeQueryRewriteConfig{
-				Enabled: true, PromptFile: "config/prompts/query-rewrite.md", PromptVersion: "query-rewrite-v1",
+				Enabled: true, ModelProfile: "qwen-rewrite", PromptFile: "config/prompts/query-rewrite.md", PromptVersion: "query-rewrite-v1",
 				TimeoutMillis: 10000, MaxSubqueries: 2, MaxOutputRunes: 2048,
 			},
 		},
@@ -37,6 +40,8 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		{name: "chunk too small", mutate: func(c *KnowledgeConfig) { c.ChunkMaxRunes = 127 }},
 		{name: "negative overlap", mutate: func(c *KnowledgeConfig) { c.ChunkOverlapRunes = -1 }},
 		{name: "overlap too large", mutate: func(c *KnowledgeConfig) { c.ChunkOverlapRunes = 350 }},
+		{name: "zero chunk write batch", mutate: func(c *KnowledgeConfig) { c.ChunkWriteBatchSize = 0 }},
+		{name: "chunk write batch too large", mutate: func(c *KnowledgeConfig) { c.ChunkWriteBatchSize = 501 }},
 		{name: "zero document units", mutate: func(c *KnowledgeConfig) { c.ParserMaxDocumentUnits = 0 }},
 		{name: "zero archive entries", mutate: func(c *KnowledgeConfig) { c.ParserMaxArchiveEntries = 0 }},
 		{name: "expanded bytes too small", mutate: func(c *KnowledgeConfig) { c.ParserMaxExpandedBytes = 1024 }},
@@ -51,6 +56,10 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 		{name: "zero visual pixels", mutate: func(c *KnowledgeConfig) { c.MinVisualPixels = 0 }},
 		{name: "zero context window", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextWindow = 0 }},
 		{name: "context budget too small", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextMaxRunes = 127 }},
+		{name: "compression without expansion", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextExpansionEnabled = false }},
+		{name: "zero compressed chunks", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextCompression.MaxChunks = 0 }},
+		{name: "compression budget too small", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextCompression.MaxRunes = 127 }},
+		{name: "compression score above one", mutate: func(c *KnowledgeConfig) { c.Retrieval.ContextCompression.MinScore = 1.1 }},
 		{name: "query rewrite timeout too small", mutate: func(c *KnowledgeConfig) { c.Retrieval.QueryRewrite.TimeoutMillis = 999 }},
 		{name: "query rewrite too many subqueries", mutate: func(c *KnowledgeConfig) { c.Retrieval.QueryRewrite.MaxSubqueries = 3 }},
 	}
@@ -68,7 +77,7 @@ func TestKnowledgeConfigValidate(t *testing.T) {
 func TestKnowledgeQueryRewriteConfigLoadsPrompt(t *testing.T) {
 	path := writePromptFileForTest(t, t.TempDir(), "query-rewrite.md", " strict query rewrite prompt \n")
 	cfg := KnowledgeQueryRewriteConfig{
-		Enabled: true, PromptFile: path, PromptVersion: "query-rewrite-v1",
+		Enabled: true, ModelProfile: "qwen-rewrite", PromptFile: path, PromptVersion: "query-rewrite-v1",
 		TimeoutMillis: 10000, MaxSubqueries: 2, MaxOutputRunes: 2048,
 	}
 	prompt, err := cfg.LoadPrompt()

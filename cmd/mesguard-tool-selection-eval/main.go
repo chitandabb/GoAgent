@@ -86,11 +86,19 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return errors.New("chat model and GitHub MCP must be enabled")
 	}
 	// 工具选择评测固定低推理强度；不修改生产配置文件。
-	cfg.Models.Chat.ReasoningEffort = "low"
-	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	profile, err := cfg.Models.Chat.ActiveProfile()
 	if err != nil {
-		return fmt.Errorf("build StepFun model: %w", err)
+		return err
 	}
+	if strings.TrimSpace(profile.ReasoningEffort) != "" {
+		profile.ReasoningEffort = "low"
+	}
+	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
+	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
+	if err != nil {
+		return fmt.Errorf("build chat model: %w", err)
+	}
+	chatModel := instance.Model
 	githubConnection, err := githubmcp.Connect(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
@@ -265,11 +273,12 @@ func observeToolSelection(
 	startedAt := time.Now()
 	message, generateErr := bound.Generate(ctx, selectionMessages(definition),
 		model.WithTemperature(0), model.WithMaxTokens(toolSelectionMaxTokens), model.WithToolChoice(schema.ToolChoiceForced))
+	profile, _ := cfg.Models.Chat.ActiveProfile()
 	observation := mesagent.ToolSelectionObservation{
 		DatasetVersion: definition.DatasetVersion, CaseID: definition.CaseID, Variant: variant,
 		RunID:         fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		ModelProvider: cfg.Models.Chat.Provider, ModelID: cfg.Models.Chat.Model,
-		ReasoningEffort: cfg.Models.Chat.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
+		ModelProvider: profile.Provider, ModelID: profile.Model,
+		ReasoningEffort: profile.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
 		MaxOutputTokens: toolSelectionMaxTokens,
 		AvailableTools:  names, ToolSchemaHash: schemaHash, ToolSchemaBytes: schemaBytes,
 		DurationMillis: time.Since(startedAt).Milliseconds(),

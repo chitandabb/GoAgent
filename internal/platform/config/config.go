@@ -11,6 +11,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -51,55 +52,106 @@ type ModelsConfig struct {
 	Vision    MultimodalModelConfig `toml:"vision"`
 }
 
-// ChatModelConfig 定义 OpenAI 兼容聊天模型。当前生产 Provider 为 StepFun Step Plan。
+// ChatModelConfig 通过命名 Profile 隔离不同模型职责和 Provider 参数。
 type ChatModelConfig struct {
-	Enabled         bool   `toml:"enabled"`
-	Provider        string `toml:"provider"`
-	BaseURL         string `toml:"baseURL"`
-	APIKeyEnv       string `toml:"apiKeyEnv"`
-	Model           string `toml:"model"`
-	ReasoningEffort string `toml:"reasoningEffort"`
-	TimeoutMillis   int    `toml:"timeoutMillis"`
-	MaxOutputTokens int    `toml:"maxOutputTokens"`
+	Enabled           bool                              `toml:"enabled"`
+	ActiveProfileName string                            `toml:"activeProfile"`
+	Profiles          map[string]ChatModelProfileConfig `toml:"profiles"`
+}
+
+// ChatModelProfileConfig 是单个 OpenAI 兼容模型端点的静态配置。
+// Provider 专有参数由 chatmodel Adapter 校验和映射。
+type ChatModelProfileConfig struct {
+	Provider        string   `toml:"provider"`
+	BaseURL         string   `toml:"baseURL"`
+	APIKeyEnv       string   `toml:"apiKeyEnv"`
+	Model           string   `toml:"model"`
+	ReasoningEffort string   `toml:"reasoningEffort"`
+	ThinkingMode    string   `toml:"thinkingMode"`
+	Temperature     *float32 `toml:"temperature"`
+	TimeoutMillis   int      `toml:"timeoutMillis"`
+	MaxOutputTokens int      `toml:"maxOutputTokens"`
 }
 
 var modelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func (c ChatModelConfig) Validate() error {
+	for name, profile := range c.Profiles {
+		if !modelName.MatchString(strings.TrimSpace(name)) {
+			return fmt.Errorf("models.chat profile name %q is invalid", name)
+		}
+		if err := profile.Validate(); err != nil {
+			return fmt.Errorf("models.chat profile %q: %w", name, err)
+		}
+	}
 	if !c.Enabled {
 		return nil
 	}
-	if strings.ToLower(strings.TrimSpace(c.Provider)) != "stepfun" {
-		return errors.New("models.chat provider must be stepfun")
-	}
-	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
-	if err != nil || endpoint.Host == "" || endpoint.Path == "" {
-		return errors.New("models.chat baseURL must be an absolute URL")
-	}
-	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
-		return errors.New("models.chat baseURL must use HTTPS unless it points to localhost")
-	}
-	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
-		return errors.New("models.chat apiKeyEnv is invalid")
-	}
-	if !modelName.MatchString(strings.TrimSpace(c.Model)) {
-		return errors.New("models.chat model is invalid")
-	}
-	switch strings.ToLower(strings.TrimSpace(c.ReasoningEffort)) {
-	case "low", "medium", "high":
-	default:
-		return errors.New("models.chat reasoningEffort must be low, medium, or high")
-	}
-	if c.TimeoutMillis <= 0 || c.TimeoutMillis > 300_000 {
-		return errors.New("models.chat timeoutMillis must be between 1 and 300000")
-	}
-	if c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 65_536 {
-		return errors.New("models.chat maxOutputTokens must be between 1 and 65536")
+	if _, err := c.ActiveProfile(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (c ChatModelConfig) APIKey() (string, error) {
+func (c ChatModelConfig) ActiveProfile() (ChatModelProfileConfig, error) {
+	name := strings.TrimSpace(c.ActiveProfileName)
+	if !modelName.MatchString(name) {
+		return ChatModelProfileConfig{}, errors.New("models.chat activeProfile is invalid")
+	}
+	return c.Profile(name)
+}
+
+func (c ChatModelConfig) Profile(name string) (ChatModelProfileConfig, error) {
+	name = strings.TrimSpace(name)
+	profile, ok := c.Profiles[name]
+	if !ok {
+		return ChatModelProfileConfig{}, fmt.Errorf("models.chat profile %q is not configured", name)
+	}
+	return profile, nil
+}
+
+func (c ChatModelProfileConfig) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
+	case "stepfun", "deepseek", "dashscope":
+	default:
+		return errors.New("provider must be stepfun, deepseek, or dashscope")
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
+	if err != nil || endpoint.Host == "" {
+		return errors.New("baseURL must be an absolute URL")
+	}
+	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
+		return errors.New("baseURL must use HTTPS unless it points to localhost")
+	}
+	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
+		return errors.New("apiKeyEnv is invalid")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.Model)) {
+		return errors.New("model is invalid")
+	}
+	if effort := strings.ToLower(strings.TrimSpace(c.ReasoningEffort)); effort != "" {
+		switch effort {
+		case "low", "medium", "high", "xhigh", "max":
+		default:
+			return errors.New("reasoningEffort must be low, medium, high, xhigh, or max when configured")
+		}
+	}
+	if thinking := strings.ToLower(strings.TrimSpace(c.ThinkingMode)); thinking != "" && thinking != "enabled" && thinking != "disabled" {
+		return errors.New("thinkingMode must be enabled or disabled when configured")
+	}
+	if c.Temperature != nil && (*c.Temperature < 0 || *c.Temperature > 2) {
+		return errors.New("temperature must be between 0 and 2")
+	}
+	if c.TimeoutMillis <= 0 || c.TimeoutMillis > 300_000 {
+		return errors.New("timeoutMillis must be between 1 and 300000")
+	}
+	if c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 65_536 {
+		return errors.New("maxOutputTokens must be between 1 and 65536")
+	}
+	return nil
+}
+
+func (c ChatModelProfileConfig) APIKey() (string, error) {
 	return requiredEnv(c.APIKeyEnv)
 }
 
@@ -431,10 +483,11 @@ func (c MinIOConfig) SecretKey() (string, error) {
 }
 
 type KnowledgeRetrievalConfig struct {
-	ContextExpansionEnabled bool                        `toml:"contextExpansionEnabled"`
-	ContextWindow           int                         `toml:"contextWindow"`
-	ContextMaxRunes         int                         `toml:"contextMaxRunes"`
-	QueryRewrite            KnowledgeQueryRewriteConfig `toml:"queryRewrite"`
+	ContextExpansionEnabled bool                              `toml:"contextExpansionEnabled"`
+	ContextWindow           int                               `toml:"contextWindow"`
+	ContextMaxRunes         int                               `toml:"contextMaxRunes"`
+	ContextCompression      KnowledgeContextCompressionConfig `toml:"contextCompression"`
+	QueryRewrite            KnowledgeQueryRewriteConfig       `toml:"queryRewrite"`
 }
 
 func (c KnowledgeRetrievalConfig) Validate() error {
@@ -446,14 +499,44 @@ func (c KnowledgeRetrievalConfig) Validate() error {
 			return errors.New("knowledge retrieval contextMaxRunes must be between 128 and 8000")
 		}
 	}
+	if c.ContextCompression.Enabled && !c.ContextExpansionEnabled {
+		return errors.New("knowledge retrieval contextCompression requires context expansion")
+	}
+	if err := c.ContextCompression.Validate(); err != nil {
+		return err
+	}
 	if err := c.QueryRewrite.Validate(); err != nil {
 		return err
 	}
 	return nil
 }
 
+type KnowledgeContextCompressionConfig struct {
+	Enabled   bool    `toml:"enabled"`
+	MaxChunks int     `toml:"maxChunks"`
+	MaxRunes  int     `toml:"maxRunes"`
+	MinScore  float64 `toml:"minScore"`
+}
+
+func (c KnowledgeContextCompressionConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.MaxChunks < 1 || c.MaxChunks > 40 {
+		return errors.New("knowledge retrieval contextCompression.maxChunks must be between 1 and 40")
+	}
+	if c.MaxRunes < 128 || c.MaxRunes > 32000 {
+		return errors.New("knowledge retrieval contextCompression.maxRunes must be between 128 and 32000")
+	}
+	if math.IsNaN(c.MinScore) || math.IsInf(c.MinScore, 0) || c.MinScore < 0 || c.MinScore > 1 {
+		return errors.New("knowledge retrieval contextCompression.minScore must be between 0 and 1")
+	}
+	return nil
+}
+
 type KnowledgeQueryRewriteConfig struct {
 	Enabled        bool   `toml:"enabled"`
+	ModelProfile   string `toml:"modelProfile"`
 	PromptFile     string `toml:"promptFile"`
 	PromptVersion  string `toml:"promptVersion"`
 	TimeoutMillis  int    `toml:"timeoutMillis"`
@@ -464,6 +547,9 @@ type KnowledgeQueryRewriteConfig struct {
 func (c KnowledgeQueryRewriteConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.ModelProfile)) {
+		return errors.New("knowledge query rewrite modelProfile is invalid")
 	}
 	promptFile := strings.TrimSpace(c.PromptFile)
 	if promptFile == "" || len(promptFile) > 512 {
@@ -501,6 +587,7 @@ type KnowledgeConfig struct {
 	MaxUploadBytes              int64                    `toml:"maxUploadBytes"`
 	ChunkMaxRunes               int                      `toml:"chunkMaxRunes"`
 	ChunkOverlapRunes           int                      `toml:"chunkOverlapRunes"`
+	ChunkWriteBatchSize         int                      `toml:"chunkWriteBatchSize"`
 	ParserMaxDocumentUnits      int                      `toml:"parserMaxDocumentUnits"`
 	ParserMaxArchiveEntries     int                      `toml:"parserMaxArchiveEntries"`
 	ParserMaxExpandedBytes      int64                    `toml:"parserMaxExpandedBytes"`
@@ -533,6 +620,9 @@ func (c KnowledgeConfig) Validate() error {
 	}
 	if c.ChunkOverlapRunes < 0 || c.ChunkOverlapRunes >= c.ChunkMaxRunes/2 {
 		return errors.New("knowledge chunkOverlapRunes must be non-negative and less than half chunkMaxRunes")
+	}
+	if c.ChunkWriteBatchSize < 1 || c.ChunkWriteBatchSize > 500 {
+		return errors.New("knowledge chunkWriteBatchSize must be between 1 and 500")
 	}
 	if c.ParserMaxDocumentUnits < 1 || c.ParserMaxDocumentUnits > 5000 {
 		return errors.New("knowledge parserMaxDocumentUnits must be between 1 and 5000")
@@ -1061,6 +1151,11 @@ func (c Config) Validate() error {
 	}
 	if err := c.Knowledge.Validate(); err != nil {
 		return err
+	}
+	if c.Knowledge.Retrieval.QueryRewrite.Enabled {
+		if _, err := c.Models.Chat.Profile(c.Knowledge.Retrieval.QueryRewrite.ModelProfile); err != nil {
+			return fmt.Errorf("knowledge query rewrite modelProfile: %w", err)
+		}
 	}
 	if c.MinIO.Enabled && c.Knowledge.MaxUploadBytes > c.MinIO.MaxObjectBytes {
 		return errors.New("knowledge maxUploadBytes must not exceed minio maxObjectBytes")

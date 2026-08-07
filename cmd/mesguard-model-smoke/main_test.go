@@ -75,4 +75,10 @@ func TestParseRunOptions(t *testing.T) {
 	if _, err = parseRunOptions([]string{"-reasoning-effort", "off"}, "medium"); err == nil {
 		t.Fatal("parseRunOptions accepted unsupported reasoning effort")
 	}
+	if opts, err = parseRunOptions(nil, ""); err != nil || opts.ReasoningEffort != "" {
+		t.Fatalf("parseRunOptions empty effort = %+v, %v", opts, err)
+	}
+	if opts, err = parseRunOptions([]string{"-reasoning-effort", "max"}, ""); err != nil || opts.ReasoningEffort != "max" {
+		t.Fatalf("parseRunOptions DeepSeek effort = %+v, %v", opts, err)
+	}
 }

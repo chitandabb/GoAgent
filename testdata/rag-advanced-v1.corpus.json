@@ -1,0 +1,44 @@
+{
+  "datasetVersion": "rag-advanced-v1",
+  "chunkerVersion": "markdown-rune-v1",
+  "chunkMaxRunes": 420,
+  "chunkOverlapRunes": 40,
+  "documents": [
+    {
+      "documentKey": "go-managing-connections",
+      "title": "Managing connections",
+      "mediaType": "text/markdown",
+      "sourceUrl": "https://go.dev/doc/database/manage-connections",
+      "sourceRetrievedAt": "2026-08-06",
+      "contentSha256": "42729f287cf127ce8ead82766e171984ff667d044886f3c6bc45b225b2c56c30",
+      "content": "# Managing connections\n\nFor the vast majority of programs, you needn't adjust the sql.DB connection pool defaults. But for some advanced programs, you might need to tune the connection pool parameters or work with connections explicitly.\n\nThe sql.DB database handle is safe for concurrent use by multiple goroutines. Each sql.DB manages a pool of active connections to the underlying database, creating new ones as needed for parallelism in your Go program.\n\nThe connection pool is suitable for most data access needs. When you call an sql.DB Query or Exec method, the sql.DB implementation retrieves an available connection from the pool or, if needed, creates one. The package returns the connection to the pool when it's no longer needed.\n\n## Setting the maximum number of open connections\n\nDB.SetMaxOpenConns imposes a limit on the number of open connections. Past this limit, new database operations will wait for an existing operation to finish, at which time sql.DB will create another connection.\n\nKeep in mind that setting a limit makes database usage similar to acquiring a lock or semaphore, with the result that your application can deadlock waiting for a new database connection.\n\n## Setting the maximum number of idle connections\n\nDB.SetMaxIdleConns changes the limit on the maximum number of idle connections sql.DB maintains. Raising the limit can avoid frequent reconnects in programs with significant parallelism."
+    },
+    {
+      "documentKey": "go-canceling-operations",
+      "title": "Canceling in-progress operations",
+      "mediaType": "text/markdown",
+      "sourceUrl": "https://go.dev/doc/database/cancel-operations",
+      "sourceRetrievedAt": "2026-08-06",
+      "contentSha256": "80a88f88681ebdfe6d343316ba8fc193a6dd8906efe1dde6b50804fcdd18eac4",
+      "content": "# Canceling in-progress operations\n\nYou can manage in-progress operations by using Go context.Context. A Context can report whether the overall operation it represents has been canceled and is no longer needed. By passing a context.Context across function calls and services, those can stop working early and return an error when their processing is no longer needed.\n\nLong-running operations, including database operations that are taking too long to complete, can be ended. Cancellation requests can also be propagated from elsewhere, such as when a client closes a connection.\n\n## Canceling database operations after a timeout\n\nYou can use a Context to set a timeout or deadline after which an operation will be canceled. To derive a Context with a timeout or deadline, call context.WithTimeout or context.WithDeadline.\n\nWhen one context is derived from an outer context, if the outer context is canceled, then the derived context is automatically canceled as well. In HTTP servers, the http.Request.Context method returns a context associated with the request. That context is canceled if the HTTP client disconnects or cancels the HTTP request.\n\nAlways defer a call to the cancel function that's returned when you create a new Context with a timeout or deadline. This releases resources held by the new Context when the containing function exits."
+    },
+    {
+      "documentKey": "go-executing-transactions",
+      "title": "Executing transactions",
+      "mediaType": "text/markdown",
+      "sourceUrl": "https://go.dev/doc/database/execute-transactions",
+      "sourceRetrievedAt": "2026-08-06",
+      "contentSha256": "e13e3416fd6867bc9a7da9cc65ddea0c8d5ffdf9a3dfb1b1a2df824c48a26616",
+      "content": "# Executing transactions\n\nYou can execute database transactions using an sql.Tx, which represents a transaction. In addition to Commit and Rollback methods, sql.Tx has the methods used to perform common database operations. To get the sql.Tx, call DB.Begin or DB.BeginTx.\n\nA database transaction groups multiple operations as part of a larger goal. All of the operations must succeed or none can, with the data's integrity preserved in either case.\n\n## Ending a transaction\n\nIf Commit succeeds, then all query results are confirmed as valid and all executed updates are applied to the database as a single atomic change. If Commit fails, then all results from Query and Exec on the Tx should be discarded as invalid.\n\nRoll back the transaction using Tx.Rollback. Even if Tx.Rollback fails, the transaction will no longer be valid, nor will it have been committed to the database.\n\n## Best practices\n\nUse the transaction APIs to manage transactions. Do not use transaction-related SQL statements such as BEGIN and COMMIT directly; doing so can leave your database in an unpredictable state, especially in concurrent programs.\n\nWhen using a transaction, take care not to call the non-transaction sql.DB methods directly, as those execute outside the transaction, giving your code an inconsistent view of the state or even causing deadlocks."
+    },
+    {
+      "documentKey": "postgresql-explicit-locking-deadlocks",
+      "title": "PostgreSQL explicit locking and deadlocks",
+      "mediaType": "text/markdown",
+      "sourceUrl": "https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-DEADLOCKS",
+      "sourceRetrievedAt": "2026-08-06",
+      "contentSha256": "5221b3eab5e8f05be46ce774af430e686c95aa7f312a046bfbbe54406e3fa59c",
+      "content": "# Deadlocks\n\nThe use of explicit locking can increase the likelihood of deadlocks, wherein two or more transactions each hold locks that the other wants. PostgreSQL automatically detects deadlock situations and resolves them by aborting one of the transactions involved, allowing the others to complete. Exactly which transaction will be aborted is difficult to predict and should not be relied upon.\n\nDeadlocks can also occur as the result of row-level locks, and thus can occur even if explicit locking is not used. PostgreSQL will detect a situation where transaction one is blocked on transaction two and transaction two is blocked on transaction one, and abort one of the transactions.\n\nThe best defense against deadlocks is generally to avoid them by being certain that all applications using a database acquire locks on multiple objects in a consistent order. One should also ensure that the first lock acquired on an object is the most restrictive mode that will be needed.\n\nIf it is not feasible to verify this in advance, deadlocks can be handled on the fly by retrying transactions that abort due to deadlocks. Applications should also avoid holding transactions open for long periods of time, such as while waiting for user input."
+    }
+  ]
+}

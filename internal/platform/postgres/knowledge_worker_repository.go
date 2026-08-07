@@ -17,11 +17,49 @@ import (
 	"gorm.io/gorm"
 )
 
-type KnowledgeWorkerRepository struct{ db *gorm.DB }
+const defaultKnowledgeChunkWriteBatchSize = 100
+
+type KnowledgeWorkerRepository struct {
+	db                  *gorm.DB
+	chunkWriteBatchSize int
+}
 
 func NewKnowledgeWorkerRepository(db *gorm.DB) *KnowledgeWorkerRepository {
-	return &KnowledgeWorkerRepository{db: db}
+	return &KnowledgeWorkerRepository{db: db, chunkWriteBatchSize: defaultKnowledgeChunkWriteBatchSize}
 }
+
+func NewKnowledgeWorkerRepositoryWithBatchSize(db *gorm.DB, batchSize int) (*KnowledgeWorkerRepository, error) {
+	if batchSize < 1 || batchSize > 500 {
+		return nil, errors.New("knowledge chunk write batch size must be between 1 and 500")
+	}
+	return &KnowledgeWorkerRepository{db: db, chunkWriteBatchSize: batchSize}, nil
+}
+
+type knowledgeChunkInsert struct {
+	ID                uuid.UUID             `gorm:"column:id"`
+	DocumentVersionID uuid.UUID             `gorm:"column:document_version_id"`
+	Ordinal           int                   `gorm:"column:ordinal"`
+	PageNumber        *int                  `gorm:"column:page_number"`
+	ElementIndex      *int                  `gorm:"column:element_index"`
+	ElementType       knowledge.ElementType `gorm:"column:element_type"`
+	SectionPath       string                `gorm:"column:section_path;type:jsonb"`
+	ContentText       string                `gorm:"column:content_text"`
+	SearchText        string                `gorm:"column:search_text"`
+	ContentSHA256     string                `gorm:"column:content_sha256"`
+	Metadata          string                `gorm:"column:metadata;type:jsonb"`
+}
+
+func (knowledgeChunkInsert) TableName() string { return "knowledge_chunks" }
+
+type knowledgeChunkEmbeddingInsert struct {
+	ChunkID       uuid.UUID       `gorm:"column:chunk_id"`
+	ProfileID     uuid.UUID       `gorm:"column:profile_id"`
+	ContentSHA256 string          `gorm:"column:content_sha256"`
+	Embedding     pgvector.Vector `gorm:"column:embedding;type:vector(1024)"`
+	CreatedAt     time.Time       `gorm:"column:created_at"`
+}
+
+func (knowledgeChunkEmbeddingInsert) TableName() string { return "knowledge_chunk_embeddings" }
 
 var _ knowledgeworker.Repository = (*KnowledgeWorkerRepository)(nil)
 
@@ -396,41 +434,16 @@ func (r *KnowledgeWorkerRepository) SaveParsedResult(
 		).Error; err != nil {
 			return TranslateError(err)
 		}
-		for ordinal, chunk := range result.Chunks {
-			chunkID := uuid.New()
-			sectionPath, err := json.Marshal(chunk.SectionPath)
-			if err != nil {
-				return err
-			}
-			if chunk.SectionPath == nil {
-				sectionPath = json.RawMessage(`[]`)
-			}
-			metadata := chunk.Metadata
-			if len(metadata) == 0 {
-				metadata = json.RawMessage(`{}`)
-			}
-			if err := tx.Exec(`
-INSERT INTO knowledge_chunks
-    (id, document_version_id, ordinal, page_number, element_index, element_type,
-     section_path, content_text, search_text, content_sha256, metadata)
-VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)`,
-				chunkID, lease.DocumentVersionID, ordinal, chunk.PageNumber, chunk.ElementIndex,
-				chunk.ElementType, string(sectionPath), chunk.ContentText, chunk.SearchText,
-				chunk.ContentSHA256, string(metadata),
-			).Error; err != nil {
+		chunkRows, embeddingRows, err := knowledgeWriteRows(lease, result, updatedAt)
+		if err != nil {
+			return err
+		}
+		if err := tx.CreateInBatches(&chunkRows, r.chunkWriteBatchSize).Error; err != nil {
+			return TranslateError(err)
+		}
+		if len(embeddingRows) > 0 {
+			if err := tx.CreateInBatches(&embeddingRows, r.chunkWriteBatchSize).Error; err != nil {
 				return TranslateError(err)
-			}
-			if result.EmbeddingProfile != nil {
-				embedding := result.Embeddings[ordinal]
-				if err := tx.Exec(`
-INSERT INTO knowledge_chunk_embeddings
-    (chunk_id, profile_id, content_sha256, embedding, created_at)
-VALUES (?, ?, ?, ?, ?)`,
-					chunkID, result.EmbeddingProfile.ID, embedding.ContentSHA256,
-					pgvector.NewVector(embedding.Vector), updatedAt.UTC(),
-				).Error; err != nil {
-					return TranslateError(err)
-				}
 			}
 		}
 		artifact := result.Artifact
@@ -461,6 +474,44 @@ WHERE id = ?`,
 		return false, nil
 	}
 	return saved, TranslateError(err)
+}
+
+func knowledgeWriteRows(
+	lease knowledgeworker.Lease,
+	result knowledgeworker.ExecutionResult,
+	createdAt time.Time,
+) ([]knowledgeChunkInsert, []knowledgeChunkEmbeddingInsert, error) {
+	chunks := make([]knowledgeChunkInsert, 0, len(result.Chunks))
+	embeddings := make([]knowledgeChunkEmbeddingInsert, 0, len(result.Embeddings))
+	for ordinal, chunk := range result.Chunks {
+		sectionPath, err := json.Marshal(chunk.SectionPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		if chunk.SectionPath == nil {
+			sectionPath = json.RawMessage(`[]`)
+		}
+		metadata := chunk.Metadata
+		if len(metadata) == 0 {
+			metadata = json.RawMessage(`{}`)
+		}
+		chunkID := uuid.New()
+		chunks = append(chunks, knowledgeChunkInsert{
+			ID: chunkID, DocumentVersionID: lease.DocumentVersionID, Ordinal: ordinal,
+			PageNumber: chunk.PageNumber, ElementIndex: chunk.ElementIndex, ElementType: chunk.ElementType,
+			SectionPath: string(sectionPath), ContentText: chunk.ContentText, SearchText: chunk.SearchText,
+			ContentSHA256: chunk.ContentSHA256, Metadata: string(metadata),
+		})
+		if result.EmbeddingProfile != nil {
+			embedding := result.Embeddings[ordinal]
+			embeddings = append(embeddings, knowledgeChunkEmbeddingInsert{
+				ChunkID: chunkID, ProfileID: result.EmbeddingProfile.ID,
+				ContentSHA256: embedding.ContentSHA256, Embedding: pgvector.NewVector(embedding.Vector),
+				CreatedAt: createdAt.UTC(),
+			})
+		}
+	}
+	return chunks, embeddings, nil
 }
 
 func (r *KnowledgeWorkerRepository) Complete(

@@ -104,7 +104,13 @@ func NewKnowledgeWorkerApp(ctx context.Context, cfg config.Config, log *zap.Logg
 	if layoutRuntime != nil {
 		layoutStage = layoutRuntime.stage
 	}
-	repository := platformpostgres.NewKnowledgeWorkerRepository(deps.db)
+	repository, err := platformpostgres.NewKnowledgeWorkerRepositoryWithBatchSize(
+		deps.db, cfg.Knowledge.ChunkWriteBatchSize,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, err
+	}
 	var embeddingConfig *knowledgeingestion.EmbeddingConfig
 	if cfg.Models.Embedding.Enabled {
 		embedder, err := platformembedding.NewClient(cfg.Models.Embedding, nil)

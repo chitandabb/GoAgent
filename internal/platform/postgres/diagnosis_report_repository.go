@@ -127,15 +127,18 @@ type reportBusinessSummaryPayload struct {
 }
 
 type reportTechnicalSummaryPayload struct {
-	Summary         string                     `json:"summary"`
-	Limitations     []string                   `json:"limitations"`
-	Partial         bool                       `json:"partial"`
-	MissingEvidence []string                   `json:"missingEvidence"`
-	Usage           diagnosis.ReportModelUsage `json:"usage"`
-	AgentRuns       int                        `json:"agentRuns"`
-	SelectedSkill   string                     `json:"selectedSkill"`
-	ExecutedSkills  []string                   `json:"executedSkills"`
-	StopReason      string                     `json:"stopReason"`
+	Summary                       string                     `json:"summary"`
+	Limitations                   []string                   `json:"limitations"`
+	Partial                       bool                       `json:"partial"`
+	MissingEvidence               []string                   `json:"missingEvidence"`
+	Usage                         diagnosis.ReportModelUsage `json:"usage"`
+	AgentRuns                     int                        `json:"agentRuns"`
+	SelectedSkill                 string                     `json:"selectedSkill"`
+	ExecutedSkills                []string                   `json:"executedSkills"`
+	StopReason                    string                     `json:"stopReason"`
+	AgenticRetrievalAttempted     bool                       `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                       `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string                     `json:"agenticRetrievalStopReason"`
 }
 
 func (r diagnosisReportRecord) toDomain() (diagnosis.DiagnosisReport, error) {
@@ -174,7 +177,10 @@ func (r diagnosisReportRecord) toDomain() (diagnosis.DiagnosisReport, error) {
 		Usage: technical.Usage, AgentRuns: technical.AgentRuns,
 		SelectedSkill: technical.SelectedSkill, ExecutedSkills: technical.ExecutedSkills,
 		StopReason: technical.StopReason, ReportSchemaVersion: r.ReportSchemaVersion,
-		ModelProvider: r.ModelProvider, ModelID: r.ModelID, PromptVersion: r.PromptVersion,
+		AgenticRetrievalAttempted:     technical.AgenticRetrievalAttempted,
+		AgenticRetrievalAddedEvidence: technical.AgenticRetrievalAddedEvidence,
+		AgenticRetrievalStopReason:    technical.AgenticRetrievalStopReason,
+		ModelProvider:                 r.ModelProvider, ModelID: r.ModelID, PromptVersion: r.PromptVersion,
 		Evidence:    []diagnosis.ReportEvidenceClaim{},
 		GeneratedAt: r.GeneratedAt.UTC(), CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC(),
 	}, nil

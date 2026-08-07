@@ -154,6 +154,45 @@ func TestSearchServiceKeepsHitsWhenContextExpansionFails(t *testing.T) {
 	}
 }
 
+func TestSearchServiceCompressesExpandedContextUnderGlobalBudget(t *testing.T) {
+	documentID, versionID, hitID := uuid.New(), uuid.New(), uuid.New()
+	hitContent := "ERP-504 无法报工"
+	hit := SearchResult{
+		DocumentID: documentID, DocumentVersionID: versionID, ChunkID: hitID,
+		Title: "报工手册", Scope: ScopeGlobal, Ordinal: 2, ElementType: ElementText,
+		ContentText: hitContent, ContentSHA256: SHA256Hex(hitContent),
+	}
+	relevantContent := "无法报工时检查 ERP-504 网关状态。"
+	noiseContent := "访客登记流程。"
+	expander := &contextExpanderStub{groups: []SearchContextGroup{{
+		DocumentID: documentID, DocumentVersionID: versionID, HitChunkIDs: []uuid.UUID{hitID},
+		Chunks: []SearchContextChunk{
+			{ChunkID: uuid.New(), Ordinal: 1, ElementType: ElementText, ContentText: noiseContent, ContentSHA256: SHA256Hex(noiseContent)},
+			{ChunkID: uuid.New(), Ordinal: 3, ElementType: ElementText, ContentText: relevantContent, ContentSHA256: SHA256Hex(relevantContent)},
+		},
+	}}}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{fts: []SearchResult{hit}}, nil, EmbeddingProfile{}, 2,
+		SearchServiceOptions{
+			ContextExpander: expander, ContextWindow: 1, ContextMaxRunes: 1800,
+			ContextCompression: ContextCompressionConfig{Enabled: true, MaxChunks: 1, MaxRunes: 128, MinScore: 0.05},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "ERP-504 无法报工", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ContextCompressionEnabled || !result.ContextCompressionApplied ||
+		result.ContextCompression.InputChunks != 2 || result.ContextCompression.OutputChunks != 1 ||
+		result.ContextCompression.OmittedChunks != 1 || len(result.ContextGroups) != 1 ||
+		len(result.ContextGroups[0].Chunks) != 1 || result.ContextGroups[0].Chunks[0].ContentText != relevantContent {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestSearchServicePropagatesContextCancellation(t *testing.T) {
 	service, err := NewSearchServiceWithRerankerAndContext(
 		&hybridRepositoryStub{fts: []SearchResult{{ChunkID: uuid.New(), ContentText: "命中内容"}}},

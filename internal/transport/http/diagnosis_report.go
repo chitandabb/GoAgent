@@ -85,30 +85,33 @@ type diagnosisReportEvidenceResponse struct {
 }
 
 type diagnosisReportResponse struct {
-	ReportID            string                            `json:"reportId"`
-	TaskID              string                            `json:"taskId"`
-	ConclusionStatus    string                            `json:"conclusionStatus"`
-	RiskLevel           string                            `json:"riskLevel"`
-	Conclusion          string                            `json:"conclusion"`
-	BusinessSummary     string                            `json:"businessSummary"`
-	TechnicalSummary    string                            `json:"technicalSummary"`
-	Confidence          string                            `json:"confidence"`
-	Limitations         []string                          `json:"limitations"`
-	Partial             bool                              `json:"partial"`
-	MissingEvidence     []string                          `json:"missingEvidence"`
-	Usage               diagnosisReportUsageResponse      `json:"usage"`
-	AgentRuns           int                               `json:"agentRuns"`
-	SelectedSkill       string                            `json:"selectedSkill"`
-	ExecutedSkills      []string                          `json:"executedSkills"`
-	StopReason          string                            `json:"stopReason,omitempty"`
-	ReportSchemaVersion int                               `json:"reportSchemaVersion"`
-	ModelProvider       string                            `json:"modelProvider"`
-	ModelID             string                            `json:"modelId"`
-	PromptVersion       string                            `json:"promptVersion"`
-	Evidence            []diagnosisReportEvidenceResponse `json:"evidence"`
-	GeneratedAt         string                            `json:"generatedAt"`
-	CreatedAt           string                            `json:"createdAt"`
-	UpdatedAt           string                            `json:"updatedAt"`
+	ReportID                      string                            `json:"reportId"`
+	TaskID                        string                            `json:"taskId"`
+	ConclusionStatus              string                            `json:"conclusionStatus"`
+	RiskLevel                     string                            `json:"riskLevel"`
+	Conclusion                    string                            `json:"conclusion"`
+	BusinessSummary               string                            `json:"businessSummary"`
+	TechnicalSummary              string                            `json:"technicalSummary"`
+	Confidence                    string                            `json:"confidence"`
+	Limitations                   []string                          `json:"limitations"`
+	Partial                       bool                              `json:"partial"`
+	MissingEvidence               []string                          `json:"missingEvidence"`
+	Usage                         diagnosisReportUsageResponse      `json:"usage"`
+	AgentRuns                     int                               `json:"agentRuns"`
+	SelectedSkill                 string                            `json:"selectedSkill"`
+	ExecutedSkills                []string                          `json:"executedSkills"`
+	StopReason                    string                            `json:"stopReason,omitempty"`
+	AgenticRetrievalAttempted     bool                              `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                              `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string                            `json:"agenticRetrievalStopReason"`
+	ReportSchemaVersion           int                               `json:"reportSchemaVersion"`
+	ModelProvider                 string                            `json:"modelProvider"`
+	ModelID                       string                            `json:"modelId"`
+	PromptVersion                 string                            `json:"promptVersion"`
+	Evidence                      []diagnosisReportEvidenceResponse `json:"evidence"`
+	GeneratedAt                   string                            `json:"generatedAt"`
+	CreatedAt                     string                            `json:"createdAt"`
+	UpdatedAt                     string                            `json:"updatedAt"`
 }
 
 func diagnosisReportResponseFrom(report diagnosis.DiagnosisReport) diagnosisReportResponse {
@@ -137,8 +140,11 @@ func diagnosisReportResponseFrom(report diagnosis.DiagnosisReport) diagnosisRepo
 		},
 		AgentRuns: report.AgentRuns, SelectedSkill: report.SelectedSkill,
 		ExecutedSkills: report.ExecutedSkills, StopReason: report.StopReason,
-		ReportSchemaVersion: report.ReportSchemaVersion,
-		ModelProvider:       report.ModelProvider, ModelID: report.ModelID, PromptVersion: report.PromptVersion,
+		AgenticRetrievalAttempted:     report.AgenticRetrievalAttempted,
+		AgenticRetrievalAddedEvidence: report.AgenticRetrievalAddedEvidence,
+		AgenticRetrievalStopReason:    report.AgenticRetrievalStopReason,
+		ReportSchemaVersion:           report.ReportSchemaVersion,
+		ModelProvider:                 report.ModelProvider, ModelID: report.ModelID, PromptVersion: report.PromptVersion,
 		Evidence: evidence, GeneratedAt: report.GeneratedAt.UTC().Format(timeRFC3339Nano),
 		CreatedAt: report.CreatedAt.UTC().Format(timeRFC3339Nano),
 		UpdatedAt: report.UpdatedAt.UTC().Format(timeRFC3339Nano),

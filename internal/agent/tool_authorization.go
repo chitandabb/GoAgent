@@ -43,6 +43,10 @@ func (m *ToolAuthorizationMiddleware) BeforeAgent(
 	if err != nil {
 		return ctx, runCtx, fmt.Errorf("resolve authorized tools: %w", err)
 	}
+	tools, err = filterAgentToolsForRun(ctx, tools)
+	if err != nil {
+		return ctx, runCtx, fmt.Errorf("apply run tool policy: %w", err)
+	}
 	next := *runCtx
 	next.Tools = append([]tool.BaseTool(nil), tools...)
 

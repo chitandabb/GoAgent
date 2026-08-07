@@ -92,7 +92,7 @@ func TestHybridRetrieverMergesQueryVariantsWithinEachChannelBeforeRRF(t *testing
 	}
 	if len(repository.ftsQueries) != 3 || len(repository.vectorCalls) != 3 || len(embedder.request.Texts) != 3 ||
 		len(search.Results) != 3 || search.Results[0].ChunkID != b || search.Results[0].FTSRank == 0 ||
-		search.Results[0].VectorRank == 0 {
+		search.Results[0].VectorRank == 0 || search.EmbeddingUsage.TotalTokens != 17 {
 		t.Fatalf("search=%+v fts=%v vectors=%d embedding=%+v", search, repository.ftsQueries, len(repository.vectorCalls), embedder.request)
 	}
 }
@@ -132,7 +132,7 @@ func (e *recordingEmbedder) Embed(_ context.Context, request EmbeddingRequest) (
 			vectors[index] = []float32{0, 1}
 		}
 	}
-	return EmbeddingResult{Vectors: vectors}, nil
+	return EmbeddingResult{Vectors: vectors, Usage: EmbeddingUsage{TotalTokens: 17}}, nil
 }
 
 type hybridRepositoryStub struct {

@@ -1,0 +1,3 @@
+{"datasetVersion":"agentic-retrieval-v1","caseId":"evidence-gap-search","scenario":"evidence_gap","userQuery":"请检查企业知识库中关于报工状态同步和网关超时的内部处理规范；如果首轮证据不足，请补充可追溯知识证据后再输出报告。","expectedAttempted":true,"expectedAddedEvidence":true,"expectedStopReason":"new_evidence_added"}
+{"datasetVersion":"agentic-retrieval-v1","caseId":"format-only-no-search","scenario":"format_only","userQuery":"已有工单证据足够；本 Case 只需要修正报告格式，不要重新检索企业知识。","expectedAttempted":false,"expectedAddedEvidence":false,"expectedStopReason":"not_eligible"}
+{"datasetVersion":"agentic-retrieval-v1","caseId":"valid-first-pass-no-search","scenario":"valid_first_pass","userQuery":"已有工单证据足够，请直接输出最终结论。","expectedAttempted":false,"expectedAddedEvidence":false,"expectedStopReason":"not_needed"}

@@ -282,14 +282,152 @@ go run ./cmd/mesguard-rag-paired-eval `
 The dataset labels relevant evidence by stable document key, chunk ordinal and content SHA-256.
 Every case must contain exactly one baseline and one experiment with the same retriever, embedding
 profile, rerank profile, channels and K. A pair must change exactly one axis in the fixed direction:
-`original -> rewrite` with unchanged context, or `child -> parent` with unchanged query mode. The
-summary reports Hit Rate@K, document Recall@K/MRR, Context Precision/Recall, query amplification,
-context-rune and duration changes, rewrite statuses and provider-reported rewrite Token usage.
+`original -> rewrite` with unchanged context, `child -> parent` with unchanged query mode, or
+uncompressed Parent -> bounded whole-Chunk compression with unchanged Query/retriever settings and pinned
+`maxChunks/maxRunes/minScore`. The summary reports Hit Rate@K, document Recall@K/MRR, Context
+Precision/Recall, query amplification, compression input/output Chunk and rune counts, omissions,
+context-rune and duration changes, rewrite statuses and provider-reported Token usage.
 
-The domain `AdvancedRetrievalObserver` now converts two runtime Search arms into strict observations
-and counts non-cancellation search failures instead of dropping them. The offline aggregator still
-does not create PostgreSQL fixtures or call providers. Do not report a metric until the real fixture
-command and expanded gold set are checked in and reviewed.
+The domain `AdvancedRetrievalObserver` converts two runtime Search arms into strict observations and
+counts non-cancellation search failures instead of dropping them. The offline aggregator does not
+create PostgreSQL fixtures or call providers.
+
+Validate the checked-in public-source corpus and its gold Chunk hashes without a database or provider:
+
+```powershell
+go run ./cmd/mesguard-rag-paired-observe -validate-only
+```
+
+Provider execution is fail-closed and defaults to one Case. Review the printed request budget before
+adding `-execute-provider`; context pairs call Embedding, while rewrite pairs call Embedding and the
+configured ChatModel. Both arms use the production `BuildKnowledgeSearchService` and all fixture rows
+are rolled back in one PostgreSQL transaction. Exact commands and the current observations
+are in `docs/evaluations/rag-advanced-v1.md`.
+
+Run the production compression thresholds across the complete five-Case fixture without Rewrite or Rerank:
+
+```powershell
+go run ./cmd/mesguard-rag-paired-observe `
+  -execute-provider -axis compression -retriever rrf -max-cases 5 -timeout 3m
+```
+
+The 2026-08-07 run used at most three document-embedding and ten query-embedding requests. It omitted zero
+chunks because the fixture averaged only 2.6 parent neighbors and 575.4 runes per Case, below the production
+six-chunk/3000-rune cap. Treat this as a wiring result, not measured savings. Add long-parent pressure Cases
+before changing thresholds or reporting a compression rate.
+
+Run the separate official-document pressure fixture with an acceptance gate:
+
+```powershell
+go run ./cmd/mesguard-rag-paired-observe `
+  -corpus testdata/rag-compression-pressure-v1.corpus.json `
+  -dataset testdata/rag-compression-pressure-v1.jsonl `
+  -execute-provider -axis compression -require-compression-acceptance `
+  -max-cases 1 -timeout 3m
+```
+
+The gate rejects zero-omission runs and any Gold Context Recall regression. Three accepted 2026-08-07
+runs consistently changed seven neighbors/1507 runes to six neighbors/1438 runes while keeping Context
+Recall at 1.0. This single stress Case verifies production-threshold behavior only; do not report its 4.58%
+neighbor-rune saving as an aggregate Token reduction.
+
+Evidence Gate re-retrieval is run-scoped. On the second Agent run, evidence/source-binding gaps retain
+`search_knowledge` with a one-call limit; format-only gaps remove it from the Tool schema. The same total
+Tool, Token and timeout budgets still apply. Diagnosis reports expose `agenticRetrievalAttempted`,
+`agenticRetrievalAddedEvidence` and `agenticRetrievalStopReason`; unit tests cover eligibility, the one-call
+limit, schema filtering and stable version/Chunk/content-hash detection.
+
+Run the real-model decision fixture only after reviewing the ChatModel budget:
+
+```powershell
+go run ./cmd/mesguard-agentic-retrieval-eval `
+  -execute-provider -max-cases 3 -timeout 90s
+```
+
+The 2026-08-07 three-Case run used `stepfun/step-3.7-flash`: evidence gaps selected one
+`search_knowledge` call and added a stable version/Chunk/hash; format-only repair did not receive the Tool;
+a valid first pass did not call the provider. Attempt precision/recall and stop-reason accuracy were 1.0 on
+this fixture, with 16453 total Tokens. The default 16000 Token budget is per Case. Provider Usage is settled
+after each response, so a single completed response can exceed the remaining total budget before cancellation
+prevents another action. Treat these three seeded control Cases as wiring evidence, not answer-quality or
+general accuracy proof; the observations and full boundary are in `docs/evaluations/rag-advanced-v1.md`.
+
+### M2-C knowledge-ingestion throughput evaluation
+
+Fetch or verify the pinned public corpus under the ignored evaluation directory. The manifest records publisher,
+source page, HTTPS download URL, usage boundary, byte length and SHA-256; the script refuses mismatches unless
+`-Force` is explicitly supplied:
+
+```powershell
+.\scripts\evaluation\fetch_rag_ingestion_corpus.ps1
+```
+
+Validate the pinned public corpus without infrastructure or Provider calls:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe -validate-only -max-documents 12
+```
+
+Run the production Parser and Chunking locally, classify text/visual readiness, and write a JSON audit
+without infrastructure or Provider calls:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe -audit-only -max-documents 12
+```
+
+Parse locally and print the expected baseline/experiment Embedding request counts without sending a request:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only -max-documents 12
+```
+
+Isolate PostgreSQL Chunk/vector staging without any Provider or object-store call:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -database-ablation -max-documents 3 -repetitions 5 -timeout 15m
+
+go run ./cmd/mesguard-ingestion-throughput-eval `
+  -input output/evaluation/rag-ingestion-db-ablation-v1.observations.jsonl `
+  -output output/evaluation/rag-ingestion-db-ablation-v1.summary.json `
+  -target-increase-percent 40
+```
+
+This mode parses the pinned real files before timing, uses deterministic normalized vectors only on non-current
+staging versions, and times `SaveParsedResult` with write batch 1 versus the configured production batch. It
+never calls the configured Embedding endpoint. The 2026-08-07 five-pair run over 3 documents/743 Chunks measured
+1752 ms versus 406 ms median staging duration; this database-only result remains outside full-chain acceptance.
+
+Real execution requires PostgreSQL, MinIO, the configured Embedding key and explicit authorization:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -execute-provider -max-documents 1 -repetitions 1 -timeout 15m
+
+go run ./cmd/mesguard-ingestion-throughput-eval `
+  -input output/evaluation/rag-ingestion-pilot-v1.observations.jsonl `
+  -output output/evaluation/rag-ingestion-pilot-v1.summary.json `
+  -target-increase-percent 40
+```
+
+The observer creates fresh MinIO/database facts for each arm and cleans them after measurement, but it does
+not clear provider, operating-system or PostgreSQL caches. It excludes RabbitMQ delivery, OCR/VLM and layout
+routing. The experiment combines the existing Embedding batch/concurrency with batched Chunk/vector INSERTs;
+use a separate staging benchmark before attributing a gain to database batching. Acceptance requires 40 real
+documents, all eight declared `formatClass` values and five integrity-preserving pairs. The current one-document
+pilot remains ineligible even though its observed increase exceeds 40%; see
+`docs/evaluations/rag-ingestion-throughput-v1.md`.
+
+The zero-cost audit currently covers 12 public documents and all 8 format classes with 4,190 Elements,
+6,177 Chunks, 128 visual candidates and zero parser failures. It counts only materialized visual bytes; PDF
+page candidates reference the immutable source and are not charged the whole PDF once per page. Format coverage
+is complete, but 28 documents and five full-chain pairs are still missing, so the acceptance gate remains false.
+
+Docker Compose must pass `DASHSCOPE_API_KEY` to both `knowledge-worker` and `diagnosis-worker`. The first
+creates document vectors during ingestion; the second creates query vectors during diagnosis retrieval.
+If only the Knowledge Worker receives the key, ingestion can succeed while diagnosis silently logs
+`knowledge vector search unavailable` and degrades to FTS. Recreate the affected application container after
+changing environment variables; no database or object-store volume reset is required.
 
 `[knowledge.layout]` may be enabled only after `modelPath`, `manifestPath` and
 `runtimeLibraryPath` resolve inside the Knowledge Worker environment. Artifact schema v5
@@ -355,10 +493,18 @@ section. `contextWindow` is limited to 1-3 and `contextMaxRunes` to 128-8000. Th
 server budgets, not Tool arguments. Expansion failure is reported as a degraded
 `context` channel and does not discard the original hits.
 
+`[knowledge.retrieval.contextCompression]` runs after expansion. With `enabled=true`, it selects only
+complete neighbor chunks under `maxChunks` (1-40), `maxRunes` (128-32000) and `minScore` (0-1); the
+checked-in production values are 6, 3000 and 0.05. Matched child chunks are outside this added-context
+budget. The Tool cannot override these settings, and compression never rewrites evidence text or hashes.
+
 `[knowledge.retrieval.queryRewrite]` controls the optional LLM Query Plan. It is disabled
-by default. When enabled, the service loads `promptFile`, records `promptVersion`, applies
-a 1-30 second internal timeout, accepts at most two subqueries, and bounds JSON output by
-`maxOutputRunes`. The original query remains available to retrieval; deterministic policy
+by default. `modelProfile` selects a named `[models.chat.profiles.<name>]` independently of
+the main Agent `activeProfile`. When enabled, the service loads `promptFile`, records
+`promptVersion`, applies a 1-30 second internal timeout, accepts at most two subqueries, and
+bounds JSON output by `maxOutputRunes`. The checked-in `qwen-rewrite` candidate disables
+thinking, uses temperature 0, a 3-second provider/rewrite timeout, 256 output tokens, and one
+subquery. The original query remains available to retrieval; deterministic policy
 rejects rewrites that change protected error codes, versions, numbers, time constraints or
 explicit negation. Provider failure, malformed JSON, policy rejection, or the rewriter's own
 timeout falls back to the original query and marks only `query_rewrite` degraded. A canceled
@@ -369,18 +515,24 @@ on for the test even though production configuration remains disabled:
 
 ```powershell
 go test -tags=integration ./internal/platform/queryrewrite `
-  -run TestStepFunQueryRewritePreservesProtectedSignals -count=1
+  -run TestConfiguredQueryRewriteProfilePreservesProtectedSignals -count=1
 ```
 
 It verifies the strict JSON/protected-signal contract, not Recall, ranking quality, latency SLA,
 or cost reduction. See `docs/evaluations/query-rewrite-v1.md` for the current smoke observations.
 
-Model configuration is not currently a universal hot-plug layer. `[models.chat]` accepts only
-`stepfun`; Judge, Embedding, Rerank, OCR and Vision accept only their registered DashScope path.
-The domain interfaces are replaceable, but adding another provider still requires a Bootstrap
-adapter and contract tests. In particular, do not point the current Chat config at DeepSeek and
-assume `reasoningEffort` has the same meaning. Provider adapters must explicitly map or omit
-reasoning controls and verify Tool Calling plus structured output.
+`[models.chat]` is a named-profile model assembly layer. `activeProfile` selects the diagnosis
+Agent model; other roles resolve their own profile. The Factory currently registers StepFun,
+DeepSeek and DashScope adapters and returns normalized profile/provider/model/capability identity.
+All configured profiles are statically validated, but only a selected profile reads its API key.
+StepFun maps `reasoningEffort`; DeepSeek requires explicit thinking mode and rejects effort while
+thinking is disabled; DashScope maps thinking mode to `enable_thinking`. Unsupported combinations
+fail during construction instead of being silently ignored.
+
+This is configuration-level replaceability, not runtime hot reload or production acceptance for
+every model. Config/key changes require restart. Judge, Embedding, Rerank, OCR and Vision still use
+their role-specific adapters. A new Chat Provider still requires an Adapter, offline request-shape
+tests and live capability/quality acceptance.
 
 Token accounting consumes provider Usage normalized by Eino. Prompt, completion and total values
 are portable only when the provider returns them. Cached and reasoning values may remain zero when
@@ -388,6 +540,14 @@ the provider omits those details; zero is not yet an availability indicator. Emb
 also require a new persisted profile and reindex rather than an in-place configuration swap. The
 full role matrix and acceptance boundary are documented in
 `docs/design/rag-ingestion-and-retrieval.md` under "模型 Provider 可替换性边界".
+
+The 2026-08-07 DeepSeek adapter maps the documented OpenAI-compatible
+`thinking={type: enabled|disabled}` request and optional thinking effort. Thinking remains explicit
+because the provider default is enabled. The pinned Eino OpenAI adapter has the fields needed to
+carry `reasoning_content`, but no live DeepSeek Tool loop has been run. Do not promote a DeepSeek
+profile to `activeProfile` until non-streaming/streaming Tool loops, strict JSON, Usage, cancellation,
+Evidence Gate and paired quality probes pass. The exact acceptance matrix and official links are in
+the same design section.
 
 After configuring the StepFun key, run the provider smoke test once:
 

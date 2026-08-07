@@ -159,21 +159,25 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	reasoningEffort, err := parseReasoningEffort(args, cfg.Models.Chat.ReasoningEffort)
+	profile, err := cfg.Models.Chat.ActiveProfile()
 	if err != nil {
 		return err
 	}
-	cfg.Models.Chat.ReasoningEffort = reasoningEffort
+	reasoningEffort, err := parseReasoningEffort(args, profile.ReasoningEffort)
+	if err != nil {
+		return err
+	}
+	profile.ReasoningEffort = reasoningEffort
 	prompts, err := cfg.Agent.LoadPrompts()
 	if err != nil {
 		return fmt.Errorf("load Agent prompts: %w", err)
 	}
-	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	instance, err := platformchatmodel.New(ctx, cfg.Models.Chat.ActiveProfileName, profile)
 	if err != nil {
-		return fmt.Errorf("build StepFun model: %w", err)
+		return fmt.Errorf("build chat model: %w", err)
 	}
 	modelTrace := &modelCallTrace{}
-	observedModel := &tracedChatModel{inner: chatModel, trace: modelTrace}
+	observedModel := &tracedChatModel{inner: instance.Model, trace: modelTrace}
 	runner, err := mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel: observedModel, ExternalCases: syntheticCaseGetter{},
 		SkillRoot:           cfg.Agent.SkillsDirectory,
@@ -250,18 +254,18 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 func parseReasoningEffort(args []string, defaultEffort string) (string, error) {
 	flags := flag.NewFlagSet("mesguard-agent-smoke", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	effort := flags.String("reasoning-effort", defaultEffort, "low, medium, or high")
+	effort := flags.String("reasoning-effort", defaultEffort, "provider-supported effort; empty keeps thinking control only")
 	if err := flags.Parse(args); err != nil {
-		return "", fmt.Errorf("usage: mesguard-agent-smoke [-reasoning-effort low|medium|high]: %w", err)
+		return "", fmt.Errorf("usage: mesguard-agent-smoke [-reasoning-effort provider-value]: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return "", errors.New("usage: mesguard-agent-smoke [-reasoning-effort low|medium|high]")
+		return "", errors.New("usage: mesguard-agent-smoke [-reasoning-effort provider-value]")
 	}
 	normalized := strings.ToLower(strings.TrimSpace(*effort))
 	switch normalized {
-	case "low", "medium", "high":
+	case "", "low", "medium", "high", "xhigh", "max":
 		return normalized, nil
 	default:
-		return "", errors.New("reasoning-effort must be low, medium, or high")
+		return "", errors.New("reasoning-effort must be empty, low, medium, high, xhigh, or max")
 	}
 }

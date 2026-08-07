@@ -36,6 +36,7 @@ This directory is the single location for project documentation.
 | [ADR 001](decisions/001-modular-monolith-architecture.md) | Why MESGuard uses a modular monolith and manual dependency injection |
 | [ADR 002](decisions/002-prefer-open-source-components.md) | Prefer mature open-source components; hand-write only thin contract glue |
 | [ADR 003](decisions/003-local-onnx-layout-routing.md) | Why local ONNX handles bounded page/region routing while OCR/VLM remain configurable cloud capabilities |
+| [ADR 004](decisions/004-conversation-driven-diagnosis-commands.md) | Why conversations stay independent while the Agent creates durable diagnosis tasks through a guarded command Tool |
 
 ## Evaluation Records
 

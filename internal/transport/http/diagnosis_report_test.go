@@ -27,7 +27,9 @@ func TestDiagnosisReportRoutesReturnsFormalReportWithoutRawEvidence(t *testing.T
 		Limitations: []string{"缺少服务日志"}, MissingEvidence: []string{},
 		Usage: diagnosis.ReportModelUsage{ModelCalls: 2, TotalTokens: 1200}, AgentRuns: 1,
 		SelectedSkill: "ticket-diagnosis", ExecutedSkills: []string{"ticket-diagnosis"},
-		ReportSchemaVersion: 1, ModelProvider: "stepfun", ModelID: "step-3.7-flash",
+		AgenticRetrievalAttempted: true, AgenticRetrievalAddedEvidence: true,
+		AgenticRetrievalStopReason: "new_evidence_added",
+		ReportSchemaVersion:        1, ModelProvider: "stepfun", ModelID: "step-3.7-flash",
 		PromptVersion: "diagnosis-v1", GeneratedAt: now, CreatedAt: now, UpdatedAt: now,
 		Evidence: []diagnosis.ReportEvidenceClaim{{
 			EvidenceID: evidenceID, ClaimKey: "claim-001", Claim: "工单仍处于处理中",
@@ -58,7 +60,9 @@ func TestDiagnosisReportRoutesReturnsFormalReportWithoutRawEvidence(t *testing.T
 		t.Fatalf("marshal response data: %v", err)
 	}
 	body := string(data)
-	for _, expected := range []string{reportID.String(), evidenceID.String(), `"sourceRef":"evidence:case-1"`, `"modelProvider":"stepfun"`} {
+	for _, expected := range []string{reportID.String(), evidenceID.String(), `"sourceRef":"evidence:case-1"`,
+		`"modelProvider":"stepfun"`, `"agenticRetrievalAttempted":true`,
+		`"agenticRetrievalAddedEvidence":true`, `"agenticRetrievalStopReason":"new_evidence_added"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("response missing %q: %s", expected, body)
 		}

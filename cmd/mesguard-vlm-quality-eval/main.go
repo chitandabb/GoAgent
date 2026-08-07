@@ -35,10 +35,11 @@ import (
 )
 
 const (
-	evaluatorVersion = "vlm-quality-eval-v1"
-	maxCases         = 3
-	maxCropPixels    = 4_000_000
-	maxSourceBytes   = 20 * 1024 * 1024
+	evaluatorVersion         = "vlm-quality-eval-v1"
+	stepFunComparisonProfile = "stepfun-main"
+	maxCases                 = 3
+	maxCropPixels            = 4_000_000
+	maxSourceBytes           = 20 * 1024 * 1024
 )
 
 type options struct {
@@ -201,7 +202,10 @@ func run(args []string) error {
 		ProviderTimeoutMillis: int(opts.providerTimeout.Milliseconds()),
 		Cases:                 inputs,
 	}
-	providerDefinitions := providerPricing(cfg, opts)
+	providerDefinitions, err := providerPricing(cfg, opts)
+	if err != nil {
+		return err
+	}
 	for _, provider := range providerDefinitions {
 		result.Providers = append(result.Providers, providerSummary{
 			Provider: provider.name, Model: provider.model, Pricing: provider.pricing,
@@ -412,14 +416,21 @@ func cropPNG(content []byte, crop cropRectangle) ([]byte, error) {
 	return encoded.Bytes(), nil
 }
 
-func providerPricing(cfg config.Config, opts options) []providerRunner {
+func providerPricing(cfg config.Config, opts options) ([]providerRunner, error) {
+	stepProfile, err := cfg.Models.Chat.Profile(stepFunComparisonProfile)
+	if err != nil {
+		return nil, fmt.Errorf("load StepFun comparison profile: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(stepProfile.Provider), "stepfun") {
+		return nil, errors.New("StepFun comparison profile must use provider stepfun")
+	}
 	dashInput, dashOutput := opts.dashScopeInputPricePerMillion, opts.dashScopeOutputPricePerMillion
 	providers := []providerRunner{{
 		name: strings.TrimSpace(cfg.Models.Vision.Provider), model: strings.TrimSpace(cfg.Models.Vision.Model),
 		pricing: pricing{Currency: "CNY", InputPricePerMillion: &dashInput, OutputPricePerMillion: &dashOutput,
 			Basis: "Alibaba Cloud China qwen3-vl-plus <=32K listing observed 2026-08-06"},
 	}, {
-		name: strings.TrimSpace(cfg.Models.Chat.Provider), model: strings.TrimSpace(cfg.Models.Chat.Model),
+		name: strings.TrimSpace(stepProfile.Provider), model: strings.TrimSpace(stepProfile.Model),
 		pricing: pricing{Currency: "CNY", Basis: "Step Plan subscription quota; no per-token amount asserted"},
 	}}
 	if opts.stepFunInputPricePerMillion >= 0 {
@@ -428,7 +439,7 @@ func providerPricing(cfg config.Config, opts options) []providerRunner {
 		providers[1].pricing.OutputPricePerMillion = &stepOutput
 		providers[1].pricing.Basis = "operator-supplied StepFun token pricing"
 	}
-	return providers
+	return providers, nil
 }
 
 func buildProviderRunners(ctx context.Context, cfg config.Config, opts options, definitions []providerRunner) ([]providerRunner, error) {
@@ -443,14 +454,18 @@ func buildProviderRunners(ctx context.Context, cfg config.Config, opts options, 
 	if err != nil {
 		return nil, err
 	}
-	stepConfig := cfg.Models.Chat
-	stepConfig.ReasoningEffort = "low"
-	stepConfig.MaxOutputTokens = opts.maxOutputTokens
-	stepConfig.TimeoutMillis = int(opts.providerTimeout.Milliseconds())
-	stepGenerator, err := platformchatmodel.NewStepFun(ctx, stepConfig)
+	stepConfig, err := cfg.Models.Chat.Profile(stepFunComparisonProfile)
 	if err != nil {
 		return nil, err
 	}
+	stepConfig.ReasoningEffort = "low"
+	stepConfig.MaxOutputTokens = opts.maxOutputTokens
+	stepConfig.TimeoutMillis = int(opts.providerTimeout.Milliseconds())
+	stepInstance, err := platformchatmodel.New(ctx, stepFunComparisonProfile, stepConfig)
+	if err != nil {
+		return nil, err
+	}
+	stepGenerator := stepInstance.Model
 	generators := []visualmodel.Generator{dashGenerator, stepGenerator}
 	result := append([]providerRunner(nil), definitions...)
 	for index := range result {

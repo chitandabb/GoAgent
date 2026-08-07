@@ -39,30 +39,33 @@ type ReportEvidenceClaim struct {
 
 // DiagnosisReport 是 Worker 已提交的不可变正式报告读取模型。
 type DiagnosisReport struct {
-	ID                  uuid.UUID
-	TaskID              uuid.UUID
-	ConclusionStatus    string
-	RiskLevel           string
-	Conclusion          string
-	BusinessSummary     string
-	TechnicalSummary    string
-	Confidence          string
-	Limitations         []string
-	Partial             bool
-	MissingEvidence     []string
-	Usage               ReportModelUsage
-	AgentRuns           int
-	SelectedSkill       string
-	ExecutedSkills      []string
-	StopReason          string
-	ReportSchemaVersion int
-	ModelProvider       string
-	ModelID             string
-	PromptVersion       string
-	Evidence            []ReportEvidenceClaim
-	GeneratedAt         time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                            uuid.UUID
+	TaskID                        uuid.UUID
+	ConclusionStatus              string
+	RiskLevel                     string
+	Conclusion                    string
+	BusinessSummary               string
+	TechnicalSummary              string
+	Confidence                    string
+	Limitations                   []string
+	Partial                       bool
+	MissingEvidence               []string
+	Usage                         ReportModelUsage
+	AgentRuns                     int
+	SelectedSkill                 string
+	ExecutedSkills                []string
+	StopReason                    string
+	AgenticRetrievalAttempted     bool
+	AgenticRetrievalAddedEvidence bool
+	AgenticRetrievalStopReason    string
+	ReportSchemaVersion           int
+	ModelProvider                 string
+	ModelID                       string
+	PromptVersion                 string
+	Evidence                      []ReportEvidenceClaim
+	GeneratedAt                   time.Time
+	CreatedAt                     time.Time
+	UpdatedAt                     time.Time
 }
 
 // TaskReportLookup 把任务归属、状态和可选报告作为一次授权查询事实返回。

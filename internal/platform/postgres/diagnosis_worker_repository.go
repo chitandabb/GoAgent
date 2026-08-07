@@ -479,15 +479,18 @@ func marshalReportSummaries(result agent.OrchestrationResult) ([]byte, []byte, e
 		return nil, nil, err
 	}
 	technical, err := json.Marshal(map[string]any{
-		"summary":         result.Report.TechnicalSummary,
-		"limitations":     result.Report.Limitations,
-		"partial":         result.Partial,
-		"missingEvidence": result.MissingEvidence,
-		"usage":           result.Usage,
-		"agentRuns":       result.AgentRuns,
-		"selectedSkill":   result.SelectedSkill,
-		"executedSkills":  result.ExecutedSkills,
-		"stopReason":      result.StopReason,
+		"summary":                       result.Report.TechnicalSummary,
+		"limitations":                   result.Report.Limitations,
+		"partial":                       result.Partial,
+		"missingEvidence":               result.MissingEvidence,
+		"usage":                         result.Usage,
+		"agentRuns":                     result.AgentRuns,
+		"selectedSkill":                 result.SelectedSkill,
+		"executedSkills":                result.ExecutedSkills,
+		"stopReason":                    result.StopReason,
+		"agenticRetrievalAttempted":     result.AgenticRetrievalAttempted,
+		"agenticRetrievalAddedEvidence": result.AgenticRetrievalAddedEvidence,
+		"agenticRetrievalStopReason":    result.AgenticRetrievalStopReason,
 	})
 	if err != nil {
 		return nil, nil, err

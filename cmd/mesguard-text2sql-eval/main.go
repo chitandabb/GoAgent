@@ -67,17 +67,25 @@ func run(args []string) error {
 	if !cfg.Models.Chat.Enabled || !cfg.SQLServer.Enabled {
 		return errors.New("chat model and SQL Server must be enabled")
 	}
-	cfg.Models.Chat.ReasoningEffort = "low"
+	profile, err := cfg.Models.Chat.ActiveProfile()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(profile.ReasoningEffort) != "" {
+		profile.ReasoningEffort = "low"
+	}
+	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
-	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
 	if err != nil {
-		return fmt.Errorf("build StepFun model: %w", err)
+		return fmt.Errorf("build chat model: %w", err)
 	}
+	chatModel := instance.Model
 	selectionTool, err := mesagent.NewExecuteReadonlyQueryTool(noopQueryExecutor{})
 	if err != nil {
 		return fmt.Errorf("build evaluation Tool schema: %w", err)
@@ -141,13 +149,14 @@ func observeTextToSQL(
 	definition mesagent.TextToSQLEvaluationCase,
 ) mesagent.TextToSQLEvaluationObservation {
 	startedAt := time.Now()
+	profile, _ := cfg.Models.Chat.ActiveProfile()
 	observation := mesagent.TextToSQLEvaluationObservation{
 		DatasetVersion:  definition.DatasetVersion,
 		CaseID:          definition.CaseID,
 		RunID:           definition.CaseID + "-" + uuid.NewString(),
-		ModelProvider:   cfg.Models.Chat.Provider,
-		ModelID:         cfg.Models.Chat.Model,
-		ReasoningEffort: cfg.Models.Chat.ReasoningEffort,
+		ModelProvider:   profile.Provider,
+		ModelID:         profile.Model,
+		ReasoningEffort: profile.ReasoningEffort,
 		PromptVersion:   textToSQLPromptVersion,
 	}
 	message, generateErr := chatModel.Generate(ctx, []*schema.Message{

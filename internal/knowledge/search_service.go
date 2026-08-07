@@ -81,25 +81,27 @@ type Reranker interface {
 // SearchService 是高层知识检索边界。调用方不需要知道 FTS、Vector 或 RRF 的选择。
 // Embedding 不可用时保留 FTS 结果并显式标记降级。
 type SearchService struct {
-	repository       Repository
-	retriever        *HybridRetriever
-	reranker         Reranker
-	rerankCandidateN int
-	contextExpander  ContextExpander
-	contextWindow    int
-	contextMaxRunes  int
-	queryRewriter    QueryRewriter
-	maxSubqueries    int
+	repository         Repository
+	retriever          *HybridRetriever
+	reranker           Reranker
+	rerankCandidateN   int
+	contextExpander    ContextExpander
+	contextWindow      int
+	contextMaxRunes    int
+	contextCompression ContextCompressionConfig
+	queryRewriter      QueryRewriter
+	maxSubqueries      int
 }
 
 type SearchServiceOptions struct {
-	Reranker         Reranker
-	RerankCandidateN int
-	ContextExpander  ContextExpander
-	ContextWindow    int
-	ContextMaxRunes  int
-	QueryRewriter    QueryRewriter
-	MaxSubqueries    int
+	Reranker           Reranker
+	RerankCandidateN   int
+	ContextExpander    ContextExpander
+	ContextWindow      int
+	ContextMaxRunes    int
+	ContextCompression ContextCompressionConfig
+	QueryRewriter      QueryRewriter
+	MaxSubqueries      int
 }
 
 func NewSearchService(repository Repository, embedder Embedder, profile EmbeddingProfile, vectorTopN int) (*SearchService, error) {
@@ -140,13 +142,20 @@ func NewSearchServiceWithOptions(
 		options.ContextMaxRunes < 128 || options.ContextMaxRunes > 8000) {
 		return nil, errors.New("knowledge context expansion config is invalid")
 	}
+	if err := options.ContextCompression.Validate(); err != nil {
+		return nil, err
+	}
+	if options.ContextCompression.Enabled && options.ContextExpander == nil {
+		return nil, errors.New("knowledge context compression requires context expansion")
+	}
 	if options.QueryRewriter != nil && (options.MaxSubqueries < 0 || options.MaxSubqueries > MaxQuerySubqueries) {
 		return nil, errors.New("knowledge query rewrite config is invalid")
 	}
 	service := &SearchService{
 		repository: repository, reranker: options.Reranker, rerankCandidateN: options.RerankCandidateN,
 		contextExpander: options.ContextExpander, contextWindow: options.ContextWindow,
-		contextMaxRunes: options.ContextMaxRunes, queryRewriter: options.QueryRewriter,
+		contextMaxRunes: options.ContextMaxRunes, contextCompression: options.ContextCompression,
+		queryRewriter: options.QueryRewriter,
 		maxSubqueries: options.MaxSubqueries,
 	}
 	if embedder != nil {
@@ -228,6 +237,7 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 	result.QueryRewriteStatus = rewriteStatus
 	result.QueryRewritePromptVersion = rewritePromptVersion
 	result.QueryRewriteUsage = rewriteUsage
+	result.ContextCompressionEnabled = s.contextCompression.Enabled
 	if rewriteDegraded {
 		result.Degraded = true
 		result.MissingChannels = appendMissingChannel(result.MissingChannels, "query_rewrite")
@@ -283,8 +293,21 @@ func (s *SearchService) expandContext(ctx context.Context, actorID uuid.UUID, re
 			return nil
 		}
 	}
-	result.ContextGroups = append([]SearchContextGroup(nil), groups...)
-	result.ContextExpanded = len(groups) > 0
+	if s.contextCompression.Enabled && len(groups) > 0 {
+		compressed, stats, compressionErr := CompressSearchContext(
+			result.QueryPlan, result.Results, groups, s.contextCompression,
+		)
+		if compressionErr != nil {
+			result.Degraded = true
+			result.MissingChannels = appendMissingChannel(result.MissingChannels, "context_compression")
+		} else {
+			groups = compressed
+			result.ContextCompressionApplied = true
+			result.ContextCompression = stats
+		}
+	}
+	result.ContextGroups = cloneSearchContextGroups(groups)
+	result.ContextExpanded = len(result.ContextGroups) > 0
 	return nil
 }
 

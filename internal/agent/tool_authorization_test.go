@@ -75,6 +75,29 @@ func TestToolAuthorizationMiddlewareRejectsInvalidProviderOutput(t *testing.T) {
 	}
 }
 
+func TestToolAuthorizationMiddlewareHidesBlockedRunTool(t *testing.T) {
+	readTool := newNamedToolForTest(t, testToolReadCase)
+	knowledgeTool := newNamedToolForTest(t, ToolSearchKnowledge)
+	middleware, err := NewToolAuthorizationMiddleware(toolProviderStub{
+		tools: []tool.BaseTool{readTool, knowledgeTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
+		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
+	}})
+	ctx := WithTaskScope(context.Background(), scope)
+	ctx = withAgentToolRunPolicy(ctx, newAgentToolRunPolicy([]string{ToolSearchKnowledge}, nil))
+	_, got, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := toolNamesForTest(t, got.Tools); !slices.Equal(names, []string{testToolReadCase}) {
+		t.Fatalf("run-policy tools = %v", names)
+	}
+}
+
 type authorizationCaptureModel struct {
 	mu       sync.Mutex
 	captured map[string][]string

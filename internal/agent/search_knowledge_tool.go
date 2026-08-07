@@ -74,17 +74,29 @@ type searchKnowledgeQueryPlan struct {
 	TotalTokens      int                          `json:"totalTokens,omitempty"`
 }
 
+type searchKnowledgeContextCompression struct {
+	Enabled       bool `json:"enabled"`
+	Applied       bool `json:"applied"`
+	InputChunks   int  `json:"inputChunks"`
+	OutputChunks  int  `json:"outputChunks"`
+	InputRunes    int  `json:"inputRunes"`
+	OutputRunes   int  `json:"outputRunes"`
+	OmittedChunks int  `json:"omittedChunks"`
+}
+
 type searchKnowledgeResponse struct {
-	Query           string                        `json:"query"`
-	QueryPlan       searchKnowledgeQueryPlan      `json:"queryPlan"`
-	Results         []searchKnowledgeResult       `json:"results"`
-	ContextGroups   []searchKnowledgeContextGroup `json:"contextGroups,omitempty"`
-	Degraded        bool                          `json:"degraded"`
-	Sources         []string                      `json:"sources"`
-	MissingChannels []string                      `json:"missingChannels,omitempty"`
-	RerankApplied   bool                          `json:"rerankApplied"`
-	RerankTokens    int                           `json:"rerankTotalTokens,omitempty"`
-	ContextExpanded bool                          `json:"contextExpanded"`
+	Query              string                            `json:"query"`
+	QueryPlan          searchKnowledgeQueryPlan          `json:"queryPlan"`
+	Results            []searchKnowledgeResult           `json:"results"`
+	ContextGroups      []searchKnowledgeContextGroup     `json:"contextGroups,omitempty"`
+	Degraded           bool                              `json:"degraded"`
+	Sources            []string                          `json:"sources"`
+	MissingChannels    []string                          `json:"missingChannels,omitempty"`
+	RerankApplied      bool                              `json:"rerankApplied"`
+	RerankTokens       int                               `json:"rerankTotalTokens,omitempty"`
+	EmbeddingTokens    int                               `json:"embeddingTotalTokens,omitempty"`
+	ContextExpanded    bool                              `json:"contextExpanded"`
+	ContextCompression searchKnowledgeContextCompression `json:"contextCompression"`
 }
 
 func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, error) {
@@ -121,6 +133,13 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 			if result.ContextExpanded != (len(result.ContextGroups) > 0) {
 				return searchKnowledgeResponse{}, errors.New("knowledge search context state is invalid")
 			}
+			contextChunks, contextRunes := contextGroupDimensions(result.ContextGroups)
+			if !validContextCompressionObservation(
+				result.ContextCompressionEnabled, result.ContextCompressionApplied,
+				result.ContextCompression, contextChunks, contextRunes,
+			) {
+				return searchKnowledgeResponse{}, errors.New("knowledge search context compression state is invalid")
+			}
 			for index, group := range result.ContextGroups {
 				if err := group.Validate(result.Results); err != nil {
 					return searchKnowledgeResponse{}, fmt.Errorf("knowledge search context group %d is invalid", index)
@@ -150,9 +169,18 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 				Sources:         append([]string(nil), result.Sources...),
 				MissingChannels: append([]string(nil), result.MissingChannels...),
 				RerankApplied:   result.RerankApplied, RerankTokens: result.RerankUsage.TotalTokens,
+				EmbeddingTokens: result.EmbeddingUsage.TotalTokens,
 				ContextExpanded: result.ContextExpanded,
-				Results:         make([]searchKnowledgeResult, 0, len(result.Results)),
-				ContextGroups:   make([]searchKnowledgeContextGroup, 0, len(result.ContextGroups)),
+				ContextCompression: searchKnowledgeContextCompression{
+					Enabled: result.ContextCompressionEnabled, Applied: result.ContextCompressionApplied,
+					InputChunks:   result.ContextCompression.InputChunks,
+					OutputChunks:  result.ContextCompression.OutputChunks,
+					InputRunes:    result.ContextCompression.InputRunes,
+					OutputRunes:   result.ContextCompression.OutputRunes,
+					OmittedChunks: result.ContextCompression.OmittedChunks,
+				},
+				Results:       make([]searchKnowledgeResult, 0, len(result.Results)),
+				ContextGroups: make([]searchKnowledgeContextGroup, 0, len(result.ContextGroups)),
 			}
 			for _, item := range result.Results {
 				response.Results = append(response.Results, searchKnowledgeResult{
@@ -211,6 +239,20 @@ func knowledgeSearchEvidenceLocation(snapshot string) (string, bool) {
 	if response.ContextExpanded != (len(response.ContextGroups) > 0) {
 		return "", false
 	}
+	compressionStats := knowledge.ContextCompressionStats{
+		InputChunks:   response.ContextCompression.InputChunks,
+		OutputChunks:  response.ContextCompression.OutputChunks,
+		InputRunes:    response.ContextCompression.InputRunes,
+		OutputRunes:   response.ContextCompression.OutputRunes,
+		OmittedChunks: response.ContextCompression.OmittedChunks,
+	}
+	contextChunks, contextRunes := serializedContextGroupDimensions(response.ContextGroups)
+	if !validContextCompressionObservation(
+		response.ContextCompression.Enabled, response.ContextCompression.Applied,
+		compressionStats, contextChunks, contextRunes,
+	) {
+		return "", false
+	}
 	for _, group := range response.ContextGroups {
 		if !group.validEvidenceFields(resultByChunkID) {
 			return "", false
@@ -218,6 +260,52 @@ func knowledgeSearchEvidenceLocation(snapshot string) (string, bool) {
 	}
 	first := response.Results[0]
 	return "knowledge:" + first.DocumentVersionID + "/" + first.ChunkID, true
+}
+
+func validContextCompressionObservation(
+	enabled bool,
+	applied bool,
+	stats knowledge.ContextCompressionStats,
+	outputChunks int,
+	outputRunes int,
+) bool {
+	if stats.Validate() != nil {
+		return false
+	}
+	if !enabled {
+		return !applied && stats == (knowledge.ContextCompressionStats{})
+	}
+	if !applied {
+		return stats == (knowledge.ContextCompressionStats{})
+	}
+	if stats.InputChunks < 1 {
+		return false
+	}
+	return outputChunks == stats.OutputChunks && outputRunes == stats.OutputRunes
+}
+
+func contextGroupDimensions(groups []knowledge.SearchContextGroup) (int, int) {
+	chunks := 0
+	runes := 0
+	for _, group := range groups {
+		for _, chunk := range group.Chunks {
+			chunks++
+			runes += len([]rune(chunk.ContentText))
+		}
+	}
+	return chunks, runes
+}
+
+func serializedContextGroupDimensions(groups []searchKnowledgeContextGroup) (int, int) {
+	chunks := 0
+	runes := 0
+	for _, group := range groups {
+		for _, chunk := range group.Chunks {
+			chunks++
+			runes += len([]rune(chunk.ContentText))
+		}
+	}
+	return chunks, runes
 }
 
 func (p searchKnowledgeQueryPlan) validEvidenceFields(query string) bool {
