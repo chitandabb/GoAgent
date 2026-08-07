@@ -21,7 +21,11 @@ type HybridSearch struct {
 	MissingChannels           []string
 	RerankApplied             bool
 	RerankUsage               RerankUsage
+	EmbeddingUsage            EmbeddingUsage
 	ContextExpanded           bool
+	ContextCompressionEnabled bool
+	ContextCompressionApplied bool
+	ContextCompression        ContextCompressionStats
 	QueryRewriteStatus        QueryRewriteStatus
 	QueryRewritePromptVersion string
 	QueryRewriteUsage         QueryRewriteUsage
@@ -73,6 +77,7 @@ func (r *HybridRetriever) SearchPlan(ctx context.Context, actorID uuid.UUID, pla
 		vectorResults []SearchResult
 		vectorErr     error
 		vectorPartial bool
+		vectorUsage   EmbeddingUsage
 	)
 	var group sync.WaitGroup
 	group.Add(2)
@@ -84,7 +89,7 @@ func (r *HybridRetriever) SearchPlan(ctx context.Context, actorID uuid.UUID, pla
 	}()
 	go func() {
 		defer group.Done()
-		vectorResults, vectorPartial, vectorErr = r.searchVectorQueries(ctx, actorID, plan.VectorQueries())
+		vectorResults, vectorPartial, vectorUsage, vectorErr = r.searchVectorQueries(ctx, actorID, plan.VectorQueries())
 	}()
 	group.Wait()
 
@@ -100,17 +105,18 @@ func (r *HybridRetriever) SearchPlan(ctx context.Context, actorID uuid.UUID, pla
 	if ftsErr != nil {
 		return HybridSearch{
 			Results: limitResults(vectorResults, limit), Degraded: true,
-			Sources: []string{"vector"}, MissingChannels: []string{"fts"},
+			Sources: []string{"vector"}, MissingChannels: []string{"fts"}, EmbeddingUsage: vectorUsage,
 		}, nil
 	}
 	if vectorErr != nil {
 		return HybridSearch{
 			Results: limitResults(ftsResults, limit), Degraded: true,
-			Sources: []string{"fts"}, MissingChannels: []string{"vector"},
+			Sources: []string{"fts"}, MissingChannels: []string{"vector"}, EmbeddingUsage: vectorUsage,
 		}, nil
 	}
 	result := HybridSearch{
 		Results: fuseRRF(ftsResults, vectorResults, r.rrfK, limit), Sources: []string{"fts", "vector"},
+		EmbeddingUsage: vectorUsage,
 	}
 	if ftsPartial {
 		result.Degraded = true
@@ -150,16 +156,16 @@ func searchFTSQueries(
 
 func (r *HybridRetriever) searchVectorQueries(
 	ctx context.Context, actorID uuid.UUID, queries []string,
-) ([]SearchResult, bool, error) {
+) ([]SearchResult, bool, EmbeddingUsage, error) {
 	if len(queries) == 0 {
-		return nil, false, errors.New("knowledge vector query plan is empty")
+		return nil, false, EmbeddingUsage{}, errors.New("knowledge vector query plan is empty")
 	}
 	embedding, err := r.embedder.Embed(ctx, EmbeddingRequest{Texts: queries, InputType: r.profile.QueryInputType})
 	if err != nil {
-		return nil, false, err
+		return nil, false, EmbeddingUsage{}, err
 	}
 	if err := embedding.Validate(len(queries), r.profile.Dimensions, r.profile.Normalize); err != nil {
-		return nil, false, err
+		return nil, false, EmbeddingUsage{}, err
 	}
 	groups := make([][]SearchResult, 0, len(queries))
 	var failures []error
@@ -169,7 +175,7 @@ func (r *HybridRetriever) searchVectorQueries(
 		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, false, err
+				return nil, false, embedding.Usage, err
 			}
 			failures = append(failures, err)
 			continue
@@ -177,9 +183,9 @@ func (r *HybridRetriever) searchVectorQueries(
 		groups = append(groups, results)
 	}
 	if len(groups) == 0 {
-		return nil, false, errors.Join(failures...)
+		return nil, false, embedding.Usage, errors.Join(failures...)
 	}
-	return mergeQueryResults(groups, r.vectorTopN), len(failures) > 0, nil
+	return mergeQueryResults(groups, r.vectorTopN), len(failures) > 0, embedding.Usage, nil
 }
 
 func mergeQueryResults(groups [][]SearchResult, limit int) []SearchResult {

@@ -143,6 +143,73 @@ func TestAdvancedRetrievalObserverRecordsFailedRewriteArm(t *testing.T) {
 	}
 }
 
+func TestAdvancedRetrievalObserverRecordsCompressionStats(t *testing.T) {
+	documentID, versionID := uuid.New(), uuid.New()
+	hitID, contextID := uuid.New(), uuid.New()
+	hitText := "ERP-504 无法报工"
+	contextText := "检查接口网关和事务日志。"
+	plan, err := OriginalQueryPlan("ERP-504 无法报工")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit := SearchResult{
+		DocumentID: documentID, DocumentVersionID: versionID, ChunkID: hitID,
+		Title: "报工手册", Scope: ScopeGlobal, Ordinal: 0, ElementType: ElementText,
+		ContentText: hitText, ContentSHA256: SHA256Hex(hitText),
+	}
+	group := SearchContextGroup{
+		DocumentID: documentID, DocumentVersionID: versionID, HitChunkIDs: []uuid.UUID{hitID},
+		Chunks: []SearchContextChunk{{
+			ChunkID: contextID, Ordinal: 1, ElementType: ElementText,
+			ContentText: contextText, ContentSHA256: SHA256Hex(contextText),
+		}},
+	}
+	baselineSearch := HybridSearch{
+		Results: []SearchResult{hit}, ContextGroups: []SearchContextGroup{group}, ContextExpanded: true,
+		QueryPlan: plan, QueryRewriteStatus: QueryRewriteDisabled,
+	}
+	experimentSearch := baselineSearch
+	experimentSearch.ContextCompressionEnabled = true
+	experimentSearch.ContextCompressionApplied = true
+	experimentSearch.ContextCompression = ContextCompressionStats{
+		InputChunks: 2, OutputChunks: 1, InputRunes: len([]rune(contextText)) + 20,
+		OutputRunes: len([]rune(contextText)), OmittedChunks: 1,
+	}
+	baselineArm := advancedRuntimeArm(
+		RetrievalQueryOriginal, RetrievalContextParent, advancedRetrievalSearcherStub{result: baselineSearch},
+	)
+	experimentArm := advancedRuntimeArm(
+		RetrievalQueryOriginal, RetrievalContextParent, advancedRetrievalSearcherStub{result: experimentSearch},
+	)
+	experimentArm.Arm.ContextCompressionEnabled = true
+	experimentArm.Arm.ContextCompressionMaxChunks = 6
+	experimentArm.Arm.ContextCompressionMaxRunes = 3000
+	experimentArm.Arm.ContextCompressionMinScore = 0.05
+	observer, err := NewAdvancedRetrievalObserver(
+		baselineArm, experimentArm, map[uuid.UUID]string{documentID: "erp-reporting"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := AdvancedRetrievalEvaluationCase{
+		DatasetVersion: "rag-advanced-v1", CaseID: "compression", Query: "ERP-504 无法报工", K: 2,
+		RelevantDocumentKeys: []string{"erp-reporting"},
+		RelevantChunks: []RetrievalEvaluationChunkRef{
+			{DocumentKey: "erp-reporting", Ordinal: 0, ContentSHA256: SHA256Hex(hitText)},
+			{DocumentKey: "erp-reporting", Ordinal: 1, ContentSHA256: SHA256Hex(contextText)},
+		},
+	}
+	observations, err := observer.Observe(context.Background(), uuid.New(), []AdvancedRetrievalEvaluationCase{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 2 || !observations[1].ContextCompressionApplied ||
+		observations[1].ContextCompression.OmittedChunks != 1 ||
+		observations[1].ContextCompression.OutputRunes != len([]rune(contextText)) {
+		t.Fatalf("observations = %+v", observations)
+	}
+}
+
 func TestAdvancedRetrievalObserverPropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

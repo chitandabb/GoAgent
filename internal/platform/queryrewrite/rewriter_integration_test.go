@@ -16,7 +16,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/queryrewrite"
 )
 
-func TestStepFunQueryRewritePreservesProtectedSignals(t *testing.T) {
+func TestConfiguredQueryRewriteProfilePreservesProtectedSignals(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate integration test source")
@@ -35,23 +35,27 @@ func TestStepFunQueryRewritePreservesProtectedSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if _, err := cfg.Models.Chat.APIKey(); err != nil {
-		t.Skip("StepFun API key is not configured")
-	}
 	rewriteConfig := cfg.Knowledge.Retrieval.QueryRewrite
 	rewriteConfig.Enabled = true
+	profile, err := cfg.Models.Chat.Profile(rewriteConfig.ModelProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := profile.APIKey(); err != nil {
+		t.Skip("query rewrite profile API key is not configured")
+	}
 	prompt, err := rewriteConfig.LoadPrompt()
 	if err != nil {
 		t.Fatalf("load query rewrite prompt: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	chatModel, err := chatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	instance, err := chatmodel.NewProfile(ctx, cfg.Models.Chat, rewriteConfig.ModelProfile)
 	if err != nil {
-		t.Fatalf("build StepFun chat model: %v", err)
+		t.Fatalf("build query rewrite chat model: %v", err)
 	}
 	rewriter, err := queryrewrite.New(
-		chatModel, prompt, rewriteConfig.PromptVersion,
+		instance.Model, prompt, rewriteConfig.PromptVersion,
 		30*time.Second,
 		rewriteConfig.MaxSubqueries, rewriteConfig.MaxOutputRunes,
 	)

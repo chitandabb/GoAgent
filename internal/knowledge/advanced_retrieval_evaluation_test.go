@@ -96,6 +96,89 @@ func TestEvaluateAdvancedRetrievalDistinguishesHitRateFromDocumentRecall(t *test
 	}
 }
 
+func TestEvaluateAdvancedRetrievalReportsProviderTokenChanges(t *testing.T) {
+	chunk := advancedChunkRef("doc-a", 0, "a0")
+	definition := AdvancedRetrievalEvaluationCase{
+		DatasetVersion: "rag-advanced-v1", CaseID: "case-a", Query: "alpha", K: 2,
+		RelevantDocumentKeys: []string{"doc-a"}, RelevantChunks: []RetrievalEvaluationChunkRef{chunk},
+	}
+	baseline := advancedBaselineObservation("case-a", "alpha", 10)
+	baseline.ReturnedDocumentKeys = []string{"doc-a"}
+	baseline.ReturnedHitChunks = []RetrievalEvaluationChunkRef{chunk}
+	baseline.HitContextRunes = 10
+	baseline.EmbeddingTotalTokens = 10
+	baseline.RerankTotalTokens = 20
+	experiment := advancedRewriteObservation("case-a", "alpha", 10)
+	experiment.ReturnedDocumentKeys = []string{"doc-a"}
+	experiment.ReturnedHitChunks = []RetrievalEvaluationChunkRef{chunk}
+	experiment.HitContextRunes = 10
+	experiment.EmbeddingTotalTokens = 25
+	experiment.RerankTotalTokens = 30
+
+	summary, err := EvaluateAdvancedRetrieval(
+		[]AdvancedRetrievalEvaluationCase{definition},
+		[]AdvancedRetrievalObservation{baseline, experiment},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Baseline.EmbeddingTotalTokens != 10 || summary.Experiment.EmbeddingTotalTokens != 25 ||
+		summary.Delta.EmbeddingTokenChangeRate != 1.5 || summary.Delta.RerankTokenChangeRate != 0.5 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestEvaluateAdvancedRetrievalMeasuresContextCompressionIndependently(t *testing.T) {
+	hit := advancedChunkRef("doc-a", 0, "hit")
+	relevantContext := advancedChunkRef("doc-a", 1, "relevant")
+	noiseContext := advancedChunkRef("doc-a", 2, "noise")
+	definition := AdvancedRetrievalEvaluationCase{
+		DatasetVersion: "rag-advanced-v1", CaseID: "case-compression", Query: "alpha timeout", K: 2,
+		RelevantDocumentKeys: []string{"doc-a"},
+		RelevantChunks:       []RetrievalEvaluationChunkRef{hit, relevantContext},
+	}
+	baseline := advancedExperimentObservation("case-compression", "alpha timeout", 10)
+	baseline.Variant = AdvancedRetrievalBaseline
+	baseline.RunID = "baseline-case-compression"
+	baseline.ReturnedDocumentKeys = []string{"doc-a"}
+	baseline.ReturnedHitChunks = []RetrievalEvaluationChunkRef{hit}
+	baseline.ReturnedContextChunks = []RetrievalEvaluationChunkRef{relevantContext, noiseContext}
+	baseline.HitContextRunes = 40
+	baseline.ExpandedContextRunes = 100
+	baseline.ContextExpanded = true
+
+	experiment := baseline
+	experiment.Variant = AdvancedRetrievalExperiment
+	experiment.RunID = "experiment-case-compression"
+	experiment.ContextCompressionEnabled = true
+	experiment.ContextCompressionMaxChunks = 1
+	experiment.ContextCompressionMaxRunes = 128
+	experiment.ContextCompressionMinScore = 0.05
+	experiment.ContextCompressionApplied = true
+	experiment.ContextCompression = ContextCompressionStats{
+		InputChunks: 2, OutputChunks: 1, InputRunes: 100, OutputRunes: 60, OmittedChunks: 1,
+	}
+	experiment.ReturnedContextChunks = []RetrievalEvaluationChunkRef{relevantContext}
+	experiment.ExpandedContextRunes = 60
+
+	summary, err := EvaluateAdvancedRetrieval(
+		[]AdvancedRetrievalEvaluationCase{definition},
+		[]AdvancedRetrievalObservation{baseline, experiment},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Baseline.ContextRecall != 1 || summary.Experiment.ContextRecall != 1 ||
+		summary.Delta.ContextRecall != 0 || summary.Experiment.ContextPrecision != 1 ||
+		summary.Experiment.CompressionAppliedRuns != 1 ||
+		summary.Experiment.CompressionTriggeredRuns != 1 ||
+		summary.Experiment.CompressionOmittedChunks != 1 ||
+		summary.Experiment.AverageCompressionRatio != 0.6 ||
+		summary.Experiment.AverageCompressionSavingsRate != 0.4 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
 func TestEvaluateAdvancedRetrievalRejectsMixedProfilesAndIncompletePairs(t *testing.T) {
 	chunk := advancedChunkRef("doc-a", 0, "a0")
 	definition := AdvancedRetrievalEvaluationCase{

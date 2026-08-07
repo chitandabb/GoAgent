@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M2-A8 Retrieval and Diagnosis Knowledge Integration Complete
+## Current Stage: M2-B1 Advanced RAG Backend Controls Implemented, Quality Expansion Pending
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -540,8 +540,11 @@ unknown. New diagnosis tasks automatically receive the backend-managed knowledge
 frontend does not choose this Tool. Knowledge results now pass a deterministic citation gate: empty or
 malformed results do not become EvidenceItems, and valid results are tagged as `knowledge_chunk` with
 document/version/Chunk/hash location metadata. Logical Parent context expansion and controlled Query Plan
-are now implemented as the first M2-B1 slices; the next resume-driven slice is their fixed-set quality
-comparison followed by bounded Agentic re-retrieval.
+are now implemented as the first M2-B1 slices; Parent and Rewrite each have one real paired Case, while the
+Compression axis has all five. Deterministic whole-Chunk compression and Evidence Gate-driven bounded
+Agentic re-retrieval are now implemented. The five quality Cases did not reach the production budget; a
+separate long-parent pressure Case repeatedly reduced 7/1507 neighbor chunks/runes to 6/1438 while preserving
+Gold Context Recall. This is a threshold check, not an aggregate Token claim.
 
 ### Completed Backend Checkpoint: Formal Diagnosis Report Read API
 
@@ -607,7 +610,7 @@ This does not complete M2-B2. There is still no Firecrawl client, Web Search Too
 public-page fetcher, SSRF/redirect gate, untrusted-page isolation, WebEvidence
 persistence, or real public-provider invocation/cost.
 
-### Partial Backend Checkpoint: Small-to-Big Context Expansion and Controlled Query Plan
+### Partial Backend Checkpoint: Small-to-Big Context, Compression, Query Plan and Agentic Re-retrieval
 
 The first M2-B1 retrieval-context slice is implemented without adding a duplicate
 parent vector index. Child chunks remain the FTS/vector/RRF/rerank unit. After final
@@ -617,6 +620,13 @@ current document version and `section_path`, under the same actor scope filters.
 matched chunks separate from context groups, preserves IDs and hashes for every
 chunk, and degrades only the `context` channel on expansion failure.
 
+Expanded context then passes through a deterministic whole-Chunk compressor owned by
+`[knowledge.retrieval.contextCompression]`. Production defaults cap added context at six chunks and
+3000 runes with a 0.05 score floor. Query coverage, protected signals, hit rank and ordinal distance
+affect selection; text is never summarized or partially truncated, so content hashes remain valid.
+Tool and Evidence boundaries verify input/output counts and runes. Compression failure reports
+`context_compression` degradation and keeps the uncompressed parent context.
+
 This is a logical parent reconstructed from section structure, not a materialized
 parent index. A configurable Query Rewriter now produces a strict lexical/semantic/
 subquery plan while always retaining the original query. Deterministic protected-signal
@@ -625,23 +635,94 @@ negation. FTS and Vector merge query variants by rank and original-query priorit
 RRF; provider failure or internal timeout degrades only `query_rewrite`. The Tool exposes
 the plan, four stable statuses, prompt version and provider token usage.
 
-Query Rewrite remains disabled by default. Three bounded StepFun smoke calls proved the
-contract and policy fallback, but included a 10-second timeout and do not establish a
-Recall/MRR/Context Precision gain. The strict paired evaluation contract and offline
-`mesguard-rag-paired-eval` aggregator now separate original/rewrite and child/parent arms,
-pin gold chunks by document/ordinal/hash, reject mixed retrieval profiles, and report quality,
-query amplification, context growth, latency and rewrite usage. Each pair changes exactly one axis.
-The runtime Search observer records stable chunks, degradations and failed runs without binding a
-provider. The offline command performs no provider calls. The real fixture command, expanded gold
-set, multi-chunk quality result, relevance compression, and bounded Agentic second retrieval remain
-unfinished.
+Query Rewrite remains disabled by default. The strict paired evaluation contract, offline
+`mesguard-rag-paired-eval` aggregator and real `mesguard-rag-paired-observe` fixture command now
+separate original/rewrite, child/parent and parent/compression arms, pin public corpus and gold chunks by URL/date/hash,
+reject mixed retrieval profiles, and report quality, query amplification, context growth, latency,
+Embedding, Rewrite and Rerank usage. The real command uses the production SearchService inside a
+rolled-back PostgreSQL transaction, defaults to one Case and requires explicit provider execution.
+
+Chat model assembly now uses `activeProfile` plus named profiles. The Provider Factory has offline
+request-shape contracts for StepFun, DeepSeek and DashScope: provider-specific reasoning/thinking
+fields are mapped or rejected explicitly, and only the selected profile reads its API key. Query
+Rewrite resolves its own fast profile (`qwen-rewrite`) instead of inheriting the main Agent's
+reasoning and output budget. This closes the configuration and budget-isolation gap, but it does
+not complete live DeepSeek/Qwen Tool Calling or quality acceptance.
+
+`rag-advanced-v1` currently contains 4 official documents, 21 chunks and 5 cases. Parent and Rewrite
+each have one bounded observation: logical Parent recovered the second gold context chunk but doubled
+context runes; accepted Query Rewrite did not change quality and added 1152 rewrite Tokens plus substantial
+latency. The compression axis has run all five Cases with pinned production limits; all 13 parent neighbors
+remained below the limit, so quality stayed unchanged and zero chunks were omitted. These results prove the
+measurement path, not a general gain or Token reduction.
+
+The separate `rag-compression-pressure-v1` fixture pins two PostgreSQL official documents and one `K=6`
+multi-fact long-section Case. A CLI acceptance gate now fails unless at least one neighbor is omitted without
+reducing Gold Context Recall. Three repeated accepted runs consistently reduced seven neighbors to six and
+1507 runes to 1438 (-4.58%) while preserving Context Recall at 1.0. This is a threshold/traceability check,
+not an aggregate Token claim; latency from the sequential provider pair is not attributed to compression.
+
+The existing EvidenceOrchestrator now owns bounded Agentic re-retrieval. Only evidence/source-binding gaps
+keep `search_knowledge` visible in run two; format-only repair hides it. A run-scoped policy permits at most
+one second-run knowledge call while retaining the original total Tool, Token and timeout budgets. The result,
+stored report and report API expose whether retrieval was attempted, whether it added a new stable
+version/Chunk/content-hash identity and why
+it stopped; the investigation timeline gets a redacted `agentic_retrieval` step. Real-model trigger precision
+is now covered by a three-Case fixed set: evidence gaps selected knowledge search and added stable evidence,
+format-only repair hid the Tool, and a valid first pass skipped the second run. All expected decisions and stop
+reasons matched, using 16453 total Tokens. Answer-quality gains and broad stability are not yet measured.
+
+ADR 004 has accepted the next conversation boundary: the right-side dossier supplies structured case
+references to an independent conversation, and the conversation Agent may create a durable diagnosis
+task through a guarded command Tool. Conversations do not own task lifecycle. This is a target decision,
+not current behavior; the implemented frontend still calls `POST /api/v1/diagnosis-tasks` directly and
+the backend has no conversation/message persistence or `create_diagnosis_task` Tool yet.
+
+### Partial Backend Checkpoint: Knowledge Ingestion Throughput Baseline
+
+The Knowledge Worker repository now accepts a validated `[knowledge].chunkWriteBatchSize` and stages
+Chunks plus pgvector rows with GORM `CreateInBatches` under the existing fenced transaction. Batch size
+one preserves the serial reference path; PostgreSQL integration tests cover multi-batch Chunk/vector
+staging and ready publication.
+
+The paired observer exercises real MinIO, PDF/Office parsing, DashScope Embedding, Worker checkpoints and
+PostgreSQL publication while cleaning all temporary facts and objects. Its corpus manifest now requires
+one of eight stable `formatClass` values and includes that class in the corpus fingerprint, so native and
+scanned PDFs are not collapsed by their shared MIME.
+
+The first NIST IR 8108 pair reduced 32 Embedding requests to 4 and 32+32 Chunk/vector INSERT batches to
+1+1. Total duration changed from 6686 ms to 1130 ms with equal 7904 Embedding Tokens and equal partial
+outcomes/7 Elements/32 Chunks. The observed throughput increase is 491.68%, but the acceptance gate remains
+false because this is only one document, one format class and one pair. It also combines Embedding batching
+with database batching and excludes RabbitMQ, OCR/VLM and layout routing. Full scope is recorded in
+`docs/evaluations/rag-ingestion-throughput-v1.md`.
+
+Database isolation is now complete on the three currently pinned public documents (two native PDFs and one
+DOCX), producing 743 Chunks. Five order-alternated pairs changed median `SaveParsedResult` time from 1752 ms
+to 406 ms and per-run Chunk/vector INSERT batches from 743+743 to 9+9, with zero Provider requests or Tokens.
+Median paired staging throughput increased 319.21% and temporary actor/document residue was 0|0. This proves
+an independent database-round-trip gain, but remains ineligible at three documents/two classes. The first DOCX
+run also exposed and fixed an OPC compatibility bug: same-package `word -> customXml` relationships are now
+allowed while traversal beyond the virtual ZIP root remains rejected.
+
+A provider-free corpus audit now runs the production Parser and Chunking before any infrastructure call. The
+pinned set contains 12 public documents across all eight declared format classes, producing 4,190 Elements,
+6,177 Chunks and 128 visual candidates with zero parser failures. Five documents are text-ready, four retain
+searchable text while awaiting visual enrichment, and three require visual enrichment. Only materialized image
+bytes are summed; PDF page references no longer multiply the source-file size. This completes the format-coverage
+gate, but total corpus size remains 12/40 and the acceptance gate stays false.
+The manifest also pins publisher, source page, HTTPS download URL and usage boundary; a guarded fetch script writes
+only below the ignored evaluation root and accepts a file only after byte-length and SHA-256 verification.
 
 ## Target Milestones, Not Yet Implemented
 
-- M2-B1: real paired fixture command, expanded fixed-set quality evaluation and bounded Agentic second retrieval; the strict observer/aggregator, controlled query rewrite and logical parent-child context expansion are implemented but remain unproven where applicable;
+- M2-B1: expand the checked-in pressure dataset beyond one long-parent Case, add failed/repeated/no-selection second-retrieval and answer-quality cases, complete the remaining Parent/Rewrite pairs, and measure aggregate compression rate and repeated-run stability; implementation is present but broad sample quality is unproven;
 - M2-B2: 公开技术 Web Search 降级链路；公网 Query 出口策略已实现，Provider、引用和失败降级待完成；
-- M2-B3: knowledge-qa HTTP/SSE conversation API, citation preview and attachment content access;
-- M2-C: expanded scanned-table/chart/screenshot quality set and full upload-to-publish throughput baseline;
+- M2-B3: independent conversation/message API, structured case/task references, guarded Agent task-creation command, knowledge-qa streaming, citation preview and attachment content access;
+- M2-C: expand the current 12-document/eight-class corpus to 40 documents with diverse sources and visual
+  difficulty, then run five full-chain pairs,
+  then add RabbitMQ delivery to the upload-to-publish throughput baseline; the current single-document
+  worker-core pilot is not acceptance evidence;
 - M4: isolated SQL performance laboratory.
 
 Do not mark a target milestone as complete here until its acceptance criteria

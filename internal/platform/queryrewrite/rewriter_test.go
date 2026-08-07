@@ -39,7 +39,8 @@ func TestRewriterReturnsStrictStructuredCandidate(t *testing.T) {
 		t.Fatalf("result=%+v messages=%+v", result, generator.messages)
 	}
 	if generator.messages[0].Role != schema.System || !strings.Contains(generator.messages[1].Content, `"query":"ERP-504 timeout"`) ||
-		!strings.Contains(generator.messages[1].Content, `"protectedSignals":["erp-504"]`) {
+		!strings.Contains(generator.messages[1].Content, `"protectedSignals":["erp-504"]`) ||
+		!strings.Contains(generator.messages[1].Content, `"maxSubqueries":2`) {
 		t.Fatalf("messages=%+v", generator.messages)
 	}
 }

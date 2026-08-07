@@ -71,10 +71,10 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	flags.SetOutput(io.Discard)
 	datasetPath := flags.String("dataset", "testdata/agent-evaluation.real-v1.jsonl", "versioned JSONL evaluation cases")
 	outputPath := flags.String("output", "testdata/agent-evaluation.real-v1.observations.jsonl", "output JSONL observations")
-	reasoningEffort := flags.String("reasoning-effort", "", "low, medium, or high; defaults to config")
+	reasoningEffort := flags.String("reasoning-effort", "", "provider-supported effort; defaults to config")
 	maxTotalTokens := flags.Int("max-total-tokens", 0, "override the Evidence Gate total token budget; defaults to config")
 	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-reasoning-effort low|medium|high]: %w", err)
+		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-reasoning-effort provider-value]: %w", err)
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -94,12 +94,17 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if !cfg.GitHubMCP.Enabled {
 		return errors.New("github MCP must be enabled for paired evaluation")
 	}
-	if strings.TrimSpace(*reasoningEffort) != "" {
-		cfg.Models.Chat.ReasoningEffort = strings.ToLower(strings.TrimSpace(*reasoningEffort))
-	}
-	if _, err := parseReasoningEffort(cfg.Models.Chat.ReasoningEffort); err != nil {
+	profile, err := cfg.Models.Chat.ActiveProfile()
+	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(*reasoningEffort) != "" {
+		profile.ReasoningEffort = strings.ToLower(strings.TrimSpace(*reasoningEffort))
+	}
+	if _, err := parseReasoningEffort(profile.ReasoningEffort); err != nil {
+		return err
+	}
+	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 	if *maxTotalTokens != 0 {
 		if *maxTotalTokens < 1000 || *maxTotalTokens > 1_000_000 {
 			return errors.New("max-total-tokens must be between 1000 and 1000000")
@@ -111,10 +116,11 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return fmt.Errorf("load Agent prompts: %w", err)
 	}
 
-	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
 	if err != nil {
-		return fmt.Errorf("build StepFun model: %w", err)
+		return fmt.Errorf("build chat model: %w", err)
 	}
+	chatModel := instance.Model
 	githubConnection, err := githubmcp.Connect(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
@@ -327,6 +333,7 @@ func observationFromResult(
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
 ) mesagent.EvaluationObservation {
+	profile, _ := cfg.Models.Chat.ActiveProfile()
 	actualTools := make([]string, 0, len(result.ToolExecutions))
 	for _, execution := range result.ToolExecutions {
 		actualTools = append(actualTools, execution.Name)
@@ -343,9 +350,9 @@ func observationFromResult(
 		CaseID:           definition.CaseID,
 		Variant:          variant,
 		RunID:            fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		Model:            cfg.Models.Chat.Provider,
-		ModelVersion:     cfg.Models.Chat.Model,
-		ReasoningEffort:  cfg.Models.Chat.ReasoningEffort,
+		Model:            profile.Provider,
+		ModelVersion:     profile.Model,
+		ReasoningEffort:  profile.ReasoningEffort,
 		PromptVersion:    cfg.Agent.PromptVersion,
 		SelectedSkill:    result.SelectedSkill,
 		ActualToolCalls:  actualTools,
@@ -412,10 +419,10 @@ func ensureEvaluationJSONEOF(decoder *json.Decoder) error {
 func parseReasoningEffort(value string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
-	case "low", "medium", "high":
+	case "", "low", "medium", "high", "xhigh", "max":
 		return normalized, nil
 	default:
-		return "", errors.New("reasoning-effort must be low, medium, or high")
+		return "", errors.New("reasoning-effort must be empty, low, medium, high, xhigh, or max")
 	}
 }
 

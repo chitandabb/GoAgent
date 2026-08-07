@@ -23,6 +23,9 @@ timeoutMillis = 90000
 
 [models.chat]
 enabled = true
+activeProfile = "stepfun-main"
+
+[models.chat.profiles.stepfun-main]
 provider = "stepfun"
 baseURL = "https://api.stepfun.com/step_plan/v1"
 apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
@@ -30,6 +33,16 @@ model = "step-3.7-flash"
 reasoningEffort = "medium"
 timeoutMillis = 120000
 maxOutputTokens = 4096
+
+[models.chat.profiles.qwen-rewrite]
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3.6-flash"
+thinkingMode = "disabled"
+temperature = 0.0
+timeoutMillis = 3000
+maxOutputTokens = 256
 
 [models.judge]
 enabled = false
@@ -176,6 +189,7 @@ maxAttempts = 3
 maxUploadBytes = 52428800
 chunkMaxRunes = 700
 chunkOverlapRunes = 80
+chunkWriteBatchSize = 100
 parserMaxDocumentUnits = 500
 parserMaxArchiveEntries = 4096
 parserMaxExpandedBytes = 268435456
@@ -194,12 +208,19 @@ contextExpansionEnabled = true
 contextWindow = 1
 contextMaxRunes = 1800
 
+[knowledge.retrieval.contextCompression]
+enabled = true
+maxChunks = 6
+maxRunes = 3000
+minScore = 0.05
+
 [knowledge.retrieval.queryRewrite]
 enabled = false
+modelProfile = "qwen-rewrite"
 promptFile = "config/prompts/query-rewrite.md"
-promptVersion = "query-rewrite-v1"
-timeoutMillis = 10000
-maxSubqueries = 2
+promptVersion = "query-rewrite-v2"
+timeoutMillis = 3000
+maxSubqueries = 1
 maxOutputRunes = 2048
 
 [knowledge.layout]

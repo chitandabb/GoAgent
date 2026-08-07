@@ -138,6 +138,72 @@ WHERE task.id = ?`, profile.ID, taskID).Scan(&facts).Error; err != nil {
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
 }
 
+func TestKnowledgeWorkerRepositoryBatchesChunksAndEmbeddings(t *testing.T) {
+	db, ctx, cleanup := prepareKnowledgeWorkerIntegration(t)
+	defer cleanup()
+	creatorID, documentID, versionID, taskID, outboxID := insertQueuedKnowledgeTask(t, db, ctx, nil, 3)
+	defer cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
+	repository, err := NewKnowledgeWorkerRepositoryWithBatchSize(db, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := knowledge.NewEmbeddingProfile(
+		"knowledge-v1", "dashscope", "text-embedding-v4", 1024, "cosine",
+		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "embedding-v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.EnsureEmbeddingProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	claim, err := repository.Claim(ctx, taskID, versionID, "worker-batch", now, now.Add(time.Minute))
+	if err != nil || claim.Lease == nil {
+		t.Fatalf("Claim = %+v err=%v", claim, err)
+	}
+	result := knowledgeworker.ExecutionResult{
+		ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"pages":3}`),
+		Checkpoint: json.RawMessage(`{"indexed":true}`),
+		Artifact: objectstore.ObjectRef{
+			Bucket: objectstore.BucketKnowledgeArtifacts, ObjectKey: "knowledge-artifact/integration/" + versionID.String(),
+			ETag: "artifact-etag", SizeBytes: 12, SHA256: knowledge.SHA256Hex("artifact"),
+			MediaType: "application/json", OriginalName: "batch.elements.json",
+		},
+		EmbeddingProfile: &profile, EmbeddingUsage: knowledge.EmbeddingUsage{TotalTokens: 6},
+	}
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		content := "batch content " + string(rune('a'+ordinal))
+		result.Chunks = append(result.Chunks, knowledge.ChunkDraft{
+			ElementType: knowledge.ElementText, SectionPath: []string{"batch"},
+			ContentText: content, SearchText: knowledge.NormalizeSearchText(content),
+			ContentSHA256: knowledge.SHA256Hex(content),
+		})
+		result.Embeddings = append(result.Embeddings, knowledge.ChunkEmbeddingDraft{
+			ChunkOrdinal: ordinal, ContentSHA256: knowledge.SHA256Hex(content),
+			Vector: unitEmbeddingVector(1024, ordinal),
+		})
+	}
+	staged, err := repository.SaveParsedResult(ctx, *claim.Lease, result, now.Add(time.Second))
+	if err != nil || !staged {
+		t.Fatalf("SaveParsedResult = %v err=%v", staged, err)
+	}
+	var counts struct {
+		Chunks     int64
+		Embeddings int64
+	}
+	if err := db.WithContext(ctx).Raw(`
+SELECT COUNT(DISTINCT chunk.id) AS chunks, COUNT(embedding.chunk_id) AS embeddings
+FROM knowledge_chunks chunk
+LEFT JOIN knowledge_chunk_embeddings embedding ON embedding.chunk_id = chunk.id
+WHERE chunk.document_version_id = ?`, versionID).Scan(&counts).Error; err != nil {
+		t.Fatal(err)
+	}
+	if counts.Chunks != 3 || counts.Embeddings != 3 {
+		t.Fatalf("counts = %+v", counts)
+	}
+}
+
 func unitEmbeddingVector(dimensions, index int) []float32 {
 	vector := make([]float32, dimensions)
 	vector[index] = 1

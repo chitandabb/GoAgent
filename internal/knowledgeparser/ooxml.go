@@ -307,8 +307,8 @@ func xmlAttribute(attributes []xml.Attr, localName string) string {
 
 func parseOOXMLRelationships(ctx context.Context, content []byte, baseDir string) (map[string]string, error) {
 	baseDir = strings.Trim(path.Clean(baseDir), "/")
-	packageRoot := strings.SplitN(baseDir, "/", 2)[0]
-	if baseDir == "." || packageRoot == "" || packageRoot == "." {
+	if baseDir == "." || baseDir == "" || baseDir == ".." || strings.HasPrefix(baseDir, "../") ||
+		strings.Contains(baseDir, "\\") || strings.Contains(baseDir, ":") {
 		return nil, fmt.Errorf("%w: Office relationship base directory is invalid", ErrInvalidContent)
 	}
 	decoder := newStrictXMLDecoder(content)
@@ -329,23 +329,46 @@ func parseOOXMLRelationships(ctx context.Context, content []byte, baseDir string
 			continue
 		}
 		id, target := strings.TrimSpace(xmlAttribute(start.Attr, "Id")), strings.TrimSpace(xmlAttribute(start.Attr, "Target"))
-		if id == "" || target == "" || strings.Contains(target, "\\") || strings.Contains(target, "://") {
+		if id == "" || target == "" || strings.Contains(target, "\\") || strings.Contains(target, "://") ||
+			strings.HasPrefix(target, "//") {
 			return nil, fmt.Errorf("%w: Office relationship is invalid", ErrInvalidContent)
 		}
-		resolved := ""
-		if strings.HasPrefix(target, "/") {
-			resolved = path.Clean(strings.TrimPrefix(target, "/"))
-		} else {
-			resolved = path.Clean(path.Join(baseDir, target))
-		}
-		if resolved == packageRoot || !strings.HasPrefix(resolved, packageRoot+"/") {
-			return nil, fmt.Errorf("%w: Office relationship escapes its package root", ErrInvalidContent)
+		resolved, err := resolveOOXMLRelationshipTarget(baseDir, target)
+		if err != nil {
+			return nil, err
 		}
 		if _, exists := result[id]; exists {
 			return nil, fmt.Errorf("%w: duplicate Office relationship id", ErrInvalidContent)
 		}
 		result[id] = resolved
 	}
+}
+
+func resolveOOXMLRelationshipTarget(baseDir, target string) (string, error) {
+	segments := make([]string, 0, 8)
+	if !strings.HasPrefix(target, "/") {
+		segments = append(segments, strings.Split(baseDir, "/")...)
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(target, "/"), "/") {
+		switch segment {
+		case "", ".":
+			continue
+		case "..":
+			if len(segments) == 0 {
+				return "", fmt.Errorf("%w: Office relationship escapes its package root", ErrInvalidContent)
+			}
+			segments = segments[:len(segments)-1]
+		default:
+			if strings.Contains(segment, ":") {
+				return "", fmt.Errorf("%w: Office relationship is invalid", ErrInvalidContent)
+			}
+			segments = append(segments, segment)
+		}
+	}
+	if len(segments) == 0 {
+		return "", fmt.Errorf("%w: Office relationship target is empty", ErrInvalidContent)
+	}
+	return strings.Join(segments, "/"), nil
 }
 
 func xmlRelationshipID(attributes []xml.Attr) string {

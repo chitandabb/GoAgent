@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -51,10 +52,11 @@ type EvidenceOrchestratorConfig struct {
 type InvestigationStepKind string
 
 const (
-	InvestigationAgentRun InvestigationStepKind = "agent_run"
-	InvestigationTool     InvestigationStepKind = "tool"
-	InvestigationGate     InvestigationStepKind = "evidence_gate"
-	InvestigationReport   InvestigationStepKind = "report"
+	InvestigationAgentRun  InvestigationStepKind = "agent_run"
+	InvestigationTool      InvestigationStepKind = "tool"
+	InvestigationGate      InvestigationStepKind = "evidence_gate"
+	InvestigationRetrieval InvestigationStepKind = "agentic_retrieval"
+	InvestigationReport    InvestigationStepKind = "report"
 )
 
 // InvestigationStep 是可以展示给用户的脱敏调查轨迹，不包含模型原始 ReasoningContent。
@@ -69,18 +71,21 @@ type InvestigationStep struct {
 }
 
 type OrchestrationResult struct {
-	Report          StructuredReport    `json:"report"`
-	Partial         bool                `json:"partial"`
-	MissingEvidence []string            `json:"missingEvidence"`
-	AgentRuns       int                 `json:"agentRuns"`
-	ToolExecutions  []ToolExecution     `json:"toolExecutions"`
-	EvidenceItems   []EvidenceItem      `json:"evidenceItems"`
-	Usage           ModelUsage          `json:"usage"`
-	AllowedTools    []string            `json:"allowedTools"`
-	SelectedSkill   SkillID             `json:"selectedSkill"`
-	StopReason      string              `json:"stopReason,omitempty"`
-	ExecutedSkills  []SkillID           `json:"executedSkills"`
-	Investigation   []InvestigationStep `json:"investigation"`
+	Report                        StructuredReport    `json:"report"`
+	Partial                       bool                `json:"partial"`
+	MissingEvidence               []string            `json:"missingEvidence"`
+	AgentRuns                     int                 `json:"agentRuns"`
+	ToolExecutions                []ToolExecution     `json:"toolExecutions"`
+	EvidenceItems                 []EvidenceItem      `json:"evidenceItems"`
+	Usage                         ModelUsage          `json:"usage"`
+	AllowedTools                  []string            `json:"allowedTools"`
+	SelectedSkill                 SkillID             `json:"selectedSkill"`
+	StopReason                    string              `json:"stopReason,omitempty"`
+	ExecutedSkills                []SkillID           `json:"executedSkills"`
+	Investigation                 []InvestigationStep `json:"investigation"`
+	AgenticRetrievalAttempted     bool                `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string              `json:"agenticRetrievalStopReason"`
 }
 
 type EvidenceOrchestrator struct {
@@ -96,27 +101,31 @@ type EvidenceOrchestrator struct {
 }
 
 type evidenceState struct {
-	request                   RunRequest
-	budget                    *executionBudget
-	agentRuns                 int
-	draft                     string
-	parsedReport              *StructuredReport
-	parseError                error
-	report                    StructuredReport
-	partial                   bool
-	gaps                      []string
-	nextNode                  string
-	toolExecutions            []ToolExecution
-	evidenceItems             []EvidenceItem
-	usage                     ModelUsage
-	allowedTools              []string
-	selectedSkill             SkillID
-	stopReason                string
-	executedSkills            []SkillID
-	investigation             []InvestigationStep
-	lastAgentFailure          string
-	maxEvidenceItems          int
-	reportContractInstruction string
+	request                       RunRequest
+	budget                        *executionBudget
+	agentRuns                     int
+	draft                         string
+	parsedReport                  *StructuredReport
+	parseError                    error
+	report                        StructuredReport
+	partial                       bool
+	gaps                          []string
+	nextNode                      string
+	toolExecutions                []ToolExecution
+	evidenceItems                 []EvidenceItem
+	usage                         ModelUsage
+	allowedTools                  []string
+	selectedSkill                 SkillID
+	stopReason                    string
+	executedSkills                []SkillID
+	investigation                 []InvestigationStep
+	lastAgentFailure              string
+	agenticRetrievalEligible      bool
+	agenticRetrievalAttempted     bool
+	agenticRetrievalAddedEvidence bool
+	agenticRetrievalStopReason    string
+	maxEvidenceItems              int
+	reportContractInstruction     string
 }
 
 func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig) (*EvidenceOrchestrator, error) {
@@ -285,9 +294,20 @@ func (o *EvidenceOrchestrator) runAgent(ctx context.Context, state *evidenceStat
 		return state, err
 	}
 	state.agentRuns++
+	var runToolPolicy *agentToolRunPolicy
+	if state.agentRuns > 1 {
+		state.agenticRetrievalEligible = state.agentRuns == 2 && evidenceGapsNeedRetrieval(state.gaps)
+		if state.agenticRetrievalEligible {
+			runToolPolicy = newAgentToolRunPolicy(nil, map[string]int{ToolSearchKnowledge: 1})
+		} else {
+			runToolPolicy = newAgentToolRunPolicy([]string{ToolSearchKnowledge}, nil)
+		}
+	}
 	request := state.request
 	request.UserQuery = state.nextAgentQuery()
 	runCtx := withExecutionBudget(ctx, state.budget)
+	runCtx = withAgentToolRunPolicy(runCtx, runToolPolicy)
+	knownKnowledge := knowledgeEvidenceKeySet(state.evidenceItems)
 	result, err := o.runner.Invoke(runCtx, request)
 	state.mergeRunResult(result)
 	state.budget.reconcileToolCalls(len(state.toolExecutions))
@@ -295,6 +315,7 @@ func (o *EvidenceOrchestrator) runAgent(ctx context.Context, state *evidenceStat
 	state.draft = result.Answer
 	state.parsedReport, state.parseError = decodeStructuredReport(result.Answer)
 	state.appendRunSteps(result, err)
+	state.observeAgenticRetrieval(result, knownKnowledge, err)
 	if err != nil {
 		if ctx.Err() != nil {
 			return state, ctx.Err()
@@ -332,6 +353,9 @@ func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceS
 		state.appendStep(InvestigationGate, "证据门禁", strings.Join(gaps, "；"), "needs_evidence", "", 0)
 		return state, nil
 	}
+	if state.agenticRetrievalStopReason == "" && evidenceGapsNeedRetrieval(gaps) {
+		state.agenticRetrievalStopReason = "run_limit_or_budget"
+	}
 	state.nextNode = evidenceNodePartialReport
 	state.gaps = uniqueStrings(append(state.gaps, state.budget.exhaustionReasons()...))
 	state.appendStep(InvestigationGate, "证据门禁", strings.Join(state.gaps, "；"), "partial", "", 0)
@@ -356,10 +380,124 @@ func (s *evidenceState) nextAgentQuery() string {
 		return strings.TrimSpace(s.request.UserQuery) + "\n\n" + s.reportContractInstruction
 	}
 	draft := truncatePromptValue(s.draft, defaultEvidenceMaxPromptBytes)
+	retrievalInstruction := "本轮只修正报告结构与已有证据引用，不要重新检索企业知识。"
+	if s.agentRuns == 2 && s.agenticRetrievalEligible {
+		retrievalInstruction = "如现有证据仍不足，可以调用 search_knowledge，但最多一次；若没有新增证据，必须明确保留限制。"
+	}
 	return strings.TrimSpace(s.request.UserQuery) +
 		"\n\n上一轮报告未通过 Evidence Gate。请只针对以下缺口补充必要调查，并重新输出完整 JSON 报告：\n- " +
 		strings.Join(s.gaps, "\n- ") +
+		"\n\n" + retrievalInstruction +
 		"\n\n<previous_report>\n" + draft + "\n</previous_report>\n\n" + s.reportContractInstruction
+}
+
+func evidenceGapsNeedRetrieval(gaps []string) bool {
+	markers := []string{
+		"可追溯证据", "sourcetool 未在本次任务中成功执行",
+		"sourceref 未对应本次运行", "来源不一致",
+	}
+	for _, gap := range gaps {
+		lower := strings.ToLower(gap)
+		for _, marker := range markers {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func knowledgeEvidenceKeySet(items []EvidenceItem) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, item := range items {
+		if item.SourceTool != ToolSearchKnowledge {
+			continue
+		}
+		for _, key := range knowledgeEvidenceKeys(item.Snapshot) {
+			result[key] = struct{}{}
+		}
+	}
+	return result
+}
+
+func knowledgeEvidenceKeys(snapshot string) []string {
+	var response searchKnowledgeResponse
+	if json.Unmarshal([]byte(snapshot), &response) != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	keys := make([]string, 0, len(response.Results))
+	appendKey := func(versionID, chunkID, contentSHA256 string) {
+		if versionID == "" || chunkID == "" || contentSHA256 == "" {
+			return
+		}
+		key := versionID + "/" + chunkID + "/" + contentSHA256
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for _, item := range response.Results {
+		appendKey(item.DocumentVersionID, item.ChunkID, item.ContentSHA256)
+	}
+	for _, group := range response.ContextGroups {
+		for _, chunk := range group.Chunks {
+			appendKey(group.DocumentVersionID, chunk.ChunkID, chunk.ContentSHA256)
+		}
+	}
+	return keys
+}
+
+func (s *evidenceState) observeAgenticRetrieval(
+	result RunResult,
+	knownKnowledge map[string]struct{},
+	runErr error,
+) {
+	if s.agentRuns != 2 {
+		return
+	}
+	if !s.agenticRetrievalEligible {
+		s.agenticRetrievalStopReason = "not_eligible"
+		return
+	}
+	failed := false
+	for _, execution := range result.ToolExecutions {
+		if execution.Name != ToolSearchKnowledge {
+			continue
+		}
+		s.agenticRetrievalAttempted = true
+		if !execution.Succeeded {
+			failed = true
+		}
+	}
+	if !s.agenticRetrievalAttempted {
+		if runErr != nil {
+			s.agenticRetrievalStopReason = "agent_run_failed"
+		} else {
+			s.agenticRetrievalStopReason = "not_selected"
+		}
+		s.appendStep(InvestigationRetrieval, "Agentic 二次检索", "模型未选择企业知识检索", "skipped", ToolSearchKnowledge, 0)
+		return
+	}
+	for key := range knowledgeEvidenceKeySet(s.evidenceItems) {
+		if _, exists := knownKnowledge[key]; !exists {
+			s.agenticRetrievalAddedEvidence = true
+			break
+		}
+	}
+	if s.agenticRetrievalAddedEvidence {
+		s.agenticRetrievalStopReason = "new_evidence_added"
+		s.appendStep(InvestigationRetrieval, "Agentic 二次检索", "补充了新的企业知识证据", "completed", ToolSearchKnowledge, 0)
+		return
+	}
+	if failed {
+		s.agenticRetrievalStopReason = "tool_failed"
+		s.appendStep(InvestigationRetrieval, "Agentic 二次检索", "企业知识检索失败，未补充证据", "failed", ToolSearchKnowledge, 0)
+		return
+	}
+	s.agenticRetrievalStopReason = "no_new_evidence"
+	s.appendStep(InvestigationRetrieval, "Agentic 二次检索", "检索未产生新的可追溯证据", "stopped", ToolSearchKnowledge, 0)
 }
 
 func (s *evidenceState) mergeRunResult(result RunResult) {
@@ -515,17 +653,30 @@ func (s *evidenceState) appendStep(
 func (s *evidenceState) result() OrchestrationResult {
 	return OrchestrationResult{
 		Report: s.report, Partial: s.partial,
-		MissingEvidence: append([]string(nil), s.gaps...),
-		AgentRuns:       s.agentRuns,
-		ToolExecutions:  append([]ToolExecution(nil), s.toolExecutions...),
-		EvidenceItems:   append([]EvidenceItem(nil), s.evidenceItems...),
-		Usage:           s.usage,
-		AllowedTools:    append([]string(nil), s.allowedTools...),
-		SelectedSkill:   s.selectedSkill,
-		StopReason:      s.stopReason,
-		ExecutedSkills:  append([]SkillID(nil), s.executedSkills...),
-		Investigation:   append([]InvestigationStep(nil), s.investigation...),
+		MissingEvidence:               append([]string(nil), s.gaps...),
+		AgentRuns:                     s.agentRuns,
+		ToolExecutions:                append([]ToolExecution(nil), s.toolExecutions...),
+		EvidenceItems:                 append([]EvidenceItem(nil), s.evidenceItems...),
+		Usage:                         s.usage,
+		AllowedTools:                  append([]string(nil), s.allowedTools...),
+		SelectedSkill:                 s.selectedSkill,
+		StopReason:                    s.stopReason,
+		ExecutedSkills:                append([]SkillID(nil), s.executedSkills...),
+		Investigation:                 append([]InvestigationStep(nil), s.investigation...),
+		AgenticRetrievalAttempted:     s.agenticRetrievalAttempted,
+		AgenticRetrievalAddedEvidence: s.agenticRetrievalAddedEvidence,
+		AgenticRetrievalStopReason:    s.agenticRetrievalResultStopReason(),
 	}
+}
+
+func (s *evidenceState) agenticRetrievalResultStopReason() string {
+	if s.agenticRetrievalStopReason != "" {
+		return s.agenticRetrievalStopReason
+	}
+	if s.agentRuns < 2 {
+		return "not_needed"
+	}
+	return "not_attempted"
 }
 
 func stopReasonForPartial(exhaustionReasons []string) string {

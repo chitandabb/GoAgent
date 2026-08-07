@@ -1187,7 +1187,7 @@ components:
     DiagnosisReport:
       type: object
       additionalProperties: false
-      required: [reportId, taskId, conclusionStatus, riskLevel, conclusion, businessSummary, technicalSummary, confidence, limitations, partial, missingEvidence, usage, agentRuns, selectedSkill, executedSkills, reportSchemaVersion, modelProvider, modelId, promptVersion, evidence, generatedAt, createdAt, updatedAt]
+      required: [reportId, taskId, conclusionStatus, riskLevel, conclusion, businessSummary, technicalSummary, confidence, limitations, partial, missingEvidence, usage, agentRuns, selectedSkill, executedSkills, agenticRetrievalAttempted, agenticRetrievalAddedEvidence, agenticRetrievalStopReason, reportSchemaVersion, modelProvider, modelId, promptVersion, evidence, generatedAt, createdAt, updatedAt]
       properties:
         reportId: {type: string, format: uuid}
         taskId: {type: string, format: uuid}
@@ -1218,6 +1218,11 @@ components:
           type: array
           items: {type: string}
         stopReason: {type: string}
+        agenticRetrievalAttempted: {type: boolean}
+        agenticRetrievalAddedEvidence: {type: boolean}
+        agenticRetrievalStopReason:
+          type: string
+          enum: [not_needed, not_eligible, not_selected, new_evidence_added, no_new_evidence, tool_failed, agent_run_failed, run_limit_or_budget, not_attempted]
         reportSchemaVersion: {type: integer, const: 1}
         modelProvider: {type: string}
         modelId: {type: string}

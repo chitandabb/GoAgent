@@ -15,7 +15,7 @@ func TestDiagnosisReportRecordDecodesVersionedSummaries(t *testing.T) {
 		TaskID: taskID, ReportID: &reportID, ConclusionStatus: "probable",
 		RiskLevel: "medium", ReportSchemaVersion: 1,
 		BusinessSummary:  []byte(`{"conclusion":"状态同步延迟","summary":"业务状态尚未闭环","confidence":"medium"}`),
-		TechnicalSummary: []byte(`{"summary":"快照显示处理延迟","limitations":[],"partial":false,"missingEvidence":[],"usage":{"modelCalls":2,"promptTokens":100,"completionTokens":20,"totalTokens":120,"cachedTokens":0,"reasoningTokens":0},"agentRuns":1,"selectedSkill":"ticket-diagnosis","executedSkills":["ticket-diagnosis"],"stopReason":""}`),
+		TechnicalSummary: []byte(`{"summary":"快照显示处理延迟","limitations":[],"partial":false,"missingEvidence":[],"usage":{"modelCalls":2,"promptTokens":100,"completionTokens":20,"totalTokens":120,"cachedTokens":0,"reasoningTokens":0},"agentRuns":2,"selectedSkill":"ticket-diagnosis","executedSkills":["ticket-diagnosis"],"stopReason":"","agenticRetrievalAttempted":true,"agenticRetrievalAddedEvidence":true,"agenticRetrievalStopReason":"new_evidence_added"}`),
 		ModelProvider:    "stepfun", ModelID: "step-3.7-flash", PromptVersion: "diagnosis-v1",
 		GeneratedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
@@ -23,7 +23,9 @@ func TestDiagnosisReportRecordDecodesVersionedSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toDomain(): %v", err)
 	}
-	if report.ID != reportID || report.TaskID != taskID || report.Usage.TotalTokens != 120 || report.AgentRuns != 1 {
+	if report.ID != reportID || report.TaskID != taskID || report.Usage.TotalTokens != 120 || report.AgentRuns != 2 ||
+		!report.AgenticRetrievalAttempted || !report.AgenticRetrievalAddedEvidence ||
+		report.AgenticRetrievalStopReason != "new_evidence_added" {
 		t.Fatalf("report = %+v", report)
 	}
 }

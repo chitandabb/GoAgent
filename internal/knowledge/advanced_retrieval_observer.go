@@ -149,23 +149,27 @@ func newAdvancedRetrievalObservation(
 		status = queryRewriteNotObserved
 	}
 	return AdvancedRetrievalObservation{
-		DatasetVersion:          definition.DatasetVersion,
-		CaseID:                  definition.CaseID,
-		Variant:                 variant,
-		RunID:                   fmt.Sprintf("%s-%s-%s", variant, definition.CaseID, uuid.NewString()),
-		Query:                   definition.Query,
-		K:                       definition.K,
-		RetrieverVersion:        arm.Arm.RetrieverVersion,
-		EmbeddingProfile:        arm.Arm.EmbeddingProfile,
-		RerankProfile:           arm.Arm.RerankProfile,
-		QueryMode:               arm.Arm.QueryMode,
-		QueryRewriteStatus:      status,
-		RewriteProvider:         arm.Arm.RewriteProvider,
-		RewriteModelID:          arm.Arm.RewriteModelID,
-		RewritePromptVersion:    arm.Arm.RewritePromptVersion,
-		ContextMode:             arm.Arm.ContextMode,
-		ContextExpansionEnabled: arm.Arm.ContextMode == RetrievalContextParent,
-		DurationMillis:          durationMillis,
+		DatasetVersion:              definition.DatasetVersion,
+		CaseID:                      definition.CaseID,
+		Variant:                     variant,
+		RunID:                       fmt.Sprintf("%s-%s-%s", variant, definition.CaseID, uuid.NewString()),
+		Query:                       definition.Query,
+		K:                           definition.K,
+		RetrieverVersion:            arm.Arm.RetrieverVersion,
+		EmbeddingProfile:            arm.Arm.EmbeddingProfile,
+		RerankProfile:               arm.Arm.RerankProfile,
+		QueryMode:                   arm.Arm.QueryMode,
+		QueryRewriteStatus:          status,
+		RewriteProvider:             arm.Arm.RewriteProvider,
+		RewriteModelID:              arm.Arm.RewriteModelID,
+		RewritePromptVersion:        arm.Arm.RewritePromptVersion,
+		ContextMode:                 arm.Arm.ContextMode,
+		ContextExpansionEnabled:     arm.Arm.ContextMode == RetrievalContextParent,
+		ContextCompressionEnabled:   arm.Arm.ContextCompressionEnabled,
+		ContextCompressionMaxChunks: arm.Arm.ContextCompressionMaxChunks,
+		ContextCompressionMaxRunes:  arm.Arm.ContextCompressionMaxRunes,
+		ContextCompressionMinScore:  arm.Arm.ContextCompressionMinScore,
+		DurationMillis:              durationMillis,
 	}
 }
 
@@ -180,6 +184,13 @@ func (o *AdvancedRetrievalObserver) populateSuccessfulObservation(
 	observation.QueryRewriteStatus = result.QueryRewriteStatus
 	observation.RewriteApplied = result.QueryPlan.RewriteApplied
 	observation.RewriteUsage = result.QueryRewriteUsage
+	observation.EmbeddingTotalTokens = result.EmbeddingUsage.TotalTokens
+	observation.RerankTotalTokens = result.RerankUsage.TotalTokens
+	if result.ContextCompressionEnabled != arm.Arm.ContextCompressionEnabled {
+		return errors.New("advanced retrieval result changed context compression arm")
+	}
+	observation.ContextCompressionApplied = result.ContextCompressionApplied
+	observation.ContextCompression = result.ContextCompression
 	if arm.FTSEnabled {
 		observation.FTSQueryCount = len(result.QueryPlan.FTSQueries())
 	}

@@ -53,7 +53,10 @@ func (r *Rewriter) Rewrite(ctx context.Context, query string) (knowledge.QueryRe
 	payload, err := json.Marshal(struct {
 		Query            string   `json:"query"`
 		ProtectedSignals []string `json:"protectedSignals"`
-	}{Query: query, ProtectedSignals: knowledge.ProtectedQuerySignals(query)})
+		MaxSubqueries    int      `json:"maxSubqueries"`
+	}{
+		Query: query, ProtectedSignals: knowledge.ProtectedQuerySignals(query), MaxSubqueries: r.maxSubqueries,
+	})
 	if err != nil {
 		return knowledge.QueryRewriteResult{}, errors.New("encode query rewrite input")
 	}

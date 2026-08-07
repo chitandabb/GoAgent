@@ -49,7 +49,13 @@ type agentRuntimeBuilders struct {
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
 	return agentRuntimeBuilders{
-		chatModel: chatmodel.NewStepFun,
+		chatModel: func(ctx context.Context, cfg config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+			instance, err := chatmodel.NewActive(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			return instance.Model, nil
+		},
 		githubMCP: func(ctx context.Context, cfg config.GitHubMCPConfig, log *zap.Logger) (
 			[]tool.BaseTool, func() error, error,
 		) {
@@ -91,10 +97,10 @@ func buildAgentRuntime(
 	log *zap.Logger,
 	builders agentRuntimeBuilders,
 ) (*agentRuntime, error) {
-	runtime := &agentRuntime{
-		modelProvider: strings.ToLower(strings.TrimSpace(cfg.Models.Chat.Provider)),
-		modelID:       strings.TrimSpace(cfg.Models.Chat.Model),
-		promptVersion: strings.TrimSpace(cfg.Agent.PromptVersion),
+	runtime := &agentRuntime{promptVersion: strings.TrimSpace(cfg.Agent.PromptVersion)}
+	if activeProfile, profileErr := cfg.Models.Chat.ActiveProfile(); profileErr == nil {
+		runtime.modelProvider = strings.ToLower(strings.TrimSpace(activeProfile.Provider))
+		runtime.modelID = strings.TrimSpace(activeProfile.Model)
 	}
 	if !cfg.Models.Chat.Enabled {
 		return runtime, nil
@@ -181,7 +187,7 @@ func buildAgentRuntime(
 		if builder == nil {
 			builder = defaultAgentRuntimeBuilders().knowledgeSearch
 		}
-		knowledgeSearch, err = builder(ctx, postgresDB, cfg, chatModel, log.Named("knowledge_search"))
+		knowledgeSearch, err = builder(ctx, postgresDB, cfg, nil, log.Named("knowledge_search"))
 		if err != nil {
 			log.Warn("knowledge search Tool unavailable; continuing with other Agent capabilities", zap.Error(err))
 			knowledgeSearch = nil
@@ -233,8 +239,27 @@ func buildKnowledgeSearchTool(
 	chatModel model.ToolCallingChatModel,
 	log *zap.Logger,
 ) (tool.BaseTool, error) {
+	service, err := BuildKnowledgeSearchService(ctx, db, cfg, chatModel, log)
+	if err != nil {
+		return nil, err
+	}
+	return mesagent.NewSearchKnowledgeTool(service)
+}
+
+// BuildKnowledgeSearchService assembles the production retrieval chain so runtime tools and
+// fixed-set evaluations exercise the same provider, fallback, rerank, and context behavior.
+func BuildKnowledgeSearchService(
+	ctx context.Context,
+	db *gorm.DB,
+	cfg config.Config,
+	queryRewriteModelOverride model.ToolCallingChatModel,
+	log *zap.Logger,
+) (*knowledge.SearchService, error) {
 	if db == nil {
 		return nil, errors.New("knowledge search PostgreSQL database is nil")
+	}
+	if log == nil {
+		log = zap.NewNop()
 	}
 	repository := platformpostgres.NewKnowledgeRepository(db)
 	var embedder knowledge.Embedder
@@ -270,39 +295,75 @@ func buildKnowledgeSearchTool(
 	if cfg.Knowledge.Retrieval.ContextExpansionEnabled {
 		contextExpander = repository
 	}
-	var queryRewriter knowledge.QueryRewriter
 	rewriteConfig := cfg.Knowledge.Retrieval.QueryRewrite
-	if rewriteConfig.Enabled {
-		prompt, promptErr := rewriteConfig.LoadPrompt()
-		if promptErr != nil {
-			log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(promptErr))
-		} else if chatModel == nil {
-			log.Warn("knowledge query rewrite unavailable; chat model is nil")
-		} else {
-			queryRewriter, promptErr = platformqueryrewrite.New(
-				chatModel, prompt, strings.TrimSpace(rewriteConfig.PromptVersion),
-				time.Duration(rewriteConfig.TimeoutMillis)*time.Millisecond,
-				rewriteConfig.MaxSubqueries, rewriteConfig.MaxOutputRunes,
-			)
-			if promptErr != nil {
-				log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(promptErr))
-				queryRewriter = nil
-			}
-		}
-	}
+	queryRewriter := buildQueryRewriter(ctx, cfg, queryRewriteModelOverride, log)
 	service, err := knowledge.NewSearchServiceWithOptions(
 		repository, embedder, profile, retrievalCandidateN, knowledge.SearchServiceOptions{
 			Reranker: reranker, RerankCandidateN: rerankCandidateN,
 			ContextExpander: contextExpander,
 			ContextWindow:   cfg.Knowledge.Retrieval.ContextWindow,
 			ContextMaxRunes: cfg.Knowledge.Retrieval.ContextMaxRunes,
-			QueryRewriter:   queryRewriter, MaxSubqueries: rewriteConfig.MaxSubqueries,
+			ContextCompression: knowledge.ContextCompressionConfig{
+				Enabled:   cfg.Knowledge.Retrieval.ContextCompression.Enabled,
+				MaxChunks: cfg.Knowledge.Retrieval.ContextCompression.MaxChunks,
+				MaxRunes:  cfg.Knowledge.Retrieval.ContextCompression.MaxRunes,
+				MinScore:  cfg.Knowledge.Retrieval.ContextCompression.MinScore,
+			},
+			QueryRewriter: queryRewriter, MaxSubqueries: rewriteConfig.MaxSubqueries,
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
-	return mesagent.NewSearchKnowledgeTool(service)
+	return service, nil
+}
+
+func buildQueryRewriter(
+	ctx context.Context,
+	cfg config.Config,
+	override model.ToolCallingChatModel,
+	log *zap.Logger,
+) knowledge.QueryRewriter {
+	rewriteConfig := cfg.Knowledge.Retrieval.QueryRewrite
+	if !rewriteConfig.Enabled {
+		return nil
+	}
+	if log == nil {
+		log = zap.NewNop()
+	}
+	prompt, err := rewriteConfig.LoadPrompt()
+	if err != nil {
+		log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(err))
+		return unavailableQueryRewriter{err: err}
+	}
+	rewriteModel := override
+	if rewriteModel == nil {
+		instance, modelErr := chatmodel.NewProfile(ctx, cfg.Models.Chat, rewriteConfig.ModelProfile)
+		if modelErr != nil {
+			log.Warn("knowledge query rewrite model unavailable; using original query", zap.Error(modelErr))
+			return unavailableQueryRewriter{err: modelErr}
+		}
+		rewriteModel = instance.Model
+	}
+	rewriter, err := platformqueryrewrite.New(
+		rewriteModel, prompt, strings.TrimSpace(rewriteConfig.PromptVersion),
+		time.Duration(rewriteConfig.TimeoutMillis)*time.Millisecond,
+		rewriteConfig.MaxSubqueries, rewriteConfig.MaxOutputRunes,
+	)
+	if err != nil {
+		log.Warn("knowledge query rewrite unavailable; using original query", zap.Error(err))
+		return unavailableQueryRewriter{err: err}
+	}
+	return rewriter
+}
+
+type unavailableQueryRewriter struct{ err error }
+
+func (r unavailableQueryRewriter) Rewrite(context.Context, string) (knowledge.QueryRewriteResult, error) {
+	if r.err == nil {
+		return knowledge.QueryRewriteResult{}, errors.New("query rewrite model is unavailable")
+	}
+	return knowledge.QueryRewriteResult{}, r.err
 }
 
 type unavailableExternalCaseGetter struct{}

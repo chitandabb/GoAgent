@@ -86,16 +86,20 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	opts, err := parseRunOptions(args, cfg.Models.Chat.ReasoningEffort)
+	profile, err := cfg.Models.Chat.ActiveProfile()
 	if err != nil {
 		return err
 	}
-	cfg.Models.Chat.ReasoningEffort = opts.ReasoningEffort
-	chatModel, err := platformchatmodel.NewStepFun(ctx, cfg.Models.Chat)
+	opts, err := parseRunOptions(args, profile.ReasoningEffort)
 	if err != nil {
-		return fmt.Errorf("build StepFun model: %w", err)
+		return err
 	}
-	result, err := probe(ctx, chatModel, cfg.Models.Chat.Model)
+	profile.ReasoningEffort = opts.ReasoningEffort
+	instance, err := platformchatmodel.New(ctx, cfg.Models.Chat.ActiveProfileName, profile)
+	if err != nil {
+		return fmt.Errorf("build chat model: %w", err)
+	}
+	result, err := probe(ctx, instance.Model, instance.Identity.ModelID)
 	if err != nil {
 		return err
 	}
@@ -127,19 +131,19 @@ func run(ctx context.Context, args []string) error {
 func parseRunOptions(args []string, defaultEffort string) (runOptions, error) {
 	flags := flag.NewFlagSet("mesguard-model-smoke", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	effort := flags.String("reasoning-effort", defaultEffort, "low, medium, or high")
+	effort := flags.String("reasoning-effort", defaultEffort, "provider-supported effort; empty keeps thinking control only")
 	showReasoning := flags.Bool("show-reasoning", false, "print raw reasoning in this local probe")
 	if err := flags.Parse(args); err != nil {
-		return runOptions{}, fmt.Errorf("usage: mesguard-model-smoke [-reasoning-effort low|medium|high] [-show-reasoning]: %w", err)
+		return runOptions{}, fmt.Errorf("usage: mesguard-model-smoke [-reasoning-effort provider-value] [-show-reasoning]: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return runOptions{}, errors.New("usage: mesguard-model-smoke [-reasoning-effort low|medium|high] [-show-reasoning]")
+		return runOptions{}, errors.New("usage: mesguard-model-smoke [-reasoning-effort provider-value] [-show-reasoning]")
 	}
 	normalizedEffort := strings.ToLower(strings.TrimSpace(*effort))
 	switch normalizedEffort {
-	case "low", "medium", "high":
+	case "", "low", "medium", "high", "xhigh", "max":
 	default:
-		return runOptions{}, errors.New("reasoning-effort must be low, medium, or high")
+		return runOptions{}, errors.New("reasoning-effort must be empty, low, medium, high, xhigh, or max")
 	}
 	return runOptions{ReasoningEffort: normalizedEffort, ShowReasoning: *showReasoning}, nil
 }

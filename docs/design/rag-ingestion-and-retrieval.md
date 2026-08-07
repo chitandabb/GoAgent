@@ -31,8 +31,11 @@
 - Embedding Profile、批量 Embedding、pgvector 精确向量检索、FTS/Vector 并行召回和 RRF 融合；
 - 可选 DashScope `qwen3-rerank` 适配器、Rerank Token/延迟观测和失败时保留 RRF 的降级；
 - 最终 child 命中后的同版本/同章节有界上下文扩展，独立返回邻接 Chunk 身份与哈希；
+- Parent 扩展后的确定性整 Chunk 压缩，全局限制邻接 Chunk/rune，并输出输入、输出和省略统计；
 - 受控 Query Plan、protected signals 门禁、多 Query 通道内合并和失败时回退原 Query；
 - 后端自动授权诊断任务使用知识库，统一 `search_knowledge` Tool 隐藏检索通道、候选预算和对象存储细节；
+- Evidence Gate 只在事实证据缺口时允许第二轮最多一次 `search_knowledge`，并记录是否新增证据和停止原因；
+- Agentic 二次检索三 Case 真实模型固定集，覆盖证据缺口、纯格式修复和首轮通过三条控制路径；
 - Knowledge Chunk 结果的文档/版本/Chunk UUID、内容哈希、标题、页码和章节路径校验；空结果或损坏结果不会生成可引用 EvidenceItem；
 - `rag-retrieval-v1` 固定集的 FTS、Vector、RRF 和 RRF+Rerank 对照结果，以及布局/OCR/VLM/PPTX 的独立质量记录。
 
@@ -42,8 +45,9 @@
 - 内容代理读取、孤儿清理和完整对象生命周期；
 - 更大规模 OCR/VLM provider 配对测评、扫描表格/小字体/退化扫描质量、复杂图表区域语义和丰富 Office 视觉语义；
 - XLSX 公式表达式、隐藏 Sheet/Slide 语义和 PPTX 演讲者备注等丰富 Office 语义；
-- 物化 Parent 索引、Agentic 二次检索和面向用户的知识问答 HTTP/SSE 运行链路；受控 Query
-  Rewrite 与逻辑 Parent 邻接扩展已实现，但尚未完成 paired 检索和多 Chunk 上下文质量评测；
+- 物化 Parent 索引和面向用户的知识问答 HTTP/SSE 运行链路；受控 Query Rewrite 与逻辑 Parent
+  邻接扩展各完成一个 paired Case，Compression 质量轴已完成 5 Case，另有单压力 Case 触发生产阈值；
+  Agentic 二次检索已完成三 Case 真实模型决策固定集，但答案质量、失败/重复证据和多轮稳定性仍待扩展；
 - Web Search Tool、公开页面抓取与企业知识引用之间的升级边界；
 - MinIO/RabbitMQ/PostgreSQL/pgvector 全链路的文档处理吞吐量基线和最终第三条简历指标；当前 parser-only 吞吐与 routing avoidance 不能直接写成端到端提升。
 
@@ -170,6 +174,10 @@
     错误率和单个成功区域成本；`gemini-3.5-flash-lite` 仅在凭证可用时作为速度参考。
 54. ONNX Router 需要单独报告页面/区域 Macro-F1、高价值视觉元素漏检率、CPU/RAM 和避免的
     OCR/VLM 调用数；路由降本不能以降低最终 Recall@5 或引用完整性为代价。
+55. Parent 邻接上下文采用确定性整 Chunk 压缩，不用 LLM 摘要改写证据。生产初值为全局最多
+    6 个邻接 Chunk、3000 rune、最低相关分 0.05；命中 Chunk 不计入该预算，配置不能由 Tool 参数覆盖。
+56. Evidence Gate 的第二轮只在缺少可追溯证据或来源绑定失败时允许 `search_knowledge`，最多一次；
+    纯结构/格式缺口隐藏该 Tool。二次检索是否尝试、是否新增稳定版本/Chunk/内容哈希和停止原因必须落库并可查询。
 
 ## 模型 Provider 可替换性边界
 
@@ -179,12 +187,20 @@
 
 | 模型角色 | 当前实现 | 只改配置可换 Provider | 切换时必须处理 |
 | --- | --- | --- | --- |
-| Agent Chat / Query Rewrite | Eino `ToolCallingChatModel` 接口，Bootstrap 固定 `NewStepFun` | 否 | Tool Calling、严格 JSON、推理参数映射、Usage 完整性和 Agent paired baseline |
+| Agent Chat | 命名 Profile Resolver + 通用 Factory；已注册 StepFun/DeepSeek/DashScope Adapter | 装配层可以；目标 Profile 仍需准入 | Tool Calling、推理参数、Usage、取消和 Agent paired baseline |
+| Query Rewrite | 独立 `modelProfile`，不再复用主 Agent；默认候选 `qwen-rewrite` | 装配层可以；当前仍默认关闭 | 严格 JSON、protected signals、质量净收益、P95 和每千次成本 |
 | LLM Judge | 只有默认关闭的 DashScope 配置骨架 | 否 | 独立适配器、Judge Prompt/Schema、与人工黄金事实的一致性校准 |
 | Embedding | `Embedder` 接口，DashScope `text-embedding-v4` 适配器 | 否，且不能原地换向量空间 | 新 `EmbeddingProfile`、全量回填、固定集评测、原子 active 切换和旧 profile 回滚 |
 | Rerank | `Reranker` 接口，DashScope `qwen3-rerank` 适配器 | 否 | 请求/分数契约、候选上限、超时降级和排序质量/成本 paired 评测；不需要重建向量 |
 | OCR / VLM | 通用 Generator/Processor 端口，Bootstrap 固定 DashScope | 否 | 图片输入格式、严格 JSON、Prompt、视觉质量、限流和 Token/费用字段映射 |
 | Layout Router | `LayoutRouter` 接口，固定 ONNX Runtime/PP-DocLayout-M 契约 | 否 | 权重许可证/SHA、标签映射、预后处理、固定集 Macro-F1 和资源门禁 |
+
+Chat Profile 的解析链路是 `role/profile -> Profile Resolver -> Provider Factory -> Adapter -> Eino
+ToolCallingChatModel`。静态校验覆盖所有已配置 Profile，但只有 active 或被角色引用的 Profile 才读取
+对应 API Key。StepFun Adapter 映射 `reasoning_effort`；DeepSeek 要求显式 `thinking`，关闭 Thinking
+时拒绝 effort，开启时映射其 `low/high/xhigh/max` 并标记多轮 Tool Calling 需要保留
+`reasoning_content`；DashScope 把 `thinkingMode` 映射为 `enable_thinking`。不支持的组合启动/构建即失败，
+不会静默忽略。
 
 Chat 的 ReAct 循环、TaskScope、Tool 参数策略和 Evidence Gate 不依赖 StepFun；换模型不会获得额外
 权限，也不会改变确定性门禁。Provider 差异集中在模型能力：有的模型支持 `reasoning_effort`，有的
@@ -200,6 +216,45 @@ Prompt/Completion/Total Token 继续以供应商 Usage 为准，不从字符数�
 
 参考：CloudWeGo Eino Extension 官方 OpenAI ChatModel 文档：
 `https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/README.md`。
+
+### 2026-08-06 DeepSeek Chat 迁移审计
+
+DeepSeek 官方当前 Chat Completion 接口使用 Bearer API Key 和 OpenAI-compatible message/tool
+结构，官方客户端示例将 `base_url` 设为 `https://api.deepseek.com`；Chat 请求仍使用
+`max_tokens`，支持 `response_format={"type":"json_object"}` 和流式响应。当前文档列出的模型包括
+`deepseek-v4-pro` 与 `deepseek-v4-flash`，思考模式示例同时使用 `reasoning_effort` 和
+`thinking={"type":"enabled"}`。模型名和请求参数属于供应商演进面，部署时必须以当时文档和
+`/models` 响应为准，不能把这里的名称当成永久常量。
+
+思考模式下的 Tool Calling 不是普通 OpenAI 请求的无差别替换：DeepSeek 官方示例要求把模型返回的
+assistant message（包括 `reasoning_content` 和 Tool Calls）加入下一轮消息，再追加 Tool 结果。仓库
+当前 Eino `v0.9.13`、OpenAI component `v0.1.13` 和 ACL `v0.1.17` 的本地源码能够解析并重新发送
+`ReasoningContent`，也支持 `ExtraFields`；这说明适配器具备实现基础，不等于已经通过 DeepSeek
+真实 Agent 循环。
+
+2026-08-07 已完成配置和请求装配层迁移：
+
+| 位置 | 当前行为 | 剩余验收 |
+| --- | --- | --- |
+| `ChatModelConfig` | `activeProfile + profiles.<name>`；StepFun/DeepSeek/DashScope 静态校验 | 配置变更/密钥轮换仍需重启，尚无动态热加载 |
+| `chatmodel` | 通用 Factory + 三个 Adapter；离线请求形状测试覆盖 effort/thinking/max token | DeepSeek non-thinking/thinking 真实 Tool Calling 和流式探针 |
+| `defaultAgentRuntimeBuilders` | active Profile 创建主 Agent；模型身份来自解析后的 Profile | 切换后跑 Agent paired baseline |
+| Query Rewrite | 按独立 `modelProfile` 创建小模型，构建失败只降级 `query_rewrite` | Qwen 小模型单 Case 成本/延迟/质量对照 |
+| `mesguard-rag-paired-observe` | Rewrite arm 与生产复用相同 named-profile Factory | 批量运行前仍需人工预算确认 |
+| Usage | 标准 Prompt/Completion/Total 已归一化 | 探针确认 cached/reasoning 明细；供应商专有 cache 字段不能静默当成 0 |
+| 评测数据 | StepFun baseline 已存在 | DeepSeek 使用独立 Provider/Model baseline，不与旧 observation 混合 |
+
+下一步不再改业务编排，而是用一个无副作用 Tool 完成 DeepSeek non-thinking 与 thinking 的非流式
+多轮 Tool Calling；随后验证严格 JSON、流式最终 usage、取消和 Evidence Gate；最后在固定 Case 上
+与 StepFun 做 paired 质量、Token、P50/P95 和失败率对照。未完成这些探针前，只能说“Provider
+装配可配置且请求合同已验证”，不能说“DeepSeek 已通过生产热插拔验收”。active Profile 仍是
+`stepfun-main`。
+
+官方资料：
+
+- `https://api-docs.deepseek.com/`；
+- `https://api-docs.deepseek.com/api/create-chat-completion`；
+- `https://api-docs.deepseek.com/guides/thinking_mode`。
 
 ## 第一轮：产品与部署边界
 
@@ -733,8 +788,9 @@ scope 和内容哈希校验。
 已经接入知识问答 Runner，负责服务端封装召回和降级结果。可选 `[models.rerank]` 与 DashScope
 `qwen3-rerank` HTTP 适配器已实现，默认关闭；启用后从最多 30 个候选重排到 Tool 请求的结果数，
 `qwen3-rerank` HTTP 适配器已完成真实固定集评测：24/24 请求成功，Recall@5 为 24/24，MRR 为 0.9792，与当前 RRF 质量相同。本次供应商响应未返回可解析的 `total_tokens`，因此不估算或虚构成本；测试中 Rerank 平均约 81.9ms，独立运行的整体查询均值为 258.8ms，相对 RRF 文档中 211.3ms 的观测增加约 22.5%。这是两次运行的差异，不作严格因果结论。
-剩余高层边界是 Agentic 二次检索、Web Search 和公开知识问答 API；逻辑 parent/child
-上下文扩展与受控 Query Plan 已实现，但还没有在扩展固定集上证明质量净收益，逻辑 Parent 也不是物化 Parent 索引；
+剩余高层边界是 Web Search 和公开知识问答 API；逻辑 parent/child 上下文扩展、受控 Query Plan、
+整 Chunk 压缩和 Evidence Gate 驱动二次检索已实现，但还没有在扩展固定集上证明答案质量净收益，逻辑
+Parent 也不是物化 Parent 索引；
 知识 Chunk 的引用门禁已落地，新建诊断任务已自动冻结 knowledge capability，不由前端或用户勾选。
 
 ### 当前实现检查点：M2-B1 逻辑 Parent 上下文扩展
@@ -749,9 +805,30 @@ Chunk 也携带自己的 ID、ordinal、页面、类型和内容哈希。Tool �
 版本、章节、命中引用、顺序和哈希。扩展失败只增加 `missingChannels=context` 并保留原召回结果；
 没有邻接 Chunk 不算故障。本检查点没有额外模型调用、Embedding 或 Rerank 费用。
 
-这不是完整 Advanced RAG：当前父级是由章节路径和邻接窗口重建，不是独立持久化/向量化的 Parent；
-受控 Query Rewrite 和最多两个子查询已实现，但还没有上下文相关性压缩或 Evidence Gate 驱动的第二次检索。是否物化
-Parent 必须由多段落、多 Chunk 答案集的 Context Recall/Precision、延迟和上下文膨胀率决定。
+当前父级由章节路径和邻接窗口重建，不是独立持久化/向量化的 Parent。扩展后执行确定性整 Chunk
+压缩：查询词覆盖、protected signals、邻接距离和命中排名共同评分；先让高排名命中组有机会保留
+一个候选，再在全局 `maxChunks/maxRunes/minScore` 内补齐。压缩不截断、不摘要，保留原文和
+SHA-256；Tool/Evidence 边界会核对统计与实际返回 Chunk/rune。压缩失败显式标记
+`missingChannels=context_compression` 并保留原上下文。
+
+生产初值为最多 6 个邻接 Chunk、3000 rune、最低分 0.05，命中 child 不计入该预算。是否物化
+Parent 必须由多段落、多 Chunk 答案集的 Context Recall/Precision、压缩率、延迟和上下文膨胀率决定。
+
+### 当前实现检查点：M2-B1 Evidence Gate 驱动二次检索
+
+现有 EvidenceOrchestrator 仍最多运行 2 轮，不新增平行 Agent 循环。第一轮报告只有在缺口包含
+“至少一条可追溯证据”、sourceTool 未成功或 sourceRef 未绑定本次 EvidenceItem 时，第二轮才继续
+暴露 `search_knowledge`；纯 JSON、结论/摘要字段或 confidence 格式问题会隐藏该 Tool，只修复报告。
+
+第二轮通过 run-scoped Tool policy 把 `search_knowledge` 限制为最多一次；该限制先于总 Tool 预算，
+但不会绕过原有 Tool/Token/时间上限。SourceRef 每次调用都会变化，因此运行后按
+`documentVersionId + chunkId + contentSha256` 判定是否真正新增知识证据，输出并持久化
+`agenticRetrievalAttempted`、`agenticRetrievalAddedEvidence` 和稳定 stop reason，同时追加脱敏
+`agentic_retrieval` 调查步骤。第二轮无新增证据不会启动第三次知识检索。当前合同/单测已完成，
+真实模型三 Case 固定集也已完成：证据缺口 Case 实际调用 `search_knowledge` 并新增稳定证据；纯格式
+Case 隐藏该 Tool；首轮合法 Case 不产生第二轮。三 Case 的尝试期望、尝试 Precision/Recall、增量证据
+期望和停止原因准确率均为 1.0，合计 16453 Token。该样本隔离验证控制面，不衡量通用答案质量；
+检索失败、重复证据、模型不选择和重复运行稳定性仍待扩展。
 
 ### 当前实现检查点：M2-B1 受控 Query Plan
 
@@ -768,15 +845,22 @@ FTS/Vector 各自先按最佳 rank、原 Query 顺序、通道分数和 Chunk ID
 和逻辑 Parent 展开；不同 Query 的原始 `ts_rank`/相似度不直接横向比较。改写器内部超时、无效或不可用
 只标记 `missingChannels=query_rewrite`，继续执行基础 FTS/Vector；只有调用方上下文真正取消才中止检索。
 
-`[knowledge.retrieval.queryRewrite]` 配置 Prompt 文件、Prompt version、1-30 秒超时、最多 2 个子查询和
-输出 rune 上限，默认 `enabled=false`。Tool 输出记录完整 QueryPlan、`disabled/accepted/provider_failed/
+`[knowledge.retrieval.queryRewrite]` 通过 `modelProfile` 选择独立快速模型，并配置 Prompt 文件、Prompt
+version、1-30 秒超时、最多 2 个子查询和输出 rune 上限，默认 `enabled=false`。当前
+`qwen-rewrite` 使用 `qwen3.6-flash`、关闭 Thinking、`temperature=0`、3 秒、256 输出 Token，默认最多
+1 个子查询；这些是待测候选，不是已证明的最优参数。Tool 输出记录完整 QueryPlan、
+`disabled/accepted/provider_failed/
 policy_rejected` 状态、Prompt version 和供应商 Token usage；严格 JSON 解码要求 `subqueries` 必须存在
 且为数组。Prompt 位于 `config/prompts/query-rewrite.md`，修改内容时必须同步提升版本。
 
-真实 StepFun smoke 共进行了三次短 Query 调用：10 秒预算出现内部超时；30 秒预算第一次返回后因
+旧版复用主 StepFun Profile 的 smoke 共进行了三次短 Query 调用：10 秒预算出现内部超时；30 秒预算第一次返回后因
 protected signals 不完整被门禁拒绝；将服务端提取的信号显式提供给模型后通过，测试总耗时观测约
 17.6 秒。这只证明结构化契约和回退门禁可用，也说明延迟/稳定性不足以默认开启；没有
-Recall/MRR/Context Precision 净收益证据。详细边界见 `docs/evaluations/query-rewrite-v1.md`。
+Recall/MRR/Context Precision 净收益证据。后续 paired 单 Case 又观测到 1152 Rewrite Token 和约
+8.4 秒总延迟，根因是改写复用了主模型的 medium reasoning/4096 输出上限；这直接促成了独立小模型
+Profile。`qwen-rewrite` 首次合同 smoke 约 1.14 秒返回，但因 Prompt v1 允许 2 个子查询而运行时只允许
+1 个，被确定性门禁拒绝；Prompt v2 已把 `maxSubqueries` 作为运行时输入并保留响应后校验，尚未二次
+调用。详细边界见 `docs/evaluations/query-rewrite-v1.md`。
 
 ### 当前实现检查点：M2-B1 Advanced RAG paired 评测合同
 
@@ -784,12 +868,14 @@ Recall/MRR/Context Precision 净收益证据。详细边界见 `docs/evaluations
 `documentKey + chunk ordinal + content SHA-256`，Chunk 内容或分块顺序漂移会使 observation 校验失败，
 不会静默沿用旧标签。每个 Case 必须且只能提供 baseline/experiment 一对 observation，并固定相同
 Retriever、Embedding profile、Rerank profile 和 K；Query 轴记录 `original/rewrite`，上下文轴记录
-`child/parent`，因此可以做 original-child、rewrite-child、original-parent、rewrite-parent 的受控对照。
+`child/parent`，压缩轴固定 Parent 并记录 enabled、maxChunks、maxRunes 和 minScore，因此可以做
+original-child、rewrite-child、original-parent、rewrite-parent 和 parent-compression 的受控对照。
 
 离线汇总器 `cmd/mesguard-rag-paired-eval` 严格读取 JSONL，拒绝未知字段、混合 K、缺失 pair、重复
 Chunk 位置、底层 profile 漂移以及同时改变两个实验轴的混杂 pair。每对实验只能按固定方向比较
-`original -> rewrite` 或 `child -> parent`。输出 Hit Rate@K、Document Recall@K/MRR、Context Precision/Recall、查询放大
-倍数、上下文 rune 变化率、延迟变化率、改写状态和供应商 Token。Hit Rate 表示每个问题是否至少
+`original -> rewrite`、`child -> parent` 或 `uncompressed parent -> bounded parent`。输出 Hit Rate@K、
+Document Recall@K/MRR、Context Precision/Recall、查询放大倍数、压缩输入/输出 Chunk 与 rune、
+省略数、压缩率、上下文 rune 变化率、延迟变化率、改写状态和供应商 Token。Hit Rate 表示每个问题是否至少
 命中一个相关文档，Document Recall 则按该问题召回的相关文档比例计算，两者不混用。
 
 领域层 `AdvancedRetrievalObserver` 已把两个真实 `SearchService` arm 的结果转换成严格 observation：
@@ -798,8 +884,32 @@ Chunk 位置、底层 profile 漂移以及同时改变两个实验轴的混杂 p
 基础检索成功时保留回退结果；检索本身失败时写入 `search_failed/not_observed` 并按零质量进入汇总，
 避免只统计成功请求；调用方取消或超时仍立即中止。Observer 只依赖稳定 Search 接口，不创建具体模型。
 
-离线命令本身不连接数据库或模型；真实 PostgreSQL/Provider fixture 命令和 `rag-advanced-v1` 扩展黄金集
-尚未完成，所以本检查点没有新增质量数字。
+离线命令本身不连接数据库或模型。真实命令 `cmd/mesguard-rag-paired-observe` 已固定 4 份公开官方
+文档、21 个 Chunk 和 5 个 Case，在 PostgreSQL 事务内构造临时知识数据、调用生产
+`BuildKnowledgeSearchService`，结束后整体回滚；默认最多一个 Case，并要求显式
+`-execute-provider`。Query Embedding、Rewrite 和 Rerank Token 分开记录。
+
+首轮仅运行 `pool-limit-wait-risk`：逻辑 Parent 将 Context Recall 从 0.5 提高到 1.0，但上下文 rune
+增加 108.97%、延迟增加 32.14%；Query Rewrite 没有改变质量指标，却消耗 1152 Rewrite Token、
+使 Query Embedding 增加 157.14%，延迟增加 4434.33%。这些都是单 Case 观察，不是总体增幅；
+完整边界见 `docs/evaluations/rag-advanced-v1.md`。
+
+2026-08-07 已对 Compression 轴运行全部 5 Case。production 阈值为 6 Chunk/3000 rune/0.05，
+13 个邻接 Chunk 全部保留，平均输入/输出均为 575.4 rune，Hit Rate、Document Recall、MRR 和
+Context Precision/Recall 均不变。该结果验证链路但没有压缩收益；当前固定集缺少会触发生产阈值的
+长 Parent 压力样本，不能宣称 Token 降低，也不能为追求降幅直接调低生产阈值。
+
+随后新增独立 `rag-compression-pressure-v1`，固定 PostgreSQL 官方 Advisory Locks/Deadlocks 文档和
+一个 `K=6` 多事实长章节 Case，不把压力 Query 混入通用质量均值。真实 RRF pair 在不改 production
+阈值时连续三次将 7 个邻接 Chunk 压到 6 个、1507 rune 压到 1438 rune（-4.58%），Gold Context
+Recall 保持 1.0。命令的 `-require-compression-acceptance` 会在零省略或黄金召回下降时失败。该结果
+证明阈值能真实触发和证据哈希保持，不是总体 Token 降幅；仍需扩展多来源压力 Case。
+
+`agentic-retrieval-v1` 进一步用固定首轮状态和固定 KnowledgeSearcher 隔离验证上层控制器。真实
+`step-3.7-flash` 运行三 Case：证据缺口路径调用一次知识 Tool 并新增证据，格式修复路径不暴露知识
+Tool，首轮通过路径不调用模型；停止原因分别为 `new_evidence_added/not_eligible/not_needed`，总计
+16453 Token。一次 8000 Token 预跑还暴露了 Provider Usage 在响应完成后结算、单次响应可能越过总预算
+的边界，因此评测默认按生产值 16000/Case 运行。该结果不替代答案/引用质量评测。
 
 上线前固定集至少新增三类对照：口语/省略/多轮指代的可独立问题改写，错误码/版本/否定条件保真，
 以及一个问题需要两个不同 Chunk 才能回答的多跳样本。比较 original-only 与 rewrite 的 Recall@K、MRR、
@@ -1103,3 +1213,44 @@ Windows ONNX 线程 A/B 中，1/2/4 intra-op 的中位平均页时延分别为 1
 结果位于 `docs/evaluations/layout-routing-public-v1.md` 与
 `docs/evaluations/knowledge-ingestion-quality-v1.md`，架构决策位于
 `docs/decisions/003-local-onnx-layout-routing.md`。
+
+### 实施中检查点：M2-C 入库吞吐基线
+
+入库吞吐优化当前只改变持久化执行方式，不改变 Artifact、Chunk、Embedding profile 或发布事务
+语义。`[knowledge].chunkWriteBatchSize` 默认 100；Repository 在同一 fenced transaction 中分别批量
+写入 Chunk 和 pgvector，`batchSize=1` 保留逐行参考路径。Embedding 仍使用既有 batch/concurrency，
+没有为了吞吐降低输出维度或跳过向量。
+
+评测使用稳定 `formatClass` 区分原生 PDF、扫描 PDF、DOCX、XLSX、PPTX、PNG、JPEG 和文本，类别
+进入 corpus fingerprint。最终 acceptance 需要至少 40 份真实文档、8 类格式、5 个 paired repetitions，
+并要求成功/partial/失败集合、Element 和 Chunk 完整性不回退。单一 MIME 数量不再被当成格式覆盖。
+
+首个真实 Worker-core pilot 使用 NIST IR 8108 的 27 页/32 Chunk 原生 PDF，覆盖 MinIO、Parser、
+DashScope Embedding、Worker checkpoint、PostgreSQL Chunk/pgvector staging 与发布。串行参考和实验
+分别耗时 6686 ms/1130 ms，Embedding 请求 32/4，Chunk 与向量 INSERT 批次 32/1，Token 都为
+7904，结果都为相同的 partial/7 Element/32 Chunk。491.68% 是组合路径的单样本观测；文档并发在
+单文档上没有作用，且未逐项消融 Embedding 与数据库 batching，也未覆盖 RabbitMQ、OCR/VLM 或
+layout。因此评测汇总保持 `AcceptanceEligible=false` 和 `MeetsTarget=false`。详细命令、合同和边界见
+`docs/evaluations/rag-ingestion-throughput-v1.md`。
+
+数据库批写已进一步完成独立消融：两份 NIST PDF 和一份 Microsoft DOCX 共 743 Chunk，五轮只改变
+`chunkWriteBatchSize=1/100`。`SaveParsedResult` 中位耗时从 1752 ms 降到 406 ms，配对 staging
+吞吐变化中位数为 +319.21%，每轮 Chunk/向量 INSERT 批次从 743+743 降到 9+9，Provider 调用和
+Token 都为 0。这证明减少数据库往返的独立收益，不代表全链路同幅提升；3 文档/2 类仍不满足验收。
+
+扩充真实语料时发现 Microsoft DOCX 通过 `word/document.xml.rels` 合法引用根级 `customXml`。OOXML
+解析器已从“必须停留在首个顶层目录”修正为“不得越过虚拟 ZIP 根”的逐段 URI path 解析；同包跨
+顶层引用可用，真正的根逃逸和外部目标仍拒绝。该兼容性修复不计入吞吐增幅。
+
+为在调用云模型前隔离坏文件和格式缺口，新增 provider-free corpus audit：不连接 MinIO、PostgreSQL
+或模型，但真实执行生产 Parser 与 Chunking，并区分 `text_ready`、`text_ready_visual_pending`、
+`visual_enrichment_required`、`parser_failed`。2026-08-07 的固定清单已达到 12 份公开文档并覆盖全部
+8 类格式，共产生 4,190 Element、6,177 Chunk、128 个视觉候选，0 份解析失败；PPTX 正确进入“文本
+可检索、视觉待增强”，扫描 PDF、PNG 和 JPEG 进入视觉增强路径，XLSX 与纯文本分别产生 185 和
+2,197 个 Chunk。视觉字节只统计实际物化的图片 `Content`，PDF 页面引用不再按页重复累计整份源文件。
+格式门槛已经通过，但总文档数仍为 12/40，且没有 5 个完整全链路 pair，因此结果仍为
+`AcceptanceEligible=false`、`MeetsTarget=false`。
+
+语料可复现性不依赖人工记忆：严格 manifest 记录 `publisher/sourceUrl/downloadUrl/usageBasis` 与文件
+身份，下载地址只允许无凭据 HTTPS；PowerShell fetch 脚本把目标限制在被 Git 忽略的 evaluation 根目录，
+已有文件先校验，下载文件也必须在临时路径通过字节数和 SHA-256 后才替换正式文件。

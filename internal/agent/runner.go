@@ -212,6 +212,10 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if resolveErr != nil {
 		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
 	}
+	allowedTools, err = filterAgentToolsForRun(ctx, allowedTools)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("apply run tool policy: %w", err)
+	}
 	result.AllowedTools, err = toolNames(ctx, allowedTools)
 	if err != nil {
 		return RunResult{}, err
@@ -504,6 +508,9 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 	return compose.ToolMiddleware{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if err := agentToolRunPolicyFromContext(ctx).reserve(input.Name); err != nil {
 				return nil, err
 			}
 			if err := executionBudgetFromContext(ctx).reserveToolCall(); err != nil {

@@ -277,19 +277,28 @@ func TestSpreadsheetColumnIndexValidatesCompleteCellReference(t *testing.T) {
 func TestOOXMLRelationshipsAllowNestedPackagePathsButRejectRootEscape(t *testing.T) {
 	relationships, err := parseOOXMLRelationships(
 		context.Background(),
-		[]byte(`<Relationships><Relationship Id="image" Target="../media/image1.png"/></Relationships>`),
+		[]byte(`<Relationships><Relationship Id="image" Target="../media/image1.png"/><Relationship Id="custom" Target="../../customXml/item1.xml"/></Relationships>`),
 		"ppt/slides",
 	)
-	if err != nil || relationships["image"] != "ppt/media/image1.png" {
+	if err != nil || relationships["image"] != "ppt/media/image1.png" ||
+		relationships["custom"] != "customXml/item1.xml" {
 		t.Fatalf("relationships = %+v, %v", relationships, err)
 	}
 	_, err = parseOOXMLRelationships(
 		context.Background(),
-		[]byte(`<Relationships><Relationship Id="escape" Target="../../outside.xml"/></Relationships>`),
+		[]byte(`<Relationships><Relationship Id="escape" Target="../../../outside.xml"/></Relationships>`),
 		"ppt/slides",
 	)
 	if !errors.Is(err, ErrInvalidContent) {
 		t.Fatalf("escape error = %v", err)
+	}
+	_, err = parseOOXMLRelationships(
+		context.Background(),
+		[]byte(`<Relationships><Relationship Id="authority" Target="//server/share.xml"/></Relationships>`),
+		"word",
+	)
+	if !errors.Is(err, ErrInvalidContent) {
+		t.Fatalf("authority error = %v", err)
 	}
 }
 

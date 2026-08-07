@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -161,6 +162,32 @@ func TestAgentRuntimeCloseReleasesMCP(t *testing.T) {
 	}
 	if !closed {
 		t.Fatal("MCP close was not called")
+	}
+}
+
+func TestBuildQueryRewriterPreservesProviderFailedSemanticsWhenProfileKeyIsMissing(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "query-rewrite.md")
+	if err := os.WriteFile(promptPath, []byte("Return strict JSON."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MISSING_REWRITE_KEY", "")
+	cfg := testAgentConfig()
+	cfg.Models.Chat.Profiles = map[string]config.ChatModelProfileConfig{
+		"rewrite": {
+			Provider: "dashscope", BaseURL: "https://example.com/v1", APIKeyEnv: "MISSING_REWRITE_KEY",
+			Model: "qwen3.6-flash", ThinkingMode: "disabled", TimeoutMillis: 3000, MaxOutputTokens: 256,
+		},
+	}
+	cfg.Knowledge.Retrieval.QueryRewrite = config.KnowledgeQueryRewriteConfig{
+		Enabled: true, ModelProfile: "rewrite", PromptFile: promptPath, PromptVersion: "query-rewrite-v1",
+		TimeoutMillis: 3000, MaxSubqueries: 1, MaxOutputRunes: 1024,
+	}
+	rewriter := buildQueryRewriter(context.Background(), cfg, nil, zap.NewNop())
+	if rewriter == nil {
+		t.Fatal("missing profile key disabled query rewrite instead of preserving failure semantics")
+	}
+	if _, err := rewriter.Rewrite(context.Background(), "SQL error 258"); err == nil {
+		t.Fatal("unavailable query rewriter returned no error")
 	}
 }
 

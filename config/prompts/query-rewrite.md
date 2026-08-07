@@ -8,7 +8,7 @@ Rules:
 
 - lexicalQuery is concise and optimized for exact keyword retrieval.
 - semanticQuery is a standalone natural-language formulation for semantic retrieval.
-- subqueries contains zero to two independent retrieval questions only when the original query has separable facets.
+- subqueries contains no more than maxSubqueries independent retrieval questions, and only when the original query has separable facets.
 - Copy every value in protectedSignals exactly into both main queries. Do not translate, normalize, replace, or omit one.
 - A subquery may cover only one facet, but must not invent identifiers, numbers, versions, products, customers, systems, or facts.
 - Do not answer the query, explain decisions, use Markdown, or add JSON fields.

@@ -95,8 +95,72 @@ func TestEvidenceOrchestratorRetriesOnlyForEvidenceGaps(t *testing.T) {
 	}
 	requests := invoker.snapshotRequests()
 	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "至少需要一条可追溯证据") ||
-		!strings.Contains(requests[1].UserQuery, "<previous_report>") {
+		!strings.Contains(requests[1].UserQuery, "<previous_report>") ||
+		!strings.Contains(requests[1].UserQuery, "search_knowledge，但最多一次") {
 		t.Fatalf("supplemental request = %+v", requests)
+	}
+	if result.AgenticRetrievalAttempted || result.AgenticRetrievalAddedEvidence ||
+		result.AgenticRetrievalStopReason != "not_selected" {
+		t.Fatalf("unexpected Agentic retrieval observation: %+v", result)
+	}
+}
+
+func TestEvidenceOrchestratorRecordsAgenticKnowledgeEvidence(t *testing.T) {
+	versionID, chunkID := uuid.NewString(), uuid.NewString()
+	contentHash := strings.Repeat("a", 64)
+	invalid := validEvidenceReport()
+	invalid.Evidence = nil
+	knowledgeReport := validEvidenceReport()
+	knowledgeReport.Evidence = []ReportEvidence{{
+		Claim: "报工接口需要核对网关超时", SourceTool: ToolSearchKnowledge,
+		SourceRef: "evidence:knowledge-2", SupportType: EvidenceSupports,
+	}}
+	knowledgeRun := evidenceRunResult(t, knowledgeReport)
+	knowledgeRun.ToolExecutions = []ToolExecution{{
+		Name: ToolSearchKnowledge, Succeeded: true, EvidenceID: "evidence:knowledge-2",
+	}}
+	knowledgeRun.EvidenceItems = []EvidenceItem{{
+		ID: "evidence:knowledge-2", SourceType: EvidenceSourceKnowledgeChunk,
+		SourceTool: ToolSearchKnowledge, SourceRef: "evidence:knowledge-2",
+		CollectedAt: time.Unix(2, 0).UTC(), Summary: "knowledge evidence",
+		Snapshot: `{"results":[{"documentVersionId":"` + versionID + `","chunkId":"` + chunkID +
+			`","contentSha256":"` + contentHash + `"}]}`, ContentHash: "sha256:knowledge-2",
+	}}
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
+		{result: evidenceRunResult(t, invalid)}, {result: knowledgeRun},
+	}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{})
+
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Partial || !result.AgenticRetrievalAttempted || !result.AgenticRetrievalAddedEvidence ||
+		result.AgenticRetrievalStopReason != "new_evidence_added" ||
+		!slices.ContainsFunc(result.Investigation, func(step InvestigationStep) bool {
+			return step.Kind == InvestigationRetrieval && step.Status == "completed"
+		}) {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestAgenticRetrievalDoesNotCountRepeatedChunkAsNewEvidence(t *testing.T) {
+	versionID, chunkID := uuid.NewString(), uuid.NewString()
+	contentHash := strings.Repeat("b", 64)
+	snapshot := `{"query":"first","results":[{"documentVersionId":"` + versionID +
+		`","chunkId":"` + chunkID + `","contentSha256":"` + contentHash + `"}]}`
+	known := knowledgeEvidenceKeySet([]EvidenceItem{{
+		SourceTool: ToolSearchKnowledge, Snapshot: snapshot,
+	}})
+	repeatedSnapshot := strings.Replace(snapshot, `"first"`, `"rewritten"`, 1)
+	state := &evidenceState{agentRuns: 2, agenticRetrievalEligible: true}
+	state.observeAgenticRetrieval(RunResult{
+		ToolExecutions: []ToolExecution{{Name: ToolSearchKnowledge, Succeeded: true}},
+		EvidenceItems:  []EvidenceItem{{SourceTool: ToolSearchKnowledge, Snapshot: repeatedSnapshot}},
+	}, known, nil)
+	if !state.agenticRetrievalAttempted || state.agenticRetrievalAddedEvidence ||
+		state.agenticRetrievalStopReason != "no_new_evidence" {
+		t.Fatalf("state = %+v", state)
 	}
 }
 
@@ -189,6 +253,22 @@ func TestToolMiddlewareEnforcesBudgetAndCancellationBeforeExecution(t *testing.T
 	if executions != 1 {
 		t.Fatalf("cancelled request started a tool; executions = %d", executions)
 	}
+
+	limitedCtx := withExecutionBudget(context.Background(), newExecutionBudget(8, 1000))
+	limitedCtx = withExecutionTrace(limitedCtx, &executionTrace{})
+	limitedCtx = withAgentToolRunPolicy(limitedCtx, newAgentToolRunPolicy(nil, map[string]int{
+		ToolSearchKnowledge: 1,
+	}))
+	knowledgeInput := &compose.ToolInput{Name: ToolSearchKnowledge, Arguments: `{}`}
+	if _, err := endpoint(limitedCtx, knowledgeInput); err != nil {
+		t.Fatalf("first bounded knowledge call: %v", err)
+	}
+	if _, err := endpoint(limitedCtx, knowledgeInput); !errors.Is(err, ErrAgentToolRunLimitExhausted) {
+		t.Fatalf("second bounded knowledge call error = %v", err)
+	}
+	if executions != 2 {
+		t.Fatalf("bounded policy allowed %d total endpoint executions, want 2", executions)
+	}
 }
 
 func TestExecutionBudgetCancelsCurrentRunAfterTokenSettlement(t *testing.T) {
@@ -217,6 +297,15 @@ func TestStructuredReportRejectsUnknownFieldsAndUnexecutedTools(t *testing.T) {
 	report.Evidence[0].SourceTool = "not_executed"
 	if gaps := validateStructuredReport(&report, []string{ToolReadExternalCase}, 16); !containsText(gaps, "未在本次任务中成功执行") {
 		t.Fatalf("validation gaps = %v", gaps)
+	}
+}
+
+func TestEvidenceGapClassifierSeparatesFormattingFromRetrieval(t *testing.T) {
+	if evidenceGapsNeedRetrieval([]string{"缺少结论", "confidence 必须是 high、medium 或 low"}) {
+		t.Fatal("format-only gaps enabled Agentic retrieval")
+	}
+	if !evidenceGapsNeedRetrieval([]string{"至少需要一条可追溯证据"}) {
+		t.Fatal("evidence gap did not enable Agentic retrieval")
 	}
 }
 

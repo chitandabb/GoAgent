@@ -49,8 +49,13 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 			}},
 		}},
 		QueryPlan: queryPlan, QueryRewriteStatus: knowledge.QueryRewriteDisabled,
-		ContextExpanded: true, Degraded: true,
-		Sources: []string{"fts"}, MissingChannels: []string{"vector"},
+		ContextExpanded: true, ContextCompressionEnabled: true, ContextCompressionApplied: true,
+		ContextCompression: knowledge.ContextCompressionStats{
+			InputChunks: 2, OutputChunks: 1, InputRunes: len([]rune(contextContent)) + 10,
+			OutputRunes: len([]rune(contextContent)), OmittedChunks: 1,
+		},
+		Degraded: true,
+		Sources:  []string{"fts"}, MissingChannels: []string{"vector"},
 	}}
 	tool, err := NewSearchKnowledgeTool(searcher)
 	if err != nil {
@@ -73,12 +78,17 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 		QueryPlan struct {
 			OriginalQuery string `json:"originalQuery"`
 		} `json:"queryPlan"`
-		Results         []map[string]any `json:"results"`
-		Degraded        bool             `json:"degraded"`
-		Sources         []string         `json:"sources"`
-		MissingChannels []string         `json:"missingChannels"`
-		ContextExpanded bool             `json:"contextExpanded"`
-		ContextGroups   []map[string]any `json:"contextGroups"`
+		Results            []map[string]any `json:"results"`
+		Degraded           bool             `json:"degraded"`
+		Sources            []string         `json:"sources"`
+		MissingChannels    []string         `json:"missingChannels"`
+		ContextExpanded    bool             `json:"contextExpanded"`
+		ContextGroups      []map[string]any `json:"contextGroups"`
+		ContextCompression struct {
+			Enabled       bool `json:"enabled"`
+			Applied       bool `json:"applied"`
+			OmittedChunks int  `json:"omittedChunks"`
+		} `json:"contextCompression"`
 	}
 	if err := json.Unmarshal([]byte(encoded), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -86,11 +96,28 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 	if response.Query != "事务超时" || response.QueryPlan.OriginalQuery != "事务超时" ||
 		len(response.Results) != 1 || !response.Degraded ||
 		len(response.Sources) != 1 || response.Sources[0] != "fts" || len(response.MissingChannels) != 1 ||
-		!response.ContextExpanded || len(response.ContextGroups) != 1 {
+		!response.ContextExpanded || len(response.ContextGroups) != 1 ||
+		!response.ContextCompression.Enabled || !response.ContextCompression.Applied ||
+		response.ContextCompression.OmittedChunks != 1 {
 		t.Fatalf("response = %s", encoded)
 	}
 	if searcher.actorID != actorID || searcher.query != "事务超时" || searcher.limit != 3 {
 		t.Fatalf("search request = actor=%s query=%q limit=%d", searcher.actorID, searcher.query, searcher.limit)
+	}
+	if _, ok := knowledgeSearchEvidenceLocation(encoded); !ok {
+		t.Fatal("valid compressed knowledge response was rejected at the evidence boundary")
+	}
+	var tampered searchKnowledgeResponse
+	if err := json.Unmarshal([]byte(encoded), &tampered); err != nil {
+		t.Fatal(err)
+	}
+	tampered.ContextCompression.OutputChunks++
+	tamperedSnapshot, err := json.Marshal(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := knowledgeSearchEvidenceLocation(string(tamperedSnapshot)); ok {
+		t.Fatal("evidence boundary accepted inconsistent context compression stats")
 	}
 }
 

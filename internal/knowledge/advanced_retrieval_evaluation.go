@@ -146,18 +146,26 @@ type AdvancedRetrievalObservation struct {
 	RewriteModelID       string             `json:"rewriteModelId,omitempty"`
 	RewritePromptVersion string             `json:"rewritePromptVersion,omitempty"`
 	RewriteUsage         QueryRewriteUsage  `json:"rewriteUsage"`
+	EmbeddingTotalTokens int                `json:"embeddingTotalTokens"`
+	RerankTotalTokens    int                `json:"rerankTotalTokens"`
 
-	ContextMode             RetrievalContextMode          `json:"contextMode"`
-	ContextExpansionEnabled bool                          `json:"contextExpansionEnabled"`
-	ContextExpanded         bool                          `json:"contextExpanded"`
-	ReturnedDocumentKeys    []string                      `json:"returnedDocumentKeys"`
-	ReturnedHitChunks       []RetrievalEvaluationChunkRef `json:"returnedHitChunks"`
-	ReturnedContextChunks   []RetrievalEvaluationChunkRef `json:"returnedContextChunks,omitempty"`
-	HitContextRunes         int                           `json:"hitContextRunes"`
-	ExpandedContextRunes    int                           `json:"expandedContextRunes"`
-	DegradedChannels        []string                      `json:"degradedChannels,omitempty"`
-	DurationMillis          float64                       `json:"durationMillis"`
-	ErrorType               string                        `json:"errorType,omitempty"`
+	ContextMode                 RetrievalContextMode          `json:"contextMode"`
+	ContextExpansionEnabled     bool                          `json:"contextExpansionEnabled"`
+	ContextExpanded             bool                          `json:"contextExpanded"`
+	ContextCompressionEnabled   bool                          `json:"contextCompressionEnabled"`
+	ContextCompressionMaxChunks int                           `json:"contextCompressionMaxChunks,omitempty"`
+	ContextCompressionMaxRunes  int                           `json:"contextCompressionMaxRunes,omitempty"`
+	ContextCompressionMinScore  float64                       `json:"contextCompressionMinScore,omitempty"`
+	ContextCompressionApplied   bool                          `json:"contextCompressionApplied"`
+	ContextCompression          ContextCompressionStats       `json:"contextCompression"`
+	ReturnedDocumentKeys        []string                      `json:"returnedDocumentKeys"`
+	ReturnedHitChunks           []RetrievalEvaluationChunkRef `json:"returnedHitChunks"`
+	ReturnedContextChunks       []RetrievalEvaluationChunkRef `json:"returnedContextChunks,omitempty"`
+	HitContextRunes             int                           `json:"hitContextRunes"`
+	ExpandedContextRunes        int                           `json:"expandedContextRunes"`
+	DegradedChannels            []string                      `json:"degradedChannels,omitempty"`
+	DurationMillis              float64                       `json:"durationMillis"`
+	ErrorType                   string                        `json:"errorType,omitempty"`
 }
 
 func (o AdvancedRetrievalObservation) Validate() error {
@@ -184,6 +192,7 @@ func (o AdvancedRetrievalObservation) Validate() error {
 		return err
 	}
 	if math.IsNaN(o.DurationMillis) || math.IsInf(o.DurationMillis, 0) || o.DurationMillis < 0 ||
+		o.EmbeddingTotalTokens < 0 || o.RerankTotalTokens < 0 ||
 		o.HitContextRunes < 0 || o.ExpandedContextRunes < 0 {
 		return errors.New("advanced retrieval duration or context size is invalid")
 	}
@@ -274,7 +283,8 @@ func (o AdvancedRetrievalObservation) validateRewrite() error {
 func (o AdvancedRetrievalObservation) validateContext() error {
 	if o.ContextMode == RetrievalContextChild {
 		if o.ContextExpansionEnabled || o.ContextExpanded || len(o.ReturnedContextChunks) != 0 ||
-			o.ExpandedContextRunes != 0 {
+			o.ExpandedContextRunes != 0 || o.ContextCompressionEnabled || o.ContextCompressionApplied ||
+			o.ContextCompression != (ContextCompressionStats{}) {
 			return errors.New("advanced retrieval child-only context is invalid")
 		}
 		return nil
@@ -282,18 +292,50 @@ func (o AdvancedRetrievalObservation) validateContext() error {
 	if !o.ContextExpansionEnabled || o.ContextExpanded != (len(o.ReturnedContextChunks) > 0) {
 		return errors.New("advanced retrieval parent context state is invalid")
 	}
+	if err := o.ContextCompression.Validate(); err != nil {
+		return err
+	}
+	if !o.ContextCompressionEnabled {
+		if o.ContextCompressionMaxChunks != 0 || o.ContextCompressionMaxRunes != 0 ||
+			o.ContextCompressionMinScore != 0 || o.ContextCompressionApplied ||
+			o.ContextCompression != (ContextCompressionStats{}) {
+			return errors.New("advanced retrieval disabled compression state is invalid")
+		}
+		return nil
+	}
+	if err := (ContextCompressionConfig{
+		Enabled: true, MaxChunks: o.ContextCompressionMaxChunks,
+		MaxRunes: o.ContextCompressionMaxRunes, MinScore: o.ContextCompressionMinScore,
+	}).Validate(); err != nil {
+		return err
+	}
+	if !o.ContextCompressionApplied {
+		if o.ContextCompression != (ContextCompressionStats{}) {
+			return errors.New("advanced retrieval unapplied compression state is invalid")
+		}
+		return nil
+	}
+	if o.ContextCompression.InputChunks < 1 ||
+		o.ContextCompression.OutputChunks != len(o.ReturnedContextChunks) ||
+		o.ContextCompression.OutputRunes != o.ExpandedContextRunes {
+		return errors.New("advanced retrieval compression output is inconsistent")
+	}
 	return nil
 }
 
 type AdvancedRetrievalArm struct {
-	RetrieverVersion     string               `json:"retrieverVersion"`
-	EmbeddingProfile     string               `json:"embeddingProfile,omitempty"`
-	RerankProfile        string               `json:"rerankProfile,omitempty"`
-	QueryMode            RetrievalQueryMode   `json:"queryMode"`
-	ContextMode          RetrievalContextMode `json:"contextMode"`
-	RewriteProvider      string               `json:"rewriteProvider,omitempty"`
-	RewriteModelID       string               `json:"rewriteModelId,omitempty"`
-	RewritePromptVersion string               `json:"rewritePromptVersion,omitempty"`
+	RetrieverVersion            string               `json:"retrieverVersion"`
+	EmbeddingProfile            string               `json:"embeddingProfile,omitempty"`
+	RerankProfile               string               `json:"rerankProfile,omitempty"`
+	QueryMode                   RetrievalQueryMode   `json:"queryMode"`
+	ContextMode                 RetrievalContextMode `json:"contextMode"`
+	ContextCompressionEnabled   bool                 `json:"contextCompressionEnabled"`
+	ContextCompressionMaxChunks int                  `json:"contextCompressionMaxChunks,omitempty"`
+	ContextCompressionMaxRunes  int                  `json:"contextCompressionMaxRunes,omitempty"`
+	ContextCompressionMinScore  float64              `json:"contextCompressionMinScore,omitempty"`
+	RewriteProvider             string               `json:"rewriteProvider,omitempty"`
+	RewriteModelID              string               `json:"rewriteModelId,omitempty"`
+	RewritePromptVersion        string               `json:"rewritePromptVersion,omitempty"`
 }
 
 func (a AdvancedRetrievalArm) Validate() error {
@@ -301,6 +343,19 @@ func (a AdvancedRetrievalArm) Validate() error {
 		!validOptionalEvaluationID(a.EmbeddingProfile) || !validOptionalEvaluationID(a.RerankProfile) ||
 		!a.QueryMode.Valid() || !a.ContextMode.Valid() {
 		return errors.New("advanced retrieval arm is invalid")
+	}
+	if a.ContextMode == RetrievalContextChild && a.ContextCompressionEnabled {
+		return errors.New("advanced retrieval child-only arm cannot compress parent context")
+	}
+	if !a.ContextCompressionEnabled {
+		if a.ContextCompressionMaxChunks != 0 || a.ContextCompressionMaxRunes != 0 || a.ContextCompressionMinScore != 0 {
+			return errors.New("advanced retrieval disabled compression arm has a compression config")
+		}
+	} else if err := (ContextCompressionConfig{
+		Enabled: true, MaxChunks: a.ContextCompressionMaxChunks,
+		MaxRunes: a.ContextCompressionMaxRunes, MinScore: a.ContextCompressionMinScore,
+	}).Validate(); err != nil {
+		return err
 	}
 	if a.QueryMode == RetrievalQueryOriginal {
 		if a.RewriteProvider != "" || a.RewriteModelID != "" || a.RewritePromptVersion != "" {
@@ -317,40 +372,53 @@ func (a AdvancedRetrievalArm) Validate() error {
 }
 
 type AdvancedRetrievalVariantSummary struct {
-	Arm                          AdvancedRetrievalArm `json:"arm"`
-	Runs                         int                  `json:"runs"`
-	FailedRuns                   int                  `json:"failedRuns"`
-	DegradedRuns                 int                  `json:"degradedRuns"`
-	HitsAtK                      int                  `json:"hitsAtK"`
-	HitRateAtK                   float64              `json:"hitRateAtK"`
-	RecallAtK                    float64              `json:"recallAtK"`
-	MeanReciprocalRank           float64              `json:"meanReciprocalRank"`
-	ContextPrecision             float64              `json:"contextPrecision"`
-	ContextRecall                float64              `json:"contextRecall"`
-	AverageFTSQueryCount         float64              `json:"averageFtsQueryCount"`
-	AverageVectorQueryCount      float64              `json:"averageVectorQueryCount"`
-	AverageHitContextRunes       float64              `json:"averageHitContextRunes"`
-	AverageExpandedContextRunes  float64              `json:"averageExpandedContextRunes"`
-	AverageContextExpansionRatio float64              `json:"averageContextExpansionRatio"`
-	AverageDurationMillis        float64              `json:"averageDurationMillis"`
-	RewriteAccepted              int                  `json:"rewriteAccepted"`
-	RewriteProviderFailed        int                  `json:"rewriteProviderFailed"`
-	RewritePolicyRejected        int                  `json:"rewritePolicyRejected"`
-	RewriteNotObserved           int                  `json:"rewriteNotObserved"`
-	RewritePromptTokens          int                  `json:"rewritePromptTokens"`
-	RewriteCompletionTokens      int                  `json:"rewriteCompletionTokens"`
-	RewriteTotalTokens           int                  `json:"rewriteTotalTokens"`
+	Arm                           AdvancedRetrievalArm `json:"arm"`
+	Runs                          int                  `json:"runs"`
+	FailedRuns                    int                  `json:"failedRuns"`
+	DegradedRuns                  int                  `json:"degradedRuns"`
+	HitsAtK                       int                  `json:"hitsAtK"`
+	HitRateAtK                    float64              `json:"hitRateAtK"`
+	RecallAtK                     float64              `json:"recallAtK"`
+	MeanReciprocalRank            float64              `json:"meanReciprocalRank"`
+	ContextPrecision              float64              `json:"contextPrecision"`
+	ContextRecall                 float64              `json:"contextRecall"`
+	AverageFTSQueryCount          float64              `json:"averageFtsQueryCount"`
+	AverageVectorQueryCount       float64              `json:"averageVectorQueryCount"`
+	AverageHitContextRunes        float64              `json:"averageHitContextRunes"`
+	AverageExpandedContextRunes   float64              `json:"averageExpandedContextRunes"`
+	AverageContextExpansionRatio  float64              `json:"averageContextExpansionRatio"`
+	CompressionAppliedRuns        int                  `json:"compressionAppliedRuns"`
+	CompressionTriggeredRuns      int                  `json:"compressionTriggeredRuns"`
+	CompressionInputChunks        int                  `json:"compressionInputChunks"`
+	CompressionOutputChunks       int                  `json:"compressionOutputChunks"`
+	CompressionOmittedChunks      int                  `json:"compressionOmittedChunks"`
+	AverageCompressionInputRunes  float64              `json:"averageCompressionInputRunes"`
+	AverageCompressionOutputRunes float64              `json:"averageCompressionOutputRunes"`
+	AverageCompressionRatio       float64              `json:"averageCompressionRatio"`
+	AverageCompressionSavingsRate float64              `json:"averageCompressionSavingsRate"`
+	AverageDurationMillis         float64              `json:"averageDurationMillis"`
+	RewriteAccepted               int                  `json:"rewriteAccepted"`
+	RewriteProviderFailed         int                  `json:"rewriteProviderFailed"`
+	RewritePolicyRejected         int                  `json:"rewritePolicyRejected"`
+	RewriteNotObserved            int                  `json:"rewriteNotObserved"`
+	RewritePromptTokens           int                  `json:"rewritePromptTokens"`
+	RewriteCompletionTokens       int                  `json:"rewriteCompletionTokens"`
+	RewriteTotalTokens            int                  `json:"rewriteTotalTokens"`
+	EmbeddingTotalTokens          int                  `json:"embeddingTotalTokens"`
+	RerankTotalTokens             int                  `json:"rerankTotalTokens"`
 }
 
 type AdvancedRetrievalDelta struct {
-	HitRateAtK              float64 `json:"hitRateAtK"`
-	RecallAtK               float64 `json:"recallAtK"`
-	MeanReciprocalRank      float64 `json:"meanReciprocalRank"`
-	ContextPrecision        float64 `json:"contextPrecision"`
-	ContextRecall           float64 `json:"contextRecall"`
-	QueryAmplificationRatio float64 `json:"queryAmplificationRatio"`
-	ContextRuneChangeRate   float64 `json:"contextRuneChangeRate"`
-	DurationChangeRate      float64 `json:"durationChangeRate"`
+	HitRateAtK               float64 `json:"hitRateAtK"`
+	RecallAtK                float64 `json:"recallAtK"`
+	MeanReciprocalRank       float64 `json:"meanReciprocalRank"`
+	ContextPrecision         float64 `json:"contextPrecision"`
+	ContextRecall            float64 `json:"contextRecall"`
+	QueryAmplificationRatio  float64 `json:"queryAmplificationRatio"`
+	ContextRuneChangeRate    float64 `json:"contextRuneChangeRate"`
+	DurationChangeRate       float64 `json:"durationChangeRate"`
+	EmbeddingTokenChangeRate float64 `json:"embeddingTokenChangeRate"`
+	RerankTokenChangeRate    float64 `json:"rerankTokenChangeRate"`
 }
 
 type AdvancedRetrievalEvaluationSummary struct {
@@ -454,6 +522,12 @@ func EvaluateAdvancedRetrieval(
 			baseline.AverageHitContextRunes+baseline.AverageExpandedContextRunes,
 		),
 		DurationChangeRate: changeRateOrZero(experiment.AverageDurationMillis, baseline.AverageDurationMillis),
+		EmbeddingTokenChangeRate: changeRateOrZero(
+			float64(experiment.EmbeddingTotalTokens), float64(baseline.EmbeddingTotalTokens),
+		),
+		RerankTokenChangeRate: changeRateOrZero(
+			float64(experiment.RerankTotalTokens), float64(baseline.RerankTotalTokens),
+		),
 	}
 	return summary, nil
 }
@@ -475,12 +549,30 @@ func validateAdvancedRetrievalArms(baseline, experiment AdvancedRetrievalArm) er
 	}
 	queryChanged := baseline.QueryMode != experiment.QueryMode
 	contextChanged := baseline.ContextMode != experiment.ContextMode
-	if queryChanged == contextChanged {
+	compressionChanged := baseline.ContextCompressionEnabled != experiment.ContextCompressionEnabled
+	changedAxes := 0
+	for _, changed := range []bool{queryChanged, contextChanged, compressionChanged} {
+		if changed {
+			changedAxes++
+		}
+	}
+	if changedAxes != 1 {
 		return errors.New("paired observations must change exactly one evaluation axis")
 	}
 	if queryChanged {
 		if baseline.QueryMode != RetrievalQueryOriginal || experiment.QueryMode != RetrievalQueryRewrite {
 			return errors.New("query evaluation must compare original baseline with rewrite experiment")
+		}
+		return nil
+	}
+	if compressionChanged {
+		if baseline.ContextMode != RetrievalContextParent || experiment.ContextMode != RetrievalContextParent ||
+			baseline.ContextCompressionEnabled || !experiment.ContextCompressionEnabled {
+			return errors.New("compression evaluation must compare uncompressed parent baseline with bounded parent experiment")
+		}
+		if baseline.RewriteProvider != experiment.RewriteProvider || baseline.RewriteModelID != experiment.RewriteModelID ||
+			baseline.RewritePromptVersion != experiment.RewritePromptVersion {
+			return errors.New("compression evaluation changes query rewrite metadata")
 		}
 		return nil
 	}
@@ -576,6 +668,7 @@ func summarizeAdvancedRetrieval(
 	armSet := false
 	var reciprocalRank, documentRecall, precision, recall, ftsQueries, vectorQueries float64
 	var hitRunes, expandedRunes, expansionRatio, duration float64
+	var compressionInputRunes, compressionOutputRunes, compressionRatio, compressionSavings float64
 	for _, score := range scores {
 		if score.observation.Variant != variant {
 			continue
@@ -607,9 +700,28 @@ func summarizeAdvancedRetrieval(
 		expandedRunes += float64(score.observation.ExpandedContextRunes)
 		expansionRatio += score.expansionRatio
 		duration += score.observation.DurationMillis
+		if score.observation.ContextCompressionApplied {
+			summary.CompressionAppliedRuns++
+			if score.observation.ContextCompression.OmittedChunks > 0 {
+				summary.CompressionTriggeredRuns++
+			}
+			summary.CompressionInputChunks += score.observation.ContextCompression.InputChunks
+			summary.CompressionOutputChunks += score.observation.ContextCompression.OutputChunks
+			summary.CompressionOmittedChunks += score.observation.ContextCompression.OmittedChunks
+			compressionInputRunes += float64(score.observation.ContextCompression.InputRunes)
+			compressionOutputRunes += float64(score.observation.ContextCompression.OutputRunes)
+			if score.observation.ContextCompression.InputRunes > 0 {
+				ratio := float64(score.observation.ContextCompression.OutputRunes) /
+					float64(score.observation.ContextCompression.InputRunes)
+				compressionRatio += ratio
+				compressionSavings += 1 - ratio
+			}
+		}
 		summary.RewritePromptTokens += score.observation.RewriteUsage.PromptTokens
 		summary.RewriteCompletionTokens += score.observation.RewriteUsage.CompletionTokens
 		summary.RewriteTotalTokens += score.observation.RewriteUsage.TotalTokens
+		summary.EmbeddingTotalTokens += score.observation.EmbeddingTotalTokens
+		summary.RerankTotalTokens += score.observation.RerankTotalTokens
 		switch score.observation.QueryRewriteStatus {
 		case QueryRewriteAccepted:
 			summary.RewriteAccepted++
@@ -636,6 +748,13 @@ func summarizeAdvancedRetrieval(
 	summary.AverageExpandedContextRunes = expandedRunes / runs
 	summary.AverageContextExpansionRatio = expansionRatio / runs
 	summary.AverageDurationMillis = duration / runs
+	if summary.CompressionAppliedRuns > 0 {
+		compressionRuns := float64(summary.CompressionAppliedRuns)
+		summary.AverageCompressionInputRunes = compressionInputRunes / compressionRuns
+		summary.AverageCompressionOutputRunes = compressionOutputRunes / compressionRuns
+		summary.AverageCompressionRatio = compressionRatio / compressionRuns
+		summary.AverageCompressionSavingsRate = compressionSavings / compressionRuns
+	}
 	return summary, nil
 }
 
@@ -643,7 +762,11 @@ func advancedRetrievalArm(o AdvancedRetrievalObservation) AdvancedRetrievalArm {
 	return AdvancedRetrievalArm{
 		RetrieverVersion: o.RetrieverVersion, EmbeddingProfile: o.EmbeddingProfile,
 		RerankProfile: o.RerankProfile, QueryMode: o.QueryMode, ContextMode: o.ContextMode,
-		RewriteProvider: o.RewriteProvider, RewriteModelID: o.RewriteModelID,
+		ContextCompressionEnabled:   o.ContextCompressionEnabled,
+		ContextCompressionMaxChunks: o.ContextCompressionMaxChunks,
+		ContextCompressionMaxRunes:  o.ContextCompressionMaxRunes,
+		ContextCompressionMinScore:  o.ContextCompressionMinScore,
+		RewriteProvider:             o.RewriteProvider, RewriteModelID: o.RewriteModelID,
 		RewritePromptVersion: o.RewritePromptVersion,
 	}
 }
