@@ -43,6 +43,7 @@ type DefaultToolCatalogDependencies struct {
 	WebSearch            tool.BaseTool
 	FetchPublicPage      tool.BaseTool
 	CreateDiagnosisTask  DiagnosisTaskCreator
+	DiagnosisTaskStatus  DiagnosisTaskStatusReader
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -131,6 +132,17 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+		})
+	}
+	if dependencies.DiagnosisTaskStatus != nil {
+		getDiagnosisTaskStatus, err := NewGetDiagnosisTaskStatusTool(dependencies.DiagnosisTaskStatus)
+		if err != nil {
+			return nil, fmt.Errorf("build diagnosis task status Tool: %w", err)
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: getDiagnosisTaskStatus, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityTask},
 		})
 	}
 	for _, sqlTool := range []tool.BaseTool{

@@ -737,8 +737,11 @@ requires a client-generated UUID `Idempotency-Key`. PostgreSQL atomically binds 
 canonical request fingerprint to the user message and execution lease; a failed retry reuses the
 same user message, and a completed retry returns the original assistant message with `200` and
 `replayed=true`. Reusing a key for a different request or sending another message while the turn is
-running returns `409`. Message SSE, attachments, citation preview, task-status Tools and background
-conversation execution remain later slices.
+running returns `409`. A user turn carrying a verified `taskReferences` entry dynamically exposes
+the internal `get_diagnosis_task_status` Tool. The Tool rechecks the latest message reference and
+owner/admin authorization, then returns persisted task status and report availability without an
+invented progress percentage. Message SSE, attachments, citation preview and background conversation
+execution remain later slices.
 
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 

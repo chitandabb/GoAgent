@@ -46,14 +46,15 @@ type agentRuntime struct {
 }
 
 type agentRuntimeBuilders struct {
-	conversationCreator  mesagent.DiagnosisTaskCreator
-	chatModel            func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
-	githubMCP            func(context.Context, config.GitHubMCPConfig, *zap.Logger) ([]tool.BaseTool, func() error, error)
-	sqlObjectDefinitions func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
-	schemaCatalog        func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error)
-	readonlyQuery        func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
-	knowledgeSearch      func(context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger) (tool.BaseTool, error)
-	webResearch          func(context.Context, config.WebSearchConfig, *zap.Logger) (*webresearch.Service, error)
+	conversationCreator    mesagent.DiagnosisTaskCreator
+	conversationTaskStatus mesagent.DiagnosisTaskStatusReader
+	chatModel              func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+	githubMCP              func(context.Context, config.GitHubMCPConfig, *zap.Logger) ([]tool.BaseTool, func() error, error)
+	sqlObjectDefinitions   func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
+	schemaCatalog          func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error)
+	readonlyQuery          func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
+	knowledgeSearch        func(context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger) (tool.BaseTool, error)
+	webResearch            func(context.Context, config.WebSearchConfig, *zap.Logger) (*webresearch.Service, error)
 }
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
@@ -257,6 +258,7 @@ func buildAgentRuntime(
 		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
 		CreateDiagnosisTask: builders.conversationCreator,
+		DiagnosisTaskStatus: builders.conversationTaskStatus,
 	})
 	if err != nil {
 		_ = runtime.close()

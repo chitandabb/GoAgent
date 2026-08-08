@@ -113,6 +113,39 @@ func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) 
 	}
 }
 
+func TestConversationRunnerOnlyExposesTaskStatusForReferencedTask(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		references []conversation.TaskReference
+		want       bool
+	}{
+		{name: "no task reference"},
+		{
+			name: "referenced task",
+			references: []conversation.TaskReference{{
+				TaskID: uuid.New(), Kind: conversation.ReferenceKindReferenced,
+			}},
+			want: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &conversationRunnerModelState{}
+			runner := newConversationRunnerTest(t, state, &diagnosisToolCreatorStub{})
+			request, ctx := conversationRunnerRequest(nil)
+			request.UserMessage.TaskReferences = test.references
+			request.History[0] = request.UserMessage
+			if _, err := runner.Respond(ctx, request); err != nil {
+				t.Fatalf("Respond(): %v", err)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if got := slices.Contains(state.schemas[0], ToolGetDiagnosisTaskStatus); got != test.want {
+				t.Fatalf("task status Tool exposed=%v, want %v; schema=%v", got, test.want, state.schemas[0])
+			}
+		})
+	}
+}
+
 func TestConversationRunnerExecutesCreateDiagnosisTaskOnce(t *testing.T) {
 	state := &conversationRunnerModelState{createIfAvailable: true}
 	creator := &diagnosisToolCreatorStub{result: conversation.CreateDiagnosisResult{
@@ -179,6 +212,7 @@ func newConversationRunnerTest(
 	t.Helper()
 	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, CreateDiagnosisTask: creator,
+		DiagnosisTaskStatus: &diagnosisTaskStatusReaderStub{},
 	})
 	if err != nil {
 		t.Fatalf("NewDefaultToolCatalog(): %v", err)

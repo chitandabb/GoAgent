@@ -11,9 +11,11 @@ The first independent Conversation Agent Runtime slice is also implemented: `/tu
 atomically creates a durable turn ledger entry and user message, executes one bounded synchronous
 Agent turn, persists the final assistant message, and copies created task references for rendering.
 Client UUID idempotency keys support failed-run retry and completed-result replay without duplicate
-messages. Assistant execution does not make the diagnosis Worker synchronous. Message SSE,
-attachments, citation preview, task-status Tools and background/resumable conversation execution
-are not implemented yet.
+messages. The read-only `get_diagnosis_task_status` Tool is also implemented: it is exposed only
+when the latest user message carries a verified task reference and reuses the diagnosis service's
+owner/admin authorization. Assistant execution does not make the diagnosis Worker synchronous.
+Message SSE, attachments, citation preview and background/resumable conversation execution are
+not implemented yet.
 
 ## Decision
 
@@ -121,7 +123,7 @@ It does not append arbitrary instructions to an already running task.
 
 The initial `/turns` execution is request-bounded rather than a background Agent Worker. It
 loads only persisted user/assistant history, applies a rune budget, and dynamically exposes
-case/knowledge/web Tools according to the current message references and dependency health.
+case/knowledge/web/task-status Tools according to the current message references and dependency health.
 The model-visible command Tool is limited to one invocation per turn. Tool results and model
 reasoning are transient; only the final assistant content and structured created-task references
 are persisted. `conversation_turns` binds a client UUID key to a canonical request fingerprint,
@@ -167,9 +169,9 @@ evidence.
 
 ## Delivery Order
 
-The persistence foundation, guarded command boundary and first independent Conversation Agent
-turn ledger/idempotency boundary are now complete. The next slice is message SSE or background
-conversation execution, followed by attachment reads, citation preview and task-status Tools.
+The persistence foundation, guarded command boundary, task-status Tool and first independent
+Conversation Agent turn ledger/idempotency boundary are now complete. The next slice is message SSE
+or background conversation execution, followed by attachment reads and citation preview.
 Do not make the long-running Diagnosis Worker part of the request. The broader knowledge-QA
 context/memory work remains after the third resume item is closed.
 
