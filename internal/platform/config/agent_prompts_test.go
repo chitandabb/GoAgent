@@ -13,6 +13,7 @@ func TestAgentConfigLoadPrompts(t *testing.T) {
 	cfg.SystemPromptFile = writePromptFileForTest(t, directory, "system.md", " system instruction \n")
 	cfg.BaselinePromptFile = writePromptFileForTest(t, directory, "baseline.md", "baseline instruction")
 	cfg.ReportContractFile = writePromptFileForTest(t, directory, "report.md", "report contract")
+	cfg.ConversationPromptFile = writePromptFileForTest(t, directory, "conversation.md", "conversation instruction")
 
 	prompts, err := cfg.LoadPrompts()
 	if err != nil {
@@ -20,7 +21,8 @@ func TestAgentConfigLoadPrompts(t *testing.T) {
 	}
 	if prompts.SystemInstruction != "system instruction" ||
 		prompts.BaselineInstruction != "baseline instruction" ||
-		prompts.ReportContractInstruction != "report contract" {
+		prompts.ReportContractInstruction != "report contract" ||
+		prompts.ConversationInstruction != "conversation instruction" {
 		t.Fatalf("unexpected prompts: %+v", prompts)
 	}
 }
@@ -47,6 +49,7 @@ func TestAgentConfigLoadPromptsRejectsInvalidFiles(t *testing.T) {
 			cfg.SystemPromptFile = path
 			cfg.BaselinePromptFile = validPath
 			cfg.ReportContractFile = validPath
+			cfg.ConversationPromptFile = validPath
 			if _, err := cfg.LoadPrompts(); err == nil {
 				t.Fatal("LoadPrompts accepted invalid prompt file")
 			}

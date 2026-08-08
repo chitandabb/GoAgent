@@ -57,10 +57,195 @@ func TestServiceAppendUserMessageTrimsContentAndUsesUserRole(t *testing.T) {
 	}
 }
 
+func TestServiceRespondToUserMessageRequiresAgent(t *testing.T) {
+	service, _ := NewService(&conversationRepositoryStub{})
+	_, err := service.RespondToUserMessage(context.Background(), Actor{UserID: uuid.New()}, uuid.New(), uuid.New())
+	if !errors.Is(err, ErrAgentUnavailable) {
+		t.Fatalf("RespondToUserMessage() error = %v, want ErrAgentUnavailable", err)
+	}
+}
+
+func TestServiceRespondToUserMessageRejectsStaleMessage(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	stale := Message{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: MessageRoleUser, Content: "诊断第一个工单"}
+	latest := Message{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: MessageRoleUser, Content: "改为诊断第二个工单"}
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+		messages:     []Message{stale, latest},
+	}
+	agent := &conversationAgentResponderStub{response: AgentResponse{Content: "不应执行"}}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+
+	_, err := service.RespondToUserMessage(context.Background(), Actor{UserID: userID}, conversationID, stale.ID)
+	if !errors.Is(err, ErrCommandNotLatest) {
+		t.Fatalf("RespondToUserMessage() error = %v, want ErrCommandNotLatest", err)
+	}
+	if agent.calls != 0 {
+		t.Fatalf("agent calls = %d, want 0", agent.calls)
+	}
+}
+
+func TestServiceAppendUserMessageAndRespondPersistsAssistantAndCreatedTaskReference(t *testing.T) {
+	userID, conversationID, caseID, taskID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+	}
+	agent := &conversationAgentResponderStub{response: AgentResponse{Content: "  已创建异步诊断任务。  "}}
+	agent.hook = func(ctx context.Context, request AgentRequest) error {
+		commandContext, ok := CommandContextFromContext(ctx)
+		if !ok || commandContext.ConversationID != conversationID || commandContext.UserMessageID != request.UserMessage.ID {
+			return ErrCommandContextRequired
+		}
+		return repository.AppendTaskReference(ctx, userID, request.UserMessage.ID, taskID, ReferenceKindCreated, time.Now())
+	}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+
+	turn, err := service.AppendUserMessageAndRespond(context.Background(), Actor{UserID: userID}, AppendMessageInput{
+		ConversationID: conversationID,
+		Content:        "请诊断这个工单",
+		CaseReferences: []CaseReference{{ExternalCaseID: caseID, Kind: ReferenceKindSelected}},
+	})
+	if err != nil {
+		t.Fatalf("AppendUserMessageAndRespond(): %v", err)
+	}
+	if turn.UserMessage.Role != MessageRoleUser || turn.AssistantMessage.Role != MessageRoleAssistant ||
+		turn.AssistantMessage.Content != "已创建异步诊断任务。" {
+		t.Fatalf("turn = %+v", turn)
+	}
+	if len(turn.AssistantMessage.TaskReferences) != 1 ||
+		turn.AssistantMessage.TaskReferences[0] != (TaskReference{TaskID: taskID, Kind: ReferenceKindCreated}) {
+		t.Fatalf("assistant task references = %+v", turn.AssistantMessage.TaskReferences)
+	}
+	if len(repository.messages) != 2 || agent.calls != 1 || agent.request.UserMessage.ID != turn.UserMessage.ID {
+		t.Fatalf("messages=%d agent calls=%d request=%+v", len(repository.messages), agent.calls, agent.request)
+	}
+}
+
+func TestServiceAppendUserMessageAndRespondKeepsUserMessageWhenAgentFails(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+	}
+	agentFailure := errors.New("model unavailable")
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(&conversationAgentResponderStub{err: agentFailure})
+
+	turn, err := service.AppendUserMessageAndRespond(context.Background(), Actor{UserID: userID}, AppendMessageInput{
+		ConversationID: conversationID, Content: "知识库如何更新？",
+	})
+	if !errors.Is(err, agentFailure) {
+		t.Fatalf("AppendUserMessageAndRespond() error = %v, want agent failure", err)
+	}
+	if turn.UserMessage.ID == uuid.Nil || len(repository.messages) != 1 || repository.messages[0].Role != MessageRoleUser {
+		t.Fatalf("turn=%+v messages=%+v", turn, repository.messages)
+	}
+}
+
 type conversationRepositoryStub struct {
 	message     Message
 	gotInput    AppendMessageInput
 	appendCalls int
+}
+
+type conversationAgentResponderStub struct {
+	response AgentResponse
+	err      error
+	hook     func(context.Context, AgentRequest) error
+	calls    int
+	request  AgentRequest
+}
+
+func (s *conversationAgentResponderStub) Respond(ctx context.Context, request AgentRequest) (AgentResponse, error) {
+	s.calls++
+	s.request = request
+	if s.hook != nil {
+		if err := s.hook(ctx, request); err != nil {
+			return AgentResponse{}, err
+		}
+	}
+	return s.response, s.err
+}
+
+type turnRepositoryStub struct {
+	conversation Conversation
+	messages     []Message
+}
+
+func (s *turnRepositoryStub) Create(context.Context, uuid.UUID, CreateInput, time.Time) (Conversation, error) {
+	return s.conversation, nil
+}
+
+func (s *turnRepositoryStub) Get(_ context.Context, userID, conversationID uuid.UUID) (Conversation, error) {
+	if s.conversation.UserID != userID || s.conversation.ID != conversationID {
+		return Conversation{}, repository.ErrNotFound
+	}
+	return s.conversation, nil
+}
+
+func (s *turnRepositoryStub) List(context.Context, uuid.UUID, ListQuery) (ListResult, error) {
+	return ListResult{}, nil
+}
+
+func (s *turnRepositoryStub) ListMessages(_ context.Context, userID, conversationID uuid.UUID, query MessageQuery) (MessagePage, error) {
+	if s.conversation.UserID != userID || s.conversation.ID != conversationID {
+		return MessagePage{}, repository.ErrNotFound
+	}
+	query.Normalize()
+	items := make([]Message, 0, query.Limit)
+	for _, message := range s.messages {
+		if message.Seq > query.AfterSeq && len(items) < query.Limit {
+			items = append(items, message)
+		}
+	}
+	return MessagePage{Items: items, AfterSeq: query.AfterSeq}, nil
+}
+
+func (s *turnRepositoryStub) AppendMessage(_ context.Context, userID uuid.UUID, input AppendMessageInput, createdAt time.Time) (Message, error) {
+	if s.conversation.UserID != userID || s.conversation.ID != input.ConversationID {
+		return Message{}, repository.ErrNotFound
+	}
+	message := Message{
+		ID: uuid.New(), ConversationID: input.ConversationID, Seq: int64(len(s.messages) + 1),
+		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
+		CaseReferences: append([]CaseReference(nil), input.CaseReferences...),
+		TaskReferences: append([]TaskReference(nil), input.TaskReferences...), CreatedAt: createdAt,
+	}
+	s.messages = append(s.messages, message)
+	return message, nil
+}
+
+func (s *turnRepositoryStub) GetMessage(_ context.Context, userID, conversationID, messageID uuid.UUID) (Message, error) {
+	if s.conversation.UserID != userID || s.conversation.ID != conversationID {
+		return Message{}, repository.ErrNotFound
+	}
+	for _, message := range s.messages {
+		if message.ID == messageID {
+			return message, nil
+		}
+	}
+	return Message{}, repository.ErrNotFound
+}
+
+func (s *turnRepositoryStub) GetLatestMessage(_ context.Context, userID, conversationID uuid.UUID) (Message, error) {
+	if s.conversation.UserID != userID || s.conversation.ID != conversationID || len(s.messages) == 0 {
+		return Message{}, repository.ErrNotFound
+	}
+	return s.messages[len(s.messages)-1], nil
+}
+
+func (s *turnRepositoryStub) AppendTaskReference(_ context.Context, userID, messageID, taskID uuid.UUID, kind ReferenceKind, _ time.Time) error {
+	if s.conversation.UserID != userID {
+		return repository.ErrNotFound
+	}
+	for index := range s.messages {
+		if s.messages[index].ID == messageID {
+			s.messages[index].TaskReferences = append(s.messages[index].TaskReferences, TaskReference{TaskID: taskID, Kind: kind})
+			return nil
+		}
+	}
+	return repository.ErrNotFound
 }
 
 func (s *conversationRepositoryStub) Create(context.Context, uuid.UUID, CreateInput, time.Time) (Conversation, error) {

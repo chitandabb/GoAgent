@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M2-B3 Conversation Persistence and Guarded Command Boundary Implemented
+## Current Stage: M2-B4 Conversation Agent Turn Boundary Implemented
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -26,7 +26,9 @@ execution order and acceptance gates are defined in
 - [x] Guarded `create_diagnosis_task` command service and narrow model-visible Tool contract;
       command creation reuses the durable diagnosis application service and is excluded from the
       Diagnosis Worker Tool scope.
-- [ ] Conversation Agent runtime, assistant message persistence, message SSE, attachment reads,
+- [x] Independent Conversation Agent runtime with bounded persisted history, dynamic conversation
+      Tool scope, final assistant-message persistence, and the `/turns` endpoint.
+- [ ] Durable/idempotent conversation runs, message SSE, attachment reads, task-status Tools,
       and citation preview.
 
 ## M0: Before Business Code
@@ -698,9 +700,9 @@ ADR 004 has accepted the next conversation boundary: the right-side dossier supp
 references to an independent conversation, and the conversation Agent may create a durable diagnosis
 task through a guarded command Tool. Conversations do not own task lifecycle. The backend now persists
 independent conversations, user messages and structured references; the command service and narrow Tool
-contract are implemented and wired to the diagnosis application service. The implemented frontend still
-calls `POST /api/v1/diagnosis-tasks` directly because the independent Conversation Agent Runtime and
-assistant-message execution path are the next slice.
+contract are implemented and wired to the diagnosis application service. The independent Conversation
+Agent Runtime and `/turns` assistant-message path are now implemented on the backend; the frontend still
+uses the direct task route until it adopts the new turn contract and its pending retry/SSE semantics.
 
 ### Partial Backend Checkpoint: Knowledge Ingestion Throughput Baseline
 
@@ -764,10 +766,11 @@ This supports the bounded worker-core 40%+ claim; the two-document/two-class sco
 
 - M2-B1: expand the checked-in pressure dataset beyond one long-parent Case, add failed/repeated/no-selection second-retrieval and answer-quality cases, complete the remaining Parent/Rewrite pairs, and measure aggregate compression rate and repeated-run stability; implementation is present but broad sample quality is unproven;
 - M2-B2: run the bounded one-Search/one-Scrape Firecrawl smoke when a Key is available, then add a small public-answer/citation quality set; backend Provider, authorization, safety, citation and dependency-degradation paths are implemented;
-- M2-B3: [in progress] independent conversation/message persistence, read API and the guarded
-  `create_diagnosis_task` command boundary are implemented; remaining work is the Conversation Agent
-  Runtime, assistant execution/messages, knowledge-QA streaming, citation preview and attachment content
-  access;
+- M2-B3: completed independent conversation/message persistence, read API and the guarded
+  `create_diagnosis_task` command boundary;
+- M2-B4: [in progress] Conversation Agent `/turns` is implemented with bounded history, dynamic Tool
+  scope and final assistant-message persistence; remaining work is durable/idempotent run semantics,
+  knowledge-QA streaming, message SSE, citation preview, task-status Tools and attachment content access;
 - M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
   use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
   the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the

@@ -13,6 +13,9 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.MaxEvidenceItems = 16
 	configured.MaxTotalTokens = 16000
 	configured.TimeoutMillis = 90000
+	configured.ConversationMaxIterations = 8
+	configured.ConversationMaxContextRunes = 32000
+	configured.ConversationTimeoutMillis = 60000
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured budgets: %v", err)
 	}
@@ -38,10 +41,12 @@ func TestAgentConfigValidate(t *testing.T) {
 
 func validAgentConfigForTest() AgentConfig {
 	return AgentConfig{
-		SkillsDirectory:    "config/skills",
-		PromptVersion:      "diagnosis-v1",
-		SystemPromptFile:   "config/prompts/diagnosis-system.md",
-		BaselinePromptFile: "config/prompts/evaluation-baseline.md",
-		ReportContractFile: "config/prompts/report-contract.md",
+		SkillsDirectory:           "config/skills",
+		PromptVersion:             "diagnosis-v1",
+		SystemPromptFile:          "config/prompts/diagnosis-system.md",
+		BaselinePromptFile:        "config/prompts/evaluation-baseline.md",
+		ReportContractFile:        "config/prompts/report-contract.md",
+		ConversationPromptVersion: "conversation-v1",
+		ConversationPromptFile:    "config/prompts/conversation-system.md",
 	}
 }

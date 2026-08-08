@@ -85,15 +85,49 @@ func TestConversationRoutesRejectsInvalidReferenceBeforeUseCase(t *testing.T) {
 	}
 }
 
+func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	userMessageID, assistantMessageID := uuid.New(), uuid.New()
+	useCase := &conversationUseCaseStub{turn: conversation.ConversationTurn{
+		UserMessage: conversation.Message{
+			ID: userMessageID, ConversationID: conversationID, Seq: 5,
+			Role: conversation.MessageRoleUser, Content: "MESGuard 的知识库怎么更新？",
+		},
+		AssistantMessage: conversation.Message{
+			ID: assistantMessageID, ConversationID: conversationID, Seq: 6,
+			Role: conversation.MessageRoleAssistant, Content: "知识文档采用版本发布。",
+		},
+	}}
+	routes, _ := NewConversationRoutes(useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/turns", strings.NewReader(`{
+"content":"MESGuard 的知识库怎么更新？"
+}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated ||
+		!strings.Contains(response.Body.String(), `"userMessage":{"id":"`+userMessageID.String()) ||
+		!strings.Contains(response.Body.String(), `"assistantMessage":{"id":"`+assistantMessageID.String()) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if useCase.turnCalls != 1 || useCase.gotInput.ConversationID != conversationID {
+		t.Fatalf("turn calls=%d input=%+v", useCase.turnCalls, useCase.gotInput)
+	}
+}
+
 type conversationUseCaseStub struct {
 	created     conversation.Conversation
 	message     conversation.Message
+	turn        conversation.ConversationTurn
 	createErr   error
 	appendErr   error
 	gotActor    conversation.Actor
 	gotCreate   conversation.CreateInput
 	gotInput    conversation.AppendMessageInput
 	appendCalls int
+	turnCalls   int
 }
 
 func (s *conversationUseCaseStub) Create(_ context.Context, actor conversation.Actor, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -117,4 +151,10 @@ func (s *conversationUseCaseStub) AppendUserMessage(_ context.Context, actor con
 	s.appendCalls++
 	s.gotActor, s.gotInput = actor, input
 	return s.message, s.appendErr
+}
+
+func (s *conversationUseCaseStub) AppendUserMessageAndRespond(_ context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.ConversationTurn, error) {
+	s.turnCalls++
+	s.gotActor, s.gotInput = actor, input
+	return s.turn, s.appendErr
 }

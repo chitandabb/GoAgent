@@ -240,11 +240,13 @@ func testAgentConfig() config.Config {
 	configRoot := filepath.Join("..", "..", "config")
 	return config.Config{
 		Agent: config.AgentConfig{
-			SkillsDirectory:    filepath.Join(configRoot, "skills"),
-			PromptVersion:      "diagnosis-test-v1",
-			SystemPromptFile:   filepath.Join(configRoot, "prompts", "diagnosis-system.md"),
-			BaselinePromptFile: filepath.Join(configRoot, "prompts", "evaluation-baseline.md"),
-			ReportContractFile: filepath.Join(configRoot, "prompts", "report-contract.md"),
+			SkillsDirectory:           filepath.Join(configRoot, "skills"),
+			PromptVersion:             "diagnosis-test-v1",
+			SystemPromptFile:          filepath.Join(configRoot, "prompts", "diagnosis-system.md"),
+			BaselinePromptFile:        filepath.Join(configRoot, "prompts", "evaluation-baseline.md"),
+			ReportContractFile:        filepath.Join(configRoot, "prompts", "report-contract.md"),
+			ConversationPromptVersion: "conversation-test-v1",
+			ConversationPromptFile:    filepath.Join(configRoot, "prompts", "conversation-system.md"),
 		},
 		Models: config.ModelsConfig{Chat: config.ChatModelConfig{Enabled: true}},
 	}

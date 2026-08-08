@@ -7,9 +7,11 @@ creation path remains implemented. The first server-side conversation slice is n
 user-scoped conversations, user messages, structured case/task references and cursor-based reads.
 The guarded `create_diagnosis_task` command service and its narrow model-visible Tool
 contract are now implemented and wired to the existing diagnosis application service.
-The conversation Agent Runtime has not been connected yet, so the Tool is not exposed
-through a public conversation execution path. Assistant messages, message SSE,
-attachments and citation preview are also not implemented yet.
+The first independent Conversation Agent Runtime slice is also implemented: `/turns`
+persists the user message, executes one bounded synchronous Agent turn, persists the final
+assistant message, and copies created task references for rendering. Assistant execution
+does not make the diagnosis Worker synchronous. Message SSE, attachments, citation preview,
+task-status Tools and durable/resumable conversation runs are not implemented yet.
 
 ## Decision
 
@@ -115,6 +117,16 @@ Conversation messages can continue while a task is pending or running. A later m
 
 It does not append arbitrary instructions to an already running task.
 
+The initial `/turns` implementation is request-bounded rather than a durable Agent run. It
+loads only persisted user/assistant history, applies a rune budget, and dynamically exposes
+case/knowledge/web Tools according to the current message references and dependency health.
+The model-visible command Tool is limited to one invocation per turn. Tool results and model
+reasoning are transient; only the final assistant content and structured created-task references
+are persisted. The endpoint currently writes the user message before calling the Agent, so a
+model or dependency failure may leave that user message without an assistant response. A future
+durable run/idempotency boundary must resolve retry and concurrent-turn semantics before the
+frontend treats `/turns` as a fully resumable stream.
+
 ## Data Model Direction
 
 The M2 conversation schema adds structured message case references and a many-to-many
@@ -149,12 +161,11 @@ evidence.
 
 ## Delivery Order
 
-The persistence foundation and guarded command boundary are now complete. The next slice is
-the independent Conversation Agent Runtime: load bounded conversation context, expose only
-conversation-safe Tools, execute `create_diagnosis_task` through the command service, persist
-assistant output and return a task reference. Do not make the long-running Diagnosis Worker part
-of the request. After that, add message SSE, attachment reads and citation preview. The broader
-knowledge-QA context/memory work remains after the third resume item is closed.
+The persistence foundation, guarded command boundary and first independent Conversation Agent
+turn are now complete. The next slice is to add durable/idempotent conversation run semantics,
+then message SSE, attachment reads, citation preview and task-status Tools. Do not make the
+long-running Diagnosis Worker part of the request. The broader knowledge-QA context/memory work
+remains after the third resume item is closed.
 
 Web Search and attachment conversation integration should target the new conversation runtime,
 not add more behavior to the temporary case-bound frontend workspace.

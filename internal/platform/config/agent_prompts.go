@@ -13,6 +13,7 @@ type AgentPrompts struct {
 	SystemInstruction         string
 	BaselineInstruction       string
 	ReportContractInstruction string
+	ConversationInstruction   string
 }
 
 func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
@@ -28,10 +29,15 @@ func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
 	if err != nil {
 		return AgentPrompts{}, err
 	}
+	conversationInstruction, err := loadPromptFile("agent", "conversation prompt", c.ConversationPromptFile, maxAgentPromptBytes)
+	if err != nil {
+		return AgentPrompts{}, err
+	}
 	return AgentPrompts{
 		SystemInstruction:         systemInstruction,
 		BaselineInstruction:       baselineInstruction,
 		ReportContractInstruction: reportContractInstruction,
+		ConversationInstruction:   conversationInstruction,
 	}, nil
 }
 

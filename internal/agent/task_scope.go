@@ -14,12 +14,13 @@ import (
 type TaskType string
 
 const (
-	TaskTypeDiagnosis TaskType = "diagnosis"
-	TaskTypeKnowledge TaskType = "knowledge_qa"
+	TaskTypeDiagnosis    TaskType = "diagnosis"
+	TaskTypeKnowledge    TaskType = "knowledge_qa"
+	TaskTypeConversation TaskType = "conversation"
 )
 
 func (t TaskType) Valid() bool {
-	return t == TaskTypeDiagnosis || t == TaskTypeKnowledge
+	return t == TaskTypeDiagnosis || t == TaskTypeKnowledge || t == TaskTypeConversation
 }
 
 type DataSourceRole string
@@ -145,10 +146,10 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 	if cfg.TaskType == TaskTypeDiagnosis && len(cfg.DataSources) == 0 {
 		return TaskScope{}, errors.New("diagnosis task scope requires at least one data source")
 	}
-	if cfg.TaskType == TaskTypeKnowledge && len(cfg.DataSources) != 0 {
-		return TaskScope{}, errors.New("knowledge task scope cannot bind diagnosis data sources")
+	if (cfg.TaskType == TaskTypeKnowledge || cfg.TaskType == TaskTypeConversation) && len(cfg.DataSources) != 0 {
+		return TaskScope{}, fmt.Errorf("%s task scope cannot bind diagnosis data sources", cfg.TaskType)
 	}
-	if len(cfg.AllowedCapabilities) == 0 {
+	if len(cfg.AllowedCapabilities) == 0 && cfg.TaskType != TaskTypeConversation {
 		return TaskScope{}, errors.New("task scope requires at least one allowed capability")
 	}
 
@@ -176,6 +177,10 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 		seenCapabilities[capability] = struct{}{}
 		if cfg.TaskType == TaskTypeKnowledge && capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch {
 			return TaskScope{}, fmt.Errorf("knowledge task scope cannot use capability %q", capability)
+		}
+		if cfg.TaskType == TaskTypeConversation && capability != ToolCapabilityCase &&
+			capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch {
+			return TaskScope{}, fmt.Errorf("conversation task scope cannot use capability %q", capability)
 		}
 	}
 	if cfg.TaskType == TaskTypeDiagnosis && !slices.Contains(capabilities, ToolCapabilityCase) {
