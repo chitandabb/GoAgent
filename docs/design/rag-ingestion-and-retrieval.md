@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：`M2-A1 至 M2-A8 后端链路已完成 / M2-B1 部分完成`
+- 状态：`M2-A1 至 M2-A8 后端链路已完成 / M2-B1 部分完成 / M2-B2 实现完成待真实 smoke`
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
@@ -48,7 +48,7 @@
 - 物化 Parent 索引和面向用户的知识问答 HTTP/SSE 运行链路；受控 Query Rewrite 与逻辑 Parent
   邻接扩展各完成一个 paired Case，Compression 质量轴已完成 5 Case，另有单压力 Case 触发生产阈值；
   Agentic 二次检索已完成三 Case 真实模型决策固定集，但答案质量、失败/重复证据和多轮稳定性仍待扩展；
-- Web Search Tool、公开页面抓取与企业知识引用之间的升级边界；
+- Web Search Tool、公开页面抓取和 `web` 引用链已实现；真实 Firecrawl smoke 与公网问答质量固定集仍待 Key/额度验证；
 - MinIO/RabbitMQ/PostgreSQL/pgvector 全链路的文档处理吞吐量基线和最终第三条简历指标；当前 parser-only 吞吐与 routing avoidance 不能直接写成端到端提升。
 
 ## 目标边界
@@ -953,11 +953,19 @@ Web 页面是不可信数据。抓取内容不能成为系统指令，不能触�
   来自客户、工单、生产标识、数据库别名和附件标识；公开产品/模块术语不自动删除，内部产品名由
   管理员通过 `sensitiveTermsEnv` 配置。规则、词典和最小化是安全边界，LLM 改写、NER 或云 DLP
   以后只能作为增强，不能绕开拒绝策略。
-- 可禁用 `[webSearch]` 默认 provider 为 `firecrawl`、base URL 为 `https://api.firecrawl.dev`，密钥
-  只通过 `FIRECRAWL_API_KEY` 读取。Firecrawl 客户端、`web_search`/`fetch_public_page` Tool、网页
-  引用固化、SSRF 防护和 Prompt Injection 隔离仍未实现；本检查点没有真实公网请求或调用费用。
-- 网页抓取必须实施 SSRF 防护、重定向复验、响应大小/类型限制、脚本不执行和 Prompt Injection
-  数据隔离。这些是 Web Tool 的实现门禁，不因供应商已抓取页面而省略。
+- `[webSearch]` 当前启用且 provider 为 `firecrawl`、base URL 为 `https://api.firecrawl.dev`，密钥只
+  通过 `FIRECRAWL_API_KEY` 读取；密钥缺失、认证失败或 Provider 不可用时不注册 Web Tool，其他
+  诊断能力继续运行。新诊断任务由后端自动冻结 `web_search` capability，前端不提供 Tool 开关。
+- Firecrawl `/v2/search` 和 `/v2/scrape` Client、`web_search`/`fetch_public_page` Tool、Run 级
+  2 Search/3 Fetch 预算和 `web` Evidence 已实现。Search 结果生成同 Run 随机 `resultId`，
+  Fetch 不接受任意 URL；重复 Fetch 复用快照，不重复消费 Provider。
+- URL Gate 在 Search 候选和 Scrape 最终报告 URL 两处校验协议、凭证、端口、域名解析及公网 IP，
+  拒绝 localhost、私网、保留地址和混合 DNS；响应只接受 JSON、最大 2 MiB，正文最大 20,000
+  字符并记录截断。Firecrawl 内部不可见的中间重定向仍依赖其服务端 SSRF 防护，不能描述为
+  MESGuard 完整观察了每一跳。
+- 网页以 `onlyMainContent` Markdown、控制字符清洗、`untrustedContent=true` 和系统级“只作数据”
+  约束进入模型，不能授权 Tool 或改变 TaskScope。来源等级由配置化域名表确定，未命中一律保守为
+  C；C 级来源不能独立支撑 conclusive 诊断。离线合同测试已完成，真实公网 smoke 尚未产生费用。
 
 ## 第十轮：失败恢复、可观测性与实施顺序
 
@@ -1244,13 +1252,44 @@ Token 都为 0。这证明减少数据库往返的独立收益，不代表全链
 
 为在调用云模型前隔离坏文件和格式缺口，新增 provider-free corpus audit：不连接 MinIO、PostgreSQL
 或模型，但真实执行生产 Parser 与 Chunking，并区分 `text_ready`、`text_ready_visual_pending`、
-`visual_enrichment_required`、`parser_failed`。2026-08-07 的固定清单已达到 12 份公开文档并覆盖全部
-8 类格式，共产生 4,190 Element、6,177 Chunk、128 个视觉候选，0 份解析失败；PPTX 正确进入“文本
-可检索、视觉待增强”，扫描 PDF、PNG 和 JPEG 进入视觉增强路径，XLSX 与纯文本分别产生 185 和
-2,197 个 Chunk。视觉字节只统计实际物化的图片 `Content`，PDF 页面引用不再按页重复累计整份源文件。
-格式门槛已经通过，但总文档数仍为 12/40，且没有 5 个完整全链路 pair，因此结果仍为
-`AcceptanceEligible=false`、`MeetsTarget=false`。
+`visual_enrichment_required`、`parser_failed`。2026-08-07 的固定清单已达到 40 份公开文档并覆盖全部
+8 类格式，共 162,852,270 bytes，产生 5,946 个原始 Element、5,854 个可检索 Element、12,864 Chunk、
+139 个视觉候选，0 份解析失败；生产 `element-merge-v1` 在 Chunking 前抑制 92 个重复或非语义
+Element。27 份文档可直接文本检索，10 份文本可检索且等待视觉增强，3 份必须进入视觉增强路径。
+视觉字节只统计实际物化的图片 `Content`，PDF 页面引用不再按页重复累计整份源文件。文档和格式门槛
+已经通过，但没有 5 个完整全链路 pair，因此结果仍为 `AcceptanceEligible=false`、`MeetsTarget=false`。
+
+固定集准入会先执行上传大小、签名、Parser 和 Chunking。83.85 MB 的 NIST PDF 超过 50 MiB 上传
+上限而拒绝；NIST AMS 100-32 虽只有 1.70 MB/50 页，但当前 Go PDF 库的页文本提取超过 40 秒仍不
+响应取消，因此从正向吞吐集移出并替换为通过审计的 NIST AMS 100-17。该反例证明 `context.Context`
+只能在页间检查，不能终止第三方库内部阻塞；后续需要进程级 Parser 隔离或等价的可终止边界。
 
 语料可复现性不依赖人工记忆：严格 manifest 记录 `publisher/sourceUrl/downloadUrl/usageBasis` 与文件
 身份，下载地址只允许无凭据 HTTPS；PowerShell fetch 脚本把目标限制在被 Git 忽略的 evaluation 根目录，
 已有文件先校验，下载文件也必须在临时路径通过字节数和 SHA-256 后才替换正式文件。
+
+真实 Worker-core 并发测试进一步修正了评测隔离：生产 `QueueVersion` 会创建 Outbox，若真实 Relay 与
+评测内嵌 Worker 同时运行，二者会竞争任务租约。评测器现把“创建任务 + 删除评测专属 Outbox”放在
+同一 PostgreSQL 事务内，因此仍保留生产任务事实，但不会触发 RabbitMQ。逐文档 status/action/reason
+也写入 Observation。加入费用预检、0.05 元默认预算、半额 TPM/RPM 平滑和 429 熔断后，仅改变
+文档并发 `1 -> 2` 的五轮复测中位耗时 `2124 -> 1450 ms`、吞吐增加 46.48%；整轮 80 次请求、
+96,060 Token、约 0.04803 元，其余 Element、Chunk、Token 和写入批次完全一致。该结果支持受控
+Worker-core 的 40%+ 口径，但双文档/双格式边界必须保留，不能作为 40 文档混合视觉验收指标。
+
+40 文档零成本估算为 12,864 个 Chunk：逐 Chunk 参考路径需要 12,864 次 Embedding 请求，生产
+batch=10 路径需要 1,306 次。因此全规模验收先选择只改变文档并发 `1 -> 2` 的 pair，确认真实
+Provider 限流、Token、耗时和费用后再安排 5 个交替顺序 pair；不直接把高请求组合 baseline 当作
+默认全规模验收路径。
+
+首个 40 文档并发 pair 的并发 1 arm 完成 12,864 Chunk、1,306 请求和 2,585,532 Token；并发 2 arm
+在后 11 份文档遇到百炼 `429 Throttling.AllocationQuota`，只完成 10,923 Chunk。评测器没有把更短
+耗时当作收益，而是因 Element、Chunk 和失败集合回退给出 `IntegrityPreserved=false`。表面
++141.57% 明确排除。两组共发起 2,412 次 HTTP 请求并消耗 4,668,907 Token，约 2.3345 元；并发组
+平均 571.6 RPM、1,076,707 TPM，对照百炼北京地域 1,800 RPM/1,200,000 TPM，根因是滚动 Token
+窗口突发而非 Key 累计额度耗尽。
+
+评测器因此新增三层成本边界：Provider 调用前本地复用生产 Parser、Element Merge 与 Chunking，
+估算完整 pair 的请求、Token 和人民币费用；默认整条命令最多 0.05 元，并以 900 RPM/600,000 TPM
+匀速调度；第一个 429 或实际 Token 越过预算即取消全组，不再继续产生无效费用。40 文档继续作为
+零成本格式覆盖与 Parser/Chunk 审计集，完整 Provider 复跑必须先单独审核预估费用。Batch API 虽然
+价格更低且不受同步限流，但异步语义不同，不进入同步延迟对照。

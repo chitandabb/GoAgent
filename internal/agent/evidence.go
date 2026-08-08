@@ -22,6 +22,7 @@ const (
 	EvidenceSourceSQLQuery       EvidenceSourceType = "sql_query"
 	EvidenceSourceCodeSearch     EvidenceSourceType = "code_search"
 	EvidenceSourceKnowledgeChunk EvidenceSourceType = "knowledge_chunk"
+	EvidenceSourceWebPage        EvidenceSourceType = "web"
 )
 
 // EvidenceItem 是一次 Agent 运行中成功工具结果的不可变快照元数据。
@@ -51,6 +52,11 @@ func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceIte
 	location := "tool-output"
 	if toolName == ToolSearchKnowledge {
 		location, ok = knowledgeSearchEvidenceLocation(snapshot)
+		if !ok {
+			return EvidenceItem{}, false
+		}
+	} else if toolName == ToolFetchPublicPage {
+		location, ok = webPageEvidenceLocation(snapshot)
 		if !ok {
 			return EvidenceItem{}, false
 		}
@@ -100,6 +106,8 @@ func evidenceSourceTypeForTool(toolName string) (EvidenceSourceType, bool) {
 		return EvidenceSourceSQLQuery, true
 	case ToolSearchKnowledge:
 		return EvidenceSourceKnowledgeChunk, true
+	case ToolFetchPublicPage:
+		return EvidenceSourceWebPage, true
 	}
 	for _, readOnlyTool := range GitHubReadOnlyTools {
 		if toolName == readOnlyTool {

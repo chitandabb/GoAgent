@@ -20,34 +20,46 @@ func (v ThroughputVariant) Valid() bool {
 }
 
 type ThroughputObservation struct {
-	DatasetVersion         string            `json:"datasetVersion"`
-	RunID                  string            `json:"runId"`
-	Repetition             int               `json:"repetition"`
-	Variant                ThroughputVariant `json:"variant"`
-	CorpusFingerprint      string            `json:"corpusFingerprint"`
-	EnvironmentFingerprint string            `json:"environmentFingerprint"`
-	Documents              int               `json:"documents"`
-	FormatCount            int               `json:"formatCount"`
-	SucceededDocuments     int               `json:"succeededDocuments"`
-	PartialDocuments       int               `json:"partialDocuments"`
-	FailedDocuments        int               `json:"failedDocuments"`
-	PartialDocumentIDs     []string          `json:"partialDocumentIds,omitempty"`
-	FailedDocumentIDs      []string          `json:"failedDocumentIds,omitempty"`
-	SourceBytes            int64             `json:"sourceBytes"`
-	Pages                  int               `json:"pages"`
-	Elements               int               `json:"elements"`
-	Chunks                 int               `json:"chunks"`
-	DurationMillis         int64             `json:"durationMillis"`
-	QueueDurationMillis    int64             `json:"queueDurationMillis"`
-	ProcessDurationMillis  int64             `json:"processDurationMillis"`
-	DocumentConcurrency    int               `json:"documentConcurrency"`
-	EmbeddingBatchSize     int               `json:"embeddingBatchSize"`
-	EmbeddingMaxConcurrent int               `json:"embeddingMaxConcurrent"`
-	ChunkWriteBatchSize    int               `json:"chunkWriteBatchSize"`
-	EmbeddingRequests      int               `json:"embeddingRequests"`
-	EmbeddingTokens        int               `json:"embeddingTokens"`
-	ChunkInsertBatches     int               `json:"chunkInsertBatches"`
-	EmbeddingInsertBatches int               `json:"embeddingInsertBatches"`
+	DatasetVersion         string                          `json:"datasetVersion"`
+	RunID                  string                          `json:"runId"`
+	Repetition             int                             `json:"repetition"`
+	Variant                ThroughputVariant               `json:"variant"`
+	CorpusFingerprint      string                          `json:"corpusFingerprint"`
+	EnvironmentFingerprint string                          `json:"environmentFingerprint"`
+	Documents              int                             `json:"documents"`
+	FormatCount            int                             `json:"formatCount"`
+	SucceededDocuments     int                             `json:"succeededDocuments"`
+	PartialDocuments       int                             `json:"partialDocuments"`
+	FailedDocuments        int                             `json:"failedDocuments"`
+	PartialDocumentIDs     []string                        `json:"partialDocumentIds,omitempty"`
+	FailedDocumentIDs      []string                        `json:"failedDocumentIds,omitempty"`
+	SourceBytes            int64                           `json:"sourceBytes"`
+	Pages                  int                             `json:"pages"`
+	Elements               int                             `json:"elements"`
+	Chunks                 int                             `json:"chunks"`
+	DurationMillis         int64                           `json:"durationMillis"`
+	QueueDurationMillis    int64                           `json:"queueDurationMillis"`
+	ProcessDurationMillis  int64                           `json:"processDurationMillis"`
+	DocumentConcurrency    int                             `json:"documentConcurrency"`
+	EmbeddingBatchSize     int                             `json:"embeddingBatchSize"`
+	EmbeddingMaxConcurrent int                             `json:"embeddingMaxConcurrent"`
+	ChunkWriteBatchSize    int                             `json:"chunkWriteBatchSize"`
+	EmbeddingRequests      int                             `json:"embeddingRequests"`
+	EmbeddingTokens        int                             `json:"embeddingTokens"`
+	ChunkInsertBatches     int                             `json:"chunkInsertBatches"`
+	EmbeddingInsertBatches int                             `json:"embeddingInsertBatches"`
+	DocumentResults        []ThroughputDocumentObservation `json:"documentResults,omitempty"`
+}
+
+type ThroughputDocumentObservation struct {
+	DocumentID      string `json:"documentId"`
+	FormatClass     string `json:"formatClass"`
+	TaskStatus      string `json:"taskStatus"`
+	OutcomeAction   string `json:"outcomeAction"`
+	OutcomeReason   string `json:"outcomeReason"`
+	Elements        int    `json:"elements"`
+	Chunks          int    `json:"chunks"`
+	EmbeddingTokens int    `json:"embeddingTokens"`
 }
 
 func (o ThroughputObservation) Validate() error {
@@ -80,6 +92,40 @@ func (o ThroughputObservation) Validate() error {
 	if o.EmbeddingRequests < 0 || o.EmbeddingTokens < 0 || o.ChunkInsertBatches < 0 ||
 		o.EmbeddingInsertBatches < 0 {
 		return errors.New("knowledge ingestion throughput usage is invalid")
+	}
+	if len(o.DocumentResults) > 0 {
+		if err := validateDocumentResults(o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDocumentResults(observation ThroughputObservation) error {
+	if len(observation.DocumentResults) != observation.Documents {
+		return errors.New("knowledge ingestion throughput document diagnostics are incomplete")
+	}
+	seen := make(map[string]struct{}, len(observation.DocumentResults))
+	elements, chunks, tokens := 0, 0, 0
+	for _, result := range observation.DocumentResults {
+		if strings.TrimSpace(result.DocumentID) == "" || result.DocumentID != strings.TrimSpace(result.DocumentID) ||
+			strings.TrimSpace(result.FormatClass) == "" || result.FormatClass != strings.TrimSpace(result.FormatClass) ||
+			strings.TrimSpace(result.TaskStatus) == "" || result.TaskStatus != strings.TrimSpace(result.TaskStatus) ||
+			strings.TrimSpace(result.OutcomeAction) == "" || result.OutcomeAction != strings.TrimSpace(result.OutcomeAction) ||
+			strings.TrimSpace(result.OutcomeReason) == "" || result.OutcomeReason != strings.TrimSpace(result.OutcomeReason) ||
+			len(result.OutcomeReason) > 500 || result.Elements < 0 || result.Chunks < 0 || result.EmbeddingTokens < 0 {
+			return errors.New("knowledge ingestion throughput document diagnostics are invalid")
+		}
+		if _, exists := seen[result.DocumentID]; exists {
+			return errors.New("knowledge ingestion throughput document diagnostics are duplicated")
+		}
+		seen[result.DocumentID] = struct{}{}
+		elements += result.Elements
+		chunks += result.Chunks
+		tokens += result.EmbeddingTokens
+	}
+	if elements != observation.Elements || chunks != observation.Chunks || tokens != observation.EmbeddingTokens {
+		return errors.New("knowledge ingestion throughput document diagnostics do not match aggregate measurements")
 	}
 	return nil
 }

@@ -86,8 +86,28 @@ func TestRunRequiresExplicitProviderExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.executeProvider || options.validateOnly || options.estimateOnly || options.maxDocuments != 1 || options.repetitions != 1 {
+	if options.executeProvider || options.validateOnly || options.estimateOnly || options.maxDocuments != 1 || options.repetitions != 1 ||
+		options.maxProviderCostCNY != defaultMaxProviderCostCNY ||
+		options.embeddingPriceCNYPerMillion != defaultEmbeddingPriceCNYPerMillion ||
+		options.providerRPM != defaultProviderRPM || options.providerTPM != defaultProviderTPM {
 		t.Fatalf("options = %+v", options)
+	}
+}
+
+func TestPinnedThroughputCorpusKeepsAcceptanceCoverage(t *testing.T) {
+	manifest, err := readCorpus(filepath.Join("..", "..", "testdata", "rag-ingestion-throughput-v1.corpus.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.DatasetVersion != "rag-ingestion-throughput-v1" || len(manifest.Documents) != 40 {
+		t.Fatalf("dataset = %q, documents = %d", manifest.DatasetVersion, len(manifest.Documents))
+	}
+	formats := make(map[string]struct{}, 8)
+	for _, document := range manifest.Documents {
+		formats[document.FormatClass] = struct{}{}
+	}
+	if len(formats) != 8 {
+		t.Fatalf("format classes = %v", formats)
 	}
 }
 
@@ -101,6 +121,38 @@ func TestParseOptionsAllowsProviderFreeDatabaseAblation(t *testing.T) {
 	}
 	if _, err := parseOptions([]string{"-database-ablation", "-execute-provider"}); err == nil {
 		t.Fatal("parseOptions accepted two execution modes")
+	}
+}
+
+func TestParseOptionsRequiresProviderForDocumentConcurrencyAblation(t *testing.T) {
+	if _, err := parseOptions([]string{"-document-concurrency-ablation"}); err == nil {
+		t.Fatal("parseOptions accepted document concurrency ablation without provider execution")
+	}
+	if _, err := parseOptions([]string{"-document-concurrency-ablation", "-estimate-only"}); err != nil {
+		t.Fatalf("parseOptions rejected provider-free concurrency estimate: %v", err)
+	}
+	options, err := parseOptions([]string{"-document-concurrency-ablation", "-execute-provider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.documentConcurrencyAblation || !options.executeProvider {
+		t.Fatalf("options = %+v", options)
+	}
+	if _, err := parseOptions([]string{"-execute-provider", "-max-provider-cost-cny", "0"}); err == nil {
+		t.Fatal("parseOptions accepted a zero provider budget")
+	}
+}
+
+func TestParseOptionsAcceptsExactDocumentSelection(t *testing.T) {
+	options, err := parseOptions([]string{"-estimate-only", "-document-ids", "third, first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.documentIDs) != 2 || options.documentIDs[0] != "third" || options.documentIDs[1] != "first" {
+		t.Fatalf("documentIDs = %v", options.documentIDs)
+	}
+	if _, err := parseOptions([]string{"-document-ids", "first,first"}); err == nil {
+		t.Fatal("parseOptions accepted duplicate document IDs")
 	}
 }
 
@@ -200,6 +252,22 @@ func TestReadCorpusRejectsMissingFormatClass(t *testing.T) {
 	}
 }
 
+func TestSelectCorpusDocumentsPreservesRequestedOrder(t *testing.T) {
+	manifest := corpusManifest{Documents: []corpusDocument{
+		{DocumentID: "first"}, {DocumentID: "second"}, {DocumentID: "third"},
+	}}
+	selected, err := selectCorpusDocuments(manifest, 1, []string{"third", "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 2 || selected[0].DocumentID != "third" || selected[1].DocumentID != "first" {
+		t.Fatalf("selected = %+v", selected)
+	}
+	if _, err := selectCorpusDocuments(manifest, 1, []string{"missing"}); err == nil {
+		t.Fatal("selectCorpusDocuments accepted an unknown document ID")
+	}
+}
+
 func TestValidCorpusURLRequiresCredentialFreeHTTPS(t *testing.T) {
 	for _, value := range []string{"http://example.com/file", "https://user:secret@example.com/file", " /relative"} {
 		if validCorpusURL(value) {
@@ -277,5 +345,19 @@ func TestChunksForProviderEstimateAcceptsVisualOnlyDocument(t *testing.T) {
 	}
 	if len(chunks) != 0 {
 		t.Fatalf("chunks = %d, want 0", len(chunks))
+	}
+}
+
+func TestChunksForProviderEstimateUsesProductionElementMerge(t *testing.T) {
+	parsed := knowledgeparser.Result{Elements: []knowledge.DocumentElement{
+		{Index: 0, ElementType: knowledge.ElementText, SectionPath: []string{"section"}, ContentText: "duplicate content"},
+		{Index: 1, ElementType: knowledge.ElementText, SectionPath: []string{"section"}, ContentText: "duplicate content"},
+	}}
+	chunks, err := chunksForProviderEstimate(parsed, knowledge.TextChunkOptions{MaxRunes: 1000, OverlapRunes: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want 1", len(chunks))
 	}
 }

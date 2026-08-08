@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/knowledgeingestion"
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 )
@@ -39,6 +40,8 @@ type corpusAuditDocument struct {
 	ParserVersion             string            `json:"parserVersion,omitempty"`
 	Status                    corpusAuditStatus `json:"status"`
 	Elements                  int               `json:"elements"`
+	SearchableElements        int               `json:"searchableElements"`
+	SuppressedElements        int               `json:"suppressedElements"`
 	ElementRunes              int               `json:"elementRunes"`
 	VisualAssets              int               `json:"visualAssets"`
 	MaterializedVisualBytes   int64             `json:"materializedVisualBytes"`
@@ -62,6 +65,8 @@ type corpusAuditSummary struct {
 	NoSearchableOutputDocuments  int                   `json:"noSearchableOutputDocuments"`
 	TotalSourceBytes             int64                 `json:"totalSourceBytes"`
 	TotalElements                int                   `json:"totalElements"`
+	TotalSearchableElements      int                   `json:"totalSearchableElements"`
+	TotalSuppressedElements      int                   `json:"totalSuppressedElements"`
 	TotalElementRunes            int                   `json:"totalElementRunes"`
 	TotalVisualAssets            int                   `json:"totalVisualAssets"`
 	TotalMaterializedVisualBytes int64                 `json:"totalMaterializedVisualBytes"`
@@ -96,6 +101,8 @@ func runCorpusAudit(
 		formats[result.FormatClass] = struct{}{}
 		summary.TotalSourceBytes += result.SizeBytes
 		summary.TotalElements += result.Elements
+		summary.TotalSearchableElements += result.SearchableElements
+		summary.TotalSuppressedElements += result.SuppressedElements
 		summary.TotalElementRunes += result.ElementRunes
 		summary.TotalVisualAssets += result.VisualAssets
 		summary.TotalMaterializedVisualBytes += result.MaterializedVisualBytes
@@ -167,7 +174,16 @@ func auditCorpusDocument(
 	}
 	result.MaterializedVisualBytes = materializedVisualBytes(parsed.VisualAssets)
 	if len(parsed.Elements) > 0 {
-		chunks, chunkErr := knowledge.ChunkElements(parsed.Elements, knowledge.TextChunkOptions{
+		prepared, prepareErr := knowledgeingestion.PrepareSearchableElements(parsed.Elements)
+		if prepareErr != nil {
+			result.Status = corpusAuditParserFailed
+			result.Error = boundedAuditError(prepareErr)
+			result.DurationMillis = max(1, time.Since(startedAt).Milliseconds())
+			return result
+		}
+		result.SearchableElements = len(prepared.Elements)
+		result.SuppressedElements = prepared.SuppressedCount
+		chunks, chunkErr := knowledge.ChunkElements(prepared.Elements, knowledge.TextChunkOptions{
 			MaxRunes: cfg.ChunkMaxRunes, OverlapRunes: cfg.ChunkOverlapRunes,
 		})
 		if chunkErr != nil {

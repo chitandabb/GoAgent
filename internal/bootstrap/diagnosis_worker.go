@@ -13,6 +13,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformrabbitmq "github.com/chitandabb/GoAgent/internal/platform/rabbitmq"
+	"github.com/chitandabb/GoAgent/internal/webresearch"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -164,6 +165,14 @@ func (e diagnosisAgentExecutor) Execute(
 	}
 	runCtx := agent.WithTaskScope(ctx, scope)
 	runCtx = withExecutionCaseSnapshot(runCtx, task.CaseSnapshot)
+	if e.runtime.webResearch != nil {
+		runCtx, err = e.runtime.webResearch.WithRunContext(
+			runCtx, task.CreatedBy.String(), webresearch.SensitiveTermsFromExternalCase(task.CaseSnapshot),
+		)
+		if err != nil {
+			return diagnosisworker.ExecutionResult{}, fmt.Errorf("%w: build web research run scope: %v", diagnosis.ErrInvalidTask, err)
+		}
+	}
 	result, err := e.runtime.orchestrator.Invoke(runCtx, agent.RunRequest{
 		UserQuery: task.RequestText, ExternalCaseID: task.CaseSnapshot.ID.String(),
 		RequestedSkill: requestedSkill,
@@ -209,6 +218,8 @@ func taskCapabilitiesFromScope(scope map[string]any) ([]agent.ToolCapability, er
 			result = append(result, agent.ToolCapabilitySQL)
 		case diagnosis.TaskCapabilityKnowledge:
 			result = append(result, agent.ToolCapabilityKnowledge)
+		case diagnosis.TaskCapabilityWebSearch:
+			result = append(result, agent.ToolCapabilityWebSearch)
 		default:
 			return nil, fmt.Errorf("%w: unsupported task capability %q", diagnosis.ErrInvalidTask, value)
 		}

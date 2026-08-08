@@ -174,7 +174,7 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 			return TaskScope{}, fmt.Errorf("duplicate task scope capability %q", capability)
 		}
 		seenCapabilities[capability] = struct{}{}
-		if cfg.TaskType == TaskTypeKnowledge && capability != ToolCapabilityKnowledge {
+		if cfg.TaskType == TaskTypeKnowledge && capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch {
 			return TaskScope{}, fmt.Errorf("knowledge task scope cannot use capability %q", capability)
 		}
 	}

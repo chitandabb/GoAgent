@@ -26,6 +26,8 @@ type DefaultRunnerDependencies struct {
 	SchemaCatalog         tool.BaseTool
 	ReadonlyQuery         tool.BaseTool
 	KnowledgeSearch       tool.BaseTool
+	WebSearch             tool.BaseTool
+	FetchPublicPage       tool.BaseTool
 	Logger                *zap.Logger
 }
 
@@ -37,6 +39,8 @@ type DefaultToolCatalogDependencies struct {
 	SchemaCatalog        tool.BaseTool
 	ReadonlyQuery        tool.BaseTool
 	KnowledgeSearch      tool.BaseTool
+	WebSearch            tool.BaseTool
+	FetchPublicPage      tool.BaseTool
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -56,7 +60,8 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		ExternalCases: dependencies.ExternalCases, SkillReference: skillRuntime.ReferenceTool,
 		GitHubTools: dependencies.GitHubTools, SQLObjectDefinitions: dependencies.SQLObjectDefinitions,
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
-		KnowledgeSearch: dependencies.KnowledgeSearch,
+		KnowledgeSearch: dependencies.KnowledgeSearch, WebSearch: dependencies.WebSearch,
+		FetchPublicPage: dependencies.FetchPublicPage,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -103,6 +108,17 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
+		})
+	}
+	for _, webTool := range []tool.BaseTool{dependencies.WebSearch, dependencies.FetchPublicPage} {
+		if webTool == nil {
+			continue
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: webTool, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityWebSearch},
+			RequiredDependencies: []ToolDependency{ToolDependencyWebSearch},
 		})
 	}
 	for _, sqlTool := range []tool.BaseTool{

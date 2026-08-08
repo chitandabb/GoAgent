@@ -18,8 +18,9 @@ const minimumContainmentRunes = 32
 type elementMergeDisposition string
 
 const (
-	elementMergeKeep     elementMergeDisposition = "keep"
-	elementMergeSuppress elementMergeDisposition = "suppress_duplicate"
+	elementMergeKeep                elementMergeDisposition = "keep"
+	elementMergeSuppress            elementMergeDisposition = "suppress_duplicate"
+	elementMergeSuppressNonsemantic elementMergeDisposition = "suppress_nonsemantic"
 )
 
 type elementMergeDecision struct {
@@ -37,6 +38,25 @@ type elementMergeOutput struct {
 	SuppressedCount    int
 }
 
+type SearchableElementPreparation struct {
+	Version         string
+	Elements        []knowledge.DocumentElement
+	SuppressedCount int
+}
+
+// PrepareSearchableElements applies the same deterministic duplicate suppression
+// used by the production Executor before Chunking and Embedding.
+func PrepareSearchableElements(elements []knowledge.DocumentElement) (SearchableElementPreparation, error) {
+	merged, err := mergeElements(elements)
+	if err != nil {
+		return SearchableElementPreparation{}, err
+	}
+	return SearchableElementPreparation{
+		Version: merged.Version, Elements: append([]knowledge.DocumentElement(nil), merged.SearchableElements...),
+		SuppressedCount: merged.SuppressedCount,
+	}, nil
+}
+
 type mergeCandidate struct {
 	element    knowledge.DocumentElement
 	normalized string
@@ -48,6 +68,7 @@ func mergeElements(elements []knowledge.DocumentElement) (elementMergeOutput, er
 		return elementMergeOutput{}, errors.New("element merge input is required and bounded")
 	}
 	candidates := make([]mergeCandidate, 0, len(elements))
+	decisions := make([]elementMergeDecision, len(elements))
 	for index, element := range elements {
 		if element.Index != index {
 			return elementMergeOutput{}, errors.New("element merge requires contiguous source indexes")
@@ -57,7 +78,11 @@ func mergeElements(elements []knowledge.DocumentElement) (elementMergeOutput, er
 		}
 		normalized := normalizeMergeText(element.ContentText)
 		if normalized == "" {
-			return elementMergeOutput{}, errors.New("element merge normalized content is empty")
+			decisions[index] = elementMergeDecision{
+				ElementIndex: index, Disposition: elementMergeSuppressNonsemantic,
+				Reason: "nonsemantic_content",
+			}
+			continue
 		}
 		candidates = append(candidates, mergeCandidate{
 			element: element, normalized: normalized, runes: utf8.RuneCountInString(normalized),
@@ -76,7 +101,6 @@ func mergeElements(elements []knowledge.DocumentElement) (elementMergeOutput, er
 		return ordered[i].element.Index < ordered[j].element.Index
 	})
 
-	decisions := make([]elementMergeDecision, len(elements))
 	kept := make([]mergeCandidate, 0, len(elements))
 	for _, candidate := range ordered {
 		duplicateOf, reason := findMergeDuplicate(candidate, kept)
@@ -94,6 +118,9 @@ func mergeElements(elements []knowledge.DocumentElement) (elementMergeOutput, er
 		decisions[candidate.element.Index] = decision
 	}
 
+	if len(kept) == 0 {
+		return elementMergeOutput{}, errors.New("element merge suppressed every element")
+	}
 	output := elementMergeOutput{
 		Version: elementMergeVersion, Elements: make([]knowledge.DocumentElement, 0, len(elements)),
 		SearchableElements: make([]knowledge.DocumentElement, 0, len(kept)), Decisions: decisions,
@@ -110,9 +137,6 @@ func mergeElements(elements []knowledge.DocumentElement) (elementMergeOutput, er
 		} else {
 			output.SuppressedCount++
 		}
-	}
-	if len(output.SearchableElements) == 0 {
-		return elementMergeOutput{}, errors.New("element merge suppressed every element")
 	}
 	return output, nil
 }
