@@ -227,6 +227,9 @@ func (r *ConversationRunner) conversationScope(actor conversation.Actor, message
 	if selected == 1 {
 		capabilities = append(capabilities, ToolCapabilityCase)
 	}
+	if len(message.TaskReferences) > 0 {
+		capabilities = append(capabilities, ToolCapabilityTask)
+	}
 	return NewTaskScope(TaskScopeConfig{
 		UserID: actor.UserID, Role: role, TaskType: TaskTypeConversation,
 		AllowedCapabilities: capabilities, AvailableDependencies: r.availableDependencies,

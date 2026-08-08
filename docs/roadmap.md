@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M2-B4 Conversation Agent Turn Boundary Implemented
+## Current Stage: M2-B5 Conversation Task Status Tool Implemented
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -30,8 +30,9 @@ execution order and acceptance gates are defined in
       Tool scope, final assistant-message persistence, and the `/turns` endpoint.
 - [x] PostgreSQL `conversation_turns` ledger with request fingerprint, client UUID idempotency,
       single-active-turn lease, failed-attempt retry and completed-result replay.
-- [ ] Background/resumable conversation execution, message SSE, attachment reads, task-status
-      Tools, and citation preview.
+- [x] Reference-gated `get_diagnosis_task_status` Tool with dynamic TaskScope exposure, latest-message
+      validation, owner/admin authorization reuse, and report-availability summary.
+- [ ] Background/resumable conversation execution, message SSE, attachment reads, and citation preview.
 
 ## M0: Before Business Code
 
@@ -770,10 +771,11 @@ This supports the bounded worker-core 40%+ claim; the two-document/two-class sco
 - M2-B2: run the bounded one-Search/one-Scrape Firecrawl smoke when a Key is available, then add a small public-answer/citation quality set; backend Provider, authorization, safety, citation and dependency-degradation paths are implemented;
 - M2-B3: completed independent conversation/message persistence, read API and the guarded
   `create_diagnosis_task` command boundary;
-- M2-B4: [in progress] Conversation Agent `/turns` is implemented with bounded history, dynamic Tool
-  scope, final assistant-message persistence and a durable idempotent turn ledger; remaining work is
-  background/resumable execution, knowledge-QA streaming, message SSE, citation preview, task-status
-  Tools and attachment content access;
+- M2-B4: completed Conversation Agent `/turns` with bounded history, dynamic Tool scope, final
+  assistant-message persistence and a durable idempotent turn ledger;
+- M2-B5: completed reference-gated diagnosis task-status Tool; remaining conversation work is
+  background/resumable execution, knowledge-QA streaming, message SSE, citation preview and
+  attachment content access;
 - M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
   use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
   the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the

@@ -258,6 +258,9 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 
 	runtimeBuilders := defaultAgentRuntimeBuilders()
 	runtimeBuilders.conversationCreator = conversationService
+	if diagnosisTaskService != nil {
+		runtimeBuilders.conversationTaskStatus = conversationService
+	}
 	agentRuntime, err := buildAgentRuntime(
 		ctx, cfg, externalCaseService, deps.sqlServer, deps.db, log.Named("agent"), runtimeBuilders,
 	)

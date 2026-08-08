@@ -535,6 +535,51 @@ func TestCreateDiagnosisTaskRejectsCaseNotMatchingSelectedReference(t *testing.T
 	}
 }
 
+func TestGetDiagnosisTaskStatusRequiresLatestReferencedTask(t *testing.T) {
+	userID, conversationID, messageID, taskID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	message := Message{
+		ID: messageID, ConversationID: conversationID, Role: MessageRoleUser, Content: "这个任务进度如何",
+		TaskReferences: []TaskReference{{TaskID: taskID, Kind: ReferenceKindReferenced}},
+	}
+	repositoryStub := &commandRepositoryStub{message: message, latest: message}
+	taskReader := &commandTaskReaderStub{task: diagnosis.DiagnosisTask{ID: taskID, CreatedBy: userID, Status: diagnosis.TaskRunning}}
+	service := newCommandService(
+		t, repositoryStub, &commandTaskCreatorStub{}, taskReader, &commandCaseReaderStub{},
+	)
+	ctx := WithCommandContext(context.Background(), CommandContext{
+		ConversationID: conversationID, UserMessageID: messageID, Actor: Actor{UserID: userID},
+	})
+
+	result, err := service.GetDiagnosisTaskStatus(ctx, taskID)
+	if err != nil {
+		t.Fatalf("GetDiagnosisTaskStatus(): %v", err)
+	}
+	if result.Task.ID != taskID || taskReader.calls != 1 || taskReader.actor.UserID != userID {
+		t.Fatalf("result=%+v reader=%+v", result, taskReader)
+	}
+}
+
+func TestGetDiagnosisTaskStatusRejectsUnreferencedTask(t *testing.T) {
+	userID, conversationID, messageID, taskID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	message := Message{ID: messageID, ConversationID: conversationID, Role: MessageRoleUser, Content: "查一下进度"}
+	repositoryStub := &commandRepositoryStub{message: message, latest: message}
+	taskReader := &commandTaskReaderStub{}
+	service := newCommandService(
+		t, repositoryStub, &commandTaskCreatorStub{}, taskReader, &commandCaseReaderStub{},
+	)
+	ctx := WithCommandContext(context.Background(), CommandContext{
+		ConversationID: conversationID, UserMessageID: messageID, Actor: Actor{UserID: userID},
+	})
+
+	_, err := service.GetDiagnosisTaskStatus(ctx, taskID)
+	if !errors.Is(err, ErrTaskReferenceRequired) {
+		t.Fatalf("GetDiagnosisTaskStatus() error = %v, want ErrTaskReferenceRequired", err)
+	}
+	if taskReader.calls != 0 {
+		t.Fatalf("task reader calls = %d, want 0", taskReader.calls)
+	}
+}
+
 func newCommandService(t *testing.T, repository Repository, creator DiagnosisTaskCreator, reader DiagnosisTaskReader, cases ExternalCaseReader) *Service {
 	t.Helper()
 	service, err := NewService(repository)
@@ -599,10 +644,18 @@ func (s *commandTaskCreatorStub) Create(_ context.Context, _ diagnosis.TaskActor
 	return s.result, nil
 }
 
-type commandTaskReaderStub struct{}
+type commandTaskReaderStub struct {
+	task   diagnosis.DiagnosisTask
+	actor  diagnosis.TaskActor
+	taskID uuid.UUID
+	calls  int
+}
 
-func (*commandTaskReaderStub) Get(context.Context, diagnosis.TaskActor, uuid.UUID) (diagnosis.DiagnosisTask, error) {
-	return diagnosis.DiagnosisTask{}, nil
+func (s *commandTaskReaderStub) Get(_ context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.DiagnosisTask, error) {
+	s.calls++
+	s.actor = actor
+	s.taskID = taskID
+	return s.task, nil
 }
 
 type commandCaseReaderStub struct {

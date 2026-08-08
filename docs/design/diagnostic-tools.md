@@ -4,7 +4,7 @@
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
 - 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
-- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool、后端拥有的 `search_knowledge`，以及 Firecrawl `web_search`/`fetch_public_page`。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。Web Search 已完成 Query 脱敏、Run 预算、搜索结果 URL 授权、公网 DNS/IP 校验、响应上限和 `web` 引用快照；真实 Firecrawl smoke 仍依赖本机 Key/额度。Catalog 扫描/发布管理、Query Store、附件正文和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool、后端拥有的 `search_knowledge`、Firecrawl `web_search`/`fetch_public_page`，以及会话专用 `create_diagnosis_task`/`get_diagnosis_task_status`。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。任务状态 Tool 只有在当前消息带有已验证任务引用时才进入 TaskScope，并继续复用 owner/admin 权限。Web Search 已完成 Query 脱敏、Run 预算、搜索结果 URL 授权、公网 DNS/IP 校验、响应上限和 `web` 引用快照；真实 Firecrawl smoke 仍依赖本机 Key/额度。Catalog 扫描/发布管理、Query Store、附件正文和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
 
 ## 总体原则
 

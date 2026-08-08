@@ -73,6 +73,7 @@ var (
 	ErrCommandNotLatest        = errors.New("conversation command is not for the latest user message")
 	ErrDiagnosisIntentRequired = errors.New("explicit diagnosis intent is required")
 	ErrCaseReferenceRequired   = errors.New("exactly one selected case reference is required")
+	ErrTaskReferenceRequired   = errors.New("referenced diagnosis task is required")
 	ErrAgentUnavailable        = errors.New("conversation agent is unavailable")
 	ErrAgentResponseInvalid    = errors.New("conversation agent response is invalid")
 	ErrTurnIdempotencyConflict = errors.New("conversation turn idempotency key conflicts")
@@ -283,6 +284,12 @@ type CreateDiagnosisInput struct {
 type CreateDiagnosisResult struct {
 	Task     diagnosis.DiagnosisTask
 	Replayed bool
+}
+
+// DiagnosisTaskStatusResult is the safe task summary exposed to a bounded
+// conversation turn. The diagnosis service remains the authorization source.
+type DiagnosisTaskStatusResult struct {
+	Task diagnosis.DiagnosisTask
 }
 
 type Service struct {
@@ -660,6 +667,54 @@ func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosis
 		return CreateDiagnosisResult{}, err
 	}
 	return CreateDiagnosisResult{Task: result.Task, Replayed: result.Replayed}, nil
+}
+
+// GetDiagnosisTaskStatus reads only a task explicitly referenced by the latest
+// user message. A model-supplied UUID alone is never sufficient authorization.
+func (s *Service) GetDiagnosisTaskStatus(ctx context.Context, taskID uuid.UUID) (DiagnosisTaskStatusResult, error) {
+	if s == nil || s.repository == nil || s.diagnosisTaskReader == nil {
+		return DiagnosisTaskStatusResult{}, errors.New("conversation diagnosis task status is unavailable")
+	}
+	commandContext, ok := CommandContextFromContext(ctx)
+	if !ok || commandContext.ConversationID == uuid.Nil || commandContext.UserMessageID == uuid.Nil ||
+		commandContext.Actor.UserID == uuid.Nil {
+		return DiagnosisTaskStatusResult{}, ErrCommandContextRequired
+	}
+	if taskID == uuid.Nil {
+		return DiagnosisTaskStatusResult{}, ErrInvalidMessage
+	}
+	actor := commandContext.Actor
+	message, err := s.repository.GetMessage(
+		ctx, actor.UserID, commandContext.ConversationID, commandContext.UserMessageID,
+	)
+	if err != nil {
+		return DiagnosisTaskStatusResult{}, err
+	}
+	latest, err := s.repository.GetLatestMessage(ctx, actor.UserID, commandContext.ConversationID)
+	if err != nil {
+		return DiagnosisTaskStatusResult{}, err
+	}
+	if message.ID != latest.ID || message.Role != MessageRoleUser {
+		return DiagnosisTaskStatusResult{}, ErrCommandNotLatest
+	}
+	referenced := false
+	for _, reference := range message.TaskReferences {
+		if reference.TaskID == taskID &&
+			(reference.Kind == ReferenceKindCreated || reference.Kind == ReferenceKindReferenced) {
+			referenced = true
+			break
+		}
+	}
+	if !referenced {
+		return DiagnosisTaskStatusResult{}, ErrTaskReferenceRequired
+	}
+	task, err := s.diagnosisTaskReader.Get(ctx, diagnosis.TaskActor{
+		UserID: actor.UserID, IsAdmin: actor.IsAdmin,
+	}, taskID)
+	if err != nil {
+		return DiagnosisTaskStatusResult{}, err
+	}
+	return DiagnosisTaskStatusResult{Task: task}, nil
 }
 
 func hasExplicitDiagnosisIntent(content string) bool {

@@ -31,10 +31,12 @@
 普通 SQL、代码、知识库、附件和 Web 调查都在同一个 Agent 内循环中完成。只有必须隔离上下文、权限或预算的大型代码调查与脱敏 Web Research，才考虑 ADK Handoff/Fork。
 
 独立工作台会话使用单独的轻量 Conversation Agent Runtime。它只加载持久化的 user/assistant
-历史和当前消息引用，按 `TaskScope` 动态暴露 case、knowledge、web Tool；`create_diagnosis_task`
+历史和当前消息引用，按 `TaskScope` 动态暴露 case、knowledge、web、task-status Tool；`create_diagnosis_task`
 是只在唯一 selected case 且由直接用户消息明确请求诊断时可见的受控命令。该 Runtime 返回最终
 回答并由会话服务持久化助手消息，但不会把长耗时 Diagnosis Worker、原始 Tool 结果或模型推理
-过程塞进会话请求。
+过程塞进会话请求。`get_diagnosis_task_status` 只在当前消息带有已持久化任务引用时可见，执行时
+再次校验最新消息引用并复用 `DiagnosisTaskService.Get` 的 owner/admin 授权；它返回持久化状态、
+尝试次数、失败摘要和报告可用性，不生成进度百分比或预计完成时间。
 `conversation_turns` 以客户端 UUID、规范化请求指纹和 PostgreSQL 租约约束每个回合：同 key
 失败重试复用原用户消息，完成重试直接回放原助手消息；单个会话同时只允许一个未过期回合。
 这解决 HTTP 重试幂等，但模型调用仍在 API 进程内同步执行，不等同于后台 Conversation Worker。

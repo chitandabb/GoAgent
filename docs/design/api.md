@@ -4,7 +4,7 @@
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
 - 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及独立会话创建/列表/详情、消息游标查询、用户消息持久化和一个受控 `/turns` Agent 回合。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
-- 会话通过结构化工单/任务引用连接业务上下文；受控 `create_diagnosis_task` 命令服务及其窄 Tool Schema 由独立 Conversation Agent 调用并复用既有诊断任务应用服务。`conversation_turns` 已实现请求指纹、客户端 UUID 幂等、单活跃租约、失败重试和完成回放。助手最终消息已经持久化，但消息 SSE、附件读取、任务状态 Tool 和引用预览仍未完成；不能把当前 `/turns` 描述成后台可恢复的完整知识问答流。
+- 会话通过结构化工单/任务引用连接业务上下文；受控 `create_diagnosis_task` 命令服务及其窄 Tool Schema 由独立 Conversation Agent 调用并复用既有诊断任务应用服务。带任务引用的回合可按需调用内部 `get_diagnosis_task_status`，读取前会再次校验最新消息引用和 owner/admin 权限。`conversation_turns` 已实现请求指纹、客户端 UUID 幂等、单活跃租约、失败重试和完成回放。助手最终消息已经持久化，但消息 SSE、附件读取和引用预览仍未完成；不能把当前 `/turns` 描述成后台可恢复的完整知识问答流。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
 ## 设计原则
@@ -836,4 +836,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测、知识问答 Runner 内部的 `search_knowledge` Tool，以及独立会话持久化、消息读取、Conversation Agent `/turns`、turn 幂等账本和助手最终消息写入。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。当前 `/turns` 仍在 HTTP 进程内同步执行，进程崩溃依靠同 key 在租约过期后重试；消息 SSE、引用预览、附件内容访问、任务状态 Tool 和后台 conversation run 未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`，内部 Tool 不能提前伪装成公开 API。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测、知识问答 Runner 内部的 `search_knowledge` Tool，以及独立会话持久化、消息读取、Conversation Agent `/turns`、turn 幂等账本、助手最终消息写入和引用门禁的内部任务状态 Tool。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。当前 `/turns` 仍在 HTTP 进程内同步执行，进程崩溃依靠同 key 在租约过期后重试；消息 SSE、引用预览、附件内容访问和后台 conversation run 未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`；内部 Tool 不作为公开 HTTP API 伪装进 OpenAPI。

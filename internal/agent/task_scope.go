@@ -80,12 +80,13 @@ const (
 	ToolCapabilityKnowledge  ToolCapability = "knowledge"
 	ToolCapabilityAttachment ToolCapability = "attachment"
 	ToolCapabilityWebSearch  ToolCapability = "web_search"
+	ToolCapabilityTask       ToolCapability = "task"
 )
 
 func (c ToolCapability) Valid() bool {
 	switch c {
 	case ToolCapabilityCase, ToolCapabilityCode, ToolCapabilitySQL, ToolCapabilityKnowledge,
-		ToolCapabilityAttachment, ToolCapabilityWebSearch:
+		ToolCapabilityAttachment, ToolCapabilityWebSearch, ToolCapabilityTask:
 		return true
 	}
 	return false
@@ -179,7 +180,8 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 			return TaskScope{}, fmt.Errorf("knowledge task scope cannot use capability %q", capability)
 		}
 		if cfg.TaskType == TaskTypeConversation && capability != ToolCapabilityCase &&
-			capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch {
+			capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch &&
+			capability != ToolCapabilityTask {
 			return TaskScope{}, fmt.Errorf("conversation task scope cannot use capability %q", capability)
 		}
 	}
