@@ -353,16 +353,19 @@ paths:
       operationId: appendConversationTurn
       summary: 追加用户消息并执行一个受控会话 Agent 回合
       description: |
-        先持久化用户消息，再由独立 Conversation Agent 处理当前回合。
+        在 conversation_turns 中原子创建执行记录和用户消息，再由独立 Conversation Agent
+        处理当前回合。
         Agent 只能使用后端按消息引用和依赖状态筛选出的会话 Tool；明确诊断请求
         可创建独立的异步诊断任务，但不会在本请求内执行诊断 Worker。助手只持久化
         最终回答和结构化任务引用，不持久化原始 Tool 结果或模型推理过程。
-        如果 Agent 失败，用户消息仍可能已经持久化，客户端不应无条件重试而制造重复消息。
+        客户端必须为一次用户发送生成稳定 UUID 幂等键；同 key 同请求在失败后复用原用户
+        消息重试，完成后直接回放原消息对，同 key 不同请求返回 409。
       security:
         - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/ConversationId"
         - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -370,8 +373,14 @@ paths:
             schema:
               $ref: "#/components/schemas/ConversationMessageRequest"
       responses:
+        "200":
+          description: 复用既有 turn；可能是已完成结果回放，也可能是失败后的同消息重试完成
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationTurnResponse"
         "201":
-          description: 用户消息和助手最终回答均已持久化
+          description: 新 turn、用户消息和助手最终回答均已持久化
           content:
             application/json:
               schema:
@@ -1272,12 +1281,15 @@ components:
               $ref: "#/components/schemas/ConversationMessage"
     ConversationTurn:
       type: object
-      required: [userMessage, assistantMessage]
+      required: [userMessage, assistantMessage, replayed]
       properties:
         userMessage:
           $ref: "#/components/schemas/ConversationMessage"
         assistantMessage:
           $ref: "#/components/schemas/ConversationMessage"
+        replayed:
+          type: boolean
+          description: true 表示直接返回此前已完成的助手消息，未再次调用模型
     ConversationTurnResponse:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"

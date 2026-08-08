@@ -28,8 +28,10 @@ execution order and acceptance gates are defined in
       Diagnosis Worker Tool scope.
 - [x] Independent Conversation Agent runtime with bounded persisted history, dynamic conversation
       Tool scope, final assistant-message persistence, and the `/turns` endpoint.
-- [ ] Durable/idempotent conversation runs, message SSE, attachment reads, task-status Tools,
-      and citation preview.
+- [x] PostgreSQL `conversation_turns` ledger with request fingerprint, client UUID idempotency,
+      single-active-turn lease, failed-attempt retry and completed-result replay.
+- [ ] Background/resumable conversation execution, message SSE, attachment reads, task-status
+      Tools, and citation preview.
 
 ## M0: Before Business Code
 
@@ -702,7 +704,7 @@ task through a guarded command Tool. Conversations do not own task lifecycle. Th
 independent conversations, user messages and structured references; the command service and narrow Tool
 contract are implemented and wired to the diagnosis application service. The independent Conversation
 Agent Runtime and `/turns` assistant-message path are now implemented on the backend; the frontend still
-uses the direct task route until it adopts the new turn contract and its pending retry/SSE semantics.
+uses the direct task route until it generates stable turn idempotency keys and adopts the pending SSE semantics.
 
 ### Partial Backend Checkpoint: Knowledge Ingestion Throughput Baseline
 
@@ -769,8 +771,9 @@ This supports the bounded worker-core 40%+ claim; the two-document/two-class sco
 - M2-B3: completed independent conversation/message persistence, read API and the guarded
   `create_diagnosis_task` command boundary;
 - M2-B4: [in progress] Conversation Agent `/turns` is implemented with bounded history, dynamic Tool
-  scope and final assistant-message persistence; remaining work is durable/idempotent run semantics,
-  knowledge-QA streaming, message SSE, citation preview, task-status Tools and attachment content access;
+  scope, final assistant-message persistence and a durable idempotent turn ledger; remaining work is
+  background/resumable execution, knowledge-QA streaming, message SSE, citation preview, task-status
+  Tools and attachment content access;
 - M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
   use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
   the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the

@@ -23,7 +23,7 @@ type conversationUseCase interface {
 	List(ctx context.Context, actor conversation.Actor, query conversation.ListQuery) (conversation.ListResult, error)
 	ListMessages(ctx context.Context, actor conversation.Actor, conversationID uuid.UUID, query conversation.MessageQuery) (conversation.MessagePage, error)
 	AppendUserMessage(ctx context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.Message, error)
-	AppendUserMessageAndRespond(ctx context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.ConversationTurn, error)
+	ExecuteTurn(ctx context.Context, actor conversation.Actor, idempotencyKey string, input conversation.AppendMessageInput) (conversation.ConversationTurnResult, error)
 }
 
 type ConversationRoutes struct {
@@ -97,6 +97,7 @@ type conversationMessageResponse struct {
 type conversationTurnResponse struct {
 	UserMessage      conversationMessageResponse `json:"userMessage"`
 	AssistantMessage conversationMessageResponse `json:"assistantMessage"`
+	Replayed         bool                        `json:"replayed"`
 }
 
 type conversationCaseReferenceResp struct {
@@ -256,14 +257,26 @@ func (r *ConversationRoutes) appendTurn(c *gin.Context) {
 		AbortWithError(c, err)
 		return
 	}
-	turn, err := r.useCase.AppendUserMessageAndRespond(c.Request.Context(), conversationActor(identity), input)
+	idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if _, err := uuid.Parse(idempotencyKey); err != nil {
+		AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+			Field: "Idempotency-Key", Reason: "必须是合法的 UUID",
+		}}))
+		return
+	}
+	result, err := r.useCase.ExecuteTurn(c.Request.Context(), conversationActor(identity), idempotencyKey, input)
 	if err != nil {
 		AbortWithError(c, translateConversationError("append conversation turn", err))
 		return
 	}
-	WriteSuccessWithStatus(c, http.StatusCreated, conversationTurnResponse{
-		UserMessage:      conversationMessageResponseFrom(turn.UserMessage),
-		AssistantMessage: conversationMessageResponseFrom(turn.AssistantMessage),
+	status := http.StatusCreated
+	if !result.Created {
+		status = http.StatusOK
+	}
+	WriteSuccessWithStatus(c, status, conversationTurnResponse{
+		UserMessage:      conversationMessageResponseFrom(result.Turn.UserMessage),
+		AssistantMessage: conversationMessageResponseFrom(result.Turn.AssistantMessage),
+		Replayed:         result.Replayed,
 	})
 }
 
@@ -373,6 +386,12 @@ func translateConversationError(operation string, err error) error {
 		return apperror.Wrap(apperror.CodeDependencyUnavailable, err)
 	case errors.Is(err, conversation.ErrAgentResponseInvalid):
 		return apperror.Wrap(apperror.CodeInternal, err)
+	case errors.Is(err, conversation.ErrTurnIdempotencyConflict):
+		return apperror.Wrap(apperror.CodeConflict, err)
+	case errors.Is(err, conversation.ErrTurnInProgress):
+		return apperror.Wrap(apperror.CodeConflict, err)
+	case errors.Is(err, conversation.ErrTurnLeaseLost):
+		return apperror.Wrap(apperror.CodeConflict, err)
 	case errors.Is(err, repository.ErrNotFound), errors.Is(err, conversation.ErrReferenceNotFound):
 		return apperror.Wrap(apperror.CodeNotFound, err)
 	default:

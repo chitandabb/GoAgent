@@ -88,22 +88,25 @@ func TestConversationRoutesRejectsInvalidReferenceBeforeUseCase(t *testing.T) {
 func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
 	userID, conversationID := uuid.New(), uuid.New()
 	userMessageID, assistantMessageID := uuid.New(), uuid.New()
-	useCase := &conversationUseCaseStub{turn: conversation.ConversationTurn{
-		UserMessage: conversation.Message{
+	idempotencyKey := uuid.NewString()
+	useCase := &conversationUseCaseStub{turnResult: conversation.ConversationTurnResult{
+		Created: true,
+		Turn: conversation.ConversationTurn{UserMessage: conversation.Message{
 			ID: userMessageID, ConversationID: conversationID, Seq: 5,
 			Role: conversation.MessageRoleUser, Content: "MESGuard 的知识库怎么更新？",
 		},
-		AssistantMessage: conversation.Message{
-			ID: assistantMessageID, ConversationID: conversationID, Seq: 6,
-			Role: conversation.MessageRoleAssistant, Content: "知识文档采用版本发布。",
-		},
+			AssistantMessage: conversation.Message{
+				ID: assistantMessageID, ConversationID: conversationID, Seq: 6,
+				Role: conversation.MessageRoleAssistant, Content: "知识文档采用版本发布。",
+			}},
 	}}
 	routes, _ := NewConversationRoutes(useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/turns", strings.NewReader(`{
 "content":"MESGuard 的知识库怎么更新？"
-}`))
+	}`))
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", idempotencyKey)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
@@ -112,22 +115,69 @@ func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"assistantMessage":{"id":"`+assistantMessageID.String()) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if useCase.turnCalls != 1 || useCase.gotInput.ConversationID != conversationID {
-		t.Fatalf("turn calls=%d input=%+v", useCase.turnCalls, useCase.gotInput)
+	if useCase.turnCalls != 1 || useCase.gotInput.ConversationID != conversationID ||
+		useCase.gotIdempotencyKey != idempotencyKey {
+		t.Fatalf("turn calls=%d key=%q input=%+v", useCase.turnCalls, useCase.gotIdempotencyKey, useCase.gotInput)
+	}
+}
+
+func TestConversationRoutesAppendTurnRequiresIdempotencyKey(t *testing.T) {
+	useCase := &conversationUseCaseStub{}
+	routes, _ := NewConversationRoutes(useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+uuid.NewString()+"/turns", strings.NewReader(`{
+"content":"知识库如何更新？"
+}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || useCase.turnCalls != 0 ||
+		!strings.Contains(response.Body.String(), `"field":"Idempotency-Key"`) {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, useCase.turnCalls, response.Body.String())
+	}
+}
+
+func TestConversationRoutesAppendTurnReturnsOKForReplay(t *testing.T) {
+	conversationID := uuid.New()
+	useCase := &conversationUseCaseStub{turnResult: conversation.ConversationTurnResult{
+		Replayed: true,
+		Turn: conversation.ConversationTurn{
+			UserMessage: conversation.Message{
+				ID: uuid.New(), ConversationID: conversationID, Seq: 1,
+				Role: conversation.MessageRoleUser, Content: "问题",
+			},
+			AssistantMessage: conversation.Message{
+				ID: uuid.New(), ConversationID: conversationID, Seq: 2,
+				Role: conversation.MessageRoleAssistant, Content: "回答",
+			},
+		},
+	}}
+	routes, _ := NewConversationRoutes(useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/turns", strings.NewReader(`{"content":"问题"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", uuid.NewString())
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"replayed":true`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
 type conversationUseCaseStub struct {
-	created     conversation.Conversation
-	message     conversation.Message
-	turn        conversation.ConversationTurn
-	createErr   error
-	appendErr   error
-	gotActor    conversation.Actor
-	gotCreate   conversation.CreateInput
-	gotInput    conversation.AppendMessageInput
-	appendCalls int
-	turnCalls   int
+	created           conversation.Conversation
+	message           conversation.Message
+	turnResult        conversation.ConversationTurnResult
+	createErr         error
+	appendErr         error
+	gotActor          conversation.Actor
+	gotCreate         conversation.CreateInput
+	gotInput          conversation.AppendMessageInput
+	gotIdempotencyKey string
+	appendCalls       int
+	turnCalls         int
 }
 
 func (s *conversationUseCaseStub) Create(_ context.Context, actor conversation.Actor, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -153,8 +203,9 @@ func (s *conversationUseCaseStub) AppendUserMessage(_ context.Context, actor con
 	return s.message, s.appendErr
 }
 
-func (s *conversationUseCaseStub) AppendUserMessageAndRespond(_ context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.ConversationTurn, error) {
+func (s *conversationUseCaseStub) ExecuteTurn(_ context.Context, actor conversation.Actor, idempotencyKey string, input conversation.AppendMessageInput) (conversation.ConversationTurnResult, error) {
 	s.turnCalls++
 	s.gotActor, s.gotInput = actor, input
-	return s.turn, s.appendErr
+	s.gotIdempotencyKey = idempotencyKey
+	return s.turnResult, s.appendErr
 }

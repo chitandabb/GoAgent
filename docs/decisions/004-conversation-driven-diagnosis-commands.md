@@ -8,10 +8,12 @@ user-scoped conversations, user messages, structured case/task references and cu
 The guarded `create_diagnosis_task` command service and its narrow model-visible Tool
 contract are now implemented and wired to the existing diagnosis application service.
 The first independent Conversation Agent Runtime slice is also implemented: `/turns`
-persists the user message, executes one bounded synchronous Agent turn, persists the final
-assistant message, and copies created task references for rendering. Assistant execution
-does not make the diagnosis Worker synchronous. Message SSE, attachments, citation preview,
-task-status Tools and durable/resumable conversation runs are not implemented yet.
+atomically creates a durable turn ledger entry and user message, executes one bounded synchronous
+Agent turn, persists the final assistant message, and copies created task references for rendering.
+Client UUID idempotency keys support failed-run retry and completed-result replay without duplicate
+messages. Assistant execution does not make the diagnosis Worker synchronous. Message SSE,
+attachments, citation preview, task-status Tools and background/resumable conversation execution
+are not implemented yet.
 
 ## Decision
 
@@ -117,15 +119,19 @@ Conversation messages can continue while a task is pending or running. A later m
 
 It does not append arbitrary instructions to an already running task.
 
-The initial `/turns` implementation is request-bounded rather than a durable Agent run. It
+The initial `/turns` execution is request-bounded rather than a background Agent Worker. It
 loads only persisted user/assistant history, applies a rune budget, and dynamically exposes
 case/knowledge/web Tools according to the current message references and dependency health.
 The model-visible command Tool is limited to one invocation per turn. Tool results and model
 reasoning are transient; only the final assistant content and structured created-task references
-are persisted. The endpoint currently writes the user message before calling the Agent, so a
-model or dependency failure may leave that user message without an assistant response. A future
-durable run/idempotency boundary must resolve retry and concurrent-turn semantics before the
-frontend treats `/turns` as a fully resumable stream.
+are persisted. `conversation_turns` binds a client UUID key to a canonical request fingerprint,
+user message, attempt count, status and execution lease. The first request creates the turn and
+user message atomically; a failed or expired attempt reuses that message, a completed attempt
+replays the same assistant message, and a changed request with the same key is rejected. A
+conversation row lock plus a partial unique index permits one unexpired running turn per
+conversation. Request cancellation uses a short non-cancelled cleanup context to mark failure.
+The model call itself still runs in the HTTP process; a process crash is recovered only when the
+client retries after lease expiry, so `/turns` is not yet a push-driven resumable stream.
 
 ## Data Model Direction
 
@@ -151,9 +157,9 @@ evidence.
 
 - A model-selected command needs stricter intent, idempotency, rate-limit and prompt-injection
   controls than read-only Tools.
-- The conversation Agent Runtime still needs to provide model context, Tool authorization,
-  assistant-message persistence and a resumable stream before the frontend can stop using
-  `sessionStorage` as its workspace adapter.
+- The conversation Agent Runtime now provides model context, Tool authorization, turn idempotency
+  and assistant-message persistence; the frontend still needs a stable-key client adapter and a
+  resumable message stream before it can remove `sessionStorage` compatibility state.
 - Existing direct task creation remains necessary for tests, administration and compatibility,
   but the target workbench should use the Agent command path.
 - Evaluation must cover correct creation, correct non-creation, duplicate model calls, ambiguous
@@ -162,10 +168,10 @@ evidence.
 ## Delivery Order
 
 The persistence foundation, guarded command boundary and first independent Conversation Agent
-turn are now complete. The next slice is to add durable/idempotent conversation run semantics,
-then message SSE, attachment reads, citation preview and task-status Tools. Do not make the
-long-running Diagnosis Worker part of the request. The broader knowledge-QA context/memory work
-remains after the third resume item is closed.
+turn ledger/idempotency boundary are now complete. The next slice is message SSE or background
+conversation execution, followed by attachment reads, citation preview and task-status Tools.
+Do not make the long-running Diagnosis Worker part of the request. The broader knowledge-QA
+context/memory work remains after the third resume item is closed.
 
 Web Search and attachment conversation integration should target the new conversation runtime,
 not add more behavior to the temporary case-bound frontend workspace.

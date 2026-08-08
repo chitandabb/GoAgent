@@ -78,7 +78,8 @@ analyst 访问 admin 路由重定向首页,未登录访问任何页面重定向 
 选择工单本身不触发模型调用或任务创建。
 
 当前后端已经提供 conversation/message 持久化和 `/turns` Agent 回合；但前端仍可继续使用
-直接任务创建 API，直到完成 `/turns` 的幂等失败展示、助手消息回放和后续 SSE 适配。当前
+直接任务创建 API，直到为每次发送生成稳定 UUID 幂等键、处理 `200 replay/409 running`、
+完成助手消息回放和后续 SSE 适配。当前
 `workspaceId`、卷宗选择及 taskId 关联仍保留浏览器 `sessionStorage` 导航适配层。
 目标边界见 ADR 004；`/assistant` 兼容路由已重定向至工作台，但知识会话尚未接入统一外壳。
 保留 `/tasks/:id` 和报告深链接用于刷新恢复、分享和运维定位。
@@ -155,7 +156,7 @@ DESIGN-apple.md 是营销站规范,工作台按以下决策"翻译":
 | task 列表/工单历史诊断 | 后端未实现；只提供本会话 taskId 导航记录 |
 | 任务证据明细/工具执行 | 后端未实现；页面显示未开放状态 |
 | admin 系统监控/死信 | 后端未实现；页面显示未接入状态 |
-| 服务端 conversation/message | 后端已实现持久化、结构化引用和 `/turns`；前端尚未接入助手回放、失败幂等、消息 SSE 和附件内容 |
+| 服务端 conversation/message | 后端已实现持久化、结构化引用、`/turns` 和 turn 幂等账本；前端尚未接入稳定 key、助手回放、消息 SSE 和附件内容 |
 | 知识助手 | 旧 Mock 页面不再挂载，`/assistant` 重定向工作台；知识问答可由后端会话 Agent 处理，但前端接入仍待完成 |
 | 知识库、用户与 Catalog 管理 | 仍为 Mock；不属于本次 M1 诊断闭环 |
 
