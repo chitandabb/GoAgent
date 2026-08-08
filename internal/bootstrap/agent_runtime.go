@@ -15,10 +15,12 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformrerank "github.com/chitandabb/GoAgent/internal/platform/dashscopererank"
+	platformdirectweb "github.com/chitandabb/GoAgent/internal/platform/directweb"
 	platformfirecrawl "github.com/chitandabb/GoAgent/internal/platform/firecrawl"
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformqueryrewrite "github.com/chitandabb/GoAgent/internal/platform/queryrewrite"
+	platformsearxng "github.com/chitandabb/GoAgent/internal/platform/searxng"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 
@@ -263,14 +265,10 @@ func buildAgentRuntime(
 }
 
 func buildWebResearchService(
-	_ context.Context,
+	ctx context.Context,
 	cfg config.WebSearchConfig,
 	_ *zap.Logger,
 ) (*webresearch.Service, error) {
-	apiKey, err := cfg.APIKey()
-	if err != nil {
-		return nil, err
-	}
 	sensitiveTerms, err := cfg.Redaction.SensitiveTerms()
 	if err != nil {
 		return nil, err
@@ -282,20 +280,94 @@ func buildWebResearchService(
 	if err != nil {
 		return nil, err
 	}
-	client, err := platformfirecrawl.New(platformfirecrawl.Config{
-		BaseURL: cfg.BaseURL, APIKey: apiKey,
-		Timeout:          time.Duration(cfg.TimeoutMillis) * time.Millisecond,
-		MaxResponseBytes: cfg.MaxResponseBytes,
-	})
+	urlPolicy := webresearch.NewURLPolicy(nil)
+	searchProviderName, contentProviderName := cfg.EffectiveProviders()
+	searchProvider, contentProvider, err := buildWebProviders(ctx, cfg, searchProviderName, contentProviderName, urlPolicy)
 	if err != nil {
 		return nil, err
 	}
 	return webresearch.NewService(webresearch.ServiceConfig{
-		Provider: client, QueryPolicy: queryPolicy, URLPolicy: webresearch.NewURLPolicy(nil),
+		SearchProvider: searchProvider, ContentProvider: contentProvider,
+		QueryPolicy: queryPolicy, URLPolicy: urlPolicy,
 		MaxResults: cfg.MaxResults, MaxFetchedPages: cfg.MaxFetchedPages,
 		MaxPageChars: cfg.MaxPageChars, MaxRounds: cfg.MaxRounds,
 		OfficialDomains: cfg.OfficialDomains, TrustedDomains: cfg.TrustedDomains,
 	})
+}
+
+func buildWebProviders(
+	ctx context.Context,
+	cfg config.WebSearchConfig,
+	searchName, contentName string,
+	urlPolicy *webresearch.URLPolicy,
+) (webresearch.SearchProvider, webresearch.ContentProvider, error) {
+	searchName = strings.ToLower(strings.TrimSpace(searchName))
+	contentName = strings.ToLower(strings.TrimSpace(contentName))
+	timeout := time.Duration(cfg.TimeoutMillis) * time.Millisecond
+
+	var firecrawlClient *platformfirecrawl.Client
+	getFirecrawl := func() (*platformfirecrawl.Client, error) {
+		if firecrawlClient != nil {
+			return firecrawlClient, nil
+		}
+		apiKey, err := cfg.APIKeyFor("firecrawl")
+		if err != nil {
+			return nil, err
+		}
+		providerConfig := cfg.ProviderConfig("firecrawl")
+		firecrawlClient, err = platformfirecrawl.New(platformfirecrawl.Config{
+			BaseURL: providerConfig.BaseURL, APIKey: apiKey,
+			Timeout: timeout, MaxResponseBytes: cfg.MaxResponseBytes,
+		})
+		return firecrawlClient, err
+	}
+
+	var searchProvider webresearch.SearchProvider
+	switch searchName {
+	case "firecrawl":
+		client, err := getFirecrawl()
+		if err != nil {
+			return nil, nil, err
+		}
+		searchProvider = client
+	case "searxng":
+		providerConfig := cfg.ProviderConfig("searxng")
+		client, err := platformsearxng.New(platformsearxng.Config{
+			BaseURL: providerConfig.BaseURL, Timeout: timeout,
+			MaxResponseBytes: cfg.MaxResponseBytes,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		searchProvider = client
+	default:
+		return nil, nil, fmt.Errorf("unsupported web search provider %q", searchName)
+	}
+
+	var contentProvider webresearch.ContentProvider
+	switch contentName {
+	case "firecrawl":
+		client, err := getFirecrawl()
+		if err != nil {
+			return nil, nil, err
+		}
+		contentProvider = client
+	case "direct":
+		client, err := platformdirectweb.New(platformdirectweb.Config{
+			Timeout: timeout, MaxResponseBytes: cfg.MaxResponseBytes,
+			ValidateRedirect: func(redirectCtx context.Context, rawURL string) error {
+				_, err := urlPolicy.Validate(redirectCtx, rawURL)
+				return err
+			},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		contentProvider = client
+	default:
+		return nil, nil, fmt.Errorf("unsupported web content provider %q", contentName)
+	}
+	return searchProvider, contentProvider, nil
 }
 
 func buildKnowledgeSearchTool(

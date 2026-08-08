@@ -953,17 +953,19 @@ Web 页面是不可信数据。抓取内容不能成为系统指令，不能触�
   来自客户、工单、生产标识、数据库别名和附件标识；公开产品/模块术语不自动删除，内部产品名由
   管理员通过 `sensitiveTermsEnv` 配置。规则、词典和最小化是安全边界，LLM 改写、NER 或云 DLP
   以后只能作为增强，不能绕开拒绝策略。
-- `[webSearch]` 当前启用且 provider 为 `firecrawl`、base URL 为 `https://api.firecrawl.dev`，密钥只
-  通过 `FIRECRAWL_API_KEY` 读取；密钥缺失、认证失败或 Provider 不可用时不注册 Web Tool，其他
-  诊断能力继续运行。新诊断任务由后端自动冻结 `web_search` capability，前端不提供 Tool 开关。
-- Firecrawl `/v2/search` 和 `/v2/scrape` Client、`web_search`/`fetch_public_page` Tool、Run 级
+- `[webSearch]` 现在用 `searchProvider`/`contentProvider` 独立选择发现和正文 Provider；旧版单一
+  `provider` 配置仍可兼容读取。默认配置保持 Firecrawl，密钥通过 Provider 配置中的 `apiKeyEnv`
+  读取；密钥缺失、认证失败或 Provider 不可用时不注册 Web Tool，其他诊断能力继续运行。新诊断
+  任务由后端自动冻结 `web_search` capability，前端不提供 Tool 开关。
+- Firecrawl `/v2/search`/`/v2/scrape`、SearXNG JSON `/search` 和 Direct HTML/Text Client、
+  `web_search`/`fetch_public_page` Tool、Run 级
   2 Search/3 Fetch 预算和 `web` Evidence 已实现。Search 结果生成同 Run 随机 `resultId`，
   Fetch 不接受任意 URL；重复 Fetch 复用快照，不重复消费 Provider。
-- URL Gate 在 Search 候选和 Scrape 最终报告 URL 两处校验协议、凭证、端口、域名解析及公网 IP，
-  拒绝 localhost、私网、保留地址和混合 DNS；响应只接受 JSON、最大 2 MiB，正文最大 20,000
-  字符并记录截断。Firecrawl 内部不可见的中间重定向仍依赖其服务端 SSRF 防护，不能描述为
-  MESGuard 完整观察了每一跳。
-- 网页以 `onlyMainContent` Markdown、控制字符清洗、`untrustedContent=true` 和系统级“只作数据”
+- URL Gate 在 Search 候选和 Content 最终 URL 两处校验协议、凭证、端口、域名解析及公网 IP，
+  拒绝 localhost、私网、保留地址和混合 DNS；响应最大 2 MiB，正文最大 20,000 字符并记录截断。
+  Direct Provider 在每一跳重定向前执行 URL Gate；Firecrawl 内部不可见的中间重定向仍依赖其
+  服务端 SSRF 防护，不能描述为 MESGuard 完整观察了每一跳。
+- 网页以 Provider 提取文本、控制字符清洗、`untrustedContent=true` 和系统级“只作数据”
   约束进入模型，不能授权 Tool 或改变 TaskScope。来源等级由配置化域名表确定，未命中一律保守为
   C；C 级来源不能独立支撑 conclusive 诊断。离线合同测试已完成，真实公网 smoke 尚未产生费用。
 

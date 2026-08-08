@@ -602,14 +602,15 @@ created only after deterministic removal of direct identifiers, private network/
 locations, business IDs, hashes, administrator terms, and current-ticket terms.
 Credentials, connection strings, raw SQL/log/stack/JSON content, invalid input, and
 queries with too little technical signal fail closed. Findings retain category/count
-only, and the future provider boundary accepts `PublicQuery` rather than arbitrary
-text. `[webSearch.redaction]` controls rune budgets and an optional environment-backed
-dictionary. Firecrawl `/v2/search` discovery and `/v2/scrape` extraction remain
-separate. Search emits run-scoped opaque result IDs; page fetch accepts no arbitrary
-URL, enforces two-search/three-page budgets, caches repeated fetches, and validates
-both candidate and final provider-reported targets against protocol, port, DNS and
-public-address rules. JSON responses are byte-bounded and page Markdown is
-character-bounded and marked untrusted.
+only, and the provider boundary accepts `PublicQuery` rather than arbitrary text.
+`[webSearch.redaction]` controls rune budgets and an optional environment-backed
+dictionary. Search discovery and Content extraction are separate Provider contracts:
+Firecrawl provides both, SearXNG provides local JSON search, and Direct provides
+bounded HTML/Text/JSON extraction. Search emits run-scoped opaque result IDs; page
+fetch accepts no arbitrary URL, enforces two-search/three-page budgets, caches repeated
+fetches, and validates both candidate and final provider-reported targets against
+protocol, port, DNS and public-address rules. Responses are byte-bounded and page text
+is character-bounded and marked untrusted.
 
 Only a fetched page can become a `web` EvidenceItem. Its URL, title, source tier,
 available page time, fetched-at time, truncation state and content SHA-256 are retained,
@@ -617,10 +618,12 @@ and the Evidence boundary recomputes the hash. Source tiers are configured by do
 unlisted sources are conservatively C. System/Skill instructions forbid treating page
 text as commands. New diagnosis tasks receive backend-managed web-search authorization,
 while dependency failure hides the Tools without failing the runtime. Offline provider,
-SSRF, budget and tamper tests pass. One real Search + one Scrape smoke remains pending
-because the current project environment has no `FIRECRAWL_API_KEY`; no public-provider
-request or cost was produced at this checkpoint. Firecrawl's unobservable intermediate
-redirect chain remains a provider-side SSRF boundary.
+SSRF, budget and tamper tests pass. SearXNG removes managed search quota but its upstream
+engines can still rate-limit or challenge the instance; Direct validates redirects before
+following them but intentionally does not execute JavaScript. A real managed-provider
+Search + Content smoke remains pending because the current project environment has no
+Firecrawl quota/key; no public-provider request or cost was produced at this checkpoint.
+Firecrawl's unobservable intermediate redirect chain remains a provider-side SSRF boundary.
 
 ### Partial Backend Checkpoint: Small-to-Big Context, Compression, Query Plan and Agentic Re-retrieval
 

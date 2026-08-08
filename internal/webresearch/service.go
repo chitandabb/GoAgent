@@ -58,11 +58,31 @@ type ProviderPage struct {
 	ModifiedTime  string
 }
 
-// Provider receives only policy-created query and URL values. Implementations
-// cannot be called with arbitrary private text or an unvalidated target URL.
-type Provider interface {
+// SearchProvider receives only a policy-created public query. Implementations
+// cannot be called with arbitrary private text.
+type SearchProvider interface {
 	Search(context.Context, PublicQuery, int) ([]ProviderSearchResult, error)
+}
+
+// ContentProvider receives only a URL that has passed the public URL policy.
+// Implementations must still validate every redirect before following it.
+type ContentProvider interface {
+	Fetch(context.Context, PublicURL) (ProviderPage, error)
+}
+
+// Provider is kept as the original compatibility contract for existing
+// adapters and tests. New integrations should implement SearchProvider and
+// ContentProvider independently so discovery and content extraction can use
+// different vendors.
+type Provider interface {
+	SearchProvider
 	Scrape(context.Context, PublicURL) (ProviderPage, error)
+}
+
+type legacyContentProvider struct{ provider Provider }
+
+func (p legacyContentProvider) Fetch(ctx context.Context, target PublicURL) (ProviderPage, error) {
+	return p.provider.Scrape(ctx, target)
 }
 
 type SearchResult struct {
@@ -101,7 +121,9 @@ type PageSnapshot struct {
 }
 
 type ServiceConfig struct {
-	Provider        Provider
+	SearchProvider  SearchProvider
+	ContentProvider ContentProvider
+	Provider        Provider // legacy composite adapter; used when either split field is nil
 	QueryPolicy     *QueryPolicy
 	URLPolicy       *URLPolicy
 	MaxResults      int
@@ -114,7 +136,8 @@ type ServiceConfig struct {
 }
 
 type Service struct {
-	provider        Provider
+	searchProvider  SearchProvider
+	contentProvider ContentProvider
 	queryPolicy     *QueryPolicy
 	urlPolicy       *URLPolicy
 	maxResults      int
@@ -150,8 +173,16 @@ type RunState struct {
 type runStateContextKey struct{}
 
 func NewService(cfg ServiceConfig) (*Service, error) {
-	if cfg.Provider == nil || cfg.QueryPolicy == nil || cfg.URLPolicy == nil {
-		return nil, errors.New("web research provider and policies are required")
+	if cfg.SearchProvider == nil {
+		cfg.SearchProvider = cfg.Provider
+	}
+	if cfg.ContentProvider == nil {
+		if cfg.Provider != nil {
+			cfg.ContentProvider = legacyContentProvider{provider: cfg.Provider}
+		}
+	}
+	if cfg.SearchProvider == nil || cfg.ContentProvider == nil || cfg.QueryPolicy == nil || cfg.URLPolicy == nil {
+		return nil, errors.New("web research providers and policies are required")
 	}
 	if cfg.MaxResults < 1 || cfg.MaxResults > 20 || cfg.MaxFetchedPages < 1 ||
 		cfg.MaxFetchedPages > cfg.MaxResults || cfg.MaxPageChars < 1000 || cfg.MaxPageChars > 100000 ||
@@ -176,7 +207,8 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
 	return &Service{
-		provider: cfg.Provider, queryPolicy: cfg.QueryPolicy, urlPolicy: cfg.URLPolicy,
+		searchProvider: cfg.SearchProvider, contentProvider: cfg.ContentProvider,
+		queryPolicy: cfg.QueryPolicy, urlPolicy: cfg.URLPolicy,
 		maxResults: cfg.MaxResults, maxFetchedPages: cfg.MaxFetchedPages,
 		maxPageChars: cfg.MaxPageChars, maxRounds: cfg.MaxRounds,
 		officialDomains: official, trustedDomains: trusted, clock: clock,
@@ -221,7 +253,7 @@ func (s *Service) Search(ctx context.Context, userID, input string, limit int) (
 	if limit > s.maxResults {
 		limit = s.maxResults
 	}
-	providerResults, err := s.provider.Search(ctx, query, limit)
+	providerResults, err := s.searchProvider.Search(ctx, query, limit)
 	if err != nil {
 		return SearchResponse{}, err
 	}
@@ -277,7 +309,7 @@ func (s *Service) Fetch(ctx context.Context, userID, resultID string) (PageSnaps
 	if !reserved {
 		return PageSnapshot{}, ErrFetchBudgetReached
 	}
-	page, err := s.provider.Scrape(ctx, authorized.url)
+	page, err := s.contentProvider.Fetch(ctx, authorized.url)
 	if err != nil {
 		return PageSnapshot{}, err
 	}

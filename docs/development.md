@@ -533,11 +533,13 @@ If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
 `code-investigation` is removed from the compiled Graph.
 
 Public Web Search is enabled in the tracked runtime profiles but remains an optional,
-fail-closed dependency. `FIRECRAWL_API_KEY` is passed only to the API/Diagnosis Worker;
-when it is absent or rejected, `web_search` and `fetch_public_page` are not registered
-and diagnosis continues with its other evidence channels. New diagnosis tasks receive
-the backend-managed `web_search` capability together with `knowledge`; users do not
-select either Tool.
+fail-closed dependency. Its search and content providers are configured independently
+with `searchProvider` and `contentProvider` under `[webSearch]`. The legacy single
+`provider`, `baseURL` and `apiKeyEnv` fields remain accepted for migration. A missing
+or rejected provider credential hides `web_search`/`fetch_public_page`; diagnosis
+continues with its other evidence channels. New diagnosis tasks receive the
+backend-managed `web_search` capability together with `knowledge`; users do not select
+either Tool.
 
 `[webSearch.redaction]` configures public-query input/output rune budgets. To add
 company or internal product names to the deterministic dictionary, set
@@ -546,22 +548,28 @@ terms in that variable; do not write the terms themselves into TOML. Current tic
 identifiers are added dynamically. Credentials, connection strings, raw
 SQL/log/stack/JSON content, and over-redacted queries are rejected rather than sent.
 
-Search and page extraction are separate Firecrawl `/v2/search` and `/v2/scrape`
-requests. A run may perform at most two searches, receive five candidates per search,
-and fetch three pages. `fetch_public_page` accepts only the opaque `resultId` returned
-by the same run, not a URL. Targets and final provider-reported URLs are restricted to
-HTTP/HTTPS on public DNS/IP addresses and normal ports; local, private, link-local,
-reserved, mixed public/private DNS and credential-bearing URLs are rejected. Responses
-are JSON-only, capped at 2 MiB, and page text is capped at 20,000 characters. Firecrawl
-returns Markdown with `onlyMainContent=true`; MESGuard does not execute scripts and
-marks every snippet/page as untrusted. The provider's unobservable intermediate
-redirect chain still relies on Firecrawl's own SSRF controls, while MESGuard validates
-both the submitted and final reported targets.
+Search and page extraction are separate Provider contracts. A run may perform at most
+two searches, receive five candidates per search, and fetch three pages.
+`fetch_public_page` accepts only the opaque `resultId` returned by the same run, not a
+URL. Targets and final provider-reported URLs are restricted to HTTP/HTTPS on public
+DNS/IP addresses and normal ports; local, private, link-local, reserved, mixed
+public/private DNS and credential-bearing URLs are rejected. Responses are capped at
+2 MiB, and page text is capped at 20,000 characters.
+
+The Firecrawl adapter calls `/v2/search` and `/v2/scrape`, returns provider Markdown
+with `onlyMainContent=true`, and relies on Firecrawl for redirects that are not
+observable to MESGuard. The SearXNG adapter calls its local JSON `/search` endpoint
+and does not require a SaaS API key; its upstream engines can still rate-limit or
+challenge the self-hosted instance. The Direct content adapter accepts HTML, XHTML,
+plain text and JSON, extracts bounded visible text without executing scripts, and
+re-validates every redirect through the MESGuard URL policy. JavaScript-heavy pages,
+PDFs and unsupported content types should use a configured managed content Provider.
+All snippets/pages remain untrusted.
 
 All contract and security tests are offline:
 
 ```powershell
-go test ./internal/webresearch ./internal/platform/firecrawl ./internal/agent ./internal/bootstrap
+go test ./internal/webresearch ./internal/platform/firecrawl ./internal/platform/directweb ./internal/platform/searxng ./internal/agent ./internal/bootstrap
 ```
 
 The opt-in live smoke spends exactly one Search and one Scrape request and performs no
