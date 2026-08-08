@@ -248,12 +248,21 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		}
 	}
 
+	runtimeBuilders := defaultAgentRuntimeBuilders()
+	runtimeBuilders.conversationCreator = conversationService
 	agentRuntime, err := buildAgentRuntime(
-		ctx, cfg, externalCaseService, deps.sqlServer, deps.db, log.Named("agent"), defaultAgentRuntimeBuilders(),
+		ctx, cfg, externalCaseService, deps.sqlServer, deps.db, log.Named("agent"), runtimeBuilders,
 	)
 	if err != nil {
 		closeDependencies()
 		return nil, err
+	}
+	if agentRuntime != nil && agentRuntime.conversation != nil {
+		if _, err := conversationService.WithAgentResponder(agentRuntime.conversation); err != nil {
+			_ = agentRuntime.close()
+			closeDependencies()
+			return nil, fmt.Errorf("wire conversation Agent responder: %w", err)
+		}
 	}
 
 	app := &App{

@@ -192,7 +192,8 @@ func validateToolScope(c *ToolCatalog, scope TaskScope) error {
 	if c == nil {
 		return errors.New("tool catalog is nil")
 	}
-	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() || len(scope.allowedCapabilities) == 0 {
+	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() ||
+		(len(scope.allowedCapabilities) == 0 && scope.taskType != TaskTypeConversation) {
 		return errors.New("task scope is invalid")
 	}
 	return nil

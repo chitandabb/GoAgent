@@ -32,18 +32,21 @@ import (
 )
 
 type agentRuntime struct {
-	runner                *mesagent.Runner
-	orchestrator          *mesagent.EvidenceOrchestrator
-	availableDependencies []mesagent.ToolDependency
-	modelProvider         string
-	modelID               string
-	promptVersion         string
-	unavailable           error
-	closeMCP              func() error
-	webResearch           *webresearch.Service
+	runner                    *mesagent.Runner
+	conversation              *mesagent.ConversationRunner
+	orchestrator              *mesagent.EvidenceOrchestrator
+	availableDependencies     []mesagent.ToolDependency
+	modelProvider             string
+	modelID                   string
+	promptVersion             string
+	conversationPromptVersion string
+	unavailable               error
+	closeMCP                  func() error
+	webResearch               *webresearch.Service
 }
 
 type agentRuntimeBuilders struct {
+	conversationCreator  mesagent.DiagnosisTaskCreator
 	chatModel            func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
 	githubMCP            func(context.Context, config.GitHubMCPConfig, *zap.Logger) ([]tool.BaseTool, func() error, error)
 	sqlObjectDefinitions func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
@@ -104,7 +107,10 @@ func buildAgentRuntime(
 	log *zap.Logger,
 	builders agentRuntimeBuilders,
 ) (*agentRuntime, error) {
-	runtime := &agentRuntime{promptVersion: strings.TrimSpace(cfg.Agent.PromptVersion)}
+	runtime := &agentRuntime{
+		promptVersion:             strings.TrimSpace(cfg.Agent.PromptVersion),
+		conversationPromptVersion: strings.TrimSpace(cfg.Agent.ConversationPromptVersion),
+	}
 	if activeProfile, profileErr := cfg.Models.Chat.ActiveProfile(); profileErr == nil {
 		runtime.modelProvider = strings.ToLower(strings.TrimSpace(activeProfile.Provider))
 		runtime.modelID = strings.TrimSpace(activeProfile.Model)
@@ -240,11 +246,36 @@ func buildAgentRuntime(
 		KnowledgeSearch:       knowledgeSearch,
 		WebSearch:             webSearch,
 		FetchPublicPage:       fetchPublicPage,
+		CreateDiagnosisTask:   builders.conversationCreator,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
 		_ = runtime.close()
 		return nil, fmt.Errorf("build Agent runner: %w", err)
+	}
+	conversationCatalog, err := mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
+		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
+		CreateDiagnosisTask: builders.conversationCreator,
+	})
+	if err != nil {
+		_ = runtime.close()
+		return nil, fmt.Errorf("build conversation Tool catalog: %w", err)
+	}
+	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
+		ChatModel: chatModel, ToolCatalog: conversationCatalog,
+		SystemInstruction:     prompts.ConversationInstruction,
+		AvailableDependencies: runtime.availableDependencies,
+		Logger:                log.Named("conversation_runner"),
+		MaxIterations:         cfg.Agent.ConversationMaxIterations,
+		MaxToolCalls:          cfg.Agent.MaxToolCalls,
+		MaxTotalTokens:        cfg.Agent.MaxTotalTokens,
+		MaxContextRunes:       cfg.Agent.ConversationMaxContextRunes,
+		Timeout:               time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond,
+	})
+	if err != nil {
+		_ = runtime.close()
+		return nil, fmt.Errorf("build conversation Agent runner: %w", err)
 	}
 	runtime.orchestrator, err = mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runtime.runner, Logger: log.Named("evidence_orchestrator"),
@@ -260,6 +291,7 @@ func buildAgentRuntime(
 	log.Info("Agent runtime initialized",
 		zap.String("skills_directory", cfg.Agent.SkillsDirectory),
 		zap.String("prompt_version", runtime.promptVersion),
+		zap.String("conversation_prompt_version", runtime.conversationPromptVersion),
 	)
 	return runtime, nil
 }

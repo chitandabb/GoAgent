@@ -211,16 +211,21 @@ func (c JudgeModelConfig) APIKey() (string, error) {
 
 // AgentConfig 声明 Skill/Prompt 文件位置、Prompt 发布标签和一次诊断的外层 Evidence Gate 总预算。
 type AgentConfig struct {
-	SkillsDirectory    string `toml:"skillsDirectory"`
-	PromptVersion      string `toml:"promptVersion"`
-	SystemPromptFile   string `toml:"systemPromptFile"`
-	BaselinePromptFile string `toml:"baselinePromptFile"`
-	ReportContractFile string `toml:"reportContractFile"`
-	MaxAgentRuns       int    `toml:"maxAgentRuns"`
-	MaxToolCalls       int    `toml:"maxToolCalls"`
-	MaxEvidenceItems   int    `toml:"maxEvidenceItems"`
-	MaxTotalTokens     int    `toml:"maxTotalTokens"`
-	TimeoutMillis      int    `toml:"timeoutMillis"`
+	SkillsDirectory             string `toml:"skillsDirectory"`
+	PromptVersion               string `toml:"promptVersion"`
+	SystemPromptFile            string `toml:"systemPromptFile"`
+	BaselinePromptFile          string `toml:"baselinePromptFile"`
+	ReportContractFile          string `toml:"reportContractFile"`
+	ConversationPromptVersion   string `toml:"conversationPromptVersion"`
+	ConversationPromptFile      string `toml:"conversationPromptFile"`
+	ConversationMaxIterations   int    `toml:"conversationMaxIterations"`
+	ConversationMaxContextRunes int    `toml:"conversationMaxContextRunes"`
+	ConversationTimeoutMillis   int    `toml:"conversationTimeoutMillis"`
+	MaxAgentRuns                int    `toml:"maxAgentRuns"`
+	MaxToolCalls                int    `toml:"maxToolCalls"`
+	MaxEvidenceItems            int    `toml:"maxEvidenceItems"`
+	MaxTotalTokens              int    `toml:"maxTotalTokens"`
+	TimeoutMillis               int    `toml:"timeoutMillis"`
 }
 
 func (c AgentConfig) Validate() error {
@@ -230,6 +235,9 @@ func (c AgentConfig) Validate() error {
 	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
 		return errors.New("agent promptVersion is invalid")
 	}
+	if !modelName.MatchString(strings.TrimSpace(c.ConversationPromptVersion)) {
+		return errors.New("agent conversationPromptVersion is invalid")
+	}
 	for _, promptFile := range []struct {
 		name string
 		path string
@@ -237,6 +245,7 @@ func (c AgentConfig) Validate() error {
 		{name: "systemPromptFile", path: c.SystemPromptFile},
 		{name: "baselinePromptFile", path: c.BaselinePromptFile},
 		{name: "reportContractFile", path: c.ReportContractFile},
+		{name: "conversationPromptFile", path: c.ConversationPromptFile},
 	} {
 		name := promptFile.name
 		path := strings.TrimSpace(promptFile.path)
@@ -261,6 +270,17 @@ func (c AgentConfig) Validate() error {
 	}
 	if c.TimeoutMillis != 0 && (c.TimeoutMillis < 1000 || c.TimeoutMillis > 600_000) {
 		return errors.New("agent timeoutMillis must be between 1000 and 600000 when configured")
+	}
+	if c.ConversationMaxIterations != 0 && (c.ConversationMaxIterations < 1 || c.ConversationMaxIterations > 16) {
+		return errors.New("agent conversationMaxIterations must be between 1 and 16 when configured")
+	}
+	if c.ConversationMaxContextRunes != 0 &&
+		(c.ConversationMaxContextRunes < 20_000 || c.ConversationMaxContextRunes > 200_000) {
+		return errors.New("agent conversationMaxContextRunes must be between 20000 and 200000 when configured")
+	}
+	if c.ConversationTimeoutMillis != 0 &&
+		(c.ConversationTimeoutMillis < 1000 || c.ConversationTimeoutMillis > 300_000) {
+		return errors.New("agent conversationTimeoutMillis must be between 1000 and 300000 when configured")
 	}
 	return nil
 }

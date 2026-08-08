@@ -72,8 +72,8 @@ Agent instructions are stored under `config/prompts/` instead of Go constants:
 - `evaluation-baseline.md`: paired-evaluation baseline instruction;
 - `report-contract.md`: Evidence Gate structured-report contract.
 
-The `[agent]` block declares these three paths and a manually maintained
-`promptVersion`. MESGuard reads, trims, validates, and caches each file once
+The `[agent]` block declares the diagnosis paths plus the independent conversation
+prompt path and their manually maintained version labels. MESGuard reads, trims, validates, and caches each file once
 while building the Agent runtime; a missing, empty, or larger-than-32-KiB file
 fails Agent initialization. Prompt changes take effect after process restart.
 
@@ -723,14 +723,20 @@ GET /api/v1/conversations?page=1&pageSize=20
 GET /api/v1/conversations/<conversationId>
 GET /api/v1/conversations/<conversationId>/messages?afterSeq=0&limit=20
 POST /api/v1/conversations/<conversationId>/messages
+POST /api/v1/conversations/<conversationId>/turns
 ```
 
 Message writes require `X-CSRF-Token`. The message request may carry `caseReferences` and
 `taskReferences`; the server verifies referenced records and writes them with the message in one
 PostgreSQL transaction. Selecting a case alone does not create a diagnosis task. The guarded
-`create_diagnosis_task` command service and internal Tool contract now exist and reuse the durable
-diagnosis application service, but the independent conversation Agent has not been wired to invoke
-them yet. Assistant messages, SSE, attachments and citation preview are not wired yet.
+`create_diagnosis_task` command service and internal Tool contract are invoked by the independent
+Conversation Agent through `/turns`. A unique `selected` case reference plus explicit diagnosis
+intent is required before that Tool is exposed. The command only creates a durable diagnosis task;
+the Diagnosis Worker remains asynchronous and independent from conversation lifecycle. `/turns`
+persists the user message before model execution, then persists only the final assistant answer and
+created task references. When model execution fails, the user message can remain persisted, so a
+client must not blindly retry the same request. Message SSE, attachments, citation preview, task
+status Tools and resumable/durable conversation runs remain later slices.
 
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 

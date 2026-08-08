@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/apperror"
+	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
@@ -22,6 +23,7 @@ type conversationUseCase interface {
 	List(ctx context.Context, actor conversation.Actor, query conversation.ListQuery) (conversation.ListResult, error)
 	ListMessages(ctx context.Context, actor conversation.Actor, conversationID uuid.UUID, query conversation.MessageQuery) (conversation.MessagePage, error)
 	AppendUserMessage(ctx context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.Message, error)
+	AppendUserMessageAndRespond(ctx context.Context, actor conversation.Actor, input conversation.AppendMessageInput) (conversation.ConversationTurn, error)
 }
 
 type ConversationRoutes struct {
@@ -48,6 +50,7 @@ func (r *ConversationRoutes) Register(api *gin.RouterGroup) {
 	commands.Use(r.csrf)
 	commands.POST("", r.create)
 	commands.POST("/:conversationId/messages", r.appendMessage)
+	commands.POST("/:conversationId/turns", r.appendTurn)
 }
 
 type conversationCreateRequest struct {
@@ -91,6 +94,11 @@ type conversationMessageResponse struct {
 	CreatedAt            time.Time                       `json:"createdAt"`
 }
 
+type conversationTurnResponse struct {
+	UserMessage      conversationMessageResponse `json:"userMessage"`
+	AssistantMessage conversationMessageResponse `json:"assistantMessage"`
+}
+
 type conversationCaseReferenceResp struct {
 	ExternalCaseID string                     `json:"externalCaseId"`
 	Kind           conversation.ReferenceKind `json:"kind"`
@@ -112,7 +120,7 @@ func (r *ConversationRoutes) list(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	result, err := r.useCase.List(c.Request.Context(), conversation.Actor{UserID: identity.User.ID}, conversation.ListQuery{
+	result, err := r.useCase.List(c.Request.Context(), conversationActor(identity), conversation.ListQuery{
 		Page: request.Page, PageSize: request.PageSize,
 	})
 	if err != nil {
@@ -140,7 +148,7 @@ func (r *ConversationRoutes) create(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	item, err := r.useCase.Create(c.Request.Context(), conversation.Actor{UserID: identity.User.ID}, conversation.CreateInput{
+	item, err := r.useCase.Create(c.Request.Context(), conversationActor(identity), conversation.CreateInput{
 		Title: strings.TrimSpace(request.Title),
 	})
 	if err != nil {
@@ -161,7 +169,7 @@ func (r *ConversationRoutes) get(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	item, err := r.useCase.Get(c.Request.Context(), conversation.Actor{UserID: identity.User.ID}, conversationID)
+	item, err := r.useCase.Get(c.Request.Context(), conversationActor(identity), conversationID)
 	if err != nil {
 		AbortWithError(c, translateConversationError("get conversation", err))
 		return
@@ -188,7 +196,7 @@ func (r *ConversationRoutes) listMessages(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	page, err := r.useCase.ListMessages(c.Request.Context(), conversation.Actor{UserID: identity.User.ID}, conversationID, conversation.MessageQuery{
+	page, err := r.useCase.ListMessages(c.Request.Context(), conversationActor(identity), conversationID, conversation.MessageQuery{
 		AfterSeq: request.AfterSeq, Limit: request.Limit,
 	})
 	if err != nil {
@@ -216,25 +224,71 @@ func (r *ConversationRoutes) appendMessage(c *gin.Context) {
 		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
 		return
 	}
-	caseReferences, err := parseConversationCaseReferences(request.CaseReferences)
+	input, err := conversationMessageInput(conversationID, request)
 	if err != nil {
 		AbortWithError(c, err)
 		return
 	}
-	taskReferences, err := parseConversationTaskReferences(request.TaskReferences)
-	if err != nil {
-		AbortWithError(c, err)
-		return
-	}
-	item, err := r.useCase.AppendUserMessage(c.Request.Context(), conversation.Actor{UserID: identity.User.ID}, conversation.AppendMessageInput{
-		ConversationID: conversationID, Content: request.Content,
-		CaseReferences: caseReferences, TaskReferences: taskReferences,
-	})
+	item, err := r.useCase.AppendUserMessage(c.Request.Context(), conversationActor(identity), input)
 	if err != nil {
 		AbortWithError(c, translateConversationError("append conversation message", err))
 		return
 	}
 	WriteSuccessWithStatus(c, http.StatusCreated, conversationMessageResponseFrom(item))
+}
+
+func (r *ConversationRoutes) appendTurn(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	request, ok := BindJSON[conversationMessageRequest](c)
+	if !ok {
+		return
+	}
+	identity, ok := identityFromContext(c)
+	if !ok {
+		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
+		return
+	}
+	input, err := conversationMessageInput(conversationID, request)
+	if err != nil {
+		AbortWithError(c, err)
+		return
+	}
+	turn, err := r.useCase.AppendUserMessageAndRespond(c.Request.Context(), conversationActor(identity), input)
+	if err != nil {
+		AbortWithError(c, translateConversationError("append conversation turn", err))
+		return
+	}
+	WriteSuccessWithStatus(c, http.StatusCreated, conversationTurnResponse{
+		UserMessage:      conversationMessageResponseFrom(turn.UserMessage),
+		AssistantMessage: conversationMessageResponseFrom(turn.AssistantMessage),
+	})
+}
+
+func conversationMessageInput(conversationID uuid.UUID, request conversationMessageRequest) (conversation.AppendMessageInput, error) {
+	caseReferences, err := parseConversationCaseReferences(request.CaseReferences)
+	if err != nil {
+		return conversation.AppendMessageInput{}, err
+	}
+	taskReferences, err := parseConversationTaskReferences(request.TaskReferences)
+	if err != nil {
+		return conversation.AppendMessageInput{}, err
+	}
+	return conversation.AppendMessageInput{
+		ConversationID: conversationID,
+		Content:        request.Content,
+		CaseReferences: caseReferences,
+		TaskReferences: taskReferences,
+	}, nil
+}
+
+func conversationActor(identity auth.Identity) conversation.Actor {
+	return conversation.Actor{
+		UserID:  identity.User.ID,
+		IsAdmin: identity.User.Role == auth.RoleAdmin,
+	}
 }
 
 func parseConversationID(c *gin.Context) (uuid.UUID, bool) {
@@ -313,6 +367,12 @@ func translateConversationError(operation string, err error) error {
 		return apperror.Wrap(apperror.CodeValidationFailed, err)
 	case errors.Is(err, conversation.ErrConversationArchived):
 		return apperror.NewWithMessage(apperror.CodeConflict, "会话已归档，不能继续追加消息")
+	case errors.Is(err, conversation.ErrCommandNotLatest):
+		return apperror.NewWithMessage(apperror.CodeConflict, "该消息已不是会话中的最新用户消息")
+	case errors.Is(err, conversation.ErrAgentUnavailable):
+		return apperror.Wrap(apperror.CodeDependencyUnavailable, err)
+	case errors.Is(err, conversation.ErrAgentResponseInvalid):
+		return apperror.Wrap(apperror.CodeInternal, err)
 	case errors.Is(err, repository.ErrNotFound), errors.Is(err, conversation.ErrReferenceNotFound):
 		return apperror.Wrap(apperror.CodeNotFound, err)
 	default:

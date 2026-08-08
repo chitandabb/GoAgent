@@ -60,6 +60,8 @@ var (
 	ErrCommandNotLatest        = errors.New("conversation command is not for the latest user message")
 	ErrDiagnosisIntentRequired = errors.New("explicit diagnosis intent is required")
 	ErrCaseReferenceRequired   = errors.New("exactly one selected case reference is required")
+	ErrAgentUnavailable        = errors.New("conversation agent is unavailable")
+	ErrAgentResponseInvalid    = errors.New("conversation agent response is invalid")
 )
 
 const (
@@ -163,6 +165,31 @@ type AppendMessageInput struct {
 	TaskReferences []TaskReference
 }
 
+// AgentRequest is the bounded input passed to the independent conversation Agent.
+// Tool results are deliberately not persisted into this history contract; they are
+// scoped to one invocation and can contain transient or untrusted data.
+type AgentRequest struct {
+	Conversation Conversation
+	UserMessage  Message
+	History      []Message
+}
+
+type AgentResponse struct {
+	Content string
+}
+
+// AgentResponder is implemented by the Eino-backed runtime in internal/agent.
+// Keeping this interface in the conversation domain avoids coupling persistence to
+// a model framework and lets the message service own assistant-message writes.
+type AgentResponder interface {
+	Respond(ctx context.Context, request AgentRequest) (AgentResponse, error)
+}
+
+type ConversationTurn struct {
+	UserMessage      Message
+	AssistantMessage Message
+}
+
 type Repository interface {
 	Create(ctx context.Context, userID uuid.UUID, input CreateInput, createdAt time.Time) (Conversation, error)
 	Get(ctx context.Context, userID, conversationID uuid.UUID) (Conversation, error)
@@ -221,9 +248,21 @@ type CreateDiagnosisResult struct {
 type Service struct {
 	repository          Repository
 	clock               func() time.Time
+	agent               AgentResponder
 	diagnosisTasks      DiagnosisTaskCreator
 	diagnosisTaskReader DiagnosisTaskReader
 	externalCases       ExternalCaseReader
+}
+
+func (s *Service) WithAgentResponder(agent AgentResponder) (*Service, error) {
+	if s == nil || s.repository == nil {
+		return nil, errors.New("conversation service is unavailable")
+	}
+	if agent == nil {
+		return nil, errors.New("conversation agent responder is nil")
+	}
+	s.agent = agent
+	return s, nil
 }
 
 func NewService(repository Repository) (*Service, error) {
@@ -308,6 +347,102 @@ func (s *Service) AppendUserMessage(ctx context.Context, actor Actor, input Appe
 func (s *Service) AppendAssistantMessage(ctx context.Context, actor Actor, input AppendMessageInput) (Message, error) {
 	input.Role = MessageRoleAssistant
 	return s.appendMessage(ctx, actor, input)
+}
+
+// AppendUserMessageAndRespond is the synchronous HTTP-facing turn boundary.
+// Diagnosis execution is still asynchronous: the Agent only creates the durable
+// diagnosis task and returns its reference; the Diagnosis Worker owns the long run.
+func (s *Service) AppendUserMessageAndRespond(
+	ctx context.Context,
+	actor Actor,
+	input AppendMessageInput,
+) (ConversationTurn, error) {
+	userMessage, err := s.AppendUserMessage(ctx, actor, input)
+	if err != nil {
+		return ConversationTurn{}, err
+	}
+	assistantMessage, err := s.RespondToUserMessage(ctx, actor, input.ConversationID, userMessage.ID)
+	if err != nil {
+		return ConversationTurn{UserMessage: userMessage}, err
+	}
+	return ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}, nil
+}
+
+func (s *Service) RespondToUserMessage(
+	ctx context.Context,
+	actor Actor,
+	conversationID, messageID uuid.UUID,
+) (Message, error) {
+	if s == nil || s.repository == nil {
+		return Message{}, errors.New("conversation service is unavailable")
+	}
+	if s.agent == nil {
+		return Message{}, ErrAgentUnavailable
+	}
+	if actor.UserID == uuid.Nil || conversationID == uuid.Nil || messageID == uuid.Nil {
+		return Message{}, ErrInvalidMessage
+	}
+	current, err := s.repository.Get(ctx, actor.UserID, conversationID)
+	if err != nil {
+		return Message{}, err
+	}
+	message, err := s.repository.GetMessage(ctx, actor.UserID, conversationID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	latest, err := s.repository.GetLatestMessage(ctx, actor.UserID, conversationID)
+	if err != nil {
+		return Message{}, err
+	}
+	if message.Role != MessageRoleUser || latest.ID != message.ID {
+		return Message{}, ErrCommandNotLatest
+	}
+	afterSeq := message.Seq - MaxMessageLimit
+	if afterSeq < 0 {
+		afterSeq = 0
+	}
+	history, err := s.repository.ListMessages(ctx, actor.UserID, conversationID, MessageQuery{
+		AfterSeq: afterSeq,
+		Limit:    MaxMessageLimit,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	commandCtx := WithCommandContext(ctx, CommandContext{
+		ConversationID: conversationID,
+		UserMessageID:  messageID,
+		Actor:          actor,
+	})
+	response, err := s.agent.Respond(commandCtx, AgentRequest{
+		Conversation: current,
+		UserMessage:  message,
+		History:      history.Items,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	response.Content = strings.TrimSpace(response.Content)
+	if response.Content == "" || len([]rune(response.Content)) > MaxContentRunes {
+		return Message{}, ErrAgentResponseInvalid
+	}
+	// The command service appends created task references to the triggering user
+	// message. Reload it after the Agent run and copy only those references to the
+	// assistant message so clients can render task cards without parsing prose.
+	message, err = s.repository.GetMessage(ctx, actor.UserID, conversationID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	createdTasks := make([]TaskReference, 0, len(message.TaskReferences))
+	for _, reference := range message.TaskReferences {
+		if reference.Kind == ReferenceKindCreated {
+			createdTasks = append(createdTasks, reference)
+		}
+	}
+	return s.AppendAssistantMessage(ctx, actor, AppendMessageInput{
+		ConversationID: conversationID,
+		Content:        response.Content,
+		TaskReferences: createdTasks,
+	})
 }
 
 func (s *Service) appendMessage(ctx context.Context, actor Actor, input AppendMessageInput) (Message, error) {

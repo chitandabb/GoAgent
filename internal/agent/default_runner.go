@@ -28,6 +28,7 @@ type DefaultRunnerDependencies struct {
 	KnowledgeSearch       tool.BaseTool
 	WebSearch             tool.BaseTool
 	FetchPublicPage       tool.BaseTool
+	CreateDiagnosisTask   DiagnosisTaskCreator
 	Logger                *zap.Logger
 }
 
@@ -41,6 +42,7 @@ type DefaultToolCatalogDependencies struct {
 	KnowledgeSearch      tool.BaseTool
 	WebSearch            tool.BaseTool
 	FetchPublicPage      tool.BaseTool
+	CreateDiagnosisTask  DiagnosisTaskCreator
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -61,7 +63,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		GitHubTools: dependencies.GitHubTools, SQLObjectDefinitions: dependencies.SQLObjectDefinitions,
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
 		KnowledgeSearch: dependencies.KnowledgeSearch, WebSearch: dependencies.WebSearch,
-		FetchPublicPage: dependencies.FetchPublicPage,
+		FetchPublicPage: dependencies.FetchPublicPage, CreateDiagnosisTask: dependencies.CreateDiagnosisTask,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -90,9 +92,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	roles := []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}
 	registrations := []ToolRegistration{{
 		Tool: readExternalCase, AllowedRoles: roles,
-		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-		AllowedDataRoles:     []DataSourceRole{DataSourceRoleCaseSource},
-		AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
+		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
 		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 		RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
 	}}
@@ -105,7 +105,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	if dependencies.KnowledgeSearch != nil {
 		registrations = append(registrations, ToolRegistration{
 			Tool: dependencies.KnowledgeSearch, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
 		})
@@ -116,9 +116,21 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 		}
 		registrations = append(registrations, ToolRegistration{
 			Tool: webTool, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityWebSearch},
 			RequiredDependencies: []ToolDependency{ToolDependencyWebSearch},
+		})
+	}
+	if dependencies.CreateDiagnosisTask != nil {
+		createDiagnosisTask, err := NewCreateDiagnosisTaskTool(dependencies.CreateDiagnosisTask)
+		if err != nil {
+			return nil, fmt.Errorf("build create diagnosis task Tool: %w", err)
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: createDiagnosisTask, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
+			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
 		})
 	}
 	for _, sqlTool := range []tool.BaseTool{

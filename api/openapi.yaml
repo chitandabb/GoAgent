@@ -348,6 +348,48 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+  /api/v1/conversations/{conversationId}/turns:
+    post:
+      operationId: appendConversationTurn
+      summary: 追加用户消息并执行一个受控会话 Agent 回合
+      description: |
+        先持久化用户消息，再由独立 Conversation Agent 处理当前回合。
+        Agent 只能使用后端按消息引用和依赖状态筛选出的会话 Tool；明确诊断请求
+        可创建独立的异步诊断任务，但不会在本请求内执行诊断 Worker。助手只持久化
+        最终回答和结构化任务引用，不持久化原始 Tool 结果或模型推理过程。
+        如果 Agent 失败，用户消息仍可能已经持久化，客户端不应无条件重试而制造重复消息。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationMessageRequest"
+      responses:
+        "201":
+          description: 用户消息和助手最终回答均已持久化
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationTurnResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
   /api/v1/diagnosis-tasks:
     post:
       operationId: createDiagnosisTask
@@ -1228,6 +1270,22 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ConversationMessage"
+    ConversationTurn:
+      type: object
+      required: [userMessage, assistantMessage]
+      properties:
+        userMessage:
+          $ref: "#/components/schemas/ConversationMessage"
+        assistantMessage:
+          $ref: "#/components/schemas/ConversationMessage"
+    ConversationTurnResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationTurn"
     ConversationMessagesData:
       type: object
       required: [items, afterSeq, nextAfterSeq, hasMore]
