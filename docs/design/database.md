@@ -616,6 +616,12 @@ M2再增加以下表，避免M1提前引入知识库的复杂状态：
 
 `conversations`保存用户会话和可见范围，`messages`保存用户、助手和工具消息。消息只通过关联表引用附件，不保存永久URL或完整Base64。
 
+`00017_create_conversations.sql` 已落地第一版持久化边界：`conversations` 按 `user_id` 隔离，
+`conversation_messages` 使用会话内单调 `seq` 支持 `afterSeq/hasMore` 补读，
+`conversation_case_references` 和 `conversation_task_references` 保存结构化引用。追加用户消息、
+引用存在性校验和会话 `last_message_at` 更新在同一 PostgreSQL 事务内完成；任务引用只记录来源，
+不会把诊断任务生命周期绑定到会话。助手消息、附件关系、摘要和 SSE 仍是后续增量。
+
 M2初期消息发送后不可编辑，不支持对话分支。用户修正问题时发送新消息；重新生成回答也创建新的追加记录，不修改已被摘要或引用的历史消息。
 
 消息需要记录：

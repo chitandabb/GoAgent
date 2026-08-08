@@ -715,6 +715,21 @@ GET /api/v1/external-cases?dataSourceId=<id>&page=1&pageSize=20
 GET /api/v1/external-cases/<externalCaseId>
 ```
 
+The first independent conversation backend slice is also available after login:
+
+```text
+POST /api/v1/conversations
+GET /api/v1/conversations?page=1&pageSize=20
+GET /api/v1/conversations/<conversationId>
+GET /api/v1/conversations/<conversationId>/messages?afterSeq=0&limit=20
+POST /api/v1/conversations/<conversationId>/messages
+```
+
+Message writes require `X-CSRF-Token`. The message request may carry `caseReferences` and
+`taskReferences`; the server verifies referenced records and writes them with the message in one
+PostgreSQL transaction. Selecting a case alone does not create a diagnosis task. The conversation
+Agent command, assistant messages, SSE, attachments and citation preview are not wired yet.
+
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 
 ## Logging

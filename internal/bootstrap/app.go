@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
@@ -91,6 +92,20 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	conversationRepository := platformpostgres.NewConversationRepository(deps.db)
+	conversationService, err := conversation.NewService(conversationRepository)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build conversation service: %w", err)
+	}
+	conversationRoutes, err := httptransport.NewConversationRoutes(
+		conversationService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build conversation routes: %w", err)
+	}
+	registrars = append(registrars, conversationRoutes)
 	knowledgeRepository := platformpostgres.NewKnowledgeRepository(deps.db)
 	knowledgeObjectStore := deps.objectStore
 	if knowledgeObjectStore == nil {

@@ -3,8 +3,10 @@
 ## Status
 
 Accepted as a target architecture on 2026-08-07. The current HTTP diagnosis-task
-creation path remains implemented; server-side conversations, message case references,
-and the `create_diagnosis_task` Tool are not implemented yet.
+creation path remains implemented. The first server-side conversation slice is now implemented:
+user-scoped conversations, user messages, structured case/task references and cursor-based reads.
+The conversation Agent, assistant messages, message SSE, attachments and the
+`create_diagnosis_task` Tool are not implemented yet.
 
 ## Decision
 

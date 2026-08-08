@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加，以及管理员知识文档创建/上传新版、入库任务查询和协作式取消；独立证据和工具执行读取接口仍是后续目标。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
-- M2 知识助手和个人知识库仍未交付；文档入库只固定当前已实现的管理员上传与任务控制接口，解析 Consumer 和在线检索不得提前声明。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及第一版独立会话创建/列表/详情、消息游标查询和用户消息持久化。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- 会话当前只持久化用户消息和工单/任务结构化引用；助手 Agent、消息 SSE、附件读取、引用预览和 `create_diagnosis_task` 命令仍未接入，不能把当前消息 API 描述成完整知识问答。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
 ## 设计原则
@@ -249,6 +249,11 @@ CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`
 | GET | `/api/v1/data-sources` | 登录 | 可用数据源列表 |
 | GET | `/api/v1/external-cases` | 登录 | 实时工单列表 |
 | GET | `/api/v1/external-cases/{externalCaseId}` | 登录 | 实时工单详情 |
+| GET | `/api/v1/conversations` | 登录 | 当前用户会话列表 |
+| POST | `/api/v1/conversations` | 登录 | 创建独立会话 |
+| GET | `/api/v1/conversations/{conversationId}` | 登录 | 会话摘要 |
+| GET | `/api/v1/conversations/{conversationId}/messages` | 登录 | 按 seq 补读消息 |
+| POST | `/api/v1/conversations/{conversationId}/messages` | 登录 | 追加用户消息和结构化引用 |
 | POST | `/api/v1/attachments` | 登录 | 流式上传附件 |
 | GET | `/api/v1/attachments/{attachmentId}` | 登录 | 附件元数据 |
 | GET | `/api/v1/attachments/{attachmentId}/content` | 登录 | 授权读取附件内容 |
@@ -830,4 +835,4 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测以及知识问答 Runner 内部的 `search_knowledge` Tool。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。公开的知识对话/消息 HTTP API 和引用预览接口仍未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`，内部 Tool 不能提前伪装成公开 API。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测、知识问答 Runner 内部的 `search_knowledge` Tool，以及独立会话的第一版持久化/消息读取边界。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。会话 Agent、诊断创建命令、助手消息、SSE、引用预览和附件内容访问仍未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`，内部 Tool 不能提前伪装成公开 API。
