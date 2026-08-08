@@ -595,20 +595,32 @@ The next backend checkpoint is repeatable process interruption, temporary model
 failure, retry/dead-letter and recovered-success drills, followed by fixed-dataset
 evaluation without fabricating duplicate reports or overwriting fenced results.
 
-### Partial Backend Checkpoint: Public Web Query Egress Policy
+### Backend Checkpoint: Controlled Public Web Research
 
-The first M2-B2 safety gate now exists in `internal/webresearch`. A provider query is
+The M2-B2 backend chain now exists in `internal/webresearch`. A provider query is
 created only after deterministic removal of direct identifiers, private network/file
 locations, business IDs, hashes, administrator terms, and current-ticket terms.
 Credentials, connection strings, raw SQL/log/stack/JSON content, invalid input, and
 queries with too little technical signal fail closed. Findings retain category/count
 only, and the future provider boundary accepts `PublicQuery` rather than arbitrary
 text. `[webSearch.redaction]` controls rune budgets and an optional environment-backed
-dictionary.
+dictionary. Firecrawl `/v2/search` discovery and `/v2/scrape` extraction remain
+separate. Search emits run-scoped opaque result IDs; page fetch accepts no arbitrary
+URL, enforces two-search/three-page budgets, caches repeated fetches, and validates
+both candidate and final provider-reported targets against protocol, port, DNS and
+public-address rules. JSON responses are byte-bounded and page Markdown is
+character-bounded and marked untrusted.
 
-This does not complete M2-B2. There is still no Firecrawl client, Web Search Tool,
-public-page fetcher, SSRF/redirect gate, untrusted-page isolation, WebEvidence
-persistence, or real public-provider invocation/cost.
+Only a fetched page can become a `web` EvidenceItem. Its URL, title, source tier,
+available page time, fetched-at time, truncation state and content SHA-256 are retained,
+and the Evidence boundary recomputes the hash. Source tiers are configured by domain;
+unlisted sources are conservatively C. System/Skill instructions forbid treating page
+text as commands. New diagnosis tasks receive backend-managed web-search authorization,
+while dependency failure hides the Tools without failing the runtime. Offline provider,
+SSRF, budget and tamper tests pass. One real Search + one Scrape smoke remains pending
+because the current project environment has no `FIRECRAWL_API_KEY`; no public-provider
+request or cost was produced at this checkpoint. Firecrawl's unobservable intermediate
+redirect chain remains a provider-side SSRF boundary.
 
 ### Partial Backend Checkpoint: Small-to-Big Context, Compression, Query Plan and Agentic Re-retrieval
 
@@ -706,23 +718,45 @@ run also exposed and fixed an OPC compatibility bug: same-package `word -> custo
 allowed while traversal beyond the virtual ZIP root remains rejected.
 
 A provider-free corpus audit now runs the production Parser and Chunking before any infrastructure call. The
-pinned set contains 12 public documents across all eight declared format classes, producing 4,190 Elements,
-6,177 Chunks and 128 visual candidates with zero parser failures. Five documents are text-ready, four retain
-searchable text while awaiting visual enrichment, and three require visual enrichment. Only materialized image
-bytes are summed; PDF page references no longer multiply the source-file size. This completes the format-coverage
-gate, but total corpus size remains 12/40 and the acceptance gate stays false.
+pinned set contains 40 public documents across all eight declared format classes, producing 5,946 raw Elements,
+5,854 searchable Elements, 12,864 Chunks and 139 visual candidates with zero parser failures. Production
+`element-merge-v1` suppresses 92 duplicate/nonsemantic Elements before Chunking. Twenty-seven documents are
+text-ready, ten retain searchable text while awaiting visual enrichment, and three require visual enrichment. Only
+materialized image bytes are summed; PDF page references no longer multiply the source-file size. This completes
+the document-count and format-coverage gates; five full-chain Provider pairs remain before acceptance can pass.
 The manifest also pins publisher, source page, HTTPS download URL and usage boundary; a guarded fetch script writes
 only below the ignored evaluation root and accepts a file only after byte-length and SHA-256 verification.
+Corpus admission rejected one 83.85 MB PDF above the 50 MiB upload limit and removed NIST AMS 100-32 after its
+in-process page text extraction exceeded 40 seconds without honoring cancellation. A passing NIST document replaced
+it in the positive corpus; a terminable subprocess or equivalent isolation boundary remains a parser-hardening task.
+The first 40-document provider pair is also excluded: its concurrency-2 arm hit DashScope
+`Throttling.AllocationQuota` on 11 documents and returned 10,923 rather than 12,864 Chunks. The integrity gate
+correctly rejected the apparent +141.57% throughput. The two arms issued 2,412 HTTP requests and consumed
+4,668,907 Tokens, approximately CNY 2.3345. The experiment averaged 571.6 RPM and 1,076,707 TPM against the
+Beijing limits of 1,800 RPM and 1,200,000 TPM, identifying rolling Token bursts rather than a permanently
+exhausted key quota. Provider runs now perform a local cost preflight, default to a CNY 0.05 command budget and
+half-limit smoothing, and abort the whole evaluation on the first 429. The 40-document set remains provider-free
+unless a full-run estimate receives explicit cost approval.
+
+The live two-document worker-core run exposed an evaluation isolation bug: its production-style Outbox row could
+be claimed by the running Relay/Worker before the embedded evaluation Worker, yielding `lease is held` and a false
+performance delta. Evaluation queueing now removes that Outbox row inside the same PostgreSQL transaction and
+persists per-document outcome diagnostics. After adding cost preflight and rate smoothing, a five-pair
+single-variable ablation changed only document concurrency `1 -> 2`; median duration fell from 2124 ms to 1450 ms
+and median throughput increased 46.48%, with identical 42 Elements/70 Chunks/requests/Tokens/batches. The whole
+run used 80 requests, 96,060 Tokens and approximately CNY 0.04803, with zero temporary actor/document residue.
+This supports the bounded worker-core 40%+ claim; the two-document/two-class scope remains explicit and is not the
+40-document mixed-visual acceptance result.
 
 ## Target Milestones, Not Yet Implemented
 
 - M2-B1: expand the checked-in pressure dataset beyond one long-parent Case, add failed/repeated/no-selection second-retrieval and answer-quality cases, complete the remaining Parent/Rewrite pairs, and measure aggregate compression rate and repeated-run stability; implementation is present but broad sample quality is unproven;
-- M2-B2: 公开技术 Web Search 降级链路；公网 Query 出口策略已实现，Provider、引用和失败降级待完成；
+- M2-B2: run the bounded one-Search/one-Scrape Firecrawl smoke when a Key is available, then add a small public-answer/citation quality set; backend Provider, authorization, safety, citation and dependency-degradation paths are implemented;
 - M2-B3: independent conversation/message API, structured case/task references, guarded Agent task-creation command, knowledge-qa streaming, citation preview and attachment content access;
-- M2-C: expand the current 12-document/eight-class corpus to 40 documents with diverse sources and visual
-  difficulty, then run five full-chain pairs,
-  then add RabbitMQ delivery to the upload-to-publish throughput baseline; the current single-document
-  worker-core pilot is not acceptance evidence;
+- M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
+  use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
+  the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the
+  upload-to-publish baseline;
 - M4: isolated SQL performance laboratory.
 
 Do not mark a target milestone as complete here until its acceptance criteria

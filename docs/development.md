@@ -365,20 +365,33 @@ source page, HTTPS download URL, usage boundary, byte length and SHA-256; the sc
 Validate the pinned public corpus without infrastructure or Provider calls:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -validate-only -max-documents 12
+go run ./cmd/mesguard-ingestion-throughput-observe -validate-only -max-documents 40
 ```
 
 Run the production Parser and Chunking locally, classify text/visual readiness, and write a JSON audit
 without infrastructure or Provider calls:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -audit-only -max-documents 12
+go run ./cmd/mesguard-ingestion-throughput-observe -audit-only -max-documents 40
 ```
 
-Parse locally and print the expected baseline/experiment Embedding request counts without sending a request:
+Parse locally and print the expected baseline/experiment Embedding request counts, conservative Token estimate
+and whole-run CNY cost without sending a request:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only -max-documents 12
+go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only -max-documents 40
+```
+
+Select a bounded low-cost subset by stable manifest ID instead of relying on manifest order:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only `
+  -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster"
+
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -estimate-only -document-concurrency-ablation `
+  -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
+  -repetitions 5
 ```
 
 Isolate PostgreSQL Chunk/vector staging without any Provider or object-store call:
@@ -398,15 +411,20 @@ staging versions, and times `SaveParsedResult` with write batch 1 versus the con
 never calls the configured Embedding endpoint. The 2026-08-07 five-pair run over 3 documents/743 Chunks measured
 1752 ms versus 406 ms median staging duration; this database-only result remains outside full-chain acceptance.
 
-Real execution requires PostgreSQL, MinIO, the configured Embedding key and explicit authorization:
+Real execution requires PostgreSQL, MinIO, the configured Embedding key and explicit authorization. Before
+opening those dependencies, the command performs the same local Parser/Chunk estimate. The default whole-command
+budget is CNY 0.05 at CNY 0.5 per million Embedding input Tokens; exceeding it fails before any paid request.
+Provider starts are smoothed to 900 RPM and 600,000 estimated TPM by default. These are evaluation safety defaults,
+not account quota claims, and can be changed only with explicit flags:
 
 ```powershell
 go run ./cmd/mesguard-ingestion-throughput-observe `
-  -execute-provider -max-documents 1 -repetitions 1 -timeout 15m
+  -execute-provider -max-documents 1 -repetitions 1 -timeout 15m `
+  -max-provider-cost-cny 0.05 -provider-rpm 900 -provider-tpm 600000
 
 go run ./cmd/mesguard-ingestion-throughput-eval `
-  -input output/evaluation/rag-ingestion-pilot-v1.observations.jsonl `
-  -output output/evaluation/rag-ingestion-pilot-v1.summary.json `
+  -input output/evaluation/rag-ingestion-throughput-v1.observations.jsonl `
+  -output output/evaluation/rag-ingestion-throughput-v1.summary.json `
   -target-increase-percent 40
 ```
 
@@ -414,14 +432,51 @@ The observer creates fresh MinIO/database facts for each arm and cleans them aft
 not clear provider, operating-system or PostgreSQL caches. It excludes RabbitMQ delivery, OCR/VLM and layout
 routing. The experiment combines the existing Embedding batch/concurrency with batched Chunk/vector INSERTs;
 use a separate staging benchmark before attributing a gain to database batching. Acceptance requires 40 real
-documents, all eight declared `formatClass` values and five integrity-preserving pairs. The current one-document
-pilot remains ineligible even though its observed increase exceeds 40%; see
+documents, all eight declared `formatClass` values and five integrity-preserving pairs. The current bounded
+five-pair concurrency result remains ineligible for that full-scale gate even though its observed increase exceeds 40%; see
 `docs/evaluations/rag-ingestion-throughput-v1.md`.
 
-The zero-cost audit currently covers 12 public documents and all 8 format classes with 4,190 Elements,
-6,177 Chunks, 128 visual candidates and zero parser failures. It counts only materialized visual bytes; PDF
-page candidates reference the immutable source and are not charged the whole PDF once per page. Format coverage
-is complete, but 28 documents and five full-chain pairs are still missing, so the acceptance gate remains false.
+The worker-core observer atomically removes its own `knowledge.ingest` Outbox row in the queue transaction.
+This is deliberate isolation: a live Outbox Relay/Knowledge Worker must not claim a task that the observer will
+execute directly. Per-document task status, Worker action/reason, Elements, Chunks and Embedding Tokens are stored
+in every new observation.
+
+Run the provider-backed document-concurrency ablation with identical Embedding/database batching on both arms:
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -execute-provider -document-concurrency-ablation `
+  -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
+  -repetitions 5 -timeout 15m `
+  -max-provider-cost-cny 0.06 -provider-rpm 900 -provider-tpm 600000 `
+  -output output/evaluation/rag-ingestion-document-concurrency-budgeted-v1.observations.jsonl
+```
+
+The budget-protected 2026-08-07 five-pair run changed only document concurrency `1 -> 2`. Preflight estimated
+100,830 Tokens/CNY 0.0504 and the manually reviewed cap was CNY 0.06; actual usage was 80 requests, 96,060 Tokens
+and approximately CNY 0.04803, with no OCR/VLM calls. Median duration changed from 2124 ms to 1450 ms and median
+document throughput increased 46.48%, while every arm retained 42 searchable Elements, 70 Chunks, 8 Embedding
+requests, 9606 Tokens and 2+2 Chunk/vector batches. `IntegrityPreserved=true` and temporary actor/document residue
+was `0|0`. This supports the bounded worker-core 40%+ claim, but remains ineligible for the 40-document/eight-format
+full-scale gate because the selected workload contains only two documents and two format classes.
+
+The zero-cost audit now covers 40 public documents and all 8 format classes with 5,946 raw Elements,
+5,854 searchable Elements, 12,864 Chunks, 139 visual candidates and zero parser failures. It applies the production
+Element merge before Chunking and records 92 suppressed duplicate/nonsemantic Elements. It counts only materialized visual bytes; PDF
+page candidates reference the immutable source and are not charged the whole PDF once per page. The 40-document
+corpus requires 12,864 Embedding requests with batch 1 or 1,306 with batch 10. Document and format coverage are
+complete, but five full-chain pairs are still missing, so the acceptance gate remains false. NIST AMS 100-32 was
+removed from the positive corpus after its page text extraction failed to terminate within 40 seconds; treat it as
+a parser-isolation fixture instead of silently increasing the worker timeout.
+
+The first 40-document provider pair is invalid. The concurrency-1 arm completed 12,864 Chunks in 280,459 ms with
+1,306 requests and 2,585,532 Tokens. The concurrency-2 arm hit DashScope `429 Throttling.AllocationQuota` on 11
+documents and produced only 10,923 Chunks, so the apparent +141.57% throughput is rejected by
+`IntegrityPreserved=false`. Both arms issued 2,412 HTTP requests and consumed 4,668,907 Tokens, approximately
+CNY 2.3345 at the Beijing synchronous price. The experiment averaged 571.6 RPM but 1,076,707 TPM; the official
+limits are 1,800 RPM and 1,200,000 TPM, so rolling Token bursts, not a permanently exhausted key quota, explain
+the 429. A first 429 now cancels the evaluation, and the 40-document corpus remains provider-free unless its
+preflight cost receives explicit approval.
 
 Docker Compose must pass `DASHSCOPE_API_KEY` to both `knowledge-worker` and `diagnosis-worker`. The first
 creates document vectors during ingestion; the second creates query vectors during diagnosis retrieval.
@@ -477,14 +532,45 @@ GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
 If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
 `code-investigation` is removed from the compiled Graph.
 
-Public Web Search remains disabled by default. `[webSearch.redaction]` configures the
-public-query input/output rune budgets. To add company or internal product names to
-the deterministic dictionary, set `sensitiveTermsEnv` to an environment-variable
-name and store comma/newline-separated terms in that variable; do not write the
-terms themselves into TOML. Current ticket identifiers are added dynamically.
-Credentials, connection strings, raw SQL/log/stack/JSON content, and over-redacted
-queries are rejected rather than sent. The Firecrawl client and Tool are not wired
-yet, so enabling the config at this checkpoint does not perform a public request.
+Public Web Search is enabled in the tracked runtime profiles but remains an optional,
+fail-closed dependency. `FIRECRAWL_API_KEY` is passed only to the API/Diagnosis Worker;
+when it is absent or rejected, `web_search` and `fetch_public_page` are not registered
+and diagnosis continues with its other evidence channels. New diagnosis tasks receive
+the backend-managed `web_search` capability together with `knowledge`; users do not
+select either Tool.
+
+`[webSearch.redaction]` configures public-query input/output rune budgets. To add
+company or internal product names to the deterministic dictionary, set
+`sensitiveTermsEnv` to an environment-variable name and store comma/newline-separated
+terms in that variable; do not write the terms themselves into TOML. Current ticket
+identifiers are added dynamically. Credentials, connection strings, raw
+SQL/log/stack/JSON content, and over-redacted queries are rejected rather than sent.
+
+Search and page extraction are separate Firecrawl `/v2/search` and `/v2/scrape`
+requests. A run may perform at most two searches, receive five candidates per search,
+and fetch three pages. `fetch_public_page` accepts only the opaque `resultId` returned
+by the same run, not a URL. Targets and final provider-reported URLs are restricted to
+HTTP/HTTPS on public DNS/IP addresses and normal ports; local, private, link-local,
+reserved, mixed public/private DNS and credential-bearing URLs are rejected. Responses
+are JSON-only, capped at 2 MiB, and page text is capped at 20,000 characters. Firecrawl
+returns Markdown with `onlyMainContent=true`; MESGuard does not execute scripts and
+marks every snippet/page as untrusted. The provider's unobservable intermediate
+redirect chain still relies on Firecrawl's own SSRF controls, while MESGuard validates
+both the submitted and final reported targets.
+
+All contract and security tests are offline:
+
+```powershell
+go test ./internal/webresearch ./internal/platform/firecrawl ./internal/agent ./internal/bootstrap
+```
+
+The opt-in live smoke spends exactly one Search and one Scrape request and performs no
+automatic retry. It loads `FIRECRAWL_API_KEY` from the environment or project `.env`:
+
+```powershell
+$env:MESGUARD_TEST_FIRECRAWL_LIVE="1"
+go test ./internal/platform/firecrawl -run TestFirecrawlLiveSearchAndScrape -count=1 -v
+```
 
 `[knowledge.retrieval]` controls small-to-big context expansion. With
 `contextExpansionEnabled=true`, retrieval and optional Rerank still operate on child

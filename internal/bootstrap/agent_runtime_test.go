@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
@@ -124,6 +126,49 @@ func TestBuildAgentRuntimeSkipsSQLToolWhenSQLServerIsUnavailable(t *testing.T) {
 	}
 	if called || runtime.runner == nil || runtime.orchestrator == nil {
 		t.Fatalf("unexpected degraded SQL runtime: called=%t runtime=%+v", called, runtime)
+	}
+}
+
+func TestBuildAgentRuntimeRegistersOrDegradesWebResearchAsOneDependency(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.WebSearch = config.WebSearchConfig{
+		Enabled: true, Provider: "firecrawl", BaseURL: "https://api.firecrawl.dev",
+		APIKeyEnv: "FIRECRAWL_API_KEY_TEST", TimeoutMillis: 5000,
+		MaxResults: 5, MaxFetchedPages: 3, MaxPageChars: 20000, MaxRounds: 2,
+		MaxResponseBytes: 64 * 1024,
+		Redaction:        config.WebSearchRedactionConfig{MaxInputRunes: 1024, MaxOutputRunes: 384, MinOutputRunes: 8},
+	}
+	t.Setenv("FIRECRAWL_API_KEY_TEST", "test-key")
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime: %v", err)
+	}
+	defer runtime.close()
+	if runtime.webResearch == nil || !slices.Contains(runtime.availableDependencies, agent.ToolDependencyWebSearch) {
+		t.Fatalf("web research dependency was not registered: %+v", runtime.availableDependencies)
+	}
+
+	cfg.WebSearch.APIKeyEnv = "MISSING_FIRECRAWL_KEY_TEST"
+	t.Setenv("MISSING_FIRECRAWL_KEY_TEST", "")
+	degraded, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime degraded: %v", err)
+	}
+	defer degraded.close()
+	if degraded.webResearch != nil || slices.Contains(degraded.availableDependencies, agent.ToolDependencyWebSearch) {
+		t.Fatalf("unavailable web research was exposed: %+v", degraded.availableDependencies)
 	}
 }
 

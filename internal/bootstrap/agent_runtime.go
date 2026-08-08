@@ -15,10 +15,12 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformrerank "github.com/chitandabb/GoAgent/internal/platform/dashscopererank"
+	platformfirecrawl "github.com/chitandabb/GoAgent/internal/platform/firecrawl"
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformqueryrewrite "github.com/chitandabb/GoAgent/internal/platform/queryrewrite"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
+	"github.com/chitandabb/GoAgent/internal/webresearch"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -36,6 +38,7 @@ type agentRuntime struct {
 	promptVersion         string
 	unavailable           error
 	closeMCP              func() error
+	webResearch           *webresearch.Service
 }
 
 type agentRuntimeBuilders struct {
@@ -45,6 +48,7 @@ type agentRuntimeBuilders struct {
 	schemaCatalog        func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error)
 	readonlyQuery        func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
 	knowledgeSearch      func(context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger) (tool.BaseTool, error)
+	webResearch          func(context.Context, config.WebSearchConfig, *zap.Logger) (*webresearch.Service, error)
 }
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
@@ -85,6 +89,7 @@ func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
 			return mesagent.NewExecuteReadonlyQueryTool(executor)
 		},
 		knowledgeSearch: buildKnowledgeSearchTool,
+		webResearch:     buildWebResearchService,
 	}
 }
 
@@ -196,6 +201,29 @@ func buildAgentRuntime(
 		}
 	}
 
+	var webSearch tool.BaseTool
+	var fetchPublicPage tool.BaseTool
+	if cfg.WebSearch.Enabled {
+		builder := builders.webResearch
+		if builder == nil {
+			builder = defaultAgentRuntimeBuilders().webResearch
+		}
+		runtime.webResearch, err = builder(ctx, cfg.WebSearch, log.Named("web_research"))
+		if err != nil {
+			log.Warn("public Web Search unavailable; continuing without web tools", zap.Error(err))
+			runtime.webResearch = nil
+		} else {
+			webSearch, err = mesagent.NewWebSearchTool(runtime.webResearch)
+			if err == nil {
+				fetchPublicPage, err = mesagent.NewFetchPublicPageTool(runtime.webResearch)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("build public web tools: %w", err)
+			}
+			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyWebSearch)
+		}
+	}
+
 	runtime.runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel:             chatModel,
 		ExternalCases:         externalCases,
@@ -208,6 +236,8 @@ func buildAgentRuntime(
 		SchemaCatalog:         schemaCatalog,
 		ReadonlyQuery:         readonlyQuery,
 		KnowledgeSearch:       knowledgeSearch,
+		WebSearch:             webSearch,
+		FetchPublicPage:       fetchPublicPage,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
@@ -230,6 +260,42 @@ func buildAgentRuntime(
 		zap.String("prompt_version", runtime.promptVersion),
 	)
 	return runtime, nil
+}
+
+func buildWebResearchService(
+	_ context.Context,
+	cfg config.WebSearchConfig,
+	_ *zap.Logger,
+) (*webresearch.Service, error) {
+	apiKey, err := cfg.APIKey()
+	if err != nil {
+		return nil, err
+	}
+	sensitiveTerms, err := cfg.Redaction.SensitiveTerms()
+	if err != nil {
+		return nil, err
+	}
+	queryPolicy, err := webresearch.NewQueryPolicy(webresearch.QueryPolicyConfig{
+		MaxInputRunes: cfg.Redaction.MaxInputRunes, MaxOutputRunes: cfg.Redaction.MaxOutputRunes,
+		MinOutputRunes: cfg.Redaction.MinOutputRunes, SensitiveTerms: sensitiveTerms,
+	})
+	if err != nil {
+		return nil, err
+	}
+	client, err := platformfirecrawl.New(platformfirecrawl.Config{
+		BaseURL: cfg.BaseURL, APIKey: apiKey,
+		Timeout:          time.Duration(cfg.TimeoutMillis) * time.Millisecond,
+		MaxResponseBytes: cfg.MaxResponseBytes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return webresearch.NewService(webresearch.ServiceConfig{
+		Provider: client, QueryPolicy: queryPolicy, URLPolicy: webresearch.NewURLPolicy(nil),
+		MaxResults: cfg.MaxResults, MaxFetchedPages: cfg.MaxFetchedPages,
+		MaxPageChars: cfg.MaxPageChars, MaxRounds: cfg.MaxRounds,
+		OfficialDomains: cfg.OfficialDomains, TrustedDomains: cfg.TrustedDomains,
+	})
 }
 
 func buildKnowledgeSearchTool(

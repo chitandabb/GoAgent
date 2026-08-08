@@ -86,3 +86,25 @@ func TestMergeElementsPrefersStructuredTableForExactText(t *testing.T) {
 		t.Fatalf("merged = %+v", merged)
 	}
 }
+
+func TestMergeElementsSuppressesNonsemanticSeparators(t *testing.T) {
+	elements := []knowledge.DocumentElement{
+		{Index: 0, ElementType: knowledge.ElementText, ContentText: "---"},
+		{Index: 1, ElementType: knowledge.ElementText, ContentText: "PLC timeout E42"},
+	}
+	merged, err := mergeElements(elements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.SuppressedCount != 1 || len(merged.SearchableElements) != 1 ||
+		merged.SearchableElements[0].Index != 1 ||
+		merged.Decisions[0].Disposition != elementMergeSuppressNonsemantic ||
+		merged.Decisions[0].Reason != "nonsemantic_content" {
+		t.Fatalf("merged = %+v", merged)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(merged.Elements[0].Metadata, &metadata); err != nil ||
+		metadata["indexingDisposition"] != "suppress_nonsemantic" {
+		t.Fatalf("metadata = %+v, err = %v", metadata, err)
+	}
+}

@@ -1,5 +1,5 @@
 param(
-    [string]$Manifest = "testdata/rag-ingestion-pilot-v1.corpus.json",
+    [string]$Manifest = "testdata/rag-ingestion-throughput-v1.corpus.json",
     [string]$OutputRoot = "output/evaluation/layout-routing-corpus",
     [switch]$Force
 )

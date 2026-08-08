@@ -60,6 +60,28 @@ func TestEvaluateThroughputRejectsChangedEnvironment(t *testing.T) {
 	}
 }
 
+func TestThroughputObservationValidatesDocumentDiagnostics(t *testing.T) {
+	observation := throughputObservationForTest(1, ThroughputBaseline, 1000)
+	observation.Documents = 1
+	observation.FormatCount = 1
+	observation.SucceededDocuments = 1
+	observation.Elements = 2
+	observation.Chunks = 3
+	observation.EmbeddingTokens = 4
+	observation.DocumentResults = []ThroughputDocumentObservation{{
+		DocumentID: "fixture", FormatClass: "text", TaskStatus: "succeeded",
+		OutcomeAction: "ack", OutcomeReason: "knowledge ingestion result committed",
+		Elements: 2, Chunks: 3, EmbeddingTokens: 4,
+	}}
+	if err := observation.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	observation.DocumentResults[0].Chunks = 2
+	if err := observation.Validate(); err == nil {
+		t.Fatal("Validate accepted mismatched document diagnostics")
+	}
+}
+
 func throughputObservationForTest(
 	repetition int,
 	variant ThroughputVariant,

@@ -278,6 +278,7 @@ type GitHubMCPConfig struct {
 
 var (
 	environmentVariableName = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,127}$`)
+	publicDomainName        = regexp.MustCompile(`(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
 func (c GitHubMCPConfig) Validate() error {
@@ -317,6 +318,8 @@ type WebSearchConfig struct {
 	MaxPageChars     int                      `toml:"maxPageChars"`
 	MaxRounds        int                      `toml:"maxRounds"`
 	MaxResponseBytes int64                    `toml:"maxResponseBytes"`
+	OfficialDomains  []string                 `toml:"officialDomains"`
+	TrustedDomains   []string                 `toml:"trustedDomains"`
 	Redaction        WebSearchRedactionConfig `toml:"redaction"`
 }
 
@@ -398,8 +401,40 @@ func (c WebSearchConfig) Validate() error {
 	if c.MaxResponseBytes < 64*1024 || c.MaxResponseBytes > 10*1024*1024 {
 		return errors.New("webSearch maxResponseBytes must be between 65536 and 10485760")
 	}
+	if err := validateWebSearchDomains(c.OfficialDomains, c.TrustedDomains); err != nil {
+		return err
+	}
 	if err := c.Redaction.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateWebSearchDomains(official, trusted []string) error {
+	if len(official) > 128 || len(trusted) > 128 {
+		return errors.New("webSearch source domain lists cannot exceed 128 entries")
+	}
+	seen := make(map[string]string, len(official)+len(trusted))
+	for tier, values := range map[string][]string{"officialDomains": official, "trustedDomains": trusted} {
+		for _, raw := range values {
+			domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+			if !publicDomainName.MatchString(domain) || net.ParseIP(domain) != nil {
+				return fmt.Errorf("webSearch %s contains invalid domain %q", tier, raw)
+			}
+			if previous, exists := seen[domain]; exists {
+				return fmt.Errorf("webSearch domain %q is duplicated across %s and %s", domain, previous, tier)
+			}
+			seen[domain] = tier
+		}
+	}
+	for _, officialDomain := range official {
+		officialDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(officialDomain), "."))
+		for _, trustedDomain := range trusted {
+			trustedDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(trustedDomain), "."))
+			if strings.HasSuffix(officialDomain, "."+trustedDomain) || strings.HasSuffix(trustedDomain, "."+officialDomain) {
+				return fmt.Errorf("webSearch source tiers overlap at %q and %q", officialDomain, trustedDomain)
+			}
+		}
 	}
 	return nil
 }

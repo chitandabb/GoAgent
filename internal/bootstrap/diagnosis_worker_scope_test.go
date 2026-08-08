@@ -19,9 +19,10 @@ func TestTaskCapabilitiesFromScopeSeparatesAuthorizationFromDependencyHealth(t *
 		t.Fatalf("capabilities = %v", capabilities)
 	}
 	capabilities, err = taskCapabilitiesFromScope(map[string]any{
-		diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case", "knowledge"},
+		diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case", "knowledge", "web_search"},
 	})
-	if err != nil || len(capabilities) != 2 || capabilities[0] != agent.ToolCapabilityCase || capabilities[1] != agent.ToolCapabilityKnowledge {
+	if err != nil || len(capabilities) != 3 || capabilities[0] != agent.ToolCapabilityCase ||
+		capabilities[1] != agent.ToolCapabilityKnowledge || capabilities[2] != agent.ToolCapabilityWebSearch {
 		t.Fatalf("knowledge capabilities = %v, err=%v", capabilities, err)
 	}
 }

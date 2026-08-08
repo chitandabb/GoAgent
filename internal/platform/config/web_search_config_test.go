@@ -25,6 +25,11 @@ func TestWebSearchConfigValidate(t *testing.T) {
 		{name: "reject unbounded page size", mutate: func(c *WebSearchConfig) { c.MaxPageChars = 100_001 }, wantErr: true},
 		{name: "reject unbounded public query", mutate: func(c *WebSearchConfig) { c.Redaction.MaxInputRunes = 4097 }, wantErr: true},
 		{name: "reject invalid sensitive terms env", mutate: func(c *WebSearchConfig) { c.Redaction.SensitiveTermsEnv = "private terms" }, wantErr: true},
+		{name: "reject invalid official domain", mutate: func(c *WebSearchConfig) { c.OfficialDomains = []string{"https://go.dev"} }, wantErr: true},
+		{name: "reject overlapping source tiers", mutate: func(c *WebSearchConfig) {
+			c.OfficialDomains = []string{"docs.example.com"}
+			c.TrustedDomains = []string{"example.com"}
+		}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

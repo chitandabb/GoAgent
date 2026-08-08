@@ -11,7 +11,7 @@ sessionAbsoluteMinutes = 720
 
 [agent]
 skillsDirectory = "/app/config/skills"
-promptVersion = "diagnosis-v1"
+promptVersion = "diagnosis-v2"
 systemPromptFile = "/app/config/prompts/diagnosis-system.md"
 baselinePromptFile = "/app/config/prompts/evaluation-baseline.md"
 reportContractFile = "/app/config/prompts/report-contract.md"
@@ -153,7 +153,7 @@ tokenEnv = "MESGUARD_GITHUB_MCP_TOKEN"
 timeoutMillis = 30000
 
 [webSearch]
-enabled = false
+enabled = true
 provider = "firecrawl"
 baseURL = "https://api.firecrawl.dev"
 apiKeyEnv = "FIRECRAWL_API_KEY"
@@ -163,6 +163,8 @@ maxFetchedPages = 3
 maxPageChars = 20000
 maxRounds = 2
 maxResponseBytes = 2097152
+officialDomains = ["go.dev", "pkg.go.dev", "cloudwego.io", "postgresql.org", "redis.io", "min.io", "rabbitmq.com", "docs.docker.com", "learn.microsoft.com", "docs.firecrawl.dev", "ietf.org", "rfc-editor.org", "w3.org", "nist.gov"]
+trustedDomains = ["developer.aliyun.com", "developer.volcengine.com"]
 
 [webSearch.redaction]
 maxInputRunes = 1024

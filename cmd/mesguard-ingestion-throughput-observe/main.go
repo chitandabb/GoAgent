@@ -43,6 +43,7 @@ type commandOptions struct {
 	sourceRoot                    string
 	outputPath                    string
 	maxDocuments                  int
+	documentIDs                   []string
 	repetitions                   int
 	experimentDocumentConcurrency int
 	timeout                       time.Duration
@@ -50,11 +51,16 @@ type commandOptions struct {
 	auditOnly                     bool
 	estimateOnly                  bool
 	databaseAblation              bool
+	documentConcurrencyAblation   bool
 	executeProvider               bool
 	auditOutputPath               string
+	embeddingPriceCNYPerMillion   float64
+	maxProviderCostCNY            float64
+	providerRPM                   int
+	providerTPM                   int
 }
 
-const defaultThroughputOutputPath = "output/evaluation/rag-ingestion-pilot-v1.observations.jsonl"
+const defaultThroughputOutputPath = "output/evaluation/rag-ingestion-throughput-v1.observations.jsonl"
 
 type corpusManifest struct {
 	DatasetVersion string           `json:"datasetVersion"`
@@ -145,7 +151,11 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	documents, err := loadDocuments(manifest, options.sourceRoot, options.maxDocuments)
+	definitions, err := selectCorpusDocuments(manifest, options.maxDocuments, options.documentIDs)
+	if err != nil {
+		return err
+	}
+	documents, err := loadDocuments(definitions, options.sourceRoot)
 	if err != nil {
 		return err
 	}
@@ -159,7 +169,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	if options.estimateOnly {
-		return estimateProviderRequests(ctx, cfg, manifest.DatasetVersion, documents)
+		return estimateProviderRequests(ctx, cfg, manifest.DatasetVersion, documents, options)
 	}
 	if options.auditOnly {
 		return runCorpusAudit(ctx, cfg.Knowledge, manifest.DatasetVersion, documents, options.auditOutputPath)
@@ -170,11 +180,25 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		}
 		return runDatabaseAblation(ctx, cfg, manifest.DatasetVersion, documents, options, log)
 	}
+	if options.documentConcurrencyAblation && options.outputPath == defaultThroughputOutputPath {
+		options.outputPath = "output/evaluation/rag-ingestion-document-concurrency-v1.observations.jsonl"
+	}
 	if !options.executeProvider {
 		return errors.New("provider execution is disabled; review the corpus and add -execute-provider")
 	}
 	if !cfg.MinIO.Enabled || !cfg.Models.Embedding.Enabled {
 		return errors.New("throughput observation requires MinIO and the embedding model")
+	}
+	providerPlan, err := estimateProviderPlan(ctx, cfg, documents, options)
+	if err != nil {
+		return err
+	}
+	printProviderPlan(manifest.DatasetVersion, providerPlan, options, false)
+	if providerPlan.EstimatedCostCNY > options.maxProviderCostCNY {
+		return fmt.Errorf(
+			"provider preflight blocked: estimated cost %.4f CNY exceeds budget %.4f CNY; reduce the corpus or explicitly raise -max-provider-cost-cny",
+			providerPlan.EstimatedCostCNY, options.maxProviderCostCNY,
+		)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, options.timeout)
 	defer cancel()
@@ -203,6 +227,18 @@ VALUES (?, ?, 'Ingestion Throughput Evaluation', 'evaluation-only-not-a-login-se
 	if err != nil {
 		return err
 	}
+	providerCtx, cancelProvider := context.WithCancel(runCtx)
+	defer cancelProvider()
+	guardedProvider, err := newGuardedEmbedder(
+		embedder,
+		providerTokenBudget(options.maxProviderCostCNY, options.embeddingPriceCNYPerMillion),
+		options.providerRPM,
+		options.providerTPM,
+		cancelProvider,
+	)
+	if err != nil {
+		return err
+	}
 	profile, err := cfg.Models.Embedding.Profile()
 	if err != nil {
 		return err
@@ -219,6 +255,11 @@ VALUES (?, ?, 'Ingestion Throughput Evaluation', 'evaluation-only-not-a-login-se
 	baseline := variantConfig{
 		variant: knowledgeingestion.ThroughputBaseline, documentConcurrency: 1,
 		embeddingBatchSize: 1, embeddingMaxConcurrent: 1, chunkWriteBatchSize: 1,
+	}
+	if options.documentConcurrencyAblation {
+		baseline.embeddingBatchSize = cfg.Models.Embedding.BatchSize
+		baseline.embeddingMaxConcurrent = cfg.Models.Embedding.MaxConcurrent
+		baseline.chunkWriteBatchSize = cfg.Knowledge.ChunkWriteBatchSize
 	}
 	experiment := variantConfig{
 		variant:                knowledgeingestion.ThroughputExperiment,
@@ -238,9 +279,12 @@ VALUES (?, ?, 'Ingestion Throughput Evaluation', 'evaluation-only-not-a-login-se
 		}
 		for _, variant := range variants {
 			observation, err := runVariant(
-				runCtx, db, store, parser, embedder, profile, cfg, manifest.DatasetVersion,
+				providerCtx, db, store, parser, guardedProvider, profile, cfg, manifest.DatasetVersion,
 				selectedCorpusFingerprint, environmentFingerprint, documents, actorID, repetition, variant,
 			)
+			if guardErr := guardedProvider.Err(); guardErr != nil {
+				return fmt.Errorf("run repetition %d variant %s: %w", repetition, variant.variant, guardErr)
+			}
 			if err != nil {
 				return fmt.Errorf("run repetition %d variant %s: %w", repetition, variant.variant, err)
 			}
@@ -278,10 +322,12 @@ func parseOptions(args []string) (commandOptions, error) {
 	flags := flag.NewFlagSet("mesguard-ingestion-throughput-observe", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	options := commandOptions{}
-	flags.StringVar(&options.corpusPath, "corpus", "testdata/rag-ingestion-pilot-v1.corpus.json", "pinned corpus manifest")
+	var documentIDs string
+	flags.StringVar(&options.corpusPath, "corpus", "testdata/rag-ingestion-throughput-v1.corpus.json", "pinned corpus manifest")
 	flags.StringVar(&options.sourceRoot, "source-root", "output/evaluation/layout-routing-corpus", "local corpus directory")
 	flags.StringVar(&options.outputPath, "output", defaultThroughputOutputPath, "observation JSONL")
 	flags.IntVar(&options.maxDocuments, "max-documents", 1, "maximum documents selected from the corpus")
+	flags.StringVar(&documentIDs, "document-ids", "", "comma-separated document IDs; overrides max-documents")
 	flags.IntVar(&options.repetitions, "repetitions", 1, "paired cold repetitions")
 	flags.IntVar(&options.experimentDocumentConcurrency, "experiment-document-concurrency", 2, "bounded experiment worker concurrency")
 	flags.DurationVar(&options.timeout, "timeout", 15*time.Minute, "whole command timeout")
@@ -289,19 +335,61 @@ func parseOptions(args []string) (commandOptions, error) {
 	flags.BoolVar(&options.auditOnly, "audit-only", false, "parse and classify the corpus without infrastructure or provider calls")
 	flags.BoolVar(&options.estimateOnly, "estimate-only", false, "parse locally and estimate embedding request counts")
 	flags.BoolVar(&options.databaseAblation, "database-ablation", false, "measure PostgreSQL staging with deterministic local vectors")
+	flags.BoolVar(&options.documentConcurrencyAblation, "document-concurrency-ablation", false, "compare document concurrency while keeping batching identical")
 	flags.BoolVar(&options.executeProvider, "execute-provider", false, "allow real embedding requests")
 	flags.StringVar(&options.auditOutputPath, "audit-output", "output/evaluation/rag-ingestion-corpus-audit.json", "corpus audit JSON output")
+	flags.Float64Var(&options.embeddingPriceCNYPerMillion, "embedding-price-cny-per-million", defaultEmbeddingPriceCNYPerMillion, "embedding input price used by the preflight cost estimate")
+	flags.Float64Var(&options.maxProviderCostCNY, "max-provider-cost-cny", defaultMaxProviderCostCNY, "hard estimated cost budget for the whole provider run")
+	flags.IntVar(&options.providerRPM, "provider-rpm", defaultProviderRPM, "smoothed provider request limit per minute")
+	flags.IntVar(&options.providerTPM, "provider-tpm", defaultProviderTPM, "smoothed estimated provider token limit per minute")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return commandOptions{}, errors.New("usage: mesguard-ingestion-throughput-observe [-validate-only|-audit-only|-estimate-only|-database-ablation|-execute-provider] [-max-documents n] [-repetitions n]")
 	}
 	if options.maxDocuments < 1 || options.maxDocuments > 40 || options.repetitions < 1 || options.repetitions > 5 ||
 		options.experimentDocumentConcurrency < 1 || options.experimentDocumentConcurrency > 8 ||
 		options.timeout < time.Minute || options.timeout > 2*time.Hour ||
+		options.embeddingPriceCNYPerMillion <= 0 || options.embeddingPriceCNYPerMillion > 100 ||
+		options.maxProviderCostCNY <= 0 || options.maxProviderCostCNY > 100 ||
+		options.providerRPM < 1 || options.providerRPM > 100_000 ||
+		options.providerTPM < 1_000 || options.providerTPM > 100_000_000 ||
 		strings.TrimSpace(options.auditOutputPath) == "" ||
 		boolCount(options.validateOnly, options.auditOnly, options.estimateOnly, options.databaseAblation, options.executeProvider) > 1 {
 		return commandOptions{}, errors.New("throughput observation options are outside safety bounds")
 	}
+	if options.documentConcurrencyAblation &&
+		(!(options.executeProvider || options.estimateOnly) || options.experimentDocumentConcurrency < 2) {
+		return commandOptions{}, errors.New("document concurrency ablation requires provider execution or estimate-only and experiment concurrency of at least two")
+	}
+	parsedDocumentIDs, err := parseDocumentIDs(documentIDs)
+	if err != nil {
+		return commandOptions{}, err
+	}
+	options.documentIDs = parsedDocumentIDs
 	return options, nil
+}
+
+func parseDocumentIDs(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) > 40 {
+		return nil, errors.New("document-ids exceeds the 40-document safety bound")
+	}
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if id == "" || len([]rune(id)) > 128 {
+			return nil, errors.New("document-ids contains an invalid document ID")
+		}
+		if _, exists := seen[id]; exists {
+			return nil, fmt.Errorf("document ID %q is duplicated", id)
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, nil
 }
 
 func estimateProviderRequests(
@@ -309,36 +397,13 @@ func estimateProviderRequests(
 	cfg config.Config,
 	datasetVersion string,
 	documents []loadedDocument,
+	options commandOptions,
 ) error {
-	parser, err := buildParser(cfg.Knowledge)
+	plan, err := estimateProviderPlan(ctx, cfg, documents, options)
 	if err != nil {
 		return err
 	}
-	totalChunks, baselineRequests, experimentRequests := 0, 0, 0
-	for _, document := range documents {
-		parsed, err := parser.Parse(ctx, knowledgeparser.Input{
-			MediaType: document.definition.MediaType, OriginalName: document.definition.FileName,
-			Content: document.content,
-		})
-		if err != nil {
-			return fmt.Errorf("estimate document %s: %w", document.definition.DocumentID, err)
-		}
-		chunks, err := chunksForProviderEstimate(parsed, knowledge.TextChunkOptions{
-			MaxRunes: cfg.Knowledge.ChunkMaxRunes, OverlapRunes: cfg.Knowledge.ChunkOverlapRunes,
-		})
-		if err != nil {
-			return fmt.Errorf("estimate chunks for %s: %w", document.definition.DocumentID, err)
-		}
-		baseline := len(chunks)
-		experiment := batches(len(chunks), cfg.Models.Embedding.BatchSize)
-		totalChunks += len(chunks)
-		baselineRequests += baseline
-		experimentRequests += experiment
-		fmt.Printf("document=%s elements=%d visual_assets=%d chunks=%d baseline_embedding_requests=%d experiment_embedding_requests=%d\n",
-			document.definition.DocumentID, len(parsed.Elements), len(parsed.VisualAssets), len(chunks), baseline, experiment)
-	}
-	fmt.Printf("dataset=%s documents=%d chunks=%d baseline_embedding_requests=%d experiment_embedding_requests=%d\n",
-		datasetVersion, len(documents), totalChunks, baselineRequests, experimentRequests)
+	printProviderPlan(datasetVersion, plan, options, true)
 	return nil
 }
 
@@ -349,7 +414,11 @@ func chunksForProviderEstimate(
 	if len(parsed.Elements) == 0 {
 		return nil, nil
 	}
-	return knowledge.ChunkElements(parsed.Elements, options)
+	prepared, err := knowledgeingestion.PrepareSearchableElements(parsed.Elements)
+	if err != nil {
+		return nil, err
+	}
+	return knowledge.ChunkElements(prepared.Elements, options)
 }
 
 func readCorpus(path string) (corpusManifest, error) {
@@ -397,10 +466,33 @@ func validCorpusURL(value string) bool {
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
-func loadDocuments(manifest corpusManifest, root string, maximum int) ([]loadedDocument, error) {
-	count := min(maximum, len(manifest.Documents))
-	documents := make([]loadedDocument, 0, count)
-	for _, definition := range manifest.Documents[:count] {
+func selectCorpusDocuments(
+	manifest corpusManifest,
+	maximum int,
+	requestedIDs []string,
+) ([]corpusDocument, error) {
+	if len(requestedIDs) == 0 {
+		count := min(maximum, len(manifest.Documents))
+		return append([]corpusDocument(nil), manifest.Documents[:count]...), nil
+	}
+	byID := make(map[string]corpusDocument, len(manifest.Documents))
+	for _, document := range manifest.Documents {
+		byID[document.DocumentID] = document
+	}
+	selected := make([]corpusDocument, 0, len(requestedIDs))
+	for _, id := range requestedIDs {
+		document, exists := byID[id]
+		if !exists {
+			return nil, fmt.Errorf("corpus document %q does not exist", id)
+		}
+		selected = append(selected, document)
+	}
+	return selected, nil
+}
+
+func loadDocuments(definitions []corpusDocument, root string) ([]loadedDocument, error) {
+	documents := make([]loadedDocument, 0, len(definitions))
+	for _, definition := range definitions {
 		contents, err := os.ReadFile(filepath.Join(root, definition.FileName))
 		if err != nil {
 			return nil, fmt.Errorf("read corpus document %s: %w", definition.DocumentID, err)
@@ -555,7 +647,7 @@ func queueDocument(
 	requestFingerprint := knowledge.SHA256Hex(fmt.Sprintf(
 		"%s/%s/%d/%s", datasetVersion, document.definition.DocumentID, repetition, variant,
 	))
-	queued, err := platformpostgres.NewKnowledgeRepository(db).QueueVersion(ctx, knowledge.QueueVersionInput{
+	queueInput := knowledge.QueueVersionInput{
 		VersionID: versionID, TaskID: taskID, OutboxEventID: outboxID, CorrelationID: correlationID,
 		DocumentID: documentID, CreatedBy: actorID, Source: ref,
 		PipelineVersion: cfg.Knowledge.PipelineVersion, MaxAttempts: cfg.Knowledge.MaxAttempts,
@@ -565,10 +657,29 @@ func queueDocument(
 			Title: fmt.Sprintf("[throughput:%s] %s", variant, document.definition.Title), CreatedBy: actorID,
 		},
 		CreatedAt: createdAt,
+	}
+	var queued knowledge.QueueVersionResult
+	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var queueErr error
+		queued, queueErr = platformpostgres.NewKnowledgeRepository(tx).QueueVersion(ctx, queueInput)
+		if queueErr != nil {
+			return queueErr
+		}
+		result := tx.Exec(
+			"DELETE FROM outbox_events WHERE id = ? AND aggregate_id = ? AND event_type = 'knowledge.ingest'",
+			outboxID, taskID,
+		)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("throughput evaluation outbox event was not isolated")
+		}
+		return nil
 	})
 	if err != nil {
 		_ = store.Remove(context.WithoutCancel(ctx), ref)
-		return queuedDocument{}, err
+		return queuedDocument{}, fmt.Errorf("queue isolated throughput document: %w", err)
 	}
 	message, err := buildWorkerMessage(outboxID, correlationID, queued.Task.ID, queued.Version.ID, createdAt)
 	if err != nil {
@@ -645,6 +756,12 @@ func buildObservation(
 		observation.Elements += elements
 		observation.Chunks += document.facts.ChunkCount
 		observation.EmbeddingTokens += embeddingTokens
+		observation.DocumentResults = append(observation.DocumentResults, knowledgeingestion.ThroughputDocumentObservation{
+			DocumentID: document.definition.DocumentID, FormatClass: document.definition.FormatClass,
+			TaskStatus: document.facts.TaskStatus, OutcomeAction: string(document.outcome.Action),
+			OutcomeReason: document.outcome.Reason, Elements: elements,
+			Chunks: document.facts.ChunkCount, EmbeddingTokens: embeddingTokens,
+		})
 		if document.facts.ChunkCount > 0 {
 			observation.EmbeddingRequests += batches(document.facts.ChunkCount, variant.embeddingBatchSize)
 			observation.ChunkInsertBatches += batches(document.facts.ChunkCount, variant.chunkWriteBatchSize)
@@ -663,6 +780,9 @@ func buildObservation(
 	}
 	slices.Sort(observation.PartialDocumentIDs)
 	slices.Sort(observation.FailedDocumentIDs)
+	slices.SortFunc(observation.DocumentResults, func(left, right knowledgeingestion.ThroughputDocumentObservation) int {
+		return strings.Compare(left.DocumentID, right.DocumentID)
+	})
 	return observation
 }
 
