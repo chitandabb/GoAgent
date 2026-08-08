@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M2-B1 Advanced RAG Backend Controls Implemented, Quality Expansion Pending
+## Current Stage: M2-B3 Conversation Persistence Foundation Implemented, Agent Command Pending
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -21,6 +21,10 @@ execution order and acceptance gates are defined in
       [`design/frontend.md`](design/frontend.md). Authentication is connected to
       the backend; business pages remain Mock-driven even though external-case,
       diagnosis-task, event-history, cancellation, and review APIs now exist.
+- [x] Independent conversation persistence: user-scoped conversations, cursor-based messages,
+      structured case/task references, and atomic message/reference writes.
+- [ ] Conversation Agent runtime, guarded `create_diagnosis_task` command, assistant message
+      persistence, message SSE, attachment reads, and citation preview.
 
 ## M0: Before Business Code
 
@@ -689,9 +693,9 @@ reasons matched, using 16453 total Tokens. Answer-quality gains and broad stabil
 
 ADR 004 has accepted the next conversation boundary: the right-side dossier supplies structured case
 references to an independent conversation, and the conversation Agent may create a durable diagnosis
-task through a guarded command Tool. Conversations do not own task lifecycle. This is a target decision,
-not current behavior; the implemented frontend still calls `POST /api/v1/diagnosis-tasks` directly and
-the backend has no conversation/message persistence or `create_diagnosis_task` Tool yet.
+task through a guarded command Tool. Conversations do not own task lifecycle. The backend now persists
+independent conversations, user messages and structured references; the implemented frontend still calls
+`POST /api/v1/diagnosis-tasks` directly, and the Agent command path is the next slice.
 
 ### Partial Backend Checkpoint: Knowledge Ingestion Throughput Baseline
 
@@ -755,7 +759,9 @@ This supports the bounded worker-core 40%+ claim; the two-document/two-class sco
 
 - M2-B1: expand the checked-in pressure dataset beyond one long-parent Case, add failed/repeated/no-selection second-retrieval and answer-quality cases, complete the remaining Parent/Rewrite pairs, and measure aggregate compression rate and repeated-run stability; implementation is present but broad sample quality is unproven;
 - M2-B2: run the bounded one-Search/one-Scrape Firecrawl smoke when a Key is available, then add a small public-answer/citation quality set; backend Provider, authorization, safety, citation and dependency-degradation paths are implemented;
-- M2-B3: independent conversation/message API, structured case/task references, guarded Agent task-creation command, knowledge-qa streaming, citation preview and attachment content access;
+- M2-B3: [in progress] independent conversation/message persistence and read API are implemented; remaining
+  work is the guarded Agent task-creation command, assistant execution/messages, knowledge-QA streaming,
+  citation preview and attachment content access;
 - M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
   use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
   the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the

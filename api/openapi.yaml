@@ -209,6 +209,145 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/conversations:
+    get:
+      operationId: listConversations
+      summary: 查询当前用户的独立会话列表
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 按最近消息时间倒序返回当前用户可见会话
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createConversation
+      summary: 创建独立工作台会话
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationCreateRequest"
+      responses:
+        "201":
+          description: 会话已创建
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/conversations/{conversationId}:
+    get:
+      operationId: getConversation
+      summary: 查询当前用户的会话摘要
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: 会话摘要
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/messages:
+    get:
+      operationId: listConversationMessages
+      summary: 按会话序号补读消息
+      description: 只返回当前用户会话的持久化消息和结构化工单/任务引用；afterSeq 为排他游标。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: afterSeq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 消息游标页
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessagesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: appendConversationUserMessage
+      summary: 追加用户消息与结构化上下文引用
+      description: 当前版本只接受用户消息。此接口不会创建诊断任务；后续会话 Agent 命令会在独立边界中调用任务应用服务。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationMessageRequest"
+      responses:
+        "201":
+          description: 用户消息已和结构化引用原子持久化
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
   /api/v1/diagnosis-tasks:
     post:
       operationId: createDiagnosisTask
@@ -677,6 +816,28 @@ components:
         type: string
         format: uuid
         maxLength: 128
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     BadRequest:
       description: 请求格式或参数错误
@@ -958,6 +1119,134 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ExternalCaseListData"
+    ConversationStatus:
+      type: string
+      enum: [active, archived]
+    ConversationCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          maxLength: 200
+          default: ""
+    Conversation:
+      type: object
+      required: [id, title, status, createdAt, updatedAt]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        status: {$ref: "#/components/schemas/ConversationStatus"}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        lastMessageAt: {type: [string, "null"], format: date-time}
+    ConversationResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/Conversation"
+    ConversationListData:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Conversation"
+        page: {type: integer}
+        pageSize: {type: integer}
+        total: {type: integer}
+    ConversationListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationListData"
+    ConversationCaseReference:
+      type: object
+      required: [externalCaseId, kind]
+      properties:
+        externalCaseId: {type: string, format: uuid}
+        kind:
+          type: string
+          enum: [selected, mentioned]
+    ConversationTaskReference:
+      type: object
+      required: [taskId, kind]
+      properties:
+        taskId: {type: string, format: uuid}
+        kind:
+          type: string
+          enum: [created, referenced]
+    ConversationMessageRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: {type: string, minLength: 1, maxLength: 20000}
+        caseReferences:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/ConversationCaseReference"
+        taskReferences:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/ConversationTaskReference"
+    ConversationMessage:
+      type: object
+      required: [id, conversationId, seq, role, content, contentSchemaVersion, caseReferences, taskReferences, createdAt]
+      properties:
+        id: {type: string, format: uuid}
+        conversationId: {type: string, format: uuid}
+        seq: {type: integer, format: int64, minimum: 1}
+        role:
+          type: string
+          enum: [user, assistant, tool, system]
+        content: {type: string}
+        contentSchemaVersion: {type: integer, minimum: 1}
+        caseReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationCaseReference"
+        taskReferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationTaskReference"
+        createdAt: {type: string, format: date-time}
+    ConversationMessageResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationMessage"
+    ConversationMessagesData:
+      type: object
+      required: [items, afterSeq, nextAfterSeq, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessage"
+        afterSeq: {type: integer, format: int64, minimum: 0}
+        nextAfterSeq: {type: integer, format: int64, minimum: 0}
+        hasMore: {type: boolean}
+    ConversationMessagesResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationMessagesData"
     DiagnosisTaskCreateRequest:
       type: object
       additionalProperties: false
