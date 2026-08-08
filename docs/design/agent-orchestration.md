@@ -35,6 +35,9 @@
 是只在唯一 selected case 且由直接用户消息明确请求诊断时可见的受控命令。该 Runtime 返回最终
 回答并由会话服务持久化助手消息，但不会把长耗时 Diagnosis Worker、原始 Tool 结果或模型推理
 过程塞进会话请求。
+`conversation_turns` 以客户端 UUID、规范化请求指纹和 PostgreSQL 租约约束每个回合：同 key
+失败重试复用原用户消息，完成重试直接回放原助手消息；单个会话同时只允许一个未过期回合。
+这解决 HTTP 重试幂等，但模型调用仍在 API 进程内同步执行，不等同于后台 Conversation Worker。
 
 ## 各层职责
 

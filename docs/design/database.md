@@ -620,7 +620,13 @@ M2再增加以下表，避免M1提前引入知识库的复杂状态：
 `conversation_messages` 使用会话内单调 `seq` 支持 `afterSeq/hasMore` 补读，
 `conversation_case_references` 和 `conversation_task_references` 保存结构化引用。追加用户消息、
 引用存在性校验和会话 `last_message_at` 更新在同一 PostgreSQL 事务内完成；任务引用只记录来源，
-不会把诊断任务生命周期绑定到会话。助手消息、附件关系、摘要和 SSE 仍是后续增量。
+不会把诊断任务生命周期绑定到会话。
+
+`00018_create_conversation_turns.sql` 增加同步 Agent 回合账本。`conversation_turns` 以
+`(conversation_id, idempotency_key)` 唯一约束绑定请求指纹、用户消息、可选助手消息、尝试次数、
+状态和租约；部分唯一索引保证一个会话同时最多一个 `running` 回合。创建 turn 与用户消息原子
+提交，失败/过期重试复用同一用户消息，完成回放复用同一助手消息，同 key 不同指纹拒绝。助手
+最终消息已经落地，附件关系、摘要、消息 SSE 和后台 Conversation Worker 仍是后续增量。
 
 M2初期消息发送后不可编辑，不支持对话分支。用户修正问题时发送新消息；重新生成回答也创建新的追加记录，不修改已被摘要或引用的历史消息。
 

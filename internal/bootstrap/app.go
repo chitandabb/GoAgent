@@ -98,6 +98,14 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation service: %w", err)
 	}
+	conversationTimeout := time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond
+	if conversationTimeout == 0 {
+		conversationTimeout = time.Minute
+	}
+	if _, err := conversationService.WithTurnLease(conversationTimeout + 30*time.Second); err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("configure conversation turn lease: %w", err)
+	}
 	conversationRoutes, err := httptransport.NewConversationRoutes(
 		conversationService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
 	)

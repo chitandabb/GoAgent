@@ -3,7 +3,12 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +27,14 @@ const (
 )
 
 func (s Status) Valid() bool { return s == StatusActive || s == StatusArchived }
+
+type TurnStatus string
+
+const (
+	TurnStatusRunning   TurnStatus = "running"
+	TurnStatusFailed    TurnStatus = "failed"
+	TurnStatusCompleted TurnStatus = "completed"
+)
 
 type MessageRole string
 
@@ -62,6 +75,9 @@ var (
 	ErrCaseReferenceRequired   = errors.New("exactly one selected case reference is required")
 	ErrAgentUnavailable        = errors.New("conversation agent is unavailable")
 	ErrAgentResponseInvalid    = errors.New("conversation agent response is invalid")
+	ErrTurnIdempotencyConflict = errors.New("conversation turn idempotency key conflicts")
+	ErrTurnInProgress          = errors.New("conversation turn is already in progress")
+	ErrTurnLeaseLost           = errors.New("conversation turn execution lease is no longer owned")
 )
 
 const (
@@ -190,6 +206,27 @@ type ConversationTurn struct {
 	AssistantMessage Message
 }
 
+type ConversationTurnResult struct {
+	Turn     ConversationTurn
+	Created  bool
+	Replayed bool
+}
+
+type BeginTurnInput struct {
+	Message            AppendMessageInput
+	IdempotencyKey     string
+	RequestFingerprint string
+	StartedAt          time.Time
+	LeaseExpiresAt     time.Time
+}
+
+type BeginTurnResult struct {
+	TurnID           uuid.UUID
+	UserMessage      Message
+	AssistantMessage *Message
+	Created          bool
+}
+
 type Repository interface {
 	Create(ctx context.Context, userID uuid.UUID, input CreateInput, createdAt time.Time) (Conversation, error)
 	Get(ctx context.Context, userID, conversationID uuid.UUID) (Conversation, error)
@@ -199,6 +236,9 @@ type Repository interface {
 	GetMessage(ctx context.Context, userID, conversationID, messageID uuid.UUID) (Message, error)
 	GetLatestMessage(ctx context.Context, userID, conversationID uuid.UUID) (Message, error)
 	AppendTaskReference(ctx context.Context, userID, messageID, taskID uuid.UUID, kind ReferenceKind, createdAt time.Time) error
+	BeginTurn(ctx context.Context, userID uuid.UUID, input BeginTurnInput) (BeginTurnResult, error)
+	CompleteTurn(ctx context.Context, userID, turnID uuid.UUID, assistantContent string, completedAt time.Time) (ConversationTurn, error)
+	FailTurn(ctx context.Context, userID, turnID uuid.UUID, failedAt time.Time) error
 }
 
 // DiagnosisTaskCreator is the application command boundary. The conversation
@@ -248,6 +288,7 @@ type CreateDiagnosisResult struct {
 type Service struct {
 	repository          Repository
 	clock               func() time.Time
+	turnLease           time.Duration
 	agent               AgentResponder
 	diagnosisTasks      DiagnosisTaskCreator
 	diagnosisTaskReader DiagnosisTaskReader
@@ -265,11 +306,26 @@ func (s *Service) WithAgentResponder(agent AgentResponder) (*Service, error) {
 	return s, nil
 }
 
+func (s *Service) WithTurnLease(lease time.Duration) (*Service, error) {
+	if s == nil || s.repository == nil {
+		return nil, errors.New("conversation service is unavailable")
+	}
+	if lease < time.Second || lease > 10*time.Minute {
+		return nil, errors.New("conversation turn lease must be between 1 second and 10 minutes")
+	}
+	s.turnLease = lease
+	return s, nil
+}
+
 func NewService(repository Repository) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("conversation repository is nil")
 	}
-	return &Service{repository: repository, clock: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{
+		repository: repository,
+		clock:      func() time.Time { return time.Now().UTC() },
+		turnLease:  6 * time.Minute,
+	}, nil
 }
 
 // WithDiagnosisCommandDependencies adds the side-effecting command boundary
@@ -349,117 +405,162 @@ func (s *Service) AppendAssistantMessage(ctx context.Context, actor Actor, input
 	return s.appendMessage(ctx, actor, input)
 }
 
-// AppendUserMessageAndRespond is the synchronous HTTP-facing turn boundary.
-// Diagnosis execution is still asynchronous: the Agent only creates the durable
-// diagnosis task and returns its reference; the Diagnosis Worker owns the long run.
-func (s *Service) AppendUserMessageAndRespond(
+// ExecuteTurn is the synchronous HTTP-facing turn boundary. The durable turn
+// record prevents retries from appending duplicate user messages. Diagnosis
+// execution remains asynchronous: the Agent can only create the task, while the
+// Diagnosis Worker owns the long-running investigation.
+func (s *Service) ExecuteTurn(
 	ctx context.Context,
 	actor Actor,
+	idempotencyKey string,
 	input AppendMessageInput,
-) (ConversationTurn, error) {
-	userMessage, err := s.AppendUserMessage(ctx, actor, input)
-	if err != nil {
-		return ConversationTurn{}, err
-	}
-	assistantMessage, err := s.RespondToUserMessage(ctx, actor, input.ConversationID, userMessage.ID)
-	if err != nil {
-		return ConversationTurn{UserMessage: userMessage}, err
-	}
-	return ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}, nil
-}
-
-func (s *Service) RespondToUserMessage(
-	ctx context.Context,
-	actor Actor,
-	conversationID, messageID uuid.UUID,
-) (Message, error) {
+) (ConversationTurnResult, error) {
 	if s == nil || s.repository == nil {
-		return Message{}, errors.New("conversation service is unavailable")
+		return ConversationTurnResult{}, errors.New("conversation service is unavailable")
 	}
 	if s.agent == nil {
-		return Message{}, ErrAgentUnavailable
+		return ConversationTurnResult{}, ErrAgentUnavailable
 	}
-	if actor.UserID == uuid.Nil || conversationID == uuid.Nil || messageID == uuid.Nil {
-		return Message{}, ErrInvalidMessage
-	}
-	current, err := s.repository.Get(ctx, actor.UserID, conversationID)
+	parsedKey, err := uuid.Parse(strings.TrimSpace(idempotencyKey))
 	if err != nil {
-		return Message{}, err
+		return ConversationTurnResult{}, ErrInvalidMessage
 	}
-	message, err := s.repository.GetMessage(ctx, actor.UserID, conversationID, messageID)
+	input.Role = MessageRoleUser
+	input, err = prepareMessageInput(actor, input)
 	if err != nil {
-		return Message{}, err
+		return ConversationTurnResult{}, err
 	}
-	latest, err := s.repository.GetLatestMessage(ctx, actor.UserID, conversationID)
+	fingerprint, err := turnRequestFingerprint(input)
 	if err != nil {
-		return Message{}, err
+		return ConversationTurnResult{}, err
 	}
-	if message.Role != MessageRoleUser || latest.ID != message.ID {
-		return Message{}, ErrCommandNotLatest
+	startedAt := s.clock().UTC()
+	started, err := s.repository.BeginTurn(ctx, actor.UserID, BeginTurnInput{
+		Message: input, IdempotencyKey: parsedKey.String(), RequestFingerprint: fingerprint,
+		StartedAt: startedAt, LeaseExpiresAt: startedAt.Add(s.turnLease),
+	})
+	if err != nil {
+		return ConversationTurnResult{}, err
 	}
-	afterSeq := message.Seq - MaxMessageLimit
+	if started.AssistantMessage != nil {
+		return ConversationTurnResult{
+			Turn:    ConversationTurn{UserMessage: started.UserMessage, AssistantMessage: *started.AssistantMessage},
+			Created: started.Created, Replayed: true,
+		}, nil
+	}
+	result := ConversationTurnResult{
+		Turn:    ConversationTurn{UserMessage: started.UserMessage},
+		Created: started.Created,
+	}
+	current, err := s.repository.Get(ctx, actor.UserID, input.ConversationID)
+	if err != nil {
+		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
+	}
+	afterSeq := started.UserMessage.Seq - MaxMessageLimit
 	if afterSeq < 0 {
 		afterSeq = 0
 	}
-	history, err := s.repository.ListMessages(ctx, actor.UserID, conversationID, MessageQuery{
+	history, err := s.repository.ListMessages(ctx, actor.UserID, input.ConversationID, MessageQuery{
 		AfterSeq: afterSeq,
 		Limit:    MaxMessageLimit,
 	})
 	if err != nil {
-		return Message{}, err
+		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
 	}
 	commandCtx := WithCommandContext(ctx, CommandContext{
-		ConversationID: conversationID,
-		UserMessageID:  messageID,
+		ConversationID: input.ConversationID,
+		UserMessageID:  started.UserMessage.ID,
 		Actor:          actor,
 	})
 	response, err := s.agent.Respond(commandCtx, AgentRequest{
 		Conversation: current,
-		UserMessage:  message,
+		UserMessage:  started.UserMessage,
 		History:      history.Items,
 	})
 	if err != nil {
-		return Message{}, err
+		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
 	}
 	response.Content = strings.TrimSpace(response.Content)
 	if response.Content == "" || len([]rune(response.Content)) > MaxContentRunes {
-		return Message{}, ErrAgentResponseInvalid
+		return result, s.failTurn(ctx, actor.UserID, started.TurnID, ErrAgentResponseInvalid)
 	}
-	// The command service appends created task references to the triggering user
-	// message. Reload it after the Agent run and copy only those references to the
-	// assistant message so clients can render task cards without parsing prose.
-	message, err = s.repository.GetMessage(ctx, actor.UserID, conversationID, messageID)
+	completed, err := s.repository.CompleteTurn(
+		ctx, actor.UserID, started.TurnID, response.Content, s.clock().UTC(),
+	)
 	if err != nil {
-		return Message{}, err
+		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
 	}
-	createdTasks := make([]TaskReference, 0, len(message.TaskReferences))
-	for _, reference := range message.TaskReferences {
-		if reference.Kind == ReferenceKindCreated {
-			createdTasks = append(createdTasks, reference)
-		}
+	result.Turn = completed
+	return result, nil
+}
+
+func (s *Service) failTurn(ctx context.Context, userID, turnID uuid.UUID, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.repository.FailTurn(cleanupCtx, userID, turnID, s.clock().UTC()); err != nil {
+		return errors.Join(cause, fmt.Errorf("mark conversation turn failed: %w", err))
 	}
-	return s.AppendAssistantMessage(ctx, actor, AppendMessageInput{
-		ConversationID: conversationID,
-		Content:        response.Content,
-		TaskReferences: createdTasks,
-	})
+	return cause
 }
 
 func (s *Service) appendMessage(ctx context.Context, actor Actor, input AppendMessageInput) (Message, error) {
 	if s == nil || s.repository == nil {
 		return Message{}, errors.New("conversation service is unavailable")
 	}
-	if actor.UserID == uuid.Nil || input.ConversationID == uuid.Nil || !input.Role.Valid() {
-		return Message{}, ErrInvalidMessage
-	}
-	if strings.TrimSpace(input.Content) == "" || len([]rune(input.Content)) > MaxContentRunes {
-		return Message{}, ErrInvalidMessage
-	}
-	input.Content = strings.TrimSpace(input.Content)
-	if err := validateReferences(input); err != nil {
+	var err error
+	input, err = prepareMessageInput(actor, input)
+	if err != nil {
 		return Message{}, err
 	}
 	return s.repository.AppendMessage(ctx, actor.UserID, input, s.clock().UTC())
+}
+
+func prepareMessageInput(actor Actor, input AppendMessageInput) (AppendMessageInput, error) {
+	if actor.UserID == uuid.Nil || input.ConversationID == uuid.Nil || !input.Role.Valid() {
+		return AppendMessageInput{}, ErrInvalidMessage
+	}
+	input.Content = strings.TrimSpace(input.Content)
+	if input.Content == "" || len([]rune(input.Content)) > MaxContentRunes {
+		return AppendMessageInput{}, ErrInvalidMessage
+	}
+	if err := validateReferences(input); err != nil {
+		return AppendMessageInput{}, err
+	}
+	return input, nil
+}
+
+func turnRequestFingerprint(input AppendMessageInput) (string, error) {
+	caseReferences := append(make([]CaseReference, 0, len(input.CaseReferences)), input.CaseReferences...)
+	slices.SortFunc(caseReferences, func(left, right CaseReference) int {
+		if compared := strings.Compare(left.ExternalCaseID.String(), right.ExternalCaseID.String()); compared != 0 {
+			return compared
+		}
+		return strings.Compare(string(left.Kind), string(right.Kind))
+	})
+	taskReferences := append(make([]TaskReference, 0, len(input.TaskReferences)), input.TaskReferences...)
+	slices.SortFunc(taskReferences, func(left, right TaskReference) int {
+		if compared := strings.Compare(left.TaskID.String(), right.TaskID.String()); compared != 0 {
+			return compared
+		}
+		return strings.Compare(string(left.Kind), string(right.Kind))
+	})
+	payload := struct {
+		ConversationID uuid.UUID       `json:"conversationId"`
+		Content        string          `json:"content"`
+		CaseReferences []CaseReference `json:"caseReferences"`
+		TaskReferences []TaskReference `json:"taskReferences"`
+	}{
+		ConversationID: input.ConversationID,
+		Content:        input.Content,
+		CaseReferences: caseReferences,
+		TaskReferences: taskReferences,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode conversation turn fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func validateReferences(input AppendMessageInput) error {

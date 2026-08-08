@@ -733,10 +733,12 @@ PostgreSQL transaction. Selecting a case alone does not create a diagnosis task.
 Conversation Agent through `/turns`. A unique `selected` case reference plus explicit diagnosis
 intent is required before that Tool is exposed. The command only creates a durable diagnosis task;
 the Diagnosis Worker remains asynchronous and independent from conversation lifecycle. `/turns`
-persists the user message before model execution, then persists only the final assistant answer and
-created task references. When model execution fails, the user message can remain persisted, so a
-client must not blindly retry the same request. Message SSE, attachments, citation preview, task
-status Tools and resumable/durable conversation runs remain later slices.
+requires a client-generated UUID `Idempotency-Key`. PostgreSQL atomically binds that key and a
+canonical request fingerprint to the user message and execution lease; a failed retry reuses the
+same user message, and a completed retry returns the original assistant message with `200` and
+`replayed=true`. Reusing a key for a different request or sending another message while the turn is
+running returns `409`. Message SSE, attachments, citation preview, task-status Tools and background
+conversation execution remain later slices.
 
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 

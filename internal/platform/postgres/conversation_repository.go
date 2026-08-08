@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
@@ -271,6 +272,553 @@ SELECT EXISTS(
 	return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 }
 
+func (r *ConversationRepository) BeginTurn(
+	ctx context.Context,
+	userID uuid.UUID,
+	input conversation.BeginTurnInput,
+) (conversation.BeginTurnResult, error) {
+	if r == nil || r.db == nil {
+		return conversation.BeginTurnResult{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || input.Message.ConversationID == uuid.Nil ||
+		input.Message.Role != conversation.MessageRoleUser || strings.TrimSpace(input.IdempotencyKey) == "" ||
+		strings.TrimSpace(input.RequestFingerprint) == "" || input.StartedAt.IsZero() || input.LeaseExpiresAt.IsZero() {
+		return conversation.BeginTurnResult{}, conversation.ErrInvalidMessage
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(input.IdempotencyKey)); err != nil {
+		return conversation.BeginTurnResult{}, conversation.ErrInvalidMessage
+	}
+	startedAt := input.StartedAt.UTC()
+	leaseExpiresAt := input.LeaseExpiresAt.UTC()
+	if !leaseExpiresAt.After(startedAt) {
+		return conversation.BeginTurnResult{}, conversation.ErrInvalidMessage
+	}
+	var result conversation.BeginTurnResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var owner struct {
+			ID     uuid.UUID           `gorm:"column:id"`
+			Status conversation.Status `gorm:"column:status"`
+		}
+		query := tx.Raw(`
+SELECT id, status
+FROM conversations
+WHERE id = ? AND user_id = ?
+FOR UPDATE`, input.Message.ConversationID, userID).Scan(&owner)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if owner.Status == conversation.StatusArchived {
+			return conversation.ErrConversationArchived
+		}
+
+		var existing conversationTurnRecord
+		query = tx.Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_expires_at,
+       completed_at, created_at, updated_at
+FROM conversation_turns
+WHERE conversation_id = ? AND idempotency_key = ?
+FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKey)).Scan(&existing)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 1 {
+			if existing.RequestFingerprint != strings.TrimSpace(input.RequestFingerprint) {
+				return conversation.ErrTurnIdempotencyConflict
+			}
+			userMessage, err := loadConversationMessage(tx, userID, input.Message.ConversationID, existing.UserMessageID)
+			if err != nil {
+				return err
+			}
+			switch existing.Status {
+			case conversation.TurnStatusCompleted:
+				if existing.AssistantMessageID == nil {
+					return errors.New("completed conversation turn has no assistant message")
+				}
+				assistantMessage, err := loadConversationMessage(tx, userID, input.Message.ConversationID, *existing.AssistantMessageID)
+				if err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage, AssistantMessage: &assistantMessage,
+					Created: false,
+				}
+				return nil
+			case conversation.TurnStatusRunning:
+				if existing.LeaseExpiresAt != nil && existing.LeaseExpiresAt.After(startedAt) {
+					return conversation.ErrTurnInProgress
+				}
+				if err := markTurnFailed(tx, existing.ID, startedAt); err != nil {
+					return err
+				}
+				if err := ensureNoRunningTurn(tx, input.Message.ConversationID, existing.ID, startedAt); err != nil {
+					return err
+				}
+				if err := ensureLatestUserMessage(tx, input.Message.ConversationID, existing.UserMessageID); err != nil {
+					return err
+				}
+				if err := reopenTurn(tx, existing.ID, existing.AttemptCount+1, startedAt, leaseExpiresAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{TurnID: existing.ID, UserMessage: userMessage, Created: false}
+				return nil
+			case conversation.TurnStatusFailed:
+				if err := ensureNoRunningTurn(tx, input.Message.ConversationID, existing.ID, startedAt); err != nil {
+					return err
+				}
+				if err := ensureLatestUserMessage(tx, input.Message.ConversationID, existing.UserMessageID); err != nil {
+					return err
+				}
+				if err := reopenTurn(tx, existing.ID, existing.AttemptCount+1, startedAt, leaseExpiresAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{TurnID: existing.ID, UserMessage: userMessage, Created: false}
+				return nil
+			default:
+				return errors.New("conversation turn has an invalid status")
+			}
+		}
+
+		if err := expireRunningTurns(tx, input.Message.ConversationID, startedAt); err != nil {
+			return err
+		}
+		var active bool
+		query = tx.Raw(`
+SELECT EXISTS(
+    SELECT 1 FROM conversation_turns
+    WHERE conversation_id = ? AND status = ? AND lease_expires_at > ?
+)`, input.Message.ConversationID, conversation.TurnStatusRunning, startedAt).Scan(&active)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if active {
+			return conversation.ErrTurnInProgress
+		}
+
+		messageID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate conversation message id: %w", err)
+		}
+		message, err := insertConversationMessage(tx, userID, input.Message, messageID, startedAt)
+		if err != nil {
+			return err
+		}
+		turnID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate conversation turn id: %w", err)
+		}
+		query = tx.Exec(`
+INSERT INTO conversation_turns
+    (id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+     user_message_id, attempt_count, lease_expires_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+			turnID, input.Message.ConversationID, userID, strings.TrimSpace(input.IdempotencyKey),
+			strings.TrimSpace(input.RequestFingerprint), conversation.TurnStatusRunning, messageID,
+			leaseExpiresAt, startedAt, startedAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		result = conversation.BeginTurnResult{TurnID: turnID, UserMessage: message, Created: true}
+		return nil
+	})
+	if err != nil {
+		return conversation.BeginTurnResult{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+func (r *ConversationRepository) CompleteTurn(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	assistantContent string,
+	completedAt time.Time,
+) (conversation.ConversationTurn, error) {
+	if r == nil || r.db == nil {
+		return conversation.ConversationTurn{}, errors.New("conversation repository is unavailable")
+	}
+	assistantContent = strings.TrimSpace(assistantContent)
+	if userID == uuid.Nil || turnID == uuid.Nil || assistantContent == "" || len([]rune(assistantContent)) > conversation.MaxContentRunes {
+		return conversation.ConversationTurn{}, conversation.ErrInvalidMessage
+	}
+	completedAt = completedAt.UTC()
+	var result conversation.ConversationTurn
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var turnOwner struct {
+			ConversationID uuid.UUID `gorm:"column:conversation_id"`
+		}
+		query := tx.Raw(`
+SELECT conversation_id
+FROM conversation_turns
+WHERE id = ? AND user_id = ?`, turnID, userID).Scan(&turnOwner)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if err := lockConversation(tx, userID, turnOwner.ConversationID); err != nil {
+			return err
+		}
+		var turn conversationTurnRecord
+		query = tx.Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_expires_at,
+       completed_at, created_at, updated_at
+FROM conversation_turns
+WHERE id = ? AND user_id = ?
+FOR UPDATE`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if turn.Status == conversation.TurnStatusCompleted {
+			if turn.AssistantMessageID == nil {
+				return errors.New("completed conversation turn has no assistant message")
+			}
+			userMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, turn.UserMessageID)
+			if err != nil {
+				return err
+			}
+			assistantMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, *turn.AssistantMessageID)
+			if err != nil {
+				return err
+			}
+			result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
+			return nil
+		}
+		if turn.Status != conversation.TurnStatusRunning || turn.LeaseExpiresAt == nil || !turn.LeaseExpiresAt.After(completedAt) {
+			return conversation.ErrTurnLeaseLost
+		}
+		if err := ensureLatestUserMessage(tx, turn.ConversationID, turn.UserMessageID); err != nil {
+			return err
+		}
+		userMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, turn.UserMessageID)
+		if err != nil {
+			return err
+		}
+		assistantMessageID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate assistant message id: %w", err)
+		}
+		assistantMessage, err := insertConversationMessage(tx, userID, conversation.AppendMessageInput{
+			ConversationID: turn.ConversationID, Role: conversation.MessageRoleAssistant,
+			Content: assistantContent, TaskReferences: createdTaskReferences(userMessage),
+		}, assistantMessageID, completedAt)
+		if err != nil {
+			return err
+		}
+		query = tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, assistant_message_id = ?, lease_expires_at = NULL,
+    completed_at = ?, updated_at = ?
+WHERE id = ? AND user_id = ? AND status = ?`,
+			conversation.TurnStatusCompleted, assistantMessageID, completedAt, completedAt,
+			turnID, userID, conversation.TurnStatusRunning)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.ErrTurnLeaseLost
+		}
+		result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
+		return nil
+	})
+	if err != nil {
+		return conversation.ConversationTurn{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+func (r *ConversationRepository) FailTurn(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	failedAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || turnID == uuid.Nil {
+		return conversation.ErrInvalidMessage
+	}
+	failedAt = failedAt.UTC()
+	query := ResolveDB(ctx, r.db).Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_expires_at = NULL, updated_at = ?
+WHERE id = ? AND user_id = ? AND status = ?`,
+		conversation.TurnStatusFailed, failedAt, turnID, userID, conversation.TurnStatusRunning)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if query.RowsAffected == 1 || query.RowsAffected == 0 {
+		return nil
+	}
+	return errors.New("unexpected conversation turn failure update count")
+}
+
+func lockConversation(tx *gorm.DB, userID, conversationID uuid.UUID) error {
+	var owner struct {
+		ID     uuid.UUID           `gorm:"column:id"`
+		Status conversation.Status `gorm:"column:status"`
+	}
+	query := tx.Raw(`
+SELECT id, status
+FROM conversations
+WHERE id = ? AND user_id = ?
+FOR UPDATE`, conversationID, userID).Scan(&owner)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	if owner.Status == conversation.StatusArchived {
+		return conversation.ErrConversationArchived
+	}
+	return nil
+}
+
+func expireRunningTurns(tx *gorm.DB, conversationID uuid.UUID, now time.Time) error {
+	result := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_expires_at = NULL, updated_at = ?
+WHERE conversation_id = ? AND status = ? AND lease_expires_at <= ?`,
+		conversation.TurnStatusFailed, now, conversationID, conversation.TurnStatusRunning, now)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	return nil
+}
+
+func ensureNoRunningTurn(tx *gorm.DB, conversationID, excludedTurnID uuid.UUID, now time.Time) error {
+	if err := expireRunningTurns(tx, conversationID, now); err != nil {
+		return err
+	}
+	var active bool
+	query := tx.Raw(`
+SELECT EXISTS(
+    SELECT 1 FROM conversation_turns
+    WHERE conversation_id = ? AND id <> ? AND status = ? AND lease_expires_at > ?
+)`, conversationID, excludedTurnID, conversation.TurnStatusRunning, now).Scan(&active)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if active {
+		return conversation.ErrTurnInProgress
+	}
+	return nil
+}
+
+func markTurnFailed(tx *gorm.DB, turnID uuid.UUID, failedAt time.Time) error {
+	result := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_expires_at = NULL, updated_at = ?
+WHERE id = ? AND status = ?`,
+		conversation.TurnStatusFailed, failedAt, turnID, conversation.TurnStatusRunning)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	return nil
+}
+
+func reopenTurn(tx *gorm.DB, turnID uuid.UUID, attemptCount int, startedAt, leaseExpiresAt time.Time) error {
+	result := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, attempt_count = ?, lease_expires_at = ?, updated_at = ?
+WHERE id = ? AND status = ?`,
+		conversation.TurnStatusRunning, attemptCount, leaseExpiresAt, startedAt, turnID, conversation.TurnStatusFailed)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("conversation turn could not be reopened")
+	}
+	return nil
+}
+
+func ensureLatestUserMessage(tx *gorm.DB, conversationID, messageID uuid.UUID) error {
+	var latest struct {
+		ID   uuid.UUID                `gorm:"column:id"`
+		Role conversation.MessageRole `gorm:"column:role"`
+	}
+	query := tx.Raw(`
+SELECT id, role
+FROM conversation_messages
+WHERE conversation_id = ?
+ORDER BY seq DESC
+LIMIT 1`, conversationID).Scan(&latest)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	if latest.ID != messageID || latest.Role != conversation.MessageRoleUser {
+		return conversation.ErrCommandNotLatest
+	}
+	return nil
+}
+
+func insertConversationMessage(
+	tx *gorm.DB,
+	userID uuid.UUID,
+	input conversation.AppendMessageInput,
+	id uuid.UUID,
+	createdAt time.Time,
+) (conversation.Message, error) {
+	var nextSeq int64
+	query := tx.Raw(`
+SELECT COALESCE(MAX(seq), 0) + 1
+FROM conversation_messages
+WHERE conversation_id = ?`, input.ConversationID).Scan(&nextSeq)
+	if query.Error != nil {
+		return conversation.Message{}, TranslateError(query.Error)
+	}
+	query = tx.Exec(`
+INSERT INTO conversation_messages
+    (id, conversation_id, seq, role, content, content_schema_version, created_at)
+VALUES (?, ?, ?, ?, ?, 1, ?)`, id, input.ConversationID, nextSeq, input.Role, input.Content, createdAt)
+	if query.Error != nil {
+		return conversation.Message{}, TranslateError(query.Error)
+	}
+	for _, ref := range input.CaseReferences {
+		query = tx.Exec(`
+INSERT INTO conversation_case_references (message_id, external_case_id, reference_kind, created_at)
+SELECT ?, id, ?, ?
+FROM external_cases
+WHERE id = ?`, id, ref.Kind, createdAt, ref.ExternalCaseID)
+		if query.Error != nil {
+			return conversation.Message{}, TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+	}
+	for _, ref := range input.TaskReferences {
+		query = tx.Exec(`
+INSERT INTO conversation_task_references (message_id, task_id, reference_kind, created_at)
+SELECT ?, id, ?, ?
+FROM diagnosis_tasks
+WHERE id = ? AND created_by = ?`, id, ref.Kind, createdAt, ref.TaskID, userID)
+		if query.Error != nil {
+			return conversation.Message{}, TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+	}
+	query = tx.Exec(`
+UPDATE conversations
+SET last_message_at = ?, updated_at = ?
+WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userID)
+	if query.Error != nil {
+		return conversation.Message{}, TranslateError(query.Error)
+	}
+	return conversation.Message{
+		ID: id, ConversationID: input.ConversationID, Seq: nextSeq,
+		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
+		CaseReferences: append([]conversation.CaseReference(nil), input.CaseReferences...),
+		TaskReferences: append([]conversation.TaskReference(nil), input.TaskReferences...),
+		CreatedAt:      createdAt,
+	}, nil
+}
+
+func createdTaskReferences(message conversation.Message) []conversation.TaskReference {
+	created := make([]conversation.TaskReference, 0, len(message.TaskReferences))
+	for _, reference := range message.TaskReferences {
+		if reference.Kind == conversation.ReferenceKindCreated {
+			created = append(created, reference)
+		}
+	}
+	return created
+}
+
+func loadConversationMessage(
+	db *gorm.DB,
+	userID, conversationID, messageID uuid.UUID,
+) (conversation.Message, error) {
+	var record messageRecord
+	query := db.Raw(`
+SELECT message.id, message.conversation_id, message.seq, message.role,
+       message.content, message.content_schema_version, message.created_at
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+WHERE message.id = ? AND message.conversation_id = ? AND conversation.user_id = ?`,
+		messageID, conversationID, userID).Scan(&record)
+	if query.Error != nil {
+		return conversation.Message{}, TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	messages := []conversation.Message{messageFromRecord(record)}
+	if err := loadConversationReferences(db, messages); err != nil {
+		return conversation.Message{}, err
+	}
+	return messages[0], nil
+}
+
+func loadConversationReferences(db *gorm.DB, messages []conversation.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(messages))
+	index := make(map[uuid.UUID]int, len(messages))
+	for i := range messages {
+		ids[i] = messages[i].ID
+		index[messages[i].ID] = i
+	}
+	var caseRefs []caseReferenceRecord
+	if err := db.Raw(`
+SELECT message_id, external_case_id, reference_kind
+FROM conversation_case_references
+WHERE message_id IN ?`, ids).Scan(&caseRefs).Error; err != nil {
+		return TranslateError(err)
+	}
+	for _, ref := range caseRefs {
+		if position, ok := index[ref.MessageID]; ok {
+			messages[position].CaseReferences = append(messages[position].CaseReferences, conversation.CaseReference{
+				ExternalCaseID: ref.ExternalCaseID, Kind: ref.Kind,
+			})
+		}
+	}
+	var taskRefs []taskReferenceRecord
+	if err := db.Raw(`
+SELECT message_id, task_id, reference_kind
+FROM conversation_task_references
+WHERE message_id IN ?`, ids).Scan(&taskRefs).Error; err != nil {
+		return TranslateError(err)
+	}
+	for _, ref := range taskRefs {
+		if position, ok := index[ref.MessageID]; ok {
+			messages[position].TaskReferences = append(messages[position].TaskReferences, conversation.TaskReference{
+				TaskID: ref.TaskID, Kind: ref.Kind,
+			})
+		}
+	}
+	return nil
+}
+
+type conversationTurnRecord struct {
+	ID                 uuid.UUID               `gorm:"column:id"`
+	ConversationID     uuid.UUID               `gorm:"column:conversation_id"`
+	UserID             uuid.UUID               `gorm:"column:user_id"`
+	IdempotencyKey     uuid.UUID               `gorm:"column:idempotency_key"`
+	RequestFingerprint string                  `gorm:"column:request_fingerprint"`
+	Status             conversation.TurnStatus `gorm:"column:status"`
+	UserMessageID      uuid.UUID               `gorm:"column:user_message_id"`
+	AssistantMessageID *uuid.UUID              `gorm:"column:assistant_message_id"`
+	AttemptCount       int                     `gorm:"column:attempt_count"`
+	LeaseExpiresAt     *time.Time              `gorm:"column:lease_expires_at"`
+	CompletedAt        *time.Time              `gorm:"column:completed_at"`
+	CreatedAt          time.Time               `gorm:"column:created_at"`
+	UpdatedAt          time.Time               `gorm:"column:updated_at"`
+}
+
 func (r *ConversationRepository) AppendMessage(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -308,61 +856,23 @@ FOR UPDATE`, input.ConversationID, userID).Scan(&ownerStatus)
 		if ownerStatus.Status == conversation.StatusArchived {
 			return conversation.ErrConversationArchived
 		}
-		var nextSeq int64
+		if err := expireRunningTurns(tx, input.ConversationID, createdAt); err != nil {
+			return err
+		}
+		var activeTurn bool
 		if err := tx.Raw(`
-SELECT COALESCE(MAX(seq), 0) + 1
-FROM conversation_messages
-WHERE conversation_id = ?`, input.ConversationID).Scan(&nextSeq).Error; err != nil {
+SELECT EXISTS(
+    SELECT 1 FROM conversation_turns
+    WHERE conversation_id = ? AND status = ? AND lease_expires_at > ?
+)`, input.ConversationID, conversation.TurnStatusRunning, createdAt).Scan(&activeTurn).Error; err != nil {
 			return TranslateError(err)
 		}
-		result = tx.Exec(`
-INSERT INTO conversation_messages
-    (id, conversation_id, seq, role, content, content_schema_version, created_at)
-VALUES (?, ?, ?, ?, ?, 1, ?)`, id, input.ConversationID, nextSeq, input.Role, input.Content, createdAt)
-		if result.Error != nil {
-			return TranslateError(result.Error)
+		if activeTurn {
+			return conversation.ErrTurnInProgress
 		}
-		for _, ref := range input.CaseReferences {
-			result = tx.Exec(`
-INSERT INTO conversation_case_references (message_id, external_case_id, reference_kind, created_at)
-SELECT ?, id, ?, ?
-FROM external_cases
-WHERE id = ?`, id, ref.Kind, createdAt, ref.ExternalCaseID)
-			if result.Error != nil {
-				return TranslateError(result.Error)
-			}
-			if result.RowsAffected != 1 {
-				return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
-			}
-		}
-		for _, ref := range input.TaskReferences {
-			result = tx.Exec(`
-INSERT INTO conversation_task_references (message_id, task_id, reference_kind, created_at)
-SELECT ?, id, ?, ?
-FROM diagnosis_tasks
-WHERE id = ? AND created_by = ?`, id, ref.Kind, createdAt, ref.TaskID, userID)
-			if result.Error != nil {
-				return TranslateError(result.Error)
-			}
-			if result.RowsAffected != 1 {
-				return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
-			}
-		}
-		result = tx.Exec(`
-UPDATE conversations
-SET last_message_at = ?, updated_at = ?
-WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userID)
-		if result.Error != nil {
-			return TranslateError(result.Error)
-		}
-		message = conversation.Message{
-			ID: id, ConversationID: input.ConversationID, Seq: nextSeq,
-			Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
-			CaseReferences: append([]conversation.CaseReference(nil), input.CaseReferences...),
-			TaskReferences: append([]conversation.TaskReference(nil), input.TaskReferences...),
-			CreatedAt:      createdAt,
-		}
-		return nil
+		var insertErr error
+		message, insertErr = insertConversationMessage(tx, userID, input, id, createdAt)
+		return insertErr
 	})
 	if err != nil {
 		return conversation.Message{}, TranslateError(err)
@@ -371,44 +881,7 @@ WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userI
 }
 
 func (r *ConversationRepository) loadReferences(db *gorm.DB, messages []conversation.Message) error {
-	if len(messages) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, len(messages))
-	index := make(map[uuid.UUID]int, len(messages))
-	for i := range messages {
-		ids[i] = messages[i].ID
-		index[messages[i].ID] = i
-	}
-	var caseRefs []caseReferenceRecord
-	if err := db.Raw(`
-SELECT message_id, external_case_id, reference_kind
-FROM conversation_case_references
-WHERE message_id IN ?`, ids).Scan(&caseRefs).Error; err != nil {
-		return TranslateError(err)
-	}
-	for _, ref := range caseRefs {
-		if i, ok := index[ref.MessageID]; ok {
-			messages[i].CaseReferences = append(messages[i].CaseReferences, conversation.CaseReference{
-				ExternalCaseID: ref.ExternalCaseID, Kind: ref.Kind,
-			})
-		}
-	}
-	var taskRefs []taskReferenceRecord
-	if err := db.Raw(`
-SELECT message_id, task_id, reference_kind
-FROM conversation_task_references
-WHERE message_id IN ?`, ids).Scan(&taskRefs).Error; err != nil {
-		return TranslateError(err)
-	}
-	for _, ref := range taskRefs {
-		if i, ok := index[ref.MessageID]; ok {
-			messages[i].TaskReferences = append(messages[i].TaskReferences, conversation.TaskReference{
-				TaskID: ref.TaskID, Kind: ref.Kind,
-			})
-		}
-	}
-	return nil
+	return loadConversationReferences(db, messages)
 }
 
 type conversationRecord struct {
