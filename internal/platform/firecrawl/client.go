@@ -145,6 +145,12 @@ func (c *Client) Scrape(ctx context.Context, target webresearch.PublicURL) (webr
 	}, nil
 }
 
+// Fetch implements webresearch.ContentProvider. Scrape is retained as a
+// compatibility method for callers that used the original Firecrawl name.
+func (c *Client) Fetch(ctx context.Context, target webresearch.PublicURL) (webresearch.ProviderPage, error) {
+	return c.Scrape(ctx, target)
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, input, output any) error {
 	if c == nil || c.baseURL == nil || c.httpClient == nil {
 		return webresearch.ErrProviderUnavailable

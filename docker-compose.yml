@@ -118,6 +118,17 @@ services:
       retries: 20
       start_period: 20s
 
+  searxng:
+    image: ${MESGUARD_SEARXNG_IMAGE:-searxng/searxng:latest}
+    container_name: mesguard-searxng
+    profiles: ["web-search-self-hosted"]
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: "http://localhost:${MESGUARD_SEARXNG_PORT:-8081}/"
+      TZ: Asia/Shanghai
+    ports:
+      - "${MESGUARD_SEARXNG_PORT:-8081}:8080"
+
   migrate:
     build:
       context: .

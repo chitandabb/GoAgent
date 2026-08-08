@@ -18,6 +18,8 @@ func TestWebSearchConfigValidate(t *testing.T) {
 		{name: "valid", mutate: func(*WebSearchConfig) {}},
 		{name: "disabled accepts empty", mutate: func(c *WebSearchConfig) { *c = WebSearchConfig{} }},
 		{name: "reject unknown provider", mutate: func(c *WebSearchConfig) { c.Provider = "other" }, wantErr: true},
+		{name: "reject direct search provider", mutate: func(c *WebSearchConfig) { c.SearchProvider = "direct" }, wantErr: true},
+		{name: "reject searxng content provider", mutate: func(c *WebSearchConfig) { c.ContentProvider = "searxng" }, wantErr: true},
 		{name: "reject insecure remote URL", mutate: func(c *WebSearchConfig) { c.BaseURL = "http://example.com" }, wantErr: true},
 		{name: "allow localhost HTTP", mutate: func(c *WebSearchConfig) { c.BaseURL = "http://127.0.0.1:3002" }},
 		{name: "reject invalid API key env", mutate: func(c *WebSearchConfig) { c.APIKeyEnv = "secret-value" }, wantErr: true},
@@ -62,5 +64,28 @@ func TestWebSearchConfigAPIKeyReadsConfiguredEnvironment(t *testing.T) {
 	}
 	if value != "test-key" {
 		t.Fatalf("APIKey() = %q", value)
+	}
+}
+
+func TestWebSearchConfigAllowsSplitSearXNGAndDirectProviders(t *testing.T) {
+	cfg := WebSearchConfig{
+		Enabled: true, SearchProvider: "searxng", ContentProvider: "direct",
+		Providers: map[string]WebSearchProviderConfig{
+			"searxng": {BaseURL: "http://searxng:8080"},
+		},
+		TimeoutMillis: 30_000, MaxResults: 5, MaxFetchedPages: 3,
+		MaxPageChars: 20_000, MaxRounds: 2, MaxResponseBytes: 2 * 1024 * 1024,
+		Redaction: WebSearchRedactionConfig{MaxInputRunes: 1024, MaxOutputRunes: 384, MinOutputRunes: 8},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	searchProvider, contentProvider := cfg.EffectiveProviders()
+	if searchProvider != "searxng" || contentProvider != "direct" {
+		t.Fatalf("EffectiveProviders() = %q, %q", searchProvider, contentProvider)
+	}
+	apiKey, err := cfg.APIKeyFor("searxng")
+	if err != nil || apiKey != "" {
+		t.Fatalf("APIKeyFor(searxng) = %q, %v", apiKey, err)
 	}
 }

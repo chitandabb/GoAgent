@@ -154,9 +154,8 @@ timeoutMillis = 30000
 
 [webSearch]
 enabled = true
-provider = "firecrawl"
-baseURL = "https://api.firecrawl.dev"
-apiKeyEnv = "FIRECRAWL_API_KEY"
+searchProvider = "firecrawl"
+contentProvider = "firecrawl"
 timeoutMillis = 30000
 maxResults = 5
 maxFetchedPages = 3
@@ -171,6 +170,13 @@ maxInputRunes = 1024
 maxOutputRunes = 384
 minOutputRunes = 8
 sensitiveTermsEnv = ""
+
+[webSearch.providers.firecrawl]
+baseURL = "https://api.firecrawl.dev"
+apiKeyEnv = "FIRECRAWL_API_KEY"
+
+[webSearch.providers.searxng]
+baseURL = "http://127.0.0.1:8081"
 
 [minio]
 enabled = true

@@ -295,21 +295,22 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 Web Search 不默认获得工单原文。进入 `web-research` 前必须把公司名、客户名、工单号、内部地址、SQL/日志原文和代码片段移除，只允许搜索通用产品概念、公开错误码和公开依赖资料。
 
 当前 `internal/webresearch` 已把这一要求固化为服务端出口策略：工单字段和管理员词典执行确定性
-替换，凭证、连接串和结构化私有内容直接拒绝，脱敏后技术信号不足也拒绝。Firecrawl Client 只能
-接收策略构造的 `PublicQuery` 和 `PublicURL`，不能接收任意字符串。LLM 改写不参与安全判定，命中
-审计只记录类别和数量，不能把敏感原值写入日志。
+替换，凭证、连接串和结构化私有内容直接拒绝，脱敏后技术信号不足也拒绝。SearchProvider 和
+ContentProvider 只能接收策略构造的 `PublicQuery` 和 `PublicURL`，不能接收任意字符串。LLM 改写
+不参与安全判定，命中审计只记录类别和数量，不能把敏感原值写入日志。
 
 `web_search` 只返回候选摘要和 Run 内随机 `resultId`，不产生 Evidence；`fetch_public_page` 只接受
 同一 Run 已授权的 `resultId`，成功后才产生 `web` EvidenceItem。快照保存 URL、域名、标题、
 可得的页面时间、抓取时间、来源等级、正文哈希和截断状态，引用门禁会重算正文 SHA-256。单 Run
 预算为最多 2 次 Search/3 次 Fetch，重复 Fetch 命中内存快照而不再次计费。URL Gate 拒绝非 HTTP(S)、
-用户信息、异常端口、localhost、私网/链路本地/保留地址和混合 DNS；提交 URL 与 Firecrawl 最终
-报告 URL 都要复验。Firecrawl 内部不可观测的中间重定向仍依赖供应商自身 SSRF 防护，这是当前
-适配器的明确边界。
+用户信息、异常端口、localhost、私网/链路本地/保留地址和混合 DNS；提交 URL 与 Provider 最终
+报告 URL 都要复验。Direct Content Provider 在跟随每一跳重定向前复用 URL Gate；Firecrawl 内部
+不可观测的中间重定向仍依赖供应商自身 SSRF 防护，这是该适配器的明确边界。
 
-网页内容经 `onlyMainContent` Markdown 提取、字符清洗和大小限制后，以 `untrustedContent=true`
-进入模型。System Prompt 和 Skill 明确禁止执行网页指令、泄露上下文或扩大 Tool 权限；这属于
-数据/指令隔离和确定性授权共同防护，不声称能够语义识别所有 Prompt Injection 文本。
+网页内容经 Provider 提取、字符清洗和大小限制后，以 `untrustedContent=true` 进入模型。Firecrawl
+使用 `onlyMainContent` Markdown，Direct Provider 只提取有限可见文本且不执行脚本；System Prompt
+和 Skill 明确禁止执行网页指令、泄露上下文或扩大 Tool 权限。这属于数据/指令隔离和确定性授权
+共同防护，不声称能够语义识别所有 Prompt Injection 文本。
 
 代码调查不维护应用内逐仓库、组织或分支授权表。fine-grained PAT 或 GitHub App Installation 决定 GitHub 返回的可见范围；`search_repositories` 用于按查询发现候选仓库，后续 Tool 直接使用选中的 owner/repo/ref/sha。MESGuard 只保留代码相关的只读 Tool，不把凭据在 GitHub 侧拥有的范围缩窄为单仓库。最终证据记录实际仓库、Commit SHA、文件和行号。
 

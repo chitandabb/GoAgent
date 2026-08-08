@@ -305,22 +305,32 @@ func (c GitHubMCPConfig) Token() (string, error) {
 	return requiredEnv(c.TokenEnv)
 }
 
-// WebSearchConfig 描述公开网页检索的供应商连接与硬预算。
+// WebSearchProviderConfig 描述一个公开 Web Provider 的连接信息。
 // API Key 只能通过 apiKeyEnv 引用，不得出现在 TOML、日志或 Tool 输出中。
+type WebSearchProviderConfig struct {
+	BaseURL   string `toml:"baseURL"`
+	APIKeyEnv string `toml:"apiKeyEnv"`
+}
+
+// WebSearchConfig 描述公开网页检索的供应商连接与硬预算。
+// Search 与 Content 可以独立选择 Provider，例如 searxng + direct。
 type WebSearchConfig struct {
-	Enabled          bool                     `toml:"enabled"`
-	Provider         string                   `toml:"provider"`
-	BaseURL          string                   `toml:"baseURL"`
-	APIKeyEnv        string                   `toml:"apiKeyEnv"`
-	TimeoutMillis    int                      `toml:"timeoutMillis"`
-	MaxResults       int                      `toml:"maxResults"`
-	MaxFetchedPages  int                      `toml:"maxFetchedPages"`
-	MaxPageChars     int                      `toml:"maxPageChars"`
-	MaxRounds        int                      `toml:"maxRounds"`
-	MaxResponseBytes int64                    `toml:"maxResponseBytes"`
-	OfficialDomains  []string                 `toml:"officialDomains"`
-	TrustedDomains   []string                 `toml:"trustedDomains"`
-	Redaction        WebSearchRedactionConfig `toml:"redaction"`
+	Enabled          bool                               `toml:"enabled"`
+	SearchProvider   string                             `toml:"searchProvider"`
+	ContentProvider  string                             `toml:"contentProvider"`
+	Providers        map[string]WebSearchProviderConfig `toml:"providers"`
+	Provider         string                             `toml:"provider"` // 兼容旧版单 Provider 配置
+	BaseURL          string                             `toml:"baseURL"`
+	APIKeyEnv        string                             `toml:"apiKeyEnv"`
+	TimeoutMillis    int                                `toml:"timeoutMillis"`
+	MaxResults       int                                `toml:"maxResults"`
+	MaxFetchedPages  int                                `toml:"maxFetchedPages"`
+	MaxPageChars     int                                `toml:"maxPageChars"`
+	MaxRounds        int                                `toml:"maxRounds"`
+	MaxResponseBytes int64                              `toml:"maxResponseBytes"`
+	OfficialDomains  []string                           `toml:"officialDomains"`
+	TrustedDomains   []string                           `toml:"trustedDomains"`
+	Redaction        WebSearchRedactionConfig           `toml:"redaction"`
 }
 
 type WebSearchRedactionConfig struct {
@@ -370,18 +380,34 @@ func (c WebSearchConfig) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if strings.ToLower(strings.TrimSpace(c.Provider)) != "firecrawl" {
-		return errors.New("webSearch provider must be firecrawl")
+	searchProvider, contentProvider := c.EffectiveProviders()
+	if err := validateWebProviderName(searchProvider, true); err != nil {
+		return fmt.Errorf("webSearch searchProvider: %w", err)
 	}
-	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
-	if err != nil || endpoint.Host == "" {
-		return errors.New("webSearch baseURL must be an absolute URL")
+	if err := validateWebProviderName(contentProvider, false); err != nil {
+		return fmt.Errorf("webSearch contentProvider: %w", err)
 	}
-	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (endpoint.Hostname() == "localhost" || endpoint.Hostname() == "127.0.0.1")) {
-		return errors.New("webSearch baseURL must use HTTPS unless it points to localhost")
-	}
-	if !environmentVariableName.MatchString(strings.TrimSpace(c.APIKeyEnv)) {
-		return errors.New("webSearch apiKeyEnv is invalid")
+	for _, provider := range []string{searchProvider, contentProvider} {
+		providerConfig := c.ProviderConfig(provider)
+		if provider == "direct" {
+			if strings.TrimSpace(providerConfig.APIKeyEnv) != "" {
+				return errors.New("webSearch direct provider must not configure apiKeyEnv")
+			}
+			continue
+		}
+		endpoint, err := url.Parse(strings.TrimSpace(providerConfig.BaseURL))
+		if err != nil || endpoint.Host == "" {
+			return fmt.Errorf("webSearch %s baseURL must be an absolute URL", provider)
+		}
+		if endpoint.Scheme != "https" && !isLocalWebProviderEndpoint(endpoint.Hostname()) {
+			return fmt.Errorf("webSearch %s baseURL must use HTTPS unless it points to a local endpoint", provider)
+		}
+		if provider == "firecrawl" && !environmentVariableName.MatchString(strings.TrimSpace(providerConfig.APIKeyEnv)) {
+			return errors.New("webSearch firecrawl apiKeyEnv is invalid")
+		}
+		if provider != "firecrawl" && strings.TrimSpace(providerConfig.APIKeyEnv) != "" && !environmentVariableName.MatchString(strings.TrimSpace(providerConfig.APIKeyEnv)) {
+			return fmt.Errorf("webSearch %s apiKeyEnv is invalid", provider)
+		}
 	}
 	if c.TimeoutMillis < 1_000 || c.TimeoutMillis > 120_000 {
 		return errors.New("webSearch timeoutMillis must be between 1000 and 120000")
@@ -440,7 +466,77 @@ func validateWebSearchDomains(official, trusted []string) error {
 }
 
 func (c WebSearchConfig) APIKey() (string, error) {
-	return requiredEnv(c.APIKeyEnv)
+	provider := strings.ToLower(strings.TrimSpace(c.Provider))
+	if provider == "" {
+		provider, _ = c.EffectiveProviders()
+	}
+	return c.APIKeyFor(provider)
+}
+
+// EffectiveProviders returns the split configuration and keeps old
+// provider=firecrawl files working during migration.
+func (c WebSearchConfig) EffectiveProviders() (string, string) {
+	searchProvider := strings.ToLower(strings.TrimSpace(c.SearchProvider))
+	contentProvider := strings.ToLower(strings.TrimSpace(c.ContentProvider))
+	legacy := strings.ToLower(strings.TrimSpace(c.Provider))
+	if searchProvider == "" {
+		searchProvider = legacy
+	}
+	if contentProvider == "" {
+		if legacy != "" {
+			contentProvider = legacy
+		} else {
+			contentProvider = "direct"
+		}
+	}
+	return searchProvider, contentProvider
+}
+
+func (c WebSearchConfig) ProviderConfig(name string) WebSearchProviderConfig {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for configuredName, providerConfig := range c.Providers {
+		if strings.ToLower(strings.TrimSpace(configuredName)) == name {
+			return providerConfig
+		}
+	}
+	return WebSearchProviderConfig{BaseURL: c.BaseURL, APIKeyEnv: c.APIKeyEnv}
+}
+
+func (c WebSearchConfig) APIKeyFor(provider string) (string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "direct" || provider == "searxng" {
+		return "", nil
+	}
+	providerConfig := c.ProviderConfig(provider)
+	if strings.TrimSpace(providerConfig.APIKeyEnv) == "" {
+		return "", errors.New("webSearch provider apiKeyEnv is required")
+	}
+	return requiredEnv(providerConfig.APIKeyEnv)
+}
+
+func validateWebProviderName(provider string, search bool) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "firecrawl":
+		return nil
+	case "searxng":
+		if !search {
+			return errors.New("searxng is a search provider and cannot fetch page content")
+		}
+		return nil
+	case "direct":
+		if search {
+			return errors.New("direct is a content provider and cannot search")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported provider %q", provider)
+	}
+}
+
+func isLocalWebProviderEndpoint(hostname string) bool {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" || !strings.Contains(hostname, ".")
 }
 
 // MinIOConfig 描述附件和知识原文使用的 S3 兼容对象存储。
