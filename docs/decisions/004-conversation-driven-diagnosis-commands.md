@@ -5,8 +5,11 @@
 Accepted as a target architecture on 2026-08-07. The current HTTP diagnosis-task
 creation path remains implemented. The first server-side conversation slice is now implemented:
 user-scoped conversations, user messages, structured case/task references and cursor-based reads.
-The conversation Agent, assistant messages, message SSE, attachments and the
-`create_diagnosis_task` Tool are not implemented yet.
+The guarded `create_diagnosis_task` command service and its narrow model-visible Tool
+contract are now implemented and wired to the existing diagnosis application service.
+The conversation Agent Runtime has not been connected yet, so the Tool is not exposed
+through a public conversation execution path. Assistant messages, message SSE,
+attachments and citation preview are also not implemented yet.
 
 ## Decision
 
@@ -114,9 +117,10 @@ It does not append arbitrary instructions to an already running task.
 
 ## Data Model Direction
 
-The target M2 conversation schema adds structured message case references and a many-to-many
-conversation/task reference. A link records `created` or `referenced` provenance and the source
-message, but tasks remain queryable and authorized without joining through a conversation.
+The M2 conversation schema adds structured message case references and a many-to-many
+conversation/task reference. This schema is now implemented. A link records `created` or
+`referenced` provenance and the source message, but tasks remain queryable and authorized
+without joining through a conversation.
 Conversations are archived rather than used as a cascade-delete owner for tasks, reports or
 evidence.
 
@@ -135,8 +139,9 @@ evidence.
 
 - A model-selected command needs stricter intent, idempotency, rate-limit and prompt-injection
   controls than read-only Tools.
-- Conversations, messages, case references and task-reference persistence must be implemented
-  before the frontend can stop using `sessionStorage` as its workspace adapter.
+- The conversation Agent Runtime still needs to provide model context, Tool authorization,
+  assistant-message persistence and a resumable stream before the frontend can stop using
+  `sessionStorage` as its workspace adapter.
 - Existing direct task creation remains necessary for tests, administration and compatibility,
   but the target workbench should use the Agent command path.
 - Evaluation must cover correct creation, correct non-creation, duplicate model calls, ambiguous
@@ -144,10 +149,12 @@ evidence.
 
 ## Delivery Order
 
-Do not interrupt the in-progress Advanced RAG core for this cross-cutting migration. First close
-the non-conversation part of resume item 3: relevance compression, bounded Agentic re-retrieval,
-the fixed paired quality set, and the end-to-end ingestion throughput evidence. Then implement
-this decision before building the knowledge-QA conversation API and resume item 4 context memory.
+The persistence foundation and guarded command boundary are now complete. The next slice is
+the independent Conversation Agent Runtime: load bounded conversation context, expose only
+conversation-safe Tools, execute `create_diagnosis_task` through the command service, persist
+assistant output and return a task reference. Do not make the long-running Diagnosis Worker part
+of the request. After that, add message SSE, attachment reads and citation preview. The broader
+knowledge-QA context/memory work remains after the third resume item is closed.
 
 Web Search and attachment conversation integration should target the new conversation runtime,
 not add more behavior to the temporary case-bound frontend workspace.

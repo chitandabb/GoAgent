@@ -222,9 +222,10 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		}
 		registrars = append(registrars, externalCaseRoutes)
 	}
+	var diagnosisTaskService *diagnosis.DiagnosisTaskService
 	if externalCaseService != nil {
 		diagnosisTaskRepository := platformpostgres.NewDiagnosisTaskRepository(deps.db)
-		diagnosisTaskService, err := diagnosis.NewDiagnosisTaskService(diagnosisTaskRepository, externalCaseService)
+		diagnosisTaskService, err = diagnosis.NewDiagnosisTaskService(diagnosisTaskRepository, externalCaseService)
 		if err != nil {
 			closeDependencies()
 			return nil, fmt.Errorf("build diagnosis task service: %w", err)
@@ -237,6 +238,14 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 			return nil, fmt.Errorf("build diagnosis task routes: %w", err)
 		}
 		registrars = append(registrars, diagnosisTaskRoutes)
+	}
+	if diagnosisTaskService != nil && externalCaseService != nil {
+		if _, err := conversationService.WithDiagnosisCommandDependencies(
+			diagnosisTaskService, diagnosisTaskService, externalCaseService,
+		); err != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("wire conversation diagnosis command: %w", err)
+		}
 	}
 
 	agentRuntime, err := buildAgentRuntime(

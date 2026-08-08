@@ -160,6 +160,117 @@ LIMIT ?`, conversationID, query.AfterSeq, query.Limit+1).Scan(&records)
 	return conversation.MessagePage{Items: items, AfterSeq: query.AfterSeq, NextAfterSeq: nextAfterSeq, HasMore: hasMore}, nil
 }
 
+func (r *ConversationRepository) GetMessage(
+	ctx context.Context,
+	userID, conversationID, messageID uuid.UUID,
+) (conversation.Message, error) {
+	if r == nil || r.db == nil {
+		return conversation.Message{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || conversationID == uuid.Nil || messageID == uuid.Nil {
+		return conversation.Message{}, conversation.ErrInvalidMessage
+	}
+	var record messageRecord
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT message.id, message.conversation_id, message.seq, message.role,
+       message.content, message.content_schema_version, message.created_at
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+WHERE message.id = ? AND message.conversation_id = ? AND conversation.user_id = ?`,
+		messageID, conversationID, userID).Scan(&record)
+	if result.Error != nil {
+		return conversation.Message{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	messages := []conversation.Message{messageFromRecord(record)}
+	if err := r.loadReferences(ResolveDB(ctx, r.db), messages); err != nil {
+		return conversation.Message{}, err
+	}
+	return messages[0], nil
+}
+
+func (r *ConversationRepository) GetLatestMessage(
+	ctx context.Context,
+	userID, conversationID uuid.UUID,
+) (conversation.Message, error) {
+	if r == nil || r.db == nil {
+		return conversation.Message{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || conversationID == uuid.Nil {
+		return conversation.Message{}, conversation.ErrInvalidMessage
+	}
+	var record messageRecord
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT message.id, message.conversation_id, message.seq, message.role,
+       message.content, message.content_schema_version, message.created_at
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+WHERE message.conversation_id = ? AND conversation.user_id = ?
+ORDER BY message.seq DESC
+LIMIT 1`, conversationID, userID).Scan(&record)
+	if result.Error != nil {
+		return conversation.Message{}, TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	messages := []conversation.Message{messageFromRecord(record)}
+	if err := r.loadReferences(ResolveDB(ctx, r.db), messages); err != nil {
+		return conversation.Message{}, err
+	}
+	return messages[0], nil
+}
+
+func (r *ConversationRepository) AppendTaskReference(
+	ctx context.Context,
+	userID, messageID, taskID uuid.UUID,
+	kind conversation.ReferenceKind,
+	createdAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || messageID == uuid.Nil || taskID == uuid.Nil ||
+		(kind != conversation.ReferenceKindCreated && kind != conversation.ReferenceKindReferenced) {
+		return conversation.ErrInvalidMessage
+	}
+	createdAt = createdAt.UTC()
+	db := ResolveDB(ctx, r.db)
+	result := db.Exec(`
+INSERT INTO conversation_task_references (message_id, task_id, reference_kind, created_at)
+SELECT message.id, task.id, ?, ?
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+JOIN diagnosis_tasks task ON task.id = ? AND task.created_by = ?
+WHERE message.id = ? AND conversation.user_id = ?
+ON CONFLICT (message_id, task_id) DO NOTHING`,
+		kind, createdAt, taskID, userID, messageID, userID)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	var alreadyExists bool
+	if err := db.Raw(`
+SELECT EXISTS(
+    SELECT 1
+    FROM conversation_task_references reference
+    JOIN conversation_messages message ON message.id = reference.message_id
+    JOIN conversations conversation ON conversation.id = message.conversation_id
+    JOIN diagnosis_tasks task ON task.id = reference.task_id
+    WHERE reference.message_id = ? AND reference.task_id = ? AND conversation.user_id = ? AND task.created_by = ?
+)`, messageID, taskID, userID, userID).Scan(&alreadyExists).Error; err != nil {
+		return TranslateError(err)
+	}
+	if alreadyExists {
+		return nil
+	}
+	return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+}
+
 func (r *ConversationRepository) AppendMessage(
 	ctx context.Context,
 	userID uuid.UUID,

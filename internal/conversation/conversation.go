@@ -7,6 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/repository"
+
 	"github.com/google/uuid"
 )
 
@@ -47,11 +51,15 @@ func (k ReferenceKind) Valid() bool {
 }
 
 var (
-	ErrInvalidConversation  = errors.New("conversation is invalid")
-	ErrConversationNotFound = errors.New("conversation is not found")
-	ErrConversationArchived = errors.New("conversation is archived")
-	ErrInvalidMessage       = errors.New("conversation message is invalid")
-	ErrReferenceNotFound    = errors.New("conversation reference is not found")
+	ErrInvalidConversation     = errors.New("conversation is invalid")
+	ErrConversationNotFound    = errors.New("conversation is not found")
+	ErrConversationArchived    = errors.New("conversation is archived")
+	ErrInvalidMessage          = errors.New("conversation message is invalid")
+	ErrReferenceNotFound       = errors.New("conversation reference is not found")
+	ErrCommandContextRequired  = errors.New("conversation command context is required")
+	ErrCommandNotLatest        = errors.New("conversation command is not for the latest user message")
+	ErrDiagnosisIntentRequired = errors.New("explicit diagnosis intent is required")
+	ErrCaseReferenceRequired   = errors.New("exactly one selected case reference is required")
 )
 
 const (
@@ -139,7 +147,8 @@ func (q *MessageQuery) Normalize() {
 }
 
 type Actor struct {
-	UserID uuid.UUID
+	UserID  uuid.UUID
+	IsAdmin bool
 }
 
 type CreateInput struct {
@@ -160,11 +169,61 @@ type Repository interface {
 	List(ctx context.Context, userID uuid.UUID, query ListQuery) (ListResult, error)
 	ListMessages(ctx context.Context, userID, conversationID uuid.UUID, query MessageQuery) (MessagePage, error)
 	AppendMessage(ctx context.Context, userID uuid.UUID, input AppendMessageInput, createdAt time.Time) (Message, error)
+	GetMessage(ctx context.Context, userID, conversationID, messageID uuid.UUID) (Message, error)
+	GetLatestMessage(ctx context.Context, userID, conversationID uuid.UUID) (Message, error)
+	AppendTaskReference(ctx context.Context, userID, messageID, taskID uuid.UUID, kind ReferenceKind, createdAt time.Time) error
+}
+
+// DiagnosisTaskCreator is the application command boundary. The conversation
+// package never writes diagnosis tables directly; the existing diagnosis service
+// remains responsible for snapshots, fingerprints, events and Outbox.
+type DiagnosisTaskCreator interface {
+	Create(ctx context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error)
+}
+
+type DiagnosisTaskReader interface {
+	Get(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.DiagnosisTask, error)
+}
+
+type ExternalCaseReader interface {
+	Get(ctx context.Context, id uuid.UUID) (*externalcase.ExternalCase, error)
+}
+
+type CommandContext struct {
+	ConversationID uuid.UUID
+	UserMessageID  uuid.UUID
+	Actor          Actor
+}
+
+type commandContextKey struct{}
+
+func WithCommandContext(ctx context.Context, commandContext CommandContext) context.Context {
+	return context.WithValue(ctx, commandContextKey{}, commandContext)
+}
+
+func CommandContextFromContext(ctx context.Context) (CommandContext, bool) {
+	value, ok := ctx.Value(commandContextKey{}).(CommandContext)
+	return value, ok
+}
+
+type CreateDiagnosisInput struct {
+	ExternalCaseID uuid.UUID
+	DiagnosisGoal  string
+	AttachmentIDs  []uuid.UUID
+	ParentTaskID   *uuid.UUID
+}
+
+type CreateDiagnosisResult struct {
+	Task     diagnosis.DiagnosisTask
+	Replayed bool
 }
 
 type Service struct {
-	repository Repository
-	clock      func() time.Time
+	repository          Repository
+	clock               func() time.Time
+	diagnosisTasks      DiagnosisTaskCreator
+	diagnosisTaskReader DiagnosisTaskReader
+	externalCases       ExternalCaseReader
 }
 
 func NewService(repository Repository) (*Service, error) {
@@ -172,6 +231,25 @@ func NewService(repository Repository) (*Service, error) {
 		return nil, errors.New("conversation repository is nil")
 	}
 	return &Service{repository: repository, clock: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// WithDiagnosisCommandDependencies adds the side-effecting command boundary
+// after the read/write conversation service has been constructed.
+func (s *Service) WithDiagnosisCommandDependencies(
+	diagnosisTasks DiagnosisTaskCreator,
+	diagnosisTaskReader DiagnosisTaskReader,
+	externalCases ExternalCaseReader,
+) (*Service, error) {
+	if s == nil || s.repository == nil {
+		return nil, errors.New("conversation service is unavailable")
+	}
+	if diagnosisTasks == nil || diagnosisTaskReader == nil || externalCases == nil {
+		return nil, errors.New("conversation diagnosis command dependencies are nil")
+	}
+	s.diagnosisTasks = diagnosisTasks
+	s.diagnosisTaskReader = diagnosisTaskReader
+	s.externalCases = externalCases
+	return s, nil
 }
 
 func (s *Service) Create(ctx context.Context, actor Actor, input CreateInput) (Conversation, error) {
@@ -276,4 +354,99 @@ func validateReferences(input AppendMessageInput) error {
 		taskSeen[ref.TaskID] = struct{}{}
 	}
 	return nil
+}
+
+// CreateDiagnosisTask converts a direct conversation command into the existing
+// durable diagnosis-task application command. The latest user turn and its
+// selected case reference participate in authorization; content from a case,
+// attachment, Tool result or web page never authorizes this command.
+func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosisInput) (CreateDiagnosisResult, error) {
+	if s == nil || s.repository == nil || s.diagnosisTasks == nil || s.diagnosisTaskReader == nil || s.externalCases == nil {
+		return CreateDiagnosisResult{}, errors.New("conversation diagnosis command is unavailable")
+	}
+	commandContext, ok := CommandContextFromContext(ctx)
+	if !ok || commandContext.ConversationID == uuid.Nil || commandContext.UserMessageID == uuid.Nil || commandContext.Actor.UserID == uuid.Nil {
+		return CreateDiagnosisResult{}, ErrCommandContextRequired
+	}
+	actor := commandContext.Actor
+	if input.ExternalCaseID == uuid.Nil || strings.TrimSpace(input.DiagnosisGoal) == "" ||
+		len([]rune(strings.TrimSpace(input.DiagnosisGoal))) > MaxContentRunes {
+		return CreateDiagnosisResult{}, ErrInvalidMessage
+	}
+	if len(input.AttachmentIDs) > 0 {
+		return CreateDiagnosisResult{}, diagnosis.ErrAttachmentsUnsupported
+	}
+	message, err := s.repository.GetMessage(ctx, actor.UserID, commandContext.ConversationID, commandContext.UserMessageID)
+	if err != nil {
+		return CreateDiagnosisResult{}, err
+	}
+	latest, err := s.repository.GetLatestMessage(ctx, actor.UserID, commandContext.ConversationID)
+	if err != nil {
+		return CreateDiagnosisResult{}, err
+	}
+	if message.ID != latest.ID || message.Role != MessageRoleUser {
+		return CreateDiagnosisResult{}, ErrCommandNotLatest
+	}
+	if !hasExplicitDiagnosisIntent(message.Content) {
+		return CreateDiagnosisResult{}, ErrDiagnosisIntentRequired
+	}
+	if len(message.CaseReferences) != 1 || message.CaseReferences[0].Kind != ReferenceKindSelected ||
+		message.CaseReferences[0].ExternalCaseID != input.ExternalCaseID {
+		return CreateDiagnosisResult{}, ErrCaseReferenceRequired
+	}
+	if input.ParentTaskID != nil {
+		if *input.ParentTaskID == uuid.Nil {
+			return CreateDiagnosisResult{}, ErrInvalidMessage
+		}
+		// Parent ownership remains creator-scoped even for an admin conversation;
+		// task references use the same visibility boundary.
+		if _, err := s.diagnosisTaskReader.Get(ctx, diagnosis.TaskActor{UserID: actor.UserID}, *input.ParentTaskID); err != nil {
+			return CreateDiagnosisResult{}, err
+		}
+	}
+	item, err := s.externalCases.Get(ctx, input.ExternalCaseID)
+	if err != nil {
+		return CreateDiagnosisResult{}, err
+	}
+	if item == nil || item.ID != input.ExternalCaseID || strings.TrimSpace(item.SourceFingerprint) == "" {
+		return CreateDiagnosisResult{}, repository.ErrNotFound
+	}
+	result, err := s.diagnosisTasks.Create(ctx, diagnosis.TaskActor{UserID: actor.UserID, IsAdmin: actor.IsAdmin}, diagnosis.CreateTaskInput{
+		ExternalCaseID: input.ExternalCaseID, ExpectedSourceFingerprint: item.SourceFingerprint,
+		RequestText: strings.TrimSpace(input.DiagnosisGoal), RetryOfTaskID: input.ParentTaskID,
+		IdempotencyKey: commandIdempotencyKey(actor.UserID, commandContext.UserMessageID, input.ExternalCaseID, input.ParentTaskID),
+		CorrelationID:  uuid.New(),
+	})
+	if err != nil {
+		return CreateDiagnosisResult{}, err
+	}
+	if err := s.repository.AppendTaskReference(ctx, actor.UserID, commandContext.UserMessageID, result.Task.ID, ReferenceKindCreated, s.clock().UTC()); err != nil {
+		return CreateDiagnosisResult{}, err
+	}
+	return CreateDiagnosisResult{Task: result.Task, Replayed: result.Replayed}, nil
+}
+
+func hasExplicitDiagnosisIntent(content string) bool {
+	value := strings.ToLower(strings.TrimSpace(content))
+	if value == "" || strings.Contains(value, "不要诊断") || strings.Contains(value, "不需要诊断") || strings.Contains(value, "don't diagnose") {
+		return false
+	}
+	for _, phrase := range []string{
+		"诊断", "排查", "故障分析", "根因分析", "定位原因", "查原因", "调查这个工单",
+		"diagnose", "troubleshoot", "investigate", "root cause", "analyze this ticket",
+	} {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandIdempotencyKey(userID, messageID, caseID uuid.UUID, parentTaskID *uuid.UUID) string {
+	parent := ""
+	if parentTaskID != nil {
+		parent = parentTaskID.String()
+	}
+	value := strings.Join([]string{"mesguard.create_diagnosis_task.v1", userID.String(), messageID.String(), caseID.String(), parent}, ":")
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(value)).String()
 }

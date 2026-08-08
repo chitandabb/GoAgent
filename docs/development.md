@@ -727,8 +727,10 @@ POST /api/v1/conversations/<conversationId>/messages
 
 Message writes require `X-CSRF-Token`. The message request may carry `caseReferences` and
 `taskReferences`; the server verifies referenced records and writes them with the message in one
-PostgreSQL transaction. Selecting a case alone does not create a diagnosis task. The conversation
-Agent command, assistant messages, SSE, attachments and citation preview are not wired yet.
+PostgreSQL transaction. Selecting a case alone does not create a diagnosis task. The guarded
+`create_diagnosis_task` command service and internal Tool contract now exist and reuse the durable
+diagnosis application service, but the independent conversation Agent has not been wired to invoke
+them yet. Assistant messages, SSE, attachments and citation preview are not wired yet.
 
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 
