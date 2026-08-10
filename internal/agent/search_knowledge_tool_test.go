@@ -107,6 +107,12 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 	if _, ok := knowledgeSearchEvidenceLocation(encoded); !ok {
 		t.Fatal("valid compressed knowledge response was rejected at the evidence boundary")
 	}
+	citationSources, ok := conversationCitationSourcesFromTool(ToolSearchKnowledge, encoded)
+	if !ok || len(citationSources) != 2 ||
+		citationSources[0].SourceRef != "knowledge:"+versionID.String()+"/"+chunkID.String() ||
+		citationSources[1].SourceRef != "knowledge:"+versionID.String()+"/"+contextChunkID.String() {
+		t.Fatalf("citation sources = %+v, ok=%v", citationSources, ok)
+	}
 	var tampered searchKnowledgeResponse
 	if err := json.Unmarshal([]byte(encoded), &tampered); err != nil {
 		t.Fatal(err)

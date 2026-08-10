@@ -7,15 +7,17 @@ creation path remains implemented. The first server-side conversation slice is n
 user-scoped conversations, user messages, structured case/task references and cursor-based reads.
 The guarded `create_diagnosis_task` command service and its narrow model-visible Tool
 contract are now implemented and wired to the existing diagnosis application service.
-The first independent Conversation Agent Runtime slice is also implemented: `/turns`
-atomically creates a durable turn ledger entry and user message, executes one bounded synchronous
-Agent turn, persists the final assistant message, and copies created task references for rendering.
-Client UUID idempotency keys support failed-run retry and completed-result replay without duplicate
-messages. The read-only `get_diagnosis_task_status` Tool is also implemented: it is exposed only
+The independent Conversation Agent Runtime is now executed by a dedicated Worker: `/turns`
+atomically commits a user message, queued turn ledger entry and Outbox event, then returns `202`.
+The Outbox Relay publishes `conversation.turn.execute`; a RabbitMQ consumer claims a fenced lease,
+executes one bounded Agent turn, persists the final assistant message, and copies created task
+references for rendering. Client UUID idempotency keys support failed-run requeue and completed-result
+replay without duplicate messages or Outbox events. The read-only `get_diagnosis_task_status` Tool is also implemented: it is exposed only
 when the latest user message carries a verified task reference and reuses the diagnosis service's
 owner/admin authorization. Assistant execution does not make the diagnosis Worker synchronous.
-Message SSE, attachments, citation preview and background/resumable conversation execution are
-not implemented yet.
+Conversation turn status query, durable turn-event JSON/SSE, conversation-scoped attachment upload,
+message-gated attachment reads, attachment/knowledge citation previews, and current-message attachment
+promotion into new diagnosis tasks are implemented.
 
 ## Decision
 
@@ -39,8 +41,8 @@ User selects a case in the dossier
   -> sends "diagnose this case" with a structured case reference
   -> conversation Agent reads the case when necessary
   -> Agent calls create_diagnosis_task
-  -> command guard validates actor, direct user intent and case reference
-  -> application service freezes CaseSnapshot, attachments and backend policy
+  -> command guard validates actor, direct user intent, case reference and current-message attachments
+  -> application service freezes CaseSnapshot, selected/all current-message attachments and backend policy
   -> PostgreSQL commits Task + first TaskEvent + Outbox atomically
   -> Tool returns taskId and current status
   -> conversation renders a task card and subscribes to task SSE
@@ -61,12 +63,13 @@ set and preserves the previous task and report for audit.
 
 ## Command Tool Contract
 
-The initial model-visible arguments are intentionally narrow:
+The model-visible arguments are intentionally narrow. The current Tool supports the case,
+diagnosis goal, current-message attachments and optional parent-task boundary:
 
 ```yaml
 externalCaseId: uuid
 diagnosisGoal: string
-attachmentIds: [uuid]       # optional, current user/message scope only
+attachmentIds: [uuid]       # optional subset of current user message attachments; omitted means all
 parentTaskId: uuid          # optional follow-up relationship
 ```
 
@@ -81,6 +84,11 @@ The model cannot provide:
 The application injects and validates these values. New-task capabilities are derived from
 backend policy, actor role, selected data sources and currently supported product behavior.
 The user and model choose the diagnosis goal, not the security boundary.
+
+Conversation attachments remain message context until the guarded command is successfully called. The
+command may freeze a bounded subset, or all attachments by default, into a new
+`diagnosis_task_attachments` set. Uploading or reading an attachment outside that command does not mutate
+an existing task; later evidence always creates a new task rather than appending to an old frozen input.
 
 The Tool is a controlled command with an internal side effect, not an evidence-reading Tool.
 It is exposed only to the conversation Agent and must not be available inside the Diagnosis
@@ -121,19 +129,27 @@ Conversation messages can continue while a task is pending or running. A later m
 
 It does not append arbitrary instructions to an already running task.
 
-The initial `/turns` execution is request-bounded rather than a background Agent Worker. It
-loads only persisted user/assistant history, applies a rune budget, and dynamically exposes
+The `/turns` API is a durable asynchronous command. Its PostgreSQL transaction writes the user
+message, a `queued` `conversation_turns` row and a `conversation.turn.execute` Outbox event, then
+returns without invoking a model. The independent Conversation Worker claims `queued`, `failed`,
+or expired `running` turns, loads only bounded persisted user/assistant history, applies a rune budget, and dynamically exposes
 case/knowledge/web/task-status Tools according to the current message references and dependency health.
 The model-visible command Tool is limited to one invocation per turn. Tool results and model
 reasoning are transient; only the final assistant content and structured created-task references
 are persisted. `conversation_turns` binds a client UUID key to a canonical request fingerprint,
-user message, attempt count, status and execution lease. The first request creates the turn and
-user message atomically; a failed or expired attempt reuses that message, a completed attempt
-replays the same assistant message, and a changed request with the same key is rejected. A
-conversation row lock plus a partial unique index permits one unexpired running turn per
-conversation. Request cancellation uses a short non-cancelled cleanup context to mark failure.
-The model call itself still runs in the HTTP process; a process crash is recovered only when the
-client retries after lease expiry, so `/turns` is not yet a push-driven resumable stream.
+user message, attempt count, status, `lease_owner` and lease deadline. The first request creates the
+turn, user message and Outbox atomically; a failed or expired attempt reuses that message, a completed
+attempt replays the same assistant message, and a changed request with the same key is rejected. A
+conversation row lock plus a partial unique index permits one `queued` or `running` turn per
+conversation. Worker heartbeats renew the lease; completion and failure updates require the current
+owner and an unexpired deadline. A crashed Worker therefore cannot overwrite a reclaimed result.
+RabbitMQ provides at-least-once wakeups, while PostgreSQL remains the execution fact source. The
+`conversation_turn_events` table records `turn_queued`, `turn_running`, `turn_retry_scheduled`,
+`turn_completed` and `turn_failed` with a monotonic per-turn sequence. Temporary failures return the
+turn to `queued` with `retry_at`; only the exhausted retry path enters `failed`, so clients do not treat
+an automatic retry as a terminal response. `GET /conversations/{conversationId}/turns/{turnId}` exposes
+a safe status summary, and the sibling `/events` endpoint supports JSON pagination or SSE replay with
+`afterSeq`/`Last-Event-ID`. Event payloads never expose lease owners, prompts, raw Tool results or reasoning.
 
 ## Data Model Direction
 
@@ -159,9 +175,10 @@ evidence.
 
 - A model-selected command needs stricter intent, idempotency, rate-limit and prompt-injection
   controls than read-only Tools.
-- The conversation Agent Runtime now provides model context, Tool authorization, turn idempotency
-  and assistant-message persistence; the frontend still needs a stable-key client adapter and a
-  resumable message stream before it can remove `sessionStorage` compatibility state.
+- The conversation Agent Runtime now provides model context, Tool authorization, turn idempotency,
+  assistant-message persistence and a durable turn-event stream in a separate Worker; the frontend still
+  needs a stable-key client adapter and must adopt the turn SSE before it can remove `sessionStorage`
+  compatibility state.
 - Existing direct task creation remains necessary for tests, administration and compatibility,
   but the target workbench should use the Agent command path.
 - Evaluation must cover correct creation, correct non-creation, duplicate model calls, ambiguous
@@ -169,9 +186,12 @@ evidence.
 
 ## Delivery Order
 
-The persistence foundation, guarded command boundary, task-status Tool and first independent
-Conversation Agent turn ledger/idempotency boundary are now complete. The next slice is message SSE
-or background conversation execution, followed by attachment reads and citation preview.
+The persistence foundation, guarded command boundary, task-status Tool, asynchronous Outbox delivery,
+Conversation Worker lease/fencing, completed-result replay, turn status query, durable turn-event SSE,
+message-gated attachment reads, citation previews and attachment promotion into a new diagnosis task are
+now complete. Remaining attachment backend work is personal scope, failed-upload recovery/orphan cleanup and
+explicit OCR/VLM policy; frontend adoption can independently consume the completed turn, attachment and
+citation APIs.
 Do not make the long-running Diagnosis Worker part of the request. The broader knowledge-QA
 context/memory work remains after the third resume item is closed.
 

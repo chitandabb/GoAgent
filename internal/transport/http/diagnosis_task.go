@@ -492,23 +492,34 @@ func (r *DiagnosisTaskRoutes) cancel(c *gin.Context) {
 }
 
 type diagnosisTaskResponse struct {
-	TaskID                    string               `json:"taskId"`
-	ExternalCaseID            string               `json:"externalCaseId"`
-	CaseSnapshotID            string               `json:"caseSnapshotId"`
-	RetryOfTaskID             string               `json:"retryOfTaskId,omitempty"`
-	RequestText               string               `json:"requestText"`
-	RequestScope              map[string]any       `json:"requestScope"`
-	RequestScopeSchemaVersion int                  `json:"requestScopeSchemaVersion"`
-	Status                    diagnosis.TaskStatus `json:"status"`
-	AttemptCount              int                  `json:"attemptCount"`
-	LastErrorCode             string               `json:"lastErrorCode,omitempty"`
-	LastErrorMessage          string               `json:"lastErrorMessage,omitempty"`
-	StartedAt                 *string              `json:"startedAt,omitempty"`
-	CompletedAt               *string              `json:"completedAt,omitempty"`
-	CreatedAt                 string               `json:"createdAt"`
-	UpdatedAt                 string               `json:"updatedAt"`
-	ReportAvailable           bool                 `json:"reportAvailable"`
-	ReportID                  string               `json:"reportId,omitempty"`
+	TaskID                    string                            `json:"taskId"`
+	ExternalCaseID            string                            `json:"externalCaseId"`
+	CaseSnapshotID            string                            `json:"caseSnapshotId"`
+	RetryOfTaskID             string                            `json:"retryOfTaskId,omitempty"`
+	RequestText               string                            `json:"requestText"`
+	RequestScope              map[string]any                    `json:"requestScope"`
+	RequestScopeSchemaVersion int                               `json:"requestScopeSchemaVersion"`
+	Status                    diagnosis.TaskStatus              `json:"status"`
+	AttemptCount              int                               `json:"attemptCount"`
+	LastErrorCode             string                            `json:"lastErrorCode,omitempty"`
+	LastErrorMessage          string                            `json:"lastErrorMessage,omitempty"`
+	StartedAt                 *string                           `json:"startedAt,omitempty"`
+	CompletedAt               *string                           `json:"completedAt,omitempty"`
+	CreatedAt                 string                            `json:"createdAt"`
+	UpdatedAt                 string                            `json:"updatedAt"`
+	ReportAvailable           bool                              `json:"reportAvailable"`
+	ReportID                  string                            `json:"reportId,omitempty"`
+	Attachments               []diagnosisTaskAttachmentResponse `json:"attachments"`
+}
+
+type diagnosisTaskAttachmentResponse struct {
+	AttachmentID    string `json:"attachmentId"`
+	SourceMessageID string `json:"sourceMessageId"`
+	Purpose         string `json:"purpose"`
+	OriginalName    string `json:"originalName"`
+	MediaType       string `json:"mediaType"`
+	SizeBytes       int64  `json:"sizeBytes"`
+	ContentSHA256   string `json:"contentSha256"`
 }
 
 func diagnosisTaskResponseFrom(task diagnosis.DiagnosisTask) diagnosisTaskResponse {
@@ -519,6 +530,14 @@ func diagnosisTaskResponseFrom(task diagnosis.DiagnosisTask) diagnosisTaskRespon
 		AttemptCount: task.AttemptCount, LastErrorCode: task.LastErrorCode,
 		LastErrorMessage: task.LastErrorMessage, CreatedAt: task.CreatedAt.UTC().Format(timeRFC3339Nano),
 		UpdatedAt: task.UpdatedAt.UTC().Format(timeRFC3339Nano), ReportAvailable: task.ReportID != nil,
+		Attachments: make([]diagnosisTaskAttachmentResponse, 0, len(task.Attachments)),
+	}
+	for _, current := range task.Attachments {
+		response.Attachments = append(response.Attachments, diagnosisTaskAttachmentResponse{
+			AttachmentID: current.AttachmentID.String(), SourceMessageID: current.SourceMessageID.String(),
+			Purpose: current.Purpose, OriginalName: current.OriginalName, MediaType: current.MediaType,
+			SizeBytes: current.SizeBytes, ContentSHA256: current.ContentSHA256,
+		})
 	}
 	if task.RetryOfTaskID != nil {
 		response.RetryOfTaskID = task.RetryOfTaskID.String()
@@ -570,8 +589,10 @@ func translateDiagnosisTaskError(operation string, err error) error {
 		return apperror.Wrap(apperror.CodeForbidden, err)
 	case errors.Is(err, diagnosis.ErrInvalidTask):
 		return apperror.Wrap(apperror.CodeValidationFailed, err)
-	case errors.Is(err, diagnosis.ErrAttachmentsUnsupported):
-		return apperror.NewWithMessage(apperror.CodeValidationFailed, "当前版本尚不支持任务附件，请先移除附件后重试")
+	case errors.Is(err, diagnosis.ErrAttachmentContextRequired):
+		return apperror.NewWithMessage(apperror.CodeValidationFailed, "任务附件只能从会话最新用户消息的已授权附件创建")
+	case errors.Is(err, diagnosis.ErrTaskAttachmentForbidden):
+		return apperror.Wrap(apperror.CodeNotFound, err)
 	case errors.Is(err, diagnosis.ErrSourceChanged):
 		return apperror.Wrap(apperror.CodeSourceChanged, err)
 	case errors.Is(err, diagnosis.ErrIdempotencyConflict):

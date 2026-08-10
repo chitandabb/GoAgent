@@ -23,7 +23,7 @@ type DiagnosisTaskCreator interface {
 type createDiagnosisTaskInput struct {
 	ExternalCaseID string   `json:"externalCaseId" jsonschema:"required" jsonschema_description:"当前会话 selected case reference 对应的 MESGuard 工单 UUID"`
 	DiagnosisGoal  string   `json:"diagnosisGoal" jsonschema:"required" jsonschema_description:"用户明确要求执行的诊断目标；不要填充系统权限、工具或预算"`
-	AttachmentIDs  []string `json:"attachmentIds,omitempty" jsonschema_description:"当前版本仅保留参数形状；附件能力启用前必须为空"`
+	AttachmentIDs  []string `json:"attachmentIds,omitempty" jsonschema_description:"可选；只能选择当前用户消息 attachments 中的 UUID；省略时后端冻结当前消息全部附件"`
 	ParentTaskID   string   `json:"parentTaskId,omitempty" jsonschema_description:"可选的同一用户已有任务 UUID，用于补充证据后的 follow-up"`
 }
 

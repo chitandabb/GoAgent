@@ -79,6 +79,13 @@ func (t *modelUsageTrace) appendValues(prompt, completion, total, cached, reason
 		ModelCalls: 1, PromptTokens: prompt, CompletionTokens: completion,
 		TotalTokens: total, CachedTokens: cached, ReasoningTokens: reasoning,
 	}
+	t.appendUsage(delta)
+}
+
+func (t *modelUsageTrace) appendUsage(delta ModelUsage) {
+	if t == nil || delta.ModelCalls == 0 && delta.TotalTokens == 0 {
+		return
+	}
 	t.mu.Lock()
 	t.usage.Add(delta)
 	onUsage := t.onUsage

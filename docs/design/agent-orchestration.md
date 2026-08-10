@@ -8,6 +8,9 @@
 - 生产系统指令、评测 baseline 指令、Evidence Gate 报告契约和独立会话指令已外置到 `config/prompts/`，由 `[agent]` 配置启动期一次加载并缓存；`promptVersion` 与 `conversationPromptVersion` 是人工发布标签。当前不做热更新、内容哈希或 Nacos Prompt 发布。
 - 当前已实现 SQL Server 对象定义、已发布 Catalog 窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool，以及 Docker PostgreSQL + SQL Server 的真实跨数据库联调。事实型只读 Tool 结果会生成运行时 `EvidenceItem`，知识检索结果还必须通过文档/版本/Chunk/内容哈希校验并映射为 `knowledge_chunk`；Evidence Gate 要求报告 `sourceRef` 精确绑定本次证据，Diagnosis Worker 会把通过门禁或明确降级的报告及其证据引用正式落库。
 - P7 正式任务链路已接通任务创建、TaskEvent JSON/SSE 补读、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer/三级重试/死信，以及 DiagnosisStep、ToolExecution、EvidenceItem、ReportEvidence 和 DiagnosisReport 的 fenced 事务提交；正式报告读取、管理员失败恢复和报告反馈也已接入。
+- 独立会话 `/turns` 已改为异步受理：API 原子写 user message、queued turn 与 Outbox，`mesguard-conversation-worker` 领取租约后运行 Conversation Agent 并 fenced 提交助手消息；模型运行时不再驻留 HTTP 进程。
+- 会话回合状态查询和事件 JSON/SSE 已接通：`conversation_turn_events` 是断线补读事实源，支持 `afterSeq`/`Last-Event-ID`、心跳、终态关闭和 Session 绝对过期退出。事件 payload 只包含状态、尝试次数、重试等待和最终消息引用，不包含租约 owner、Prompt、原始 Tool 结果或模型推理过程。
+- 会话附件链路已接通：上传对象先固化到 MinIO，再写 PostgreSQL 附件事实；消息事务保存附件关联。只有当前 user message 明确关联附件时才向 Conversation Agent 暴露 `read_attachment`，Tool 执行时继续校验 user/conversation/message/attachment 四元边界。附件与知识 Chunk 引用预览均不泄漏对象存储坐标。
 - 迁移步骤和验收标准见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。准确率和 Token 降幅仍是评测目标，不是已达到的项目结果。
 
 ## 目标架构
@@ -31,15 +34,53 @@
 普通 SQL、代码、知识库、附件和 Web 调查都在同一个 Agent 内循环中完成。只有必须隔离上下文、权限或预算的大型代码调查与脱敏 Web Research，才考虑 ADK Handoff/Fork。
 
 独立工作台会话使用单独的轻量 Conversation Agent Runtime。它只加载持久化的 user/assistant
-历史和当前消息引用，按 `TaskScope` 动态暴露 case、knowledge、web、task-status Tool；`create_diagnosis_task`
+历史和当前消息引用，按 `TaskScope` 动态暴露 case、knowledge、web、attachment、task-status Tool；`create_diagnosis_task`
 是只在唯一 selected case 且由直接用户消息明确请求诊断时可见的受控命令。该 Runtime 返回最终
 回答并由会话服务持久化助手消息，但不会把长耗时 Diagnosis Worker、原始 Tool 结果或模型推理
-过程塞进会话请求。`get_diagnosis_task_status` 只在当前消息带有已持久化任务引用时可见，执行时
+过程写入会话历史。`get_diagnosis_task_status` 只在当前消息带有已持久化任务引用时可见，执行时
 再次校验最新消息引用并复用 `DiagnosisTaskService.Get` 的 owner/admin 授权；它返回持久化状态、
 尝试次数、失败摘要和报告可用性，不生成进度百分比或预计完成时间。
-`conversation_turns` 以客户端 UUID、规范化请求指纹和 PostgreSQL 租约约束每个回合：同 key
-失败重试复用原用户消息，完成重试直接回放原助手消息；单个会话同时只允许一个未过期回合。
-这解决 HTTP 重试幂等，但模型调用仍在 API 进程内同步执行，不等同于后台 Conversation Worker。
+`conversation_turns` 以客户端 UUID、规范化请求指纹、`queued/running/failed/completed` 状态和
+PostgreSQL 租约约束每个回合：同 key 排队/运行只返回当前状态，失败重试复用原用户消息并新增
+Outbox 唤醒，完成重试直接回放原助手消息；单个会话同时只允许一个 queued/running 回合。
+Conversation Worker 使用 `lease_owner + lease_expires_at` 心跳续租，完成或失败必须匹配当前 owner，
+因此进程崩溃后可由新 Worker 接管，旧 Worker 不能覆盖新结果。临时失败转为带 `retry_at` 的 queued
+回合并追加 `turn_retry_scheduled`；只有超过自动重试上限才进入 failed 终态，避免 SSE 把自动重试误报成终态。
+Runner 从请求通过授权后开始维护安全 Run 观测；Worker 仅在最终失败时把最后一次模型/Prompt 身份、
+实际 Provider usage、耗时、已验证来源、降级通道和稳定错误类型交给仓储。失败状态、观测、来源与
+`turn_failed` 事件共用 owner/deadline fencing 事务，不持久化原始异常文本。终态失败没有助手消息也
+可供离线质量导出；用户显式重跑同一 Turn 时，重新入队事务会清除旧失败 Ledger。
+附件能力由当前消息驱动而不是用户手工选择：Runner 只有看到附件关联且 MinIO/Parser 依赖可用时，
+才把 attachment capability/dependency 放入 `TaskScope`。`read_attachment` 最多返回 12,000 rune 的
+文本/表格元素和定位信息；图片或扫描页只报告 visual asset 数量，不在会话 Worker 内自动调用
+OCR/VLM。上传但未随当前消息发送、其他消息、其他会话或其他用户的附件都不能通过 Tool 读取。
+创建诊断任务命令只接受当前消息已授权附件的 UUID 子集；省略时后端默认冻结当前消息全部附件。
+Repository 在创建事务内再次校验最新 user message、owner、会话、`session` scope 和 `uploaded` 状态，
+把关联写入 `diagnosis_task_attachments`。直接 HTTP 创建接口没有消息授权上下文，仍拒绝非空附件列表。
+
+会话答案引用采用“同一 Run 候选集 + 最终 marker”双层门禁。`search_knowledge`、
+`read_attachment` 和 `fetch_public_page` 先通过各自既有的内容哈希、身份和安全校验，Conversation
+Tool Middleware 再向本轮 Tool JSON 添加后端生成的 `citationSources`；它只包含来源类型、稳定
+引用、内容 SHA-256 和由后端格式化的完整 marker。模型在答案中逐字复制 marker，例如
+`[source:knowledge:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222]`；
+尖括号、引号和反引号不属于语法。Runner 只接受本轮候选集中
+出现的 ref，并按答案首次出现位置去重、最多保留 20 项。来源 Tool 成功但主答案零 marker 时，
+`conversation-v6` 可触发一次同模型、Tool-free、严格 JSON 的受控修复；正常答案零额外调用，修复
+失败仍保持 `insufficient_evidence`，修复 usage 进入原 Token 预算。不能仅凭附件 UUID、Chunk UUID 或任意
+URL 扩权，也不会把“检索到但未被答案引用”的来源冒充引用落库。若原 Tool 结果或加入来源后的
+结果超过字节预算，则不暴露该批来源；未知/篡改 marker 使回合失败。Worker 最终把回答和实际
+引用在同一 PostgreSQL 完成事务中持久化，后续消息补读和幂等回放恢复同一引用顺序。
+
+同一运行时还形成不含正文的 `AgentRunObservation`：模型 provider/ID、Prompt 发布标签、供应商
+usage、端到端耗时、后端验证后的 retrieved source 身份以及稳定降级通道。`attachment_visual_only`、
+知识 FTS/Vector/Rerank 缺失、Web Search/页面抓取失败和页面截断都由 Middleware 根据 Tool 结构化
+结果归类，不能让模型自由填写。成功/降级观测随 turn 完成事务落库；重试耗尽后的可识别 Agent
+失败观测随 failed 事务落库；离线评测再用固定集 case 与 turn ID 对齐。Prompt、原始 Tool JSON、
+思维过程、MinIO 坐标、原始异常文本和凭证不进入观测表。
+
+真实 PostgreSQL + MinIO 的小型 TXT HTTP smoke 已验证 `HTTP 上传 -> MinIO 固化 -> PostgreSQL 附件事实
+-> 消息级授权 -> read_attachment -> 引用预览`，并覆盖幂等重放、跨用户拒绝、对象存储坐标不泄漏和
+测试数据清理。该 smoke 不调用模型，只作为附件授权与引用基础设施回归门禁。
 
 ## 各层职责
 
@@ -164,7 +205,11 @@ Agent 看到的是这些 Workflow 的窄 Tool 接口，不是内部每一个实�
 
 模型 usage 必须来自供应商响应，按一次任务中的 ChatModel 调用累计 prompt、completion、total、cached 和 reasoning Token。Callback/Middleware 需要按组件类型和调用 ID 去重，避免 Graph 与 Agent 对同一响应重复计数。
 
-诊断任务通过 SSE 发布结构化调查轨迹、Tool 摘要、Evidence Gate 结果和最终报告。前端可将调查轨迹默认折叠、按需展开，但不输出或持久化模型原始 `ReasoningContent`、完整 Prompt 和敏感 Tool 参数。知识问答另行支持逐 Token 流式输出。最终报告仍需持久化并一次性确认，浏览器断开不取消后台任务。
+诊断任务通过 SSE 发布结构化调查轨迹、Tool 摘要、Evidence Gate 结果和最终报告；附件读取成功结果
+以 `attachment` EvidenceItem 进入同一证据门禁。会话回合通过独立的 turn SSE 发布
+queued/running/retry/completed/failed 生命周期和最终消息引用。前端可将调查轨迹默认折叠、按需展开，
+但不输出或持久化模型原始 `ReasoningContent`、完整 Prompt 和敏感 Tool 参数。知识问答是否逐 Token
+流式输出仍由后续产品切片决定。最终报告和助手消息仍需持久化并一次性确认，浏览器断开不取消后台任务。
 
 应用边界统一使用 Zap 记录任务 ID、Agent Run ID、模型、Skill、Tool、耗时、Token 和降级状态。底层返回错误，由最了解请求/任务语义的边界层记录一次，避免重复日志。
 

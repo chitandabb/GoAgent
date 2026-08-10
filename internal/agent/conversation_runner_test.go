@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -17,10 +19,13 @@ import (
 )
 
 type conversationRunnerModelState struct {
-	mu                sync.Mutex
-	createIfAvailable bool
-	repeatCreate      bool
-	schemas           [][]string
+	mu                         sync.Mutex
+	createIfAvailable          bool
+	repeatCreate               bool
+	searchKnowledgeIfAvailable bool
+	omitKnowledgeCitation      bool
+	finalContent               string
+	schemas                    [][]string
 }
 
 type conversationRunnerTestModel struct {
@@ -47,9 +52,20 @@ func (m *conversationRunnerTestModel) Generate(_ context.Context, input []*schem
 	m.state.mu.Unlock()
 
 	hasCreateResult := false
+	hasKnowledgeResult := false
+	knowledgeSourceRef := ""
 	for _, message := range input {
 		if message.Role == schema.Tool && message.ToolName == ToolCreateDiagnosisTask {
 			hasCreateResult = true
+		}
+		if message.Role == schema.Tool && message.ToolName == ToolSearchKnowledge {
+			hasKnowledgeResult = true
+			var payload struct {
+				CitationSources []conversation.MessageCitation `json:"citationSources"`
+			}
+			if json.Unmarshal([]byte(message.Content), &payload) == nil && len(payload.CitationSources) > 0 {
+				knowledgeSourceRef = payload.CitationSources[0].SourceRef
+			}
 		}
 	}
 	if m.state.createIfAvailable && slices.Contains(names, ToolCreateDiagnosisTask) &&
@@ -57,7 +73,43 @@ func (m *conversationRunnerTestModel) Generate(_ context.Context, input []*schem
 		return runnerTestToolCall(ToolCreateDiagnosisTask,
 			`{"externalCaseId":"`+runnerTestCaseID.String()+`","diagnosisGoal":"请诊断这个工单"}`), nil
 	}
+	if m.state.searchKnowledgeIfAvailable && slices.Contains(names, ToolSearchKnowledge) && !hasKnowledgeResult {
+		return runnerTestToolCall(ToolSearchKnowledge, `{"query":"连接池超时","maxResults":3}`), nil
+	}
+	if knowledgeSourceRef != "" {
+		if m.state.omitKnowledgeCitation {
+			return withRunnerTestUsage(schema.AssistantMessage("应先检查连接池配置。", nil)), nil
+		}
+		return withRunnerTestUsage(schema.AssistantMessage(
+			"应先检查连接池配置。[source:"+knowledgeSourceRef+"]", nil,
+		)), nil
+	}
+	if m.state.finalContent != "" {
+		return withRunnerTestUsage(schema.AssistantMessage(m.state.finalContent, nil)), nil
+	}
 	return withRunnerTestUsage(schema.AssistantMessage("已处理当前会话请求。", nil)), nil
+}
+
+type conversationCitationRepairerStub struct {
+	calls int
+}
+
+func (s *conversationCitationRepairerStub) Repair(
+	_ context.Context,
+	request ConversationCitationRepairRequest,
+) (ConversationCitationRepairResult, error) {
+	s.calls++
+	if len(request.Evidence) == 0 || len(request.Sources) == 0 {
+		return ConversationCitationRepairResult{}, errors.New("repair evidence missing")
+	}
+	marker, err := conversation.FormatAnswerCitationMarker(request.Sources[0])
+	if err != nil {
+		return ConversationCitationRepairResult{}, err
+	}
+	return ConversationCitationRepairResult{
+		Answer: "应先检查连接池配置。" + marker,
+		Usage:  ModelUsage{ModelCalls: 1, PromptTokens: 6, CompletionTokens: 2, TotalTokens: 8},
+	}, nil
 }
 
 func (m *conversationRunnerTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -146,6 +198,28 @@ func TestConversationRunnerOnlyExposesTaskStatusForReferencedTask(t *testing.T) 
 	}
 }
 
+func TestConversationRunnerScopesAttachmentToolToReferencedMessages(t *testing.T) {
+	runner := &ConversationRunner{availableDependencies: []ToolDependency{ToolDependencyAttachment}}
+	actor := conversation.Actor{UserID: uuid.New()}
+	withoutAttachment, err := runner.conversationScope(actor, conversation.Message{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutAttachment.CapabilityAllowed(ToolCapabilityAttachment) {
+		t.Fatal("attachment capability was exposed without a message attachment")
+	}
+	withAttachment, err := runner.conversationScope(actor, conversation.Message{Attachments: []conversation.MessageAttachment{{
+		AttachmentID: uuid.New(), Position: 0, Purpose: "context", Status: "uploaded",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !withAttachment.CapabilityAllowed(ToolCapabilityAttachment) ||
+		!withAttachment.DependencyAvailable(ToolDependencyAttachment) {
+		t.Fatalf("attachment scope=%+v", withAttachment)
+	}
+}
+
 func TestConversationRunnerExecutesCreateDiagnosisTaskOnce(t *testing.T) {
 	state := &conversationRunnerModelState{createIfAvailable: true}
 	creator := &diagnosisToolCreatorStub{result: conversation.CreateDiagnosisResult{
@@ -179,8 +253,136 @@ func TestConversationRunnerRejectsSecondCreateDiagnosisTaskCall(t *testing.T) {
 	if !errors.Is(err, ErrAgentToolRunLimitExhausted) {
 		t.Fatalf("Respond() error = %v, want ErrAgentToolRunLimitExhausted", err)
 	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || failure.ErrorType != "agent_tool_run_limit_exhausted" ||
+		failure.Observation.Outcome != conversation.AgentRunFailed {
+		t.Fatalf("failure record = %+v, present=%v", failure, ok)
+	}
 	if creator.calls != 1 {
 		t.Fatalf("creator calls = %d, want 1", creator.calls)
+	}
+}
+
+func TestConversationRunnerPersistsOnlyCitedSameRunKnowledgeSource(t *testing.T) {
+	versionID, chunkID := uuid.New(), uuid.New()
+	content := "连接池耗尽时应先检查最大连接数和事务超时。"
+	queryPlan, err := knowledge.OriginalQueryPlan("连接池超时")
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeTool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{result: knowledge.HybridSearch{
+		Results: []knowledge.SearchResult{{
+			DocumentID: uuid.New(), DocumentVersionID: versionID, ChunkID: chunkID,
+			Title: "数据库运行手册", Scope: knowledge.ScopeGlobal, ElementType: knowledge.ElementText,
+			ContentText: content, ContentSHA256: knowledge.SHA256Hex(content), Score: 0.91,
+		}},
+		QueryPlan: queryPlan, QueryRewriteStatus: knowledge.QueryRewriteDisabled, Sources: []string{"fts"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: &conversationRunnerModelState{
+			searchKnowledgeIfAvailable: true,
+		}},
+		ToolCatalog: catalog, SystemInstruction: "conversation citation test",
+		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
+		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	wantRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	if len(response.Citations) != 1 || response.Citations[0].SourceRef != wantRef ||
+		response.Citations[0].ContentSHA256 != knowledge.SHA256Hex(content) ||
+		response.Content != "应先检查连接池配置。[source:"+wantRef+"]" {
+		t.Fatalf("response = %+v", response)
+	}
+	if response.RunObservation == nil || response.RunObservation.Outcome != conversation.AgentRunAnswered ||
+		response.RunObservation.ModelProvider != "fixture" || len(response.RunObservation.RetrievedSources) != 1 ||
+		response.RunObservation.RetrievedSources[0].SourceRef != wantRef ||
+		response.RunObservation.Usage.TotalTokens != 24 {
+		t.Fatalf("run observation = %+v", response.RunObservation)
+	}
+}
+
+func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
+	versionID, chunkID := uuid.New(), uuid.New()
+	content := "连接池耗尽时应先检查最大连接数和事务超时。"
+	queryPlan, err := knowledge.OriginalQueryPlan("连接池超时")
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeTool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{result: knowledge.HybridSearch{
+		Results: []knowledge.SearchResult{{
+			DocumentID: uuid.New(), DocumentVersionID: versionID, ChunkID: chunkID,
+			Title: "数据库运行手册", Scope: knowledge.ScopeGlobal, ElementType: knowledge.ElementText,
+			ContentText: content, ContentSHA256: knowledge.SHA256Hex(content), Score: 0.91,
+		}},
+		QueryPlan: queryPlan, QueryRewriteStatus: knowledge.QueryRewriteDisabled, Sources: []string{"fts"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairer := &conversationCitationRepairerStub{}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: &conversationRunnerModelState{
+			searchKnowledgeIfAvailable: true, omitKnowledgeCitation: true,
+		}},
+		CitationRepairer: repairer,
+		ToolCatalog:      catalog, SystemInstruction: "conversation citation repair test",
+		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
+		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	if repairer.calls != 1 || len(response.Citations) != 1 || response.Citations[0].SourceRef != wantRef ||
+		response.RunObservation == nil || response.RunObservation.Outcome != conversation.AgentRunAnswered ||
+		response.RunObservation.Usage.TotalTokens != 32 {
+		t.Fatalf("repairer calls = %d, response = %+v", repairer.calls, response)
+	}
+}
+
+func TestConversationRunnerRejectsFabricatedCitation(t *testing.T) {
+	state := &conversationRunnerModelState{
+		finalContent: "这是一个没有工具来源的结论。[source:https://example.com/fabricated]",
+	}
+	runner := newConversationRunnerTest(t, state, &diagnosisToolCreatorStub{})
+	request, ctx := conversationRunnerRequest(nil)
+	_, err := runner.Respond(ctx, request)
+	if !errors.Is(err, conversation.ErrAgentResponseInvalid) {
+		t.Fatalf("Respond() error = %v, want ErrAgentResponseInvalid", err)
+	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || failure.ErrorType != "agent_response_invalid" ||
+		failure.Observation.Outcome != conversation.AgentRunFailed || failure.Observation.Usage.ModelCalls != 1 {
+		t.Fatalf("failure record = %+v, present=%v", failure, ok)
 	}
 }
 
@@ -221,6 +423,9 @@ func newConversationRunnerTest(
 		ChatModel:             &conversationRunnerTestModel{state: state},
 		ToolCatalog:           catalog,
 		SystemInstruction:     "conversation test instruction",
+		ModelProvider:         "fixture",
+		ModelID:               "fixture-v1",
+		PromptVersion:         "conversation-test-v1",
 		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase},
 		Logger:                zap.NewNop(),
 		MaxContextRunes:       conversation.MaxContentRunes,

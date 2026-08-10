@@ -2,12 +2,14 @@ package knowledgeenrichment
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
+	"github.com/chitandabb/GoAgent/internal/knowledgetable"
 )
 
 var (
@@ -21,6 +23,7 @@ const (
 	RouteSkip   Route = "skip"
 	RouteOCR    Route = "ocr"
 	RouteOCRVLM Route = "ocr_vlm"
+	RouteTable  Route = "table"
 )
 
 type Status string
@@ -112,7 +115,7 @@ func (p PlannedAsset) Validate() error {
 	if err := p.Asset.Validate(); err != nil {
 		return err
 	}
-	if p.Route != RouteSkip && p.Route != RouteOCR && p.Route != RouteOCRVLM {
+	if p.Route != RouteSkip && p.Route != RouteOCR && p.Route != RouteOCRVLM && p.Route != RouteTable {
 		return errors.New("knowledge visual enrichment planned route is invalid")
 	}
 	if strings.TrimSpace(p.Reason) == "" || p.Reason != strings.TrimSpace(p.Reason) || len(p.Reason) > 256 {
@@ -122,15 +125,24 @@ func (p PlannedAsset) Validate() error {
 }
 
 type Orchestrator struct {
-	config    Config
-	processor Processor
+	config         Config
+	processor      Processor
+	tableProcessor knowledgetable.Processor
 }
 
 func New(config Config, processor Processor) (*Orchestrator, error) {
+	return NewWithTableProcessor(config, processor, nil)
+}
+
+func NewWithTableProcessor(
+	config Config,
+	processor Processor,
+	tableProcessor knowledgetable.Processor,
+) (*Orchestrator, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &Orchestrator{config: config, processor: processor}, nil
+	return &Orchestrator{config: config, processor: processor, tableProcessor: tableProcessor}, nil
 }
 
 func (o *Orchestrator) Enrich(
@@ -194,7 +206,7 @@ func (o *Orchestrator) EnrichPlanned(
 			output.Records = append(output.Records, record)
 			continue
 		}
-		if o.processor == nil {
+		if o.processor == nil && (route != RouteTable || o.tableProcessor == nil) {
 			record.Status = StatusMissing
 			record.Reason = "processor_disabled"
 			output.Partial = true
@@ -204,9 +216,7 @@ func (o *Orchestrator) EnrichPlanned(
 			output.Records = append(output.Records, record)
 			continue
 		}
-		processed, err := o.processor.Process(ctx, Request{
-			Source: source, Asset: asset, Route: route, Reason: reason,
-		})
+		processed, err := o.process(ctx, source, asset, route, reason)
 		if err != nil {
 			if ctx.Err() != nil {
 				return Output{}, ctx.Err()
@@ -220,7 +230,7 @@ func (o *Orchestrator) EnrichPlanned(
 			output.Records = append(output.Records, record)
 			continue
 		}
-		if err := validateProviderResult(processed); err != nil {
+		if err := validateProviderResult(route, processed); err != nil {
 			return Output{}, err
 		}
 		record.Status = StatusCompleted
@@ -249,6 +259,76 @@ func (o *Orchestrator) EnrichPlanned(
 		output.Records = append(output.Records, record)
 	}
 	return output, nil
+}
+
+func (o *Orchestrator) process(
+	ctx context.Context,
+	source Source,
+	asset knowledgeparser.VisualAsset,
+	route Route,
+	reason string,
+) (ProviderResult, error) {
+	if route != RouteTable {
+		if o.processor == nil {
+			return ProviderResult{}, ErrUnavailable
+		}
+		return o.processor.Process(ctx, Request{Source: source, Asset: asset, Route: route, Reason: reason})
+	}
+	if o.tableProcessor != nil {
+		table, err := o.tableProcessor.Recover(ctx, knowledgetable.Request{Asset: asset, Reason: reason})
+		if err == nil {
+			return tableProviderResult(asset, reason, table)
+		}
+		if !errors.Is(err, knowledgetable.ErrUnavailable) || o.processor == nil {
+			return ProviderResult{}, err
+		}
+	}
+	if o.processor == nil {
+		return ProviderResult{}, knowledgetable.ErrUnavailable
+	}
+	fallback, err := o.processor.Process(ctx, Request{
+		Source: source, Asset: asset, Route: RouteOCRVLM, Reason: reason,
+	})
+	if err != nil {
+		return ProviderResult{}, err
+	}
+	fallback.Partial = true
+	fallback.Reason = "table_processor_unavailable_visual_fallback"
+	return fallback, nil
+}
+
+func tableProviderResult(
+	asset knowledgeparser.VisualAsset,
+	reason string,
+	result knowledgetable.Result,
+) (ProviderResult, error) {
+	if err := result.Validate(); err != nil {
+		return ProviderResult{}, err
+	}
+	metadata, err := json.Marshal(map[string]any{
+		"assetIndex": asset.Index, "sourcePath": asset.SourcePath,
+		"sourcePart": asset.SourcePart, "relationshipId": asset.RelationshipID,
+		"method": "table_recovery", "provider": result.Provider, "model": result.Model,
+		"promptVersion": result.PromptVersion, "routeReason": reason,
+		"confidence": result.Confidence, "warnings": append([]string(nil), result.Warnings...),
+		"cells": append([]knowledgetable.Cell(nil), result.Cells...),
+	})
+	if err != nil {
+		return ProviderResult{}, err
+	}
+	var usage *ProviderUsage
+	if result.Usage != nil {
+		usage = &ProviderUsage{
+			PromptTokens: result.Usage.PromptTokens, CompletionTokens: result.Usage.CompletionTokens,
+			TotalTokens: result.Usage.TotalTokens,
+		}
+	}
+	return ProviderResult{
+		Provider: result.Provider, Model: result.Model, Partial: result.Partial, Reason: result.Reason,
+		Usage: usage, Elements: []knowledge.DocumentElement{{
+			ElementType: knowledge.ElementTable, ContentText: result.Markdown, Metadata: metadata,
+		}},
+	}, nil
 }
 
 func missingReason(reason string) bool {
@@ -280,7 +360,7 @@ func (o *Orchestrator) route(asset knowledgeparser.VisualAsset) (Route, string) 
 	return RouteOCRVLM, "visual_semantics_required"
 }
 
-func validateProviderResult(result ProviderResult) error {
+func validateProviderResult(route Route, result ProviderResult) error {
 	if strings.TrimSpace(result.Provider) == "" || strings.TrimSpace(result.Model) == "" || len(result.Elements) == 0 {
 		return errors.New("knowledge visual enrichment provider result is incomplete")
 	}
@@ -288,7 +368,9 @@ func validateProviderResult(result ProviderResult) error {
 		return errors.New("knowledge visual enrichment partial result has no reason")
 	}
 	for _, element := range result.Elements {
-		if element.ElementType != knowledge.ElementOCRText && element.ElementType != knowledge.ElementImageDescription {
+		validVisual := element.ElementType == knowledge.ElementOCRText || element.ElementType == knowledge.ElementImageDescription
+		validTable := route == RouteTable && element.ElementType == knowledge.ElementTable
+		if !validVisual && !validTable {
 			return errors.New("knowledge visual enrichment returned an invalid element type")
 		}
 	}

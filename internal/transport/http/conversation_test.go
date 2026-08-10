@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/gin-gonic/gin"
@@ -19,7 +20,7 @@ func TestConversationRoutesCreateInjectsAuthenticatedUser(t *testing.T) {
 	useCase := &conversationUseCaseStub{created: conversation.Conversation{
 		ID: conversationID, UserID: userID, Status: conversation.StatusActive,
 	}}
-	routes, err := NewConversationRoutes(useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	routes, err := NewConversationRoutes(context.Background(), useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
 	if err != nil {
 		t.Fatalf("NewConversationRoutes(): %v", err)
 	}
@@ -47,7 +48,7 @@ func TestConversationRoutesAppendMessageParsesReferencesAndReturnsPageShape(t *t
 		Content: "诊断这个工单", CaseReferences: []conversation.CaseReference{{ExternalCaseID: caseID, Kind: conversation.ReferenceKindSelected}},
 		TaskReferences: []conversation.TaskReference{{TaskID: taskID, Kind: conversation.ReferenceKindReferenced}},
 	}}
-	routes, _ := NewConversationRoutes(useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/messages", strings.NewReader(`{
 "content":"诊断这个工单",
@@ -71,7 +72,7 @@ func TestConversationRoutesAppendMessageParsesReferencesAndReturnsPageShape(t *t
 
 func TestConversationRoutesRejectsInvalidReferenceBeforeUseCase(t *testing.T) {
 	useCase := &conversationUseCaseStub{}
-	routes, _ := NewConversationRoutes(useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+uuid.NewString()+"/messages", strings.NewReader(`{
 "content":"诊断",
@@ -85,22 +86,18 @@ func TestConversationRoutesRejectsInvalidReferenceBeforeUseCase(t *testing.T) {
 	}
 }
 
-func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
+func TestConversationRoutesAppendTurnReturnsAcceptedQueueState(t *testing.T) {
 	userID, conversationID := uuid.New(), uuid.New()
-	userMessageID, assistantMessageID := uuid.New(), uuid.New()
+	turnID, userMessageID := uuid.New(), uuid.New()
 	idempotencyKey := uuid.NewString()
 	useCase := &conversationUseCaseStub{turnResult: conversation.ConversationTurnResult{
-		Created: true,
+		TurnID: turnID, Status: conversation.TurnStatusQueued, Created: true,
 		Turn: conversation.ConversationTurn{UserMessage: conversation.Message{
 			ID: userMessageID, ConversationID: conversationID, Seq: 5,
 			Role: conversation.MessageRoleUser, Content: "MESGuard 的知识库怎么更新？",
-		},
-			AssistantMessage: conversation.Message{
-				ID: assistantMessageID, ConversationID: conversationID, Seq: 6,
-				Role: conversation.MessageRoleAssistant, Content: "知识文档采用版本发布。",
-			}},
+		}},
 	}}
-	routes, _ := NewConversationRoutes(useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/turns", strings.NewReader(`{
 "content":"MESGuard 的知识库怎么更新？"
@@ -110,9 +107,11 @@ func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusCreated ||
+	if response.Code != http.StatusAccepted ||
+		!strings.Contains(response.Body.String(), `"turnId":"`+turnID.String()) ||
+		!strings.Contains(response.Body.String(), `"status":"queued"`) ||
 		!strings.Contains(response.Body.String(), `"userMessage":{"id":"`+userMessageID.String()) ||
-		!strings.Contains(response.Body.String(), `"assistantMessage":{"id":"`+assistantMessageID.String()) {
+		strings.Contains(response.Body.String(), `"assistantMessage"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	if useCase.turnCalls != 1 || useCase.gotInput.ConversationID != conversationID ||
@@ -123,7 +122,7 @@ func TestConversationRoutesAppendTurnReturnsPersistedPair(t *testing.T) {
 
 func TestConversationRoutesAppendTurnRequiresIdempotencyKey(t *testing.T) {
 	useCase := &conversationUseCaseStub{}
-	routes, _ := NewConversationRoutes(useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+uuid.NewString()+"/turns", strings.NewReader(`{
 "content":"知识库如何更新？"
@@ -140,8 +139,10 @@ func TestConversationRoutesAppendTurnRequiresIdempotencyKey(t *testing.T) {
 
 func TestConversationRoutesAppendTurnReturnsOKForReplay(t *testing.T) {
 	conversationID := uuid.New()
+	turnID := uuid.New()
+	citationRef := "https://docs.example.com/runbook"
 	useCase := &conversationUseCaseStub{turnResult: conversation.ConversationTurnResult{
-		Replayed: true,
+		TurnID: turnID, Status: conversation.TurnStatusCompleted, Replayed: true,
 		Turn: conversation.ConversationTurn{
 			UserMessage: conversation.Message{
 				ID: uuid.New(), ConversationID: conversationID, Seq: 1,
@@ -149,11 +150,15 @@ func TestConversationRoutesAppendTurnReturnsOKForReplay(t *testing.T) {
 			},
 			AssistantMessage: conversation.Message{
 				ID: uuid.New(), ConversationID: conversationID, Seq: 2,
-				Role: conversation.MessageRoleAssistant, Content: "回答",
+				Role: conversation.MessageRoleAssistant, Content: "回答[source:" + citationRef + "]",
+				Citations: []conversation.MessageCitation{{
+					Position: 0, SourceType: conversation.CitationSourceWeb,
+					SourceRef: citationRef, ContentSHA256: strings.Repeat("a", 64),
+				}},
 			},
 		},
 	}}
-	routes, _ := NewConversationRoutes(useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
 	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID.String()+"/turns", strings.NewReader(`{"content":"问题"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -161,10 +166,78 @@ func TestConversationRoutesAppendTurnReturnsOKForReplay(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"replayed":true`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"replayed":true`) ||
+		!strings.Contains(response.Body.String(), `"citations":[{"position":0,"sourceType":"web","sourceRef":"`+citationRef+`"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestConversationRoutesGetsTurnStatusWithoutExecutionInternals(t *testing.T) {
+	userID, conversationID, turnID := uuid.New(), uuid.New(), uuid.New()
+	userMessageID, assistantMessageID := uuid.New(), uuid.New()
+	createdAt := time.Date(2026, 8, 8, 8, 0, 0, 0, time.UTC)
+	useCase := &conversationUseCaseStub{turnDetail: conversation.TurnDetail{
+		ID: turnID, ConversationID: conversationID, Status: conversation.TurnStatusCompleted,
+		UserMessageID: userMessageID, AssistantMessageID: &assistantMessageID, AttemptCount: 2,
+		CreatedAt: createdAt, UpdatedAt: createdAt.Add(time.Minute), CompletedAt: timePointer(createdAt.Add(time.Minute)),
+	}}
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodGet,
+		"/api/v1/conversations/"+conversationID.String()+"/turns/"+turnID.String(), nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"status":"completed"`) ||
+		!strings.Contains(body, `"assistantMessageId":"`+assistantMessageID.String()) ||
+		strings.Contains(body, "leaseOwner") || strings.Contains(body, "requestFingerprint") {
+		t.Fatalf("status=%d body=%s", response.Code, body)
+	}
+	if useCase.gotActor.UserID != userID || useCase.gotConversationID != conversationID || useCase.gotTurnID != turnID {
+		t.Fatalf("actor=%+v conversationID=%s turnID=%s", useCase.gotActor, useCase.gotConversationID, useCase.gotTurnID)
+	}
+}
+
+func TestConversationRoutesStreamsTurnEventsAndHonorsLastEventID(t *testing.T) {
+	userID, conversationID, turnID := uuid.New(), uuid.New(), uuid.New()
+	stream := &conversationTurnEventStreamStub{
+		initialStatus: conversation.TurnStatusCompleted,
+		pages: []conversation.TurnEventPage{{
+			Items: []conversation.TurnEvent{{
+				TurnID: turnID, ConversationID: conversationID, Seq: 4,
+				EventType: conversation.TurnEventCompleted,
+				Payload:   map[string]any{"assistantMessageId": uuid.NewString()}, PayloadSchemaVersion: 1,
+				CreatedAt: time.Date(2026, 8, 8, 8, 30, 0, 0, time.UTC),
+			}},
+			AfterSeq: 3, NextAfterSeq: 4,
+		}},
+	}
+	useCase := &conversationUseCaseStub{eventStream: stream}
+	routes, _ := NewConversationRoutes(context.Background(), useCase, identityMiddleware(userID, false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodGet,
+		"/api/v1/conversations/"+conversationID.String()+"/turns/"+turnID.String()+"/events?afterSeq=1&limit=25", nil)
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Last-Event-ID", "3")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	body := response.Body.String()
+	for _, expected := range []string{
+		"retry: 3000\n\n", "id: 4\n", "event: turn_completed\n",
+		`"seq":4`, `"eventType":"turn_completed"`, `"createdAt":"2026-08-08T08:30:00Z"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("SSE body missing %q: %s", expected, body)
+		}
+	}
+	if response.Code != http.StatusOK || len(stream.gotAfterSeq) != 1 || stream.gotAfterSeq[0] != 3 || stream.gotLimit[0] != 25 {
+		t.Fatalf("status=%d cursors=%v limits=%v body=%s", response.Code, stream.gotAfterSeq, stream.gotLimit, body)
+	}
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
 
 type conversationUseCaseStub struct {
 	created           conversation.Conversation
@@ -178,6 +251,11 @@ type conversationUseCaseStub struct {
 	gotIdempotencyKey string
 	appendCalls       int
 	turnCalls         int
+	turnDetail        conversation.TurnDetail
+	eventPage         conversation.TurnEventPage
+	eventStream       conversation.TurnEventStream
+	gotConversationID uuid.UUID
+	gotTurnID         uuid.UUID
 }
 
 func (s *conversationUseCaseStub) Create(_ context.Context, actor conversation.Actor, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -203,9 +281,46 @@ func (s *conversationUseCaseStub) AppendUserMessage(_ context.Context, actor con
 	return s.message, s.appendErr
 }
 
-func (s *conversationUseCaseStub) ExecuteTurn(_ context.Context, actor conversation.Actor, idempotencyKey string, input conversation.AppendMessageInput) (conversation.ConversationTurnResult, error) {
+func (s *conversationUseCaseStub) AcceptTurn(_ context.Context, actor conversation.Actor, idempotencyKey string, input conversation.AppendMessageInput) (conversation.ConversationTurnResult, error) {
 	s.turnCalls++
 	s.gotActor, s.gotInput = actor, input
 	s.gotIdempotencyKey = idempotencyKey
 	return s.turnResult, s.appendErr
+}
+
+func (s *conversationUseCaseStub) GetTurn(_ context.Context, actor conversation.Actor, conversationID, turnID uuid.UUID) (conversation.TurnDetail, error) {
+	s.gotActor, s.gotConversationID, s.gotTurnID = actor, conversationID, turnID
+	return s.turnDetail, nil
+}
+
+func (s *conversationUseCaseStub) ListTurnEvents(_ context.Context, actor conversation.Actor, conversationID, turnID uuid.UUID, afterSeq int64, limit int) (conversation.TurnEventPage, error) {
+	s.gotActor, s.gotConversationID, s.gotTurnID = actor, conversationID, turnID
+	return s.eventPage, nil
+}
+
+func (s *conversationUseCaseStub) OpenTurnEventStream(_ context.Context, actor conversation.Actor, conversationID, turnID uuid.UUID) (conversation.TurnEventStream, error) {
+	s.gotActor, s.gotConversationID, s.gotTurnID = actor, conversationID, turnID
+	return s.eventStream, nil
+}
+
+type conversationTurnEventStreamStub struct {
+	initialStatus conversation.TurnStatus
+	pages         []conversation.TurnEventPage
+	gotAfterSeq   []int64
+	gotLimit      []int
+}
+
+func (s *conversationTurnEventStreamStub) InitialStatus() conversation.TurnStatus {
+	return s.initialStatus
+}
+
+func (s *conversationTurnEventStreamStub) Next(_ context.Context, afterSeq int64, limit int) (conversation.TurnEventPage, error) {
+	s.gotAfterSeq = append(s.gotAfterSeq, afterSeq)
+	s.gotLimit = append(s.gotLimit, limit)
+	if len(s.pages) == 0 {
+		return conversation.TurnEventPage{AfterSeq: afterSeq, NextAfterSeq: afterSeq}, nil
+	}
+	page := s.pages[0]
+	s.pages = s.pages[1:]
+	return page, nil
 }

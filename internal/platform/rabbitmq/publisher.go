@@ -132,6 +132,14 @@ func (p *Publisher) connectLocked() error {
 	); err != nil {
 		return cleanup(fmt.Errorf("bind rabbitmq diagnosis queue: %w", err))
 	}
+	if _, err := channel.QueueDeclare(p.config.ConversationQueue, true, false, false, false, nil); err != nil {
+		return cleanup(fmt.Errorf("declare rabbitmq conversation queue: %w", err))
+	}
+	if err := channel.QueueBind(
+		p.config.ConversationQueue, p.config.ConversationRoutingKey, p.config.Exchange, false, nil,
+	); err != nil {
+		return cleanup(fmt.Errorf("bind rabbitmq conversation queue: %w", err))
+	}
 	if _, err := channel.QueueDeclare(p.config.KnowledgeIngestionQueue, true, false, false, false, nil); err != nil {
 		return cleanup(fmt.Errorf("declare rabbitmq knowledge ingestion queue: %w", err))
 	}
@@ -179,6 +187,8 @@ func (p *Publisher) buildPublishing(event messaging.OutboxEvent) (string, amqp.P
 	switch event.EventType {
 	case "diagnosis.execute":
 		routingKey = p.config.DiagnosisRoutingKey
+	case "conversation.turn.execute":
+		routingKey = p.config.ConversationRoutingKey
 	case "knowledge.ingest":
 		routingKey = p.config.KnowledgeIngestionRoutingKey
 	default:

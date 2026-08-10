@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及独立会话创建/列表/详情、消息游标查询、用户消息持久化和一个受控 `/turns` Agent 回合。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
-- 会话通过结构化工单/任务引用连接业务上下文；受控 `create_diagnosis_task` 命令服务及其窄 Tool Schema 由独立 Conversation Agent 调用并复用既有诊断任务应用服务。带任务引用的回合可按需调用内部 `get_diagnosis_task_status`，读取前会再次校验最新消息引用和 owner/admin 权限。`conversation_turns` 已实现请求指纹、客户端 UUID 幂等、单活跃租约、失败重试和完成回放。助手最终消息已经持久化，但消息 SSE、附件读取和引用预览仍未完成；不能把当前 `/turns` 描述成后台可恢复的完整知识问答流。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及独立会话创建/列表/详情、消息游标查询、用户消息持久化、异步 `/turns` 受理、回合状态查询和回合事件 JSON/SSE。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- 会话通过结构化工单/任务引用连接业务上下文；受控 `create_diagnosis_task` 命令服务及其窄 Tool Schema 由独立 Conversation Worker 中的 Agent 调用并复用既有诊断任务应用服务。带任务引用的回合可按需调用内部 `get_diagnosis_task_status`，读取前会再次校验最新消息引用和 owner/admin 权限。`conversation_turns` 已实现请求指纹、客户端 UUID 幂等、queued/running 单活跃约束、Worker 租约 fencing、自动重试和完成回放；`conversation_turn_events` 支持 `afterSeq`/`Last-Event-ID` 断线续传。HTTP 首次受理返回 `202 + turnId + queued`，完成幂等回放返回 `200`。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
 ## 设计原则
@@ -254,10 +254,12 @@ CSRF Token 同时写入 `mesguard_csrf` Cookie。该 Cookie 不设置 `HttpOnly`
 | GET | `/api/v1/conversations/{conversationId}` | 登录 | 会话摘要 |
 | GET | `/api/v1/conversations/{conversationId}/messages` | 登录 | 按 seq 补读消息 |
 | POST | `/api/v1/conversations/{conversationId}/messages` | 登录 | 追加用户消息和结构化引用；当前不触发会话 Agent |
-| POST | `/api/v1/conversations/{conversationId}/turns` | 登录 | 使用 UUID 幂等键执行受控会话 Agent 回合；失败复用用户消息，完成结果可回放；明确诊断意图可创建独立异步任务 |
-| POST | `/api/v1/attachments` | 登录 | 流式上传附件 |
-| GET | `/api/v1/attachments/{attachmentId}` | 登录 | 附件元数据 |
-| GET | `/api/v1/attachments/{attachmentId}/content` | 登录 | 授权读取附件内容 |
+| POST | `/api/v1/conversations/{conversationId}/turns` | 登录 | 使用 UUID 幂等键异步受理会话 Agent 回合；原子写消息/turn/Outbox，失败复用用户消息，完成结果可回放 |
+| GET | `/api/v1/conversations/{conversationId}/turns/{turnId}` | 登录 | 查询回合状态安全摘要 |
+| GET | `/api/v1/conversations/{conversationId}/turns/{turnId}/events` | 登录 | 回合事件 JSON 历史或 SSE 订阅 |
+| POST | `/api/v1/conversations/{conversationId}/attachments` | 登录 | 向当前用户会话流式上传一个 session 附件 |
+| GET | `/api/v1/conversations/{conversationId}/attachments/{attachmentId}/preview` | 登录 | 受 owner/conversation 约束的附件文本预览 |
+| GET | `/api/v1/knowledge-citations/{chunkId}` | 登录 | 按知识 scope 与版本状态读取 Chunk 引用预览 |
 | GET | `/api/v1/diagnosis-tasks` | 登录 | 任务列表 |
 | POST | `/api/v1/diagnosis-tasks` | 登录 | 创建异步诊断任务 |
 | GET | `/api/v1/diagnosis-tasks/{taskId}` | 登录 | 任务详情与步骤摘要 |
@@ -509,7 +511,7 @@ sortOrder
 
 ## 附件接口
 
-### `POST /api/v1/attachments`
+### `POST /api/v1/conversations/{conversationId}/attachments`
 
 请求：
 
@@ -518,48 +520,59 @@ Content-Type: multipart/form-data
 Idempotency-Key: <UUID>
 
 file=<binary>
-scope=session
 ```
 
-M1 每次上传一个文件，API 流式写入 MinIO，不使用 Base64，也不把完整文件读入内存。
+当前每次上传一个文件，scope 由路由固定为 `session`，客户端不能扩大范围。API 先将输入流式写入
+有大小上限的临时文件并计算 SHA-256，校验后写入 MinIO，不使用 Base64，也不把完整文件读入内存。
 
-允许类型：PNG、JPEG、WebP、PDF、TXT、LOG。ZIP、可执行文件和 Office 宏文件一期拒绝。单文件默认最大 50 MB，具体限制按类型配置。服务端校验实际文件签名、大小和流式计算的 SHA-256，不能只信任扩展名或浏览器 MIME。
+允许类型为 UTF-8 TXT/Markdown/LOG/JSON/CSV/SQL/XML/YAML、PDF、DOCX、XLSX、PPTX、PNG 和
+JPEG。服务端校验扩展名对应的文件签名或 OOXML 主结构；加密 Office 包、宏格式、任意 ZIP、
+可执行文件、NUL 文本和非 UTF-8 文本均拒绝。单文件上限复用 `[minio].maxObjectBytes`。
 
 幂等状态存 PostgreSQL：
 
-- 第一次请求创建 `uploading` 记录和上传租约；
-- 同一用户、同一 Key、相同文件且已成功时返回原 `attachmentId`；
-- 租约有效时返回 `40922`；
-- 租约过期或上次失败时允许接管同一附件记录并增加尝试次数；
-- 相同 Key 对应不同 scope 或文件指纹时返回 `40911`；
-- Redis 只允许作为短期锁优化。
+- 第一次请求先固化不可变对象，再插入 `uploaded` 附件事实；
+- 同一用户、同一 UUID Key、相同 conversation 和上传指纹返回原 `attachmentId`；
+- 相同 Key 对应不同 conversation、文件名、媒体类型、大小或 SHA-256 时返回冲突；
+- 并发唯一键冲突后重新读取事实并按同一规则判定，不依赖 Redis；
+- 数据库插入失败时只对本次新写对象执行尽力清理。
+
+当前未实现 `uploading/failed` 租约状态、失败上传接管和孤儿对象定时清理，不能用目标设计中的
+`40922` 语义描述现有接口。
 
 首次成功返回 `201`，幂等重放返回 `200`：
 
 ```json
 {
   "attachmentId": "...",
-  "originalFilename": "problem.png",
-  "contentType": "image/png",
+  "conversationId": "...",
+  "originalName": "problem.png",
+  "mediaType": "image/png",
   "sizeBytes": 483920,
-  "sha256": "...",
+  "contentSha256": "...",
   "scope": "session",
-  "processingStatus": "ready",
+  "status": "uploaded",
   "replayed": false,
   "createdAt": "2026-07-26T03:20:15Z"
 }
 ```
 
-### 附件元数据与内容
+### 附件引用预览
 
 ```text
-GET /api/v1/attachments/{attachmentId}
-GET /api/v1/attachments/{attachmentId}/content
+GET /api/v1/conversations/{conversationId}/attachments/{attachmentId}/preview
+GET /api/v1/knowledge-citations/{chunkId}
 ```
 
-元数据接口不返回 bucket、object key 或永久 URL。内容接口先做所有权、任务关联和删除状态检查，再由 API 代理流式返回，支持适合 PDF/图片预览的 Range 请求。普通浏览器不直接获得 MinIO 凭证。
+附件预览先校验当前用户和 conversation，复用知识 Parser，最多返回 2,000 rune 的文本/表格元素、
+页码、章节、元素类型、Parser 版本、内容哈希和视觉内容数量。它不代理原始二进制，也不返回 bucket、
+object key、ETag、永久 URL 或 MinIO 凭证。图片或扫描页只返回视觉内容数量，不隐式调用 OCR/VLM。
 
-M1 不提供任意物理删除接口。用户从尚未提交的表单移除附件只解除前端选择；未绑定对象超过 24 小时由清理任务处理。已被任务、证据或报告引用的附件不能直接删除。
+知识引用预览按 `chunkId` 返回稳定 `knowledge_chunk:{chunkId}` 来源、文档/版本/Chunk、页码、章节、
+原文和内容哈希。global 文档可由登录用户读取；personal 文档只允许 owner；已删除文档、非
+`ready/retired` 版本和越权 personal 文档统一返回 404。
+
+当前不提供原始附件下载或任意物理删除接口。孤儿对象清理与保留期任务仍待实现。
 
 ## 诊断任务接口
 
@@ -607,10 +620,10 @@ API 在创建前重新只读查询 SQL Server 并计算 fingerprint：
 - 与 `expectedSourceFingerprint` 一致时继续；
 - 不一致返回 `40923`，前端刷新工单后让用户重新确认；
 - SQL Server 查询、附件校验和数据源权限检查发生在 PostgreSQL 业务事务之前；
-- PostgreSQL 事务目标写入 CaseSnapshot、DiagnosisTask、关联数据源、附件关联、首个 TaskEvent 和 OutboxEvent；当前切片尚未实现附件表和附件关联；
+- PostgreSQL 事务写入 CaseSnapshot、DiagnosisTask、关联数据源、首个 TaskEvent 和 OutboxEvent；当调用来自 Conversation Agent 且当前消息带附件时，同一事务还写 `diagnosis_task_attachments`；
 - 事务提交后返回 `202` 和 `Location: /api/v1/diagnosis-tasks/{taskId}`。
 
-当前实现已完成外部工单重读、fingerprint 校验、脱敏 CaseSnapshot、DiagnosisTask、TaskEvent 和 OutboxEvent 的原子落库，并支持同一用户同一幂等键的重放/冲突判断。附件表和 MinIO 流程尚未实现，非空 `attachments` 会明确返回业务校验失败，不会被静默忽略。
+当前实现已完成外部工单重读、fingerprint 校验、脱敏 CaseSnapshot、DiagnosisTask、TaskEvent 和 OutboxEvent 的原子落库，并支持同一用户同一幂等键的重放/冲突判断。会话附件与 MinIO 流程已经实现；Conversation Agent 的创建命令会从当前最新 user message 冻结全部或指定子集附件，并在同一任务事务写入 `diagnosis_task_attachments`。直接创建诊断任务的 HTTP 契约仍拒绝非空 `attachments`，因为它没有消息级授权上下文，不会静默忽略。
 
 响应：
 
@@ -825,7 +838,7 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 3. 未登录、越权、账号禁用、CSRF 失败和 Session 过期均有测试。
 4. analyst 不能读取、取消或反馈其他 analyst 的任务和附件。
 5. 同一诊断 Idempotency-Key 重试只产生一个快照、任务和 Outbox。
-6. 同一附件 Key 的成功重放返回原附件；失败或租约过期可恢复。
+6. 同一附件 Key 的成功重放返回原附件，不同上传指纹返回冲突；失败租约恢复仍待实现。
 7. 外部工单 fingerprint 变化时不静默创建诊断任务。
 8. 关闭或重连 SSE 不取消任务，`Last-Event-ID/afterSeq` 可以无缺口补读。
 9. Redis 不可用时 Session、幂等和 TaskEvent 事实仍然正确。
@@ -836,4 +849,33 @@ OpenAPI 负责精确字段、required、枚举、格式和示例，并用于生�
 
 ## 后续工作
 
-M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测、知识问答 Runner 内部的 `search_knowledge` Tool，以及独立会话持久化、消息读取、Conversation Agent `/turns`、turn 幂等账本、助手最终消息写入和引用门禁的内部任务状态 Tool。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。当前 `/turns` 仍在 HTTP 进程内同步执行，进程崩溃依靠同 key 在租约过期后重试；消息 SSE、引用预览、附件内容访问和后台 conversation run 未实现。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`；内部 Tool 不作为公开 HTTP API 伪装进 OpenAPI。
+M0、M1-A1 和 P7 任务创建、TaskEvent JSON 历史/SSE、取消命令、Outbox Relay、RabbitMQ Consumer、Diagnosis Worker、正式报告查询及管理员失败恢复已实现。M2 当前已实现管理员知识原文上传、幂等重放/冲突、入库任务查询/取消、Worker claim/lease/checkpoint/fencing、多格式解析、Element Artifact、Embedding/pgvector、FTS/Vector/RRF 召回、真实 `qwen3-rerank` 固定集评测、知识问答 Runner 内部的 `search_knowledge` Tool，以及独立会话持久化、消息读取、Conversation Agent `/turns`、turn 幂等账本、助手最终消息写入、回合状态查询、可续传回合事件 SSE、引用门禁的内部任务状态 Tool、会话附件上传/消息关联/受控正文读取、附件/知识 Chunk 引用预览、诊断任务附件冻结/任务级读取、知识/附件/网页的助手结构化引用持久化，以及成功、降级和终态失败回合的 recorded-run 事实与离线导出器。失败观测受 lease owner/deadline 事务门禁，只保存稳定错误类型，不增加公开 HTTP 接口。新建诊断任务已由后端自动冻结 knowledge capability，前端不提供 Tool 开关。真实 PostgreSQL + MinIO 的小型 TXT HTTP smoke 已验证上传幂等、消息授权、Tool 读取、引用预览、跨用户拒绝和敏感对象坐标不泄漏，且未调用 Provider。`conversation-v6` 还为“来源已取回但主答案零引用”增加一次失败触发、严格 JSON、同模型的受控引用修复；首个 transaction Case 已通过引用精度/召回、预览一致性与人工无证据扩写复核。机器可读契约只随已实现 Handler 更新在 `api/openapi.yaml`；内部 Tool 不作为公开 HTTP API 伪装进 OpenAPI。下一步是代表性跨格式全链路 pair、更大多 Case 稳定性、前端回合/附件/引用接入，以及 personal 附件与失败上传租约/孤儿清理等工程收尾。
+
+### 会话消息引用约定
+
+assistant message 的 `citations` 是有序数组，每项只返回：
+
+```json
+{
+  "position": 0,
+  "sourceType": "knowledge_chunk",
+  "sourceRef": "knowledge:<documentVersionId>/<chunkId>",
+  "contentSha256": "<64 lowercase hex>"
+}
+```
+
+`sourceType` 还可为 `attachment` 或 `web`。附件引用为 `attachment:<attachmentId>`；网页引用必须是
+无 userinfo 的 HTTPS URL。Runner 只接受最终回答中完整复制的 marker，例如
+`[source:knowledge:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222]`；
+尖括号、引号和反引号都不是语法字符，且 marker 必须与同一 Agent
+run 中后端验证过的 Tool 来源完全匹配的 marker。重复 marker 在持久化时去重并按首次出现排序，
+未知/篡改/超过 20 个不同来源的回答不会生成 assistant message。HTTP 消息补读和完成幂等回放均
+返回相同 `citations`；SSE `turn_completed` 仍只发布安全的 assistant message ID 和引用数量，客户端
+收到终态后通过消息/回放响应读取完整引用元数据。知识和附件正文不得从 `sourceRef` 直接拼对象
+地址，必须调用已有受权预览 API；网页只允许打开返回的 HTTPS URL。
+
+### 会话回合事件约定
+
+`GET /api/v1/conversations/{conversationId}/turns/{turnId}` 返回回合当前安全摘要：状态、用户/助手消息 ID、尝试次数、时间、自动重试时间和面向用户的失败摘要。它不返回 `lease_owner`、请求指纹、模型配置、Prompt、工具结果或异常堆栈。
+
+`GET .../events` 默认返回 JSON 游标页；当 `Accept` 包含 `text/event-stream` 时返回 SSE。事件表是事实源，Redis/RabbitMQ 只负责唤醒和投递。事件类型为 `turn_queued`、`turn_running`、`turn_retry_scheduled`、`turn_completed` 和 `turn_failed`。临时模型/Tool 失败转为带 `retry_at` 的 queued 回合，`turn_retry_scheduled` 不是终态；只有达到自动重试上限才写 `turn_failed`，SSE 在发送完成/失败终态后关闭。

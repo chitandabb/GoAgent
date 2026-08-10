@@ -68,3 +68,20 @@ func TestPublisherBuildPublishingRoutesKnowledgeIngestion(t *testing.T) {
 		t.Fatalf("routingKey = %q, message type = %q", routingKey, message.Type)
 	}
 }
+
+func TestPublisherBuildPublishingRoutesConversationTurn(t *testing.T) {
+	turnID := uuid.New()
+	publisher := &Publisher{config: config.RabbitMQConfig{ConversationRoutingKey: "conversation.turn.execute"}}
+	routingKey, message, err := publisher.buildPublishing(messaging.OutboxEvent{
+		ID: uuid.New(), EventType: "conversation.turn.execute", AggregateType: "conversation_turn",
+		AggregateID: turnID, CorrelationID: uuid.New(),
+		Payload:              json.RawMessage(`{"turnId":"` + turnID.String() + `"}`),
+		PayloadSchemaVersion: 1, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("buildPublishing(): %v", err)
+	}
+	if routingKey != "conversation.turn.execute" || message.Type != "conversation.turn.execute" {
+		t.Fatalf("routingKey = %q, message type = %q", routingKey, message.Type)
+	}
+}

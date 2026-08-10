@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
+	domainrepository "github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/google/uuid"
 	gormpostgres "gorm.io/driver/postgres"
@@ -64,6 +66,23 @@ VALUES (?, ?, ?, 'incident', now())`,
 		externalCaseID, dataSourceID, "TASK-"+uuid.NewString()[:8]).Error; err != nil {
 		t.Fatalf("insert external case: %v", err)
 	}
+	conversationRepository := NewConversationRepository(tx)
+	conversationItem, err := conversationRepository.Create(ctx, ownerID, conversation.CreateInput{Title: "诊断附件"}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	attachmentRepository := NewAttachmentRepository(tx)
+	attachmentItem := integrationAttachment(ownerID, conversationItem.ID, uuid.New())
+	if err := attachmentRepository.Create(ctx, attachmentItem); err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+	message, err := conversationRepository.AppendMessage(ctx, ownerID, conversation.AppendMessageInput{
+		ConversationID: conversationItem.ID, Role: conversation.MessageRoleUser, Content: "请诊断并检查附件",
+		Attachments: []conversation.MessageAttachmentInput{{AttachmentID: attachmentItem.ID, Purpose: "log_file"}},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("append attachment message: %v", err)
+	}
 
 	item := &externalcase.ExternalCase{
 		ID: externalCaseID, DataSourceID: dataSourceID, ExternalCaseKey: "TASK-1001", CaseType: "incident",
@@ -79,6 +98,10 @@ VALUES (?, ?, ?, 'incident', now())`,
 	input := diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: item.SourceFingerprint,
 		RequestText: "检查任务快照", RequestScope: map[string]any{"source": "integration"},
+		Attachments: []diagnosis.TaskAttachment{{AttachmentID: attachmentItem.ID, Purpose: "log_file"}},
+		AttachmentSource: &diagnosis.TaskAttachmentSource{
+			ConversationID: conversationItem.ID, MessageID: message.ID,
+		},
 		IdempotencyKey: uuid.NewString(), CorrelationID: uuid.New(),
 	}
 	created, err := service.Create(ctx, diagnosis.TaskActor{UserID: ownerID}, input)
@@ -89,12 +112,15 @@ VALUES (?, ?, ?, 'incident', now())`,
 		t.Fatalf("created task = %+v", created)
 	}
 
-	var snapshotCount, taskCount, eventCount, outboxCount int64
+	var snapshotCount, taskCount, attachmentCount, eventCount, outboxCount int64
 	if err := tx.Raw("SELECT COUNT(*) FROM case_snapshots WHERE id = ?", created.Task.CaseSnapshotID).Scan(&snapshotCount).Error; err != nil {
 		t.Fatalf("count snapshot: %v", err)
 	}
 	if err := tx.Raw("SELECT COUNT(*) FROM diagnosis_tasks WHERE id = ?", created.Task.ID).Scan(&taskCount).Error; err != nil {
 		t.Fatalf("count task: %v", err)
+	}
+	if err := tx.Raw("SELECT COUNT(*) FROM diagnosis_task_attachments WHERE task_id = ?", created.Task.ID).Scan(&attachmentCount).Error; err != nil {
+		t.Fatalf("count task attachment: %v", err)
 	}
 	if err := tx.Raw("SELECT COUNT(*) FROM task_events WHERE task_id = ?", created.Task.ID).Scan(&eventCount).Error; err != nil {
 		t.Fatalf("count task event: %v", err)
@@ -102,8 +128,8 @@ VALUES (?, ?, ?, 'incident', now())`,
 	if err := tx.Raw("SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = ?", created.Task.ID).Scan(&outboxCount).Error; err != nil {
 		t.Fatalf("count outbox: %v", err)
 	}
-	if snapshotCount != 1 || taskCount != 1 || eventCount != 1 || outboxCount != 1 {
-		t.Fatalf("durable counts snapshot/task/event/outbox = %d/%d/%d/%d, want 1/1/1/1", snapshotCount, taskCount, eventCount, outboxCount)
+	if snapshotCount != 1 || taskCount != 1 || attachmentCount != 1 || eventCount != 1 || outboxCount != 1 {
+		t.Fatalf("durable counts snapshot/task/attachment/event/outbox = %d/%d/%d/%d/%d, want 1/1/1/1/1", snapshotCount, taskCount, attachmentCount, eventCount, outboxCount)
 	}
 	var snapshotPayload string
 	if err := tx.Raw("SELECT payload::text FROM case_snapshots WHERE id = ?", created.Task.CaseSnapshotID).Scan(&snapshotPayload).Error; err != nil {
@@ -119,6 +145,33 @@ VALUES (?, ?, ?, 'incident', now())`,
 	}
 	if !replayed.Replayed || replayed.Task.ID != created.Task.ID {
 		t.Fatalf("replayed result = %+v", replayed)
+	}
+	if len(replayed.Task.Attachments) != 1 || replayed.Task.Attachments[0].AttachmentID != attachmentItem.ID ||
+		replayed.Task.Attachments[0].SourceMessageID != message.ID {
+		t.Fatalf("replayed task attachments=%+v", replayed.Task.Attachments)
+	}
+	if _, err := attachmentRepository.GetTaskReadable(ctx, ownerID, created.Task.ID, attachmentItem.ID); err != nil {
+		t.Fatalf("GetTaskReadable(): %v", err)
+	}
+	if _, err := attachmentRepository.GetTaskReadable(ctx, uuid.New(), created.Task.ID, attachmentItem.ID); !errors.Is(err, domainrepository.ErrNotFound) {
+		t.Fatalf("cross-user GetTaskReadable() error=%v", err)
+	}
+	unlinkedAttachment := integrationAttachment(ownerID, conversationItem.ID, uuid.New())
+	if err := attachmentRepository.Create(ctx, unlinkedAttachment); err != nil {
+		t.Fatalf("create unlinked attachment: %v", err)
+	}
+	unauthorizedInput := input
+	unauthorizedInput.IdempotencyKey = uuid.NewString()
+	unauthorizedInput.Attachments = []diagnosis.TaskAttachment{{AttachmentID: unlinkedAttachment.ID, Purpose: "context"}}
+	if _, err := service.Create(ctx, diagnosis.TaskActor{UserID: ownerID}, unauthorizedInput); !errors.Is(err, diagnosis.ErrTaskAttachmentForbidden) {
+		t.Fatalf("unauthorized attachment Create() error=%v", err)
+	}
+	var unauthorizedTaskCount int64
+	if err := tx.Raw("SELECT COUNT(*) FROM diagnosis_tasks WHERE created_by = ? AND idempotency_key = ?", ownerID, unauthorizedInput.IdempotencyKey).Scan(&unauthorizedTaskCount).Error; err != nil {
+		t.Fatalf("count unauthorized tasks: %v", err)
+	}
+	if unauthorizedTaskCount != 0 {
+		t.Fatalf("unauthorized task count=%d, want 0", unauthorizedTaskCount)
 	}
 
 	input.RequestText = "不同请求内容"

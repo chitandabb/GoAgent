@@ -29,6 +29,15 @@ type DataSource struct {
 	SafetyMode agent.DataSourceSafetyMode
 }
 
+type TaskAttachment struct {
+	ID            uuid.UUID
+	Purpose       string
+	OriginalName  string
+	MediaType     string
+	SizeBytes     int64
+	ContentSHA256 string
+}
+
 type Task struct {
 	ID           uuid.UUID
 	CreatedBy    uuid.UUID
@@ -37,6 +46,7 @@ type Task struct {
 	RequestScope map[string]any
 	CaseSnapshot externalcase.ExternalCase
 	DataSources  []DataSource
+	Attachments  []TaskAttachment
 }
 
 type ExecutionResult struct {

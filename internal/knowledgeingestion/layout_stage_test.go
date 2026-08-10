@@ -173,6 +173,8 @@ func testLayoutRoute(
 	switch route {
 	case knowledgelayout.RouteCloudOCR:
 		reason = knowledgelayout.ReasonScannedTextRegion
+	case knowledgelayout.RouteTableRecovery:
+		reason = knowledgelayout.ReasonTableStructureRequired
 	case knowledgelayout.RouteNativeText:
 		reason = knowledgelayout.ReasonNativeTextRegion
 	case knowledgelayout.RouteSkip:

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
@@ -48,6 +49,7 @@ type agentRuntime struct {
 type agentRuntimeBuilders struct {
 	conversationCreator    mesagent.DiagnosisTaskCreator
 	conversationTaskStatus mesagent.DiagnosisTaskStatusReader
+	attachmentReader       attachment.Reader
 	chatModel              func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
 	githubMCP              func(context.Context, config.GitHubMCPConfig, *zap.Logger) ([]tool.BaseTool, func() error, error)
 	sqlObjectDefinitions   func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error)
@@ -248,6 +250,7 @@ func buildAgentRuntime(
 		WebSearch:             webSearch,
 		FetchPublicPage:       fetchPublicPage,
 		CreateDiagnosisTask:   builders.conversationCreator,
+		AttachmentReader:      builders.attachmentReader,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
@@ -259,14 +262,37 @@ func buildAgentRuntime(
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
 		CreateDiagnosisTask: builders.conversationCreator,
 		DiagnosisTaskStatus: builders.conversationTaskStatus,
+		AttachmentReader:    builders.attachmentReader,
 	})
 	if err != nil {
 		_ = runtime.close()
 		return nil, fmt.Errorf("build conversation Tool catalog: %w", err)
 	}
+	if builders.attachmentReader != nil {
+		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyAttachment)
+	}
+	var citationRepairer mesagent.ConversationCitationRepairer
+	if cfg.Agent.ConversationCitationRepairEnabled {
+		citationRepairer, err = mesagent.NewModelConversationCitationRepairer(
+			mesagent.ModelConversationCitationRepairerConfig{
+				ChatModel:       chatModel,
+				Instruction:     prompts.ConversationCitationRepairInstruction,
+				PromptVersion:   cfg.Agent.ConversationCitationRepairPromptVersion,
+				Timeout:         time.Duration(cfg.Agent.ConversationCitationRepairTimeoutMillis) * time.Millisecond,
+				MaxOutputTokens: cfg.Agent.ConversationCitationRepairMaxOutputTokens,
+			},
+		)
+		if err != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation citation repairer: %w", err)
+		}
+	}
 	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
-		ChatModel: chatModel, ToolCatalog: conversationCatalog,
+		ChatModel: chatModel, CitationRepairer: citationRepairer, ToolCatalog: conversationCatalog,
 		SystemInstruction:     prompts.ConversationInstruction,
+		ModelProvider:         runtime.modelProvider,
+		ModelID:               runtime.modelID,
+		PromptVersion:         runtime.conversationPromptVersion,
 		AvailableDependencies: runtime.availableDependencies,
 		Logger:                log.Named("conversation_runner"),
 		MaxIterations:         cfg.Agent.ConversationMaxIterations,

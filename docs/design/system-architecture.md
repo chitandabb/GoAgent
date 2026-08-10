@@ -557,7 +557,7 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | React + Nginx | 未实现 | M1 |
 | Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入正式 Worker 执行、报告生成/读取、TaskEvent 补读、SSE、取消、恢复和报告反馈基础链路 | M1 |
 | 知识助手与pgvector RAG | M2-A1 至 M2-A8 已实现版本化文档、MinIO 入库、PDF/Office 解析、ONNX 页面/区域路由、Embedding、FTS/Vector/RRF、可选 Rerank、`search_knowledge` 和知识 Chunk 引用门禁；Query 改写、Agentic 二次检索、Web Search 和公开知识问答 API 仍待实现 | M2 |
-| Ingestion Worker与ONNX | Knowledge Worker、云OCR/VLM、PDFium-WASM、PP-DocLayout-M ONNX Router、区域显式路由、自适应DPI、确定性Element合并和Artifact v5 provenance已实现且默认关闭；公开路由集、Windows/Linux资源、OCR像素对照、三图VLM成对测评和非root专用镜像已记录，扩充语料与合并质量测评待完成 | M2 |
+| Ingestion Worker与ONNX | Knowledge Worker、云OCR/VLM、独立Table Processor、PDFium-WASM、PP-DocLayout-M ONNX Router、区域显式路由、自适应DPI、确定性Element合并和Artifact v6 provenance已实现；公开路由集、Windows/Linux资源、OCR像素对照、三图VLM成对测评、NIST真实表格单区smoke和非root专用镜像已记录，精确merged-cell与扩充合并质量测评为增强项 | M2 |
 | GitHub MCP代码调查工具 | 已实现只读接入、凭据握手、仓库搜索、仓库树候选读取、固定SHA文件读取、提交追溯和不完整搜索降级；v2 工具级评测覆盖私有C#、GoAgent、GoChat和公开仓库共6条样本，2条真实不完整响应均恢复成功；Agent paired 已覆盖工单、代码调查和 GitHub 降级三类样本，完整数据集仍待扩展 | M1 |
 | SQL性能实验室 | 未实现 | M4 |
 | Prometheus/Grafana/Trace平台 | 未实现 | 业务埋点后按需接入 |

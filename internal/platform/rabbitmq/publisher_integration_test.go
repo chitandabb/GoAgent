@@ -28,6 +28,7 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 	cfg := config.RabbitMQConfig{
 		Enabled: true, URLEnv: "MESGUARD_TEST_RABBITMQ_URL_ACTIVE", Exchange: exchange,
 		DiagnosisQueue: queue, DiagnosisRoutingKey: "diagnosis.execute",
+		ConversationQueue: queue + ".conversation", ConversationRoutingKey: "conversation.turn.execute",
 		KnowledgeIngestionQueue: queue + ".knowledge", KnowledgeIngestionRoutingKey: "knowledge.ingest",
 		RelayBatchSize: 1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
 		PublishConfirmTimeoutMillis: 1000, WorkerLeaseMillis: 30000,
@@ -49,6 +50,7 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 		t.Fatalf("open inspection channel: %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = channel.QueueDelete(queue+".conversation", false, false, false)
 		_, _ = channel.QueueDelete(queue+".knowledge", false, false, false)
 		_, _ = channel.QueueDelete(queue, false, false, false)
 		_ = channel.ExchangeDelete(exchange, false, false)

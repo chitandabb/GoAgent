@@ -10,10 +10,11 @@ const maxAgentPromptBytes = 32 * 1024
 
 // AgentPrompts 是启动时加载并缓存的 Agent 指令集合。
 type AgentPrompts struct {
-	SystemInstruction         string
-	BaselineInstruction       string
-	ReportContractInstruction string
-	ConversationInstruction   string
+	SystemInstruction                     string
+	BaselineInstruction                   string
+	ReportContractInstruction             string
+	ConversationInstruction               string
+	ConversationCitationRepairInstruction string
 }
 
 func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
@@ -33,11 +34,22 @@ func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
 	if err != nil {
 		return AgentPrompts{}, err
 	}
+	citationRepairInstruction := ""
+	if c.ConversationCitationRepairEnabled {
+		citationRepairInstruction, err = loadPromptFile(
+			"agent", "conversation citation repair prompt",
+			c.ConversationCitationRepairPromptFile, maxAgentPromptBytes,
+		)
+		if err != nil {
+			return AgentPrompts{}, err
+		}
+	}
 	return AgentPrompts{
-		SystemInstruction:         systemInstruction,
-		BaselineInstruction:       baselineInstruction,
-		ReportContractInstruction: reportContractInstruction,
-		ConversationInstruction:   conversationInstruction,
+		SystemInstruction:                     systemInstruction,
+		BaselineInstruction:                   baselineInstruction,
+		ReportContractInstruction:             reportContractInstruction,
+		ConversationInstruction:               conversationInstruction,
+		ConversationCitationRepairInstruction: citationRepairInstruction,
 	}, nil
 }
 

@@ -282,7 +282,7 @@ paths:
     get:
       operationId: listConversationMessages
       summary: 按会话序号补读消息
-      description: 只返回当前用户会话的持久化消息和结构化工单/任务引用；afterSeq 为排他游标。
+      description: 只返回当前用户会话的持久化消息和结构化工单、任务、附件引用；afterSeq 为排他游标。附件不包含对象存储地址。
       security:
         - sessionCookie: []
       parameters:
@@ -348,18 +348,100 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+  /api/v1/conversations/{conversationId}/attachments:
+    post:
+      operationId: uploadConversationAttachment
+      summary: 上传会话附件并固化 MinIO 对象
+      description: >-
+        先流式校验并固化对象，再写入当前用户和会话范围内的附件事实。客户端必须为一次上传
+        生成稳定 UUID 幂等键；同 key 同内容返回原附件，不同内容返回 409。响应不包含 bucket、
+        object key、ETag 或永久下载地址；上传本身不会授权 Agent，附件还必须随消息提交。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: 幂等回放既有附件
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentUploadResponse"
+        "201":
+          description: 附件已固化
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentUploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/conversations/{conversationId}/attachments/{attachmentId}/preview:
+    get:
+      operationId: previewConversationAttachment
+      summary: 查询附件安全引用预览
+      description: >-
+        只允许附件所有者在所属会话中读取。返回最多 2000 rune 的确定性解析元素、页码/章节、
+        内容哈希和视觉内容数量；不返回对象存储坐标、凭证、Base64 或原始二进制。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/AttachmentId"
+      responses:
+        "200":
+          description: 附件引用预览
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentPreviewResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
   /api/v1/conversations/{conversationId}/turns:
     post:
       operationId: appendConversationTurn
-      summary: 追加用户消息并执行一个受控会话 Agent 回合
+      summary: 异步受理一个受控会话 Agent 回合
       description: |
-        在 conversation_turns 中原子创建执行记录和用户消息，再由独立 Conversation Agent
-        处理当前回合。
+        在同一 PostgreSQL 事务中创建用户消息、queued conversation_turn 和 Outbox 事件，
+        随后由独立 Conversation Worker 领取租约并运行 Agent。HTTP 进程不调用模型。
         Agent 只能使用后端按消息引用和依赖状态筛选出的会话 Tool；明确诊断请求
-        可创建独立的异步诊断任务，但不会在本请求内执行诊断 Worker。助手只持久化
+        可创建独立的异步诊断任务。助手只持久化
         最终回答和结构化任务引用，不持久化原始 Tool 结果或模型推理过程。
         客户端必须为一次用户发送生成稳定 UUID 幂等键；同 key 同请求在失败后复用原用户
-        消息重试，完成后直接回放原消息对，同 key 不同请求返回 409。
+        消息重新入队，排队/运行中返回当前状态，完成后直接回放原消息对；同 key 不同请求返回 409。
       security:
         - sessionCookie: []
       parameters:
@@ -374,13 +456,13 @@ paths:
               $ref: "#/components/schemas/ConversationMessageRequest"
       responses:
         "200":
-          description: 复用既有 turn；可能是已完成结果回放，也可能是失败后的同消息重试完成
+          description: 幂等回放既有 completed turn 和助手最终消息
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConversationTurnResponse"
-        "201":
-          description: 新 turn、用户消息和助手最终回答均已持久化
+        "202":
+          description: 新 turn 已入队，或同一 turn 当前仍处于 queued/running
           content:
             application/json:
               schema:
@@ -399,6 +481,94 @@ paths:
           $ref: "#/components/responses/ValidationFailed"
         "503":
           $ref: "#/components/responses/DependencyUnavailable"
+  /api/v1/conversations/{conversationId}/turns/{turnId}:
+    get:
+      operationId: getConversationTurn
+      summary: 查询会话回合状态
+      description: 只返回当前用户拥有的回合状态摘要，不返回租约、模型、提示词或工具内部信息。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: turnId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 回合状态摘要
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationTurnDetailResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/turns/{turnId}/events:
+    get:
+      operationId: listConversationTurnEvents
+      summary: 查询或持续订阅会话回合事件
+      description: >-
+        默认返回 JSON 事件页；Accept 包含 text/event-stream 时返回 SSE。事件事实持久化在 PostgreSQL，
+        afterSeq 为排他游标，Last-Event-ID 提供时优先用于断线续传。SSE 只返回状态和最终结果引用，
+        不返回租约 owner、提示词、原始工具结果或模型推理过程。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: turnId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: afterSeq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+        - name: Last-Event-ID
+          in: header
+          description: SSE 重连游标；提供时优先于 afterSeq
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: Accept
+          in: header
+          description: 包含 text/event-stream 时使用 SSE，否则返回 JSON
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 事件页或 SSE 事件流
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationTurnEventsResponse"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/diagnosis-tasks:
     post:
       operationId: createDiagnosisTask
@@ -839,6 +1009,35 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+  /api/v1/knowledge-citations/{chunkId}:
+    get:
+      operationId: getKnowledgeCitationPreview
+      summary: 查询知识 Chunk 引用预览
+      description: >-
+        按当前用户的 global/personal 知识范围读取一个已发布或已退役版本中的 Chunk，返回文档版本、
+        页码/章节、原文和内容哈希。删除文档、处理中版本、其他用户个人知识统一返回 404。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: chunkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 知识引用预览
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeCitationPreviewResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   securitySchemes:
     sessionCookie:
@@ -884,6 +1083,13 @@ components:
         default: 20
     ConversationId:
       name: conversationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AttachmentId:
+      name: attachmentId
       in: path
       required: true
       schema:
@@ -1234,6 +1440,30 @@ components:
         kind:
           type: string
           enum: [created, referenced]
+    ConversationAttachmentInput:
+      type: object
+      additionalProperties: false
+      required: [attachmentId]
+      properties:
+        attachmentId: {type: string, format: uuid}
+        purpose:
+          type: string
+          maxLength: 64
+          default: context
+    ConversationAttachment:
+      type: object
+      required: [attachmentId, position, purpose, originalName, mediaType, sizeBytes, contentSha256, status]
+      properties:
+        attachmentId: {type: string, format: uuid}
+        position: {type: integer, minimum: 0}
+        purpose: {type: string}
+        originalName: {type: string}
+        mediaType: {type: string}
+        sizeBytes: {type: integer, format: int64, minimum: 1}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        status:
+          type: string
+          enum: [uploaded]
     ConversationMessageRequest:
       type: object
       additionalProperties: false
@@ -1250,9 +1480,14 @@ components:
           maxItems: 20
           items:
             $ref: "#/components/schemas/ConversationTaskReference"
+        attachments:
+          type: array
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/ConversationAttachmentInput"
     ConversationMessage:
       type: object
-      required: [id, conversationId, seq, role, content, contentSchemaVersion, caseReferences, taskReferences, createdAt]
+      required: [id, conversationId, seq, role, content, contentSchemaVersion, caseReferences, taskReferences, attachments, citations, createdAt]
       properties:
         id: {type: string, format: uuid}
         conversationId: {type: string, format: uuid}
@@ -1270,7 +1505,127 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ConversationTaskReference"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationAttachment"
+        citations:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/ConversationCitation"
         createdAt: {type: string, format: date-time}
+    ConversationCitation:
+      type: object
+      required: [position, sourceType, sourceRef, contentSha256]
+      properties:
+        position: {type: integer, minimum: 0, maximum: 19}
+        sourceType:
+          type: string
+          enum: [knowledge_chunk, attachment, web]
+        sourceRef: {type: string, minLength: 1, maxLength: 2048}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+    AttachmentUpload:
+      type: object
+      required: [attachmentId, conversationId, scope, status, originalName, mediaType, sizeBytes, contentSha256, replayed, uploadedAt]
+      properties:
+        attachmentId: {type: string, format: uuid}
+        conversationId: {type: string, format: uuid}
+        scope:
+          type: string
+          enum: [session]
+        status:
+          type: string
+          enum: [uploaded]
+        originalName: {type: string}
+        mediaType: {type: string}
+        sizeBytes: {type: integer, format: int64, minimum: 1}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        replayed: {type: boolean}
+        uploadedAt: {type: string, format: date-time}
+    AttachmentUploadResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/AttachmentUpload"
+    AttachmentPreviewElement:
+      type: object
+      required: [index, elementType, contentText]
+      properties:
+        index: {type: integer, minimum: 0}
+        pageNumber: {type: integer, minimum: 1}
+        elementType:
+          type: string
+          enum: [text, table, ocr_text, image_description]
+        sectionPath:
+          type: array
+          items: {type: string}
+        contentText: {type: string}
+    AttachmentPreview:
+      type: object
+      required: [sourceType, sourceRef, attachmentId, originalName, mediaType, sizeBytes, contentSha256, parserVersion, elements, visualAssetCount, truncated]
+      properties:
+        sourceType:
+          type: string
+          const: attachment
+        sourceRef: {type: string, pattern: "^attachment:[0-9a-fA-F-]{36}$"}
+        attachmentId: {type: string, format: uuid}
+        originalName: {type: string}
+        mediaType: {type: string}
+        sizeBytes: {type: integer, format: int64, minimum: 1}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        parserVersion: {type: string}
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentPreviewElement"
+        visualAssetCount: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+    AttachmentPreviewResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/AttachmentPreview"
+    KnowledgeCitationPreview:
+      type: object
+      required: [sourceType, sourceRef, documentId, documentVersionId, chunkId, title, scope, version, ordinal, elementType, sectionPath, contentText, contentSha256]
+      properties:
+        sourceType:
+          type: string
+          const: knowledge_chunk
+        sourceRef: {type: string, pattern: "^knowledge_chunk:[0-9a-fA-F-]{36}$"}
+        documentId: {type: string, format: uuid}
+        documentVersionId: {type: string, format: uuid}
+        chunkId: {type: string, format: uuid}
+        title: {type: string}
+        scope:
+          type: string
+          enum: [global, personal]
+        version: {type: integer, minimum: 1}
+        ordinal: {type: integer, minimum: 0}
+        pageNumber: {type: integer, minimum: 1}
+        elementType:
+          type: string
+          enum: [text, table, ocr_text, image_description]
+        sectionPath:
+          type: array
+          items: {type: string}
+        contentText: {type: string}
+        contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+    KnowledgeCitationPreviewResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/KnowledgeCitationPreview"
     ConversationMessageResponse:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"
@@ -1281,8 +1636,14 @@ components:
               $ref: "#/components/schemas/ConversationMessage"
     ConversationTurn:
       type: object
-      required: [userMessage, assistantMessage, replayed]
+      required: [turnId, status, userMessage, replayed]
       properties:
+        turnId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, failed, completed]
         userMessage:
           $ref: "#/components/schemas/ConversationMessage"
         assistantMessage:
@@ -1298,6 +1659,65 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ConversationTurn"
+    ConversationTurnDetail:
+      type: object
+      required: [turnId, conversationId, status, userMessageId, attemptCount, createdAt, updatedAt]
+      properties:
+        turnId: {type: string, format: uuid}
+        conversationId: {type: string, format: uuid}
+        status:
+          type: string
+          enum: [queued, running, failed, completed]
+        userMessageId: {type: string, format: uuid}
+        assistantMessageId: {type: string, format: uuid}
+        attemptCount: {type: integer, minimum: 0}
+        failureSummary:
+          type: string
+          description: 面向用户的安全失败摘要，不包含内部异常详情
+        retryAt: {type: string, format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+    ConversationTurnDetailResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationTurnDetail"
+    ConversationTurnEvent:
+      type: object
+      required: [seq, eventType, payload, payloadSchemaVersion, createdAt]
+      properties:
+        seq: {type: integer, format: int64, minimum: 1}
+        eventType:
+          type: string
+          enum: [turn_queued, turn_running, turn_retry_scheduled, turn_completed, turn_failed]
+        payload:
+          type: object
+          additionalProperties: true
+        payloadSchemaVersion: {type: integer, minimum: 1}
+        createdAt: {type: string, format: date-time}
+    ConversationTurnEventsData:
+      type: object
+      required: [items, afterSeq, nextAfterSeq, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationTurnEvent"
+        afterSeq: {type: integer, format: int64, minimum: 0}
+        nextAfterSeq: {type: integer, format: int64, minimum: 0}
+        hasMore: {type: boolean}
+    ConversationTurnEventsResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/ConversationTurnEventsData"
     ConversationMessagesData:
       type: object
       required: [items, afterSeq, nextAfterSeq, hasMore]
@@ -1398,7 +1818,7 @@ components:
               $ref: "#/components/schemas/DiagnosisTaskCreateData"
     DiagnosisTask:
       type: object
-      required: [taskId, externalCaseId, caseSnapshotId, requestText, requestScope, requestScopeSchemaVersion, status, attemptCount, createdAt, updatedAt, reportAvailable]
+      required: [taskId, externalCaseId, caseSnapshotId, requestText, requestScope, requestScopeSchemaVersion, status, attemptCount, createdAt, updatedAt, reportAvailable, attachments]
       properties:
         taskId: {type: string, format: uuid}
         externalCaseId: {type: string, format: uuid}
@@ -1420,6 +1840,25 @@ components:
         updatedAt: {type: string, format: date-time}
         reportAvailable: {type: boolean}
         reportId: {type: string, format: uuid}
+        attachments:
+          type: array
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/DiagnosisTaskAttachment"
+    DiagnosisTaskAttachment:
+      type: object
+      additionalProperties: false
+      required: [attachmentId, sourceMessageId, purpose, originalName, mediaType, sizeBytes, contentSha256]
+      properties:
+        attachmentId: {type: string, format: uuid}
+        sourceMessageId: {type: string, format: uuid}
+        purpose: {type: string, minLength: 1, maxLength: 64}
+        originalName: {type: string, minLength: 1, maxLength: 512}
+        mediaType: {type: string, minLength: 1, maxLength: 255}
+        sizeBytes: {type: integer, format: int64, minimum: 1}
+        contentSha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
     DiagnosisTaskResponse:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"

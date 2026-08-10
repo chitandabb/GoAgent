@@ -15,6 +15,7 @@
 
 - `answer_correctness`：候选答案覆盖黄金事实且没有事实错误；
 - `faithfulness`：答案中的可验证断言能被给定证据直接支持；
+- `answer_relevance`：答案紧扣问题，不加入无关背景、风险、参数或建议；
 - `citation_correctness`：引用来源被允许、定位存在并真正支持相邻断言；
 - `refusal_correctness`：无答案时正确拒答，有答案时没有无故拒答。
 
@@ -23,10 +24,11 @@
 只输出一个合法 JSON 对象，不要输出 Markdown、代码围栏或额外说明。JSON 必须符合以下结构：
 
 {
-  "schema_version": "rag-judge-v1",
+  "schema_version": "rag-judge-v2",
   "verdict": "pass",
   "answer_correctness": {"score": 4, "reason": ""},
   "faithfulness": {"score": 4, "reason": ""},
+  "answer_relevance": {"score": 4, "reason": ""},
   "citation_correctness": {"score": 4, "reason": ""},
   "refusal_correctness": {"score": 4, "reason": ""},
   "unsupported_claims": [{"claim": "", "reason": ""}],

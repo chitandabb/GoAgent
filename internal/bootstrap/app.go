@@ -27,7 +27,6 @@ import (
 
 type App struct {
 	server       *stdhttp.Server
-	agent        *agentRuntime
 	db           *gorm.DB
 	dbClose      func() error
 	redis        *rediscli.Client
@@ -98,22 +97,28 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation service: %w", err)
 	}
-	conversationTimeout := time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond
-	if conversationTimeout == 0 {
-		conversationTimeout = time.Minute
-	}
-	if _, err := conversationService.WithTurnLease(conversationTimeout + 30*time.Second); err != nil {
-		closeDependencies()
-		return nil, fmt.Errorf("configure conversation turn lease: %w", err)
-	}
 	conversationRoutes, err := httptransport.NewConversationRoutes(
-		conversationService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+		ctx, conversationService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
 	)
 	if err != nil {
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation routes: %w", err)
 	}
 	registrars = append(registrars, conversationRoutes)
+	attachmentService, err := buildAttachmentService(cfg, deps.db, deps.objectStore, deps.objectStoreError)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build attachment service: %w", err)
+	}
+	attachmentRoutes, err := httptransport.NewAttachmentRoutes(
+		attachmentService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+		cfg.Knowledge.MaxUploadBytes,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build attachment routes: %w", err)
+	}
+	registrars = append(registrars, attachmentRoutes)
 	knowledgeRepository := platformpostgres.NewKnowledgeRepository(deps.db)
 	knowledgeObjectStore := deps.objectStore
 	if knowledgeObjectStore == nil {
@@ -146,6 +151,21 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		return nil, fmt.Errorf("build knowledge ingestion task routes: %w", err)
 	}
 	registrars = append(registrars, knowledgeTaskRoutes)
+	knowledgeCitationService, err := knowledge.NewCitationService(
+		platformpostgres.NewKnowledgeCitationRepository(deps.db),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge citation service: %w", err)
+	}
+	knowledgeCitationRoutes, err := httptransport.NewKnowledgeCitationRoutes(
+		knowledgeCitationService, authRoutes.RequireAuthentication(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build knowledge citation routes: %w", err)
+	}
+	registrars = append(registrars, knowledgeCitationRoutes)
 	diagnosisTaskRecoveryRepository := platformpostgres.NewDiagnosisTaskRecoveryRepository(deps.db)
 	diagnosisTaskRecoveryService, err := diagnosis.NewTaskRecoveryService(diagnosisTaskRecoveryRepository)
 	if err != nil {
@@ -256,28 +276,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		}
 	}
 
-	runtimeBuilders := defaultAgentRuntimeBuilders()
-	runtimeBuilders.conversationCreator = conversationService
-	if diagnosisTaskService != nil {
-		runtimeBuilders.conversationTaskStatus = conversationService
-	}
-	agentRuntime, err := buildAgentRuntime(
-		ctx, cfg, externalCaseService, deps.sqlServer, deps.db, log.Named("agent"), runtimeBuilders,
-	)
-	if err != nil {
-		closeDependencies()
-		return nil, err
-	}
-	if agentRuntime != nil && agentRuntime.conversation != nil {
-		if _, err := conversationService.WithAgentResponder(agentRuntime.conversation); err != nil {
-			_ = agentRuntime.close()
-			closeDependencies()
-			return nil, fmt.Errorf("wire conversation Agent responder: %w", err)
-		}
-	}
-
 	app := &App{
-		agent:        agentRuntime,
 		db:           deps.db,
 		dbClose:      deps.dbClose,
 		redis:        deps.redis,
@@ -320,10 +319,7 @@ func (a *App) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownWait)
 	defer cancel()
 	shutdownErr := a.server.Shutdown(ctx)
-	var agentErr, redisErr, objectStoreErr, sqlServerErr error
-	if a.agent != nil {
-		agentErr = a.agent.close()
-	}
+	var redisErr, objectStoreErr, sqlServerErr error
 	if a.redis != nil {
 		redisErr = a.redis.Close()
 	}
@@ -334,7 +330,7 @@ func (a *App) Close() error {
 		sqlServerErr = a.sqlServer.Close()
 	}
 	dbErr := a.dbClose()
-	err := errors.Join(shutdownErr, agentErr, redisErr, objectStoreErr, sqlServerErr, dbErr)
+	err := errors.Join(shutdownErr, redisErr, objectStoreErr, sqlServerErr, dbErr)
 	if err != nil {
 		a.logger.Error("application shutdown failed", zap.Error(err))
 		return err

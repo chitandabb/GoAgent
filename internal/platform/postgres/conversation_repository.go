@@ -2,11 +2,13 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
@@ -21,6 +23,7 @@ type ConversationRepository struct {
 }
 
 var _ conversation.Repository = (*ConversationRepository)(nil)
+var _ conversation.AsyncRepository = (*ConversationRepository)(nil)
 
 func NewConversationRepository(db *gorm.DB) *ConversationRepository {
 	return &ConversationRepository{db: db}
@@ -317,8 +320,8 @@ FOR UPDATE`, input.Message.ConversationID, userID).Scan(&owner)
 		var existing conversationTurnRecord
 		query = tx.Raw(`
 SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
-       user_message_id, assistant_message_id, attempt_count, lease_expires_at,
-       completed_at, created_at, updated_at
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
 FROM conversation_turns
 WHERE conversation_id = ? AND idempotency_key = ?
 FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKey)).Scan(&existing)
@@ -344,9 +347,11 @@ FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKe
 				}
 				result = conversation.BeginTurnResult{
 					TurnID: existing.ID, UserMessage: userMessage, AssistantMessage: &assistantMessage,
-					Created: false,
+					Status: conversation.TurnStatusCompleted, Created: false,
 				}
 				return nil
+			case conversation.TurnStatusQueued:
+				return conversation.ErrTurnInProgress
 			case conversation.TurnStatusRunning:
 				if existing.LeaseExpiresAt != nil && existing.LeaseExpiresAt.After(startedAt) {
 					return conversation.ErrTurnInProgress
@@ -363,7 +368,16 @@ FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKe
 				if err := reopenTurn(tx, existing.ID, existing.AttemptCount+1, startedAt, leaseExpiresAt); err != nil {
 					return err
 				}
-				result = conversation.BeginTurnResult{TurnID: existing.ID, UserMessage: userMessage, Created: false}
+				if err := appendConversationTurnEvent(tx, existing.ID, input.Message.ConversationID, conversation.TurnEventRunning, map[string]any{
+					"attemptCount": existing.AttemptCount + 1,
+					"reclaimed":    true,
+				}, startedAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage,
+					Status: conversation.TurnStatusRunning, Created: false,
+				}
 				return nil
 			case conversation.TurnStatusFailed:
 				if err := ensureNoRunningTurn(tx, input.Message.ConversationID, existing.ID, startedAt); err != nil {
@@ -375,7 +389,15 @@ FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKe
 				if err := reopenTurn(tx, existing.ID, existing.AttemptCount+1, startedAt, leaseExpiresAt); err != nil {
 					return err
 				}
-				result = conversation.BeginTurnResult{TurnID: existing.ID, UserMessage: userMessage, Created: false}
+				if err := appendConversationTurnEvent(tx, existing.ID, input.Message.ConversationID, conversation.TurnEventRunning, map[string]any{
+					"attemptCount": existing.AttemptCount + 1,
+				}, startedAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage,
+					Status: conversation.TurnStatusRunning, Created: false,
+				}
 				return nil
 			default:
 				return errors.New("conversation turn has an invalid status")
@@ -389,8 +411,8 @@ FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKe
 		query = tx.Raw(`
 SELECT EXISTS(
     SELECT 1 FROM conversation_turns
-    WHERE conversation_id = ? AND status = ? AND lease_expires_at > ?
-)`, input.Message.ConversationID, conversation.TurnStatusRunning, startedAt).Scan(&active)
+    WHERE conversation_id = ? AND status IN (?, ?)
+)`, input.Message.ConversationID, conversation.TurnStatusQueued, conversation.TurnStatusRunning).Scan(&active)
 		if query.Error != nil {
 			return TranslateError(query.Error)
 		}
@@ -421,7 +443,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
 		if query.Error != nil {
 			return TranslateError(query.Error)
 		}
-		result = conversation.BeginTurnResult{TurnID: turnID, UserMessage: message, Created: true}
+		if err := appendConversationTurnEvent(tx, turnID, input.Message.ConversationID, conversation.TurnEventRunning, map[string]any{
+			"attemptCount": 1,
+		}, startedAt); err != nil {
+			return err
+		}
+		result = conversation.BeginTurnResult{
+			TurnID: turnID, UserMessage: message,
+			Status: conversation.TurnStatusRunning, Created: true,
+		}
 		return nil
 	})
 	if err != nil {
@@ -430,17 +460,636 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
 	return result, nil
 }
 
-func (r *ConversationRepository) CompleteTurn(
+// AcceptTurn is the asynchronous counterpart of BeginTurn. The transaction
+// owns the user message, queued turn and execute event together, so a relay
+// crash cannot leave a turn accepted without a durable delivery intent.
+func (r *ConversationRepository) AcceptTurn(
+	ctx context.Context,
+	userID uuid.UUID,
+	input conversation.BeginTurnInput,
+) (conversation.BeginTurnResult, error) {
+	if r == nil || r.db == nil {
+		return conversation.BeginTurnResult{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || input.Message.ConversationID == uuid.Nil ||
+		input.Message.Role != conversation.MessageRoleUser ||
+		strings.TrimSpace(input.IdempotencyKey) == "" || strings.TrimSpace(input.RequestFingerprint) == "" ||
+		input.StartedAt.IsZero() || input.ExecutionMode != conversation.TurnExecutionAsynchronous ||
+		input.CorrelationID == uuid.Nil {
+		return conversation.BeginTurnResult{}, conversation.ErrInvalidMessage
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(input.IdempotencyKey)); err != nil {
+		return conversation.BeginTurnResult{}, conversation.ErrInvalidMessage
+	}
+	acceptedAt := input.StartedAt.UTC()
+	var result conversation.BeginTurnResult
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		if err := lockConversation(tx, userID, input.Message.ConversationID); err != nil {
+			return err
+		}
+
+		var existing conversationTurnRecord
+		query := tx.Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
+FROM conversation_turns
+WHERE conversation_id = ? AND idempotency_key = ?
+FOR UPDATE`, input.Message.ConversationID, strings.TrimSpace(input.IdempotencyKey)).Scan(&existing)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 1 {
+			if existing.RequestFingerprint != strings.TrimSpace(input.RequestFingerprint) {
+				return conversation.ErrTurnIdempotencyConflict
+			}
+			userMessage, err := loadConversationMessage(tx, userID, input.Message.ConversationID, existing.UserMessageID)
+			if err != nil {
+				return err
+			}
+			switch existing.Status {
+			case conversation.TurnStatusCompleted:
+				if existing.AssistantMessageID == nil {
+					return errors.New("completed conversation turn has no assistant message")
+				}
+				assistantMessage, err := loadConversationMessage(tx, userID, input.Message.ConversationID, *existing.AssistantMessageID)
+				if err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage, AssistantMessage: &assistantMessage,
+					Status: conversation.TurnStatusCompleted,
+				}
+				return nil
+			case conversation.TurnStatusQueued:
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage, Status: existing.Status,
+				}
+				return nil
+			case conversation.TurnStatusRunning:
+				if existing.LeaseExpiresAt != nil && existing.LeaseExpiresAt.After(acceptedAt) {
+					result = conversation.BeginTurnResult{
+						TurnID: existing.ID, UserMessage: userMessage, Status: existing.Status,
+					}
+					return nil
+				}
+				if err := markTurnFailed(tx, existing.ID, acceptedAt); err != nil {
+					return err
+				}
+				if err := ensureNoActiveTurn(tx, input.Message.ConversationID, existing.ID, acceptedAt); err != nil {
+					return err
+				}
+				if err := ensureLatestUserMessage(tx, input.Message.ConversationID, existing.UserMessageID); err != nil {
+					return err
+				}
+				if err := reopenQueuedTurn(tx, existing.ID, acceptedAt); err != nil {
+					return err
+				}
+				if err := appendConversationTurnEvent(tx, existing.ID, input.Message.ConversationID, conversation.TurnEventQueued, map[string]any{
+					"requeued": true,
+				}, acceptedAt); err != nil {
+					return err
+				}
+				if err := appendConversationTurnOutbox(tx, existing.ID, input.CorrelationID, acceptedAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage,
+					Status: conversation.TurnStatusQueued,
+				}
+				return nil
+			case conversation.TurnStatusFailed:
+				if err := ensureNoActiveTurn(tx, input.Message.ConversationID, existing.ID, acceptedAt); err != nil {
+					return err
+				}
+				if err := ensureLatestUserMessage(tx, input.Message.ConversationID, existing.UserMessageID); err != nil {
+					return err
+				}
+				if err := reopenQueuedTurn(tx, existing.ID, acceptedAt); err != nil {
+					return err
+				}
+				if err := appendConversationTurnEvent(tx, existing.ID, input.Message.ConversationID, conversation.TurnEventQueued, map[string]any{
+					"requeued": true,
+				}, acceptedAt); err != nil {
+					return err
+				}
+				if err := appendConversationTurnOutbox(tx, existing.ID, input.CorrelationID, acceptedAt); err != nil {
+					return err
+				}
+				result = conversation.BeginTurnResult{
+					TurnID: existing.ID, UserMessage: userMessage,
+					Status: conversation.TurnStatusQueued,
+				}
+				return nil
+			default:
+				return errors.New("conversation turn has an invalid status")
+			}
+		}
+
+		if err := expireRunningTurns(tx, input.Message.ConversationID, acceptedAt); err != nil {
+			return err
+		}
+		if err := ensureNoActiveTurn(tx, input.Message.ConversationID, uuid.Nil, acceptedAt); err != nil {
+			return err
+		}
+		messageID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate conversation message id: %w", err)
+		}
+		message, err := insertConversationMessage(tx, userID, input.Message, messageID, acceptedAt)
+		if err != nil {
+			return err
+		}
+		turnID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate conversation turn id: %w", err)
+		}
+		query = tx.Exec(`
+INSERT INTO conversation_turns
+    (id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+     user_message_id, attempt_count, lease_owner, lease_expires_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)`,
+			turnID, input.Message.ConversationID, userID, strings.TrimSpace(input.IdempotencyKey),
+			strings.TrimSpace(input.RequestFingerprint), conversation.TurnStatusQueued, messageID,
+			acceptedAt, acceptedAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if err := appendConversationTurnEvent(tx, turnID, input.Message.ConversationID, conversation.TurnEventQueued, map[string]any{}, acceptedAt); err != nil {
+			return err
+		}
+		if err := appendConversationTurnOutbox(tx, turnID, input.CorrelationID, acceptedAt); err != nil {
+			return err
+		}
+		result = conversation.BeginTurnResult{
+			TurnID: turnID, UserMessage: message, Status: conversation.TurnStatusQueued, Created: true,
+		}
+		return nil
+	})
+	if err != nil {
+		return conversation.BeginTurnResult{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+// ClaimTurn fences a worker before loading the durable Agent input. The turn
+// row is locked while queued, failed, or expired-running state is converted to
+// a new running attempt.
+func (r *ConversationRepository) ClaimTurn(
+	ctx context.Context,
+	turnID uuid.UUID,
+	workerID string,
+	claimedAt, leaseExpiresAt time.Time,
+) (conversation.TurnExecution, error) {
+	if r == nil || r.db == nil {
+		return conversation.TurnExecution{}, errors.New("conversation repository is unavailable")
+	}
+	workerID = strings.TrimSpace(workerID)
+	claimedAt = claimedAt.UTC()
+	leaseExpiresAt = leaseExpiresAt.UTC()
+	if turnID == uuid.Nil || workerID == "" || len(workerID) > 128 || claimedAt.IsZero() || !leaseExpiresAt.After(claimedAt) {
+		return conversation.TurnExecution{}, conversation.ErrInvalidMessage
+	}
+	var execution conversation.TurnExecution
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var turn conversationTurnRecord
+		query := tx.Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
+FROM conversation_turns
+WHERE id = ?
+FOR UPDATE`, turnID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		switch turn.Status {
+		case conversation.TurnStatusCompleted:
+			return conversation.ErrTurnAlreadyCompleted
+		case conversation.TurnStatusRunning:
+			if turn.LeaseExpiresAt != nil && turn.LeaseExpiresAt.After(claimedAt) {
+				return conversation.ErrTurnInProgress
+			}
+		case conversation.TurnStatusQueued:
+			if turn.RetryAt != nil && turn.RetryAt.After(claimedAt) {
+				return conversation.ErrTurnInProgress
+			}
+		case conversation.TurnStatusFailed:
+		default:
+			return errors.New("conversation turn has an invalid status")
+		}
+		if err := ensureNoActiveTurn(tx, turn.ConversationID, turn.ID, claimedAt); err != nil {
+			return err
+		}
+		if err := ensureLatestUserMessage(tx, turn.ConversationID, turn.UserMessageID); err != nil {
+			return err
+		}
+		var user struct {
+			Role   auth.Role       `gorm:"column:role"`
+			Status auth.UserStatus `gorm:"column:status"`
+		}
+		query = tx.Raw(`SELECT role, status FROM users WHERE id = ?`, turn.UserID).Scan(&user)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if !user.Status.Valid() || !user.Role.Valid() {
+			return errors.New("conversation turn actor is unavailable")
+		}
+		userMessage, err := loadConversationMessage(tx, turn.UserID, turn.ConversationID, turn.UserMessageID)
+		if err != nil {
+			return err
+		}
+		history, err := loadConversationHistory(tx, turn.UserID, turn.ConversationID, userMessage.Seq)
+		if err != nil {
+			return err
+		}
+		query = tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_owner = ?, lease_expires_at = ?, attempt_count = attempt_count + 1,
+    failure_code = NULL, retry_at = NULL, updated_at = ?
+WHERE id = ? AND status = ?`,
+			conversation.TurnStatusRunning, workerID, leaseExpiresAt, claimedAt, turnID, turn.Status)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.ErrTurnLeaseLost
+		}
+		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventRunning, map[string]any{
+			"attemptCount": turn.AttemptCount + 1,
+			"reclaimed":    turn.Status == conversation.TurnStatusRunning,
+		}, claimedAt); err != nil {
+			return err
+		}
+		var currentConversation conversationRecord
+		query = tx.Raw(`
+SELECT id, user_id, title, status, last_message_at, created_at, updated_at
+FROM conversations
+WHERE id = ? AND user_id = ?`, turn.ConversationID, turn.UserID).Scan(&currentConversation)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		execution = conversation.TurnExecution{
+			TurnID:       turnID,
+			Turn:         conversation.ConversationTurn{UserMessage: userMessage},
+			Conversation: conversationFromRecord(currentConversation),
+			Actor:        conversation.Actor{UserID: turn.UserID, IsAdmin: user.Role == auth.RoleAdmin},
+			History:      history, AttemptCount: turn.AttemptCount + 1,
+		}
+		return nil
+	})
+	if err != nil {
+		return conversation.TurnExecution{}, TranslateError(err)
+	}
+	return execution, nil
+}
+
+func (r *ConversationRepository) RenewTurnExecution(
+	ctx context.Context,
+	turnID uuid.UUID,
+	workerID string,
+	renewedAt, leaseExpiresAt time.Time,
+) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("conversation repository is unavailable")
+	}
+	workerID = strings.TrimSpace(workerID)
+	renewedAt = renewedAt.UTC()
+	leaseExpiresAt = leaseExpiresAt.UTC()
+	if turnID == uuid.Nil || workerID == "" || len(workerID) > 128 || renewedAt.IsZero() || !leaseExpiresAt.After(renewedAt) {
+		return false, conversation.ErrInvalidMessage
+	}
+	query := ResolveDB(ctx, r.db).Exec(`
+UPDATE conversation_turns
+SET lease_expires_at = ?, updated_at = ?
+WHERE id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?`,
+		leaseExpiresAt, renewedAt, turnID, conversation.TurnStatusRunning, workerID, renewedAt)
+	if query.Error != nil {
+		return false, TranslateError(query.Error)
+	}
+	return query.RowsAffected == 1, nil
+}
+
+func (r *ConversationRepository) CompleteTurnExecution(
 	ctx context.Context,
 	userID, turnID uuid.UUID,
-	assistantContent string,
+	workerID string,
+	response conversation.AgentResponse,
 	completedAt time.Time,
 ) (conversation.ConversationTurn, error) {
 	if r == nil || r.db == nil {
 		return conversation.ConversationTurn{}, errors.New("conversation repository is unavailable")
 	}
-	assistantContent = strings.TrimSpace(assistantContent)
-	if userID == uuid.Nil || turnID == uuid.Nil || assistantContent == "" || len([]rune(assistantContent)) > conversation.MaxContentRunes {
+	workerID = strings.TrimSpace(workerID)
+	response.Content = strings.TrimSpace(response.Content)
+	completedAt = completedAt.UTC()
+	if userID == uuid.Nil || turnID == uuid.Nil || workerID == "" || response.Validate() != nil || completedAt.IsZero() {
+		return conversation.ConversationTurn{}, conversation.ErrInvalidMessage
+	}
+	var result conversation.ConversationTurn
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var turn conversationTurnRecord
+		query := tx.Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
+FROM conversation_turns
+WHERE id = ? AND user_id = ?
+FOR UPDATE`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if turn.Status == conversation.TurnStatusCompleted {
+			if turn.AssistantMessageID == nil {
+				return errors.New("completed conversation turn has no assistant message")
+			}
+			userMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, turn.UserMessageID)
+			if err != nil {
+				return err
+			}
+			assistantMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, *turn.AssistantMessageID)
+			if err != nil {
+				return err
+			}
+			result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
+			return nil
+		}
+		if turn.Status != conversation.TurnStatusRunning || turn.LeaseOwner == nil || *turn.LeaseOwner != workerID ||
+			turn.LeaseExpiresAt == nil || !turn.LeaseExpiresAt.After(completedAt) {
+			return conversation.ErrTurnLeaseLost
+		}
+		if err := ensureLatestUserMessage(tx, turn.ConversationID, turn.UserMessageID); err != nil {
+			return err
+		}
+		userMessage, err := loadConversationMessage(tx, userID, turn.ConversationID, turn.UserMessageID)
+		if err != nil {
+			return err
+		}
+		assistantMessageID, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("generate assistant message id: %w", err)
+		}
+		assistantMessage, err := insertConversationMessage(tx, userID, conversation.AppendMessageInput{
+			ConversationID: turn.ConversationID, Role: conversation.MessageRoleAssistant,
+			Content: response.Content, TaskReferences: createdTaskReferences(userMessage),
+			Citations: response.Citations,
+		}, assistantMessageID, completedAt)
+		if err != nil {
+			return err
+		}
+		if err := insertConversationRunObservation(tx, turnID, response.RunObservation, "", completedAt); err != nil {
+			return err
+		}
+		query = tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, assistant_message_id = ?, lease_owner = NULL, lease_expires_at = NULL,
+    completed_at = ?, failure_code = NULL, retry_at = NULL, updated_at = ?
+WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?`,
+			conversation.TurnStatusCompleted, assistantMessageID, completedAt, completedAt,
+			turnID, userID, conversation.TurnStatusRunning, workerID, completedAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.ErrTurnLeaseLost
+		}
+		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
+			"assistantMessageId": assistantMessageID.String(),
+			"citationCount":      len(response.Citations),
+		}, completedAt); err != nil {
+			return err
+		}
+		result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
+		return nil
+	})
+	if err != nil {
+		return conversation.ConversationTurn{}, TranslateError(err)
+	}
+	return result, nil
+}
+
+func (r *ConversationRepository) FailTurnExecution(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	workerID string,
+	failure *conversation.AgentRunFailureRecord,
+	failedAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("conversation repository is unavailable")
+	}
+	workerID = strings.TrimSpace(workerID)
+	failedAt = failedAt.UTC()
+	if userID == uuid.Nil || turnID == uuid.Nil || workerID == "" || failedAt.IsZero() ||
+		(failure != nil && failure.Validate() != nil) {
+		return conversation.ErrInvalidMessage
+	}
+	failureCode := "agent_execution_failed"
+	if failure != nil {
+		failureCode = failure.ErrorType
+	}
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		query := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, failure_code = ?, retry_at = NULL, updated_at = ?
+WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?`,
+			conversation.TurnStatusFailed, failureCode, failedAt, turnID, userID,
+			conversation.TurnStatusRunning, workerID, failedAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.ErrTurnLeaseLost
+		}
+		var turn struct {
+			ConversationID uuid.UUID `gorm:"column:conversation_id"`
+		}
+		query = tx.Raw(`SELECT conversation_id FROM conversation_turns WHERE id = ? AND user_id = ?`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if failure != nil {
+			if err := insertConversationRunObservation(
+				tx, turnID, &failure.Observation, failure.ErrorType, failedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventFailed, map[string]any{
+			"failureCode": failureCode,
+			"retryable":   false,
+		}, failedAt)
+	})
+	if err != nil {
+		return TranslateError(err)
+	}
+	return nil
+}
+
+func (r *ConversationRepository) QueueTurnRetry(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	workerID string,
+	scheduledAt, retryAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("conversation repository is unavailable")
+	}
+	workerID = strings.TrimSpace(workerID)
+	scheduledAt = scheduledAt.UTC()
+	retryAt = retryAt.UTC()
+	if userID == uuid.Nil || turnID == uuid.Nil || workerID == "" || scheduledAt.IsZero() || !retryAt.After(scheduledAt) {
+		return conversation.ErrInvalidMessage
+	}
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		query := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL,
+    failure_code = ?, retry_at = ?, updated_at = ?
+WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expires_at > ?`,
+			conversation.TurnStatusQueued, "agent_execution_failed", retryAt, scheduledAt,
+			turnID, userID, conversation.TurnStatusRunning, workerID, scheduledAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.ErrTurnLeaseLost
+		}
+		var turn struct {
+			ConversationID uuid.UUID `gorm:"column:conversation_id"`
+			AttemptCount   int       `gorm:"column:attempt_count"`
+		}
+		query = tx.Raw(`SELECT conversation_id, attempt_count FROM conversation_turns WHERE id = ? AND user_id = ?`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		return appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventRetryScheduled, map[string]any{
+			"attemptCount":      turn.AttemptCount,
+			"retryAfterSeconds": int64(retryAt.Sub(scheduledAt) / time.Second),
+			"failureCode":       "agent_execution_failed",
+		}, scheduledAt)
+	})
+	if err != nil {
+		return TranslateError(err)
+	}
+	return nil
+}
+
+func reopenQueuedTurn(tx *gorm.DB, turnID uuid.UUID, queuedAt time.Time) error {
+	result := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, assistant_message_id = NULL,
+    completed_at = NULL, failure_code = NULL, retry_at = NULL, updated_at = ?
+WHERE id = ? AND status = ?`,
+		conversation.TurnStatusQueued, queuedAt, turnID, conversation.TurnStatusFailed)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("conversation turn could not be requeued")
+	}
+	// The run ledger represents the current terminal outcome of a Turn. A
+	// deliberate replay reopens that same Turn, so its previous failed attempt
+	// must be removed atomically before a later completion/failure can replace it.
+	result = tx.Exec(`DELETE FROM conversation_turn_run_observations WHERE turn_id = ?`, turnID)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	return nil
+}
+
+func appendConversationTurnOutbox(tx *gorm.DB, turnID, correlationID uuid.UUID, createdAt time.Time) error {
+	if turnID == uuid.Nil || correlationID == uuid.Nil {
+		return conversation.ErrInvalidMessage
+	}
+	payload, err := json.Marshal(map[string]string{"turnId": turnID.String()})
+	if err != nil {
+		return fmt.Errorf("marshal conversation turn outbox payload: %w", err)
+	}
+	outboxID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate conversation turn outbox id: %w", err)
+	}
+	result := tx.Exec(`
+INSERT INTO outbox_events
+    (id, event_type, aggregate_type, aggregate_id, correlation_id, causation_id,
+     payload, payload_schema_version, attempt_count, available_at, requeue_count, created_at)
+VALUES (?, 'conversation.turn.execute', 'conversation_turn', ?, ?, NULL, ?, 1, 0, ?, 0, ?)`,
+		outboxID, turnID, correlationID, payload, createdAt.UTC(), createdAt.UTC())
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	return nil
+}
+
+func appendConversationTurnEvent(
+	tx *gorm.DB,
+	turnID, conversationID uuid.UUID,
+	eventType conversation.TurnEventType,
+	payload map[string]any,
+	createdAt time.Time,
+) error {
+	if tx == nil || turnID == uuid.Nil || conversationID == uuid.Nil || !eventType.Valid() || createdAt.IsZero() {
+		return conversation.ErrInvalidMessage
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal conversation turn event payload: %w", err)
+	}
+	var nextSeq int64
+	query := tx.Raw(`
+SELECT COALESCE(MAX(seq), 0) + 1
+FROM conversation_turn_events
+WHERE turn_id = ?`, turnID).Scan(&nextSeq)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if nextSeq < 1 {
+		return errors.New("conversation turn event sequence is invalid")
+	}
+	query = tx.Exec(`
+INSERT INTO conversation_turn_events
+    (turn_id, conversation_id, seq, event_type, payload, payload_schema_version, created_at)
+VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		turnID, conversationID, nextSeq, eventType, encoded, createdAt.UTC())
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	return nil
+}
+
+func (r *ConversationRepository) CompleteTurn(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	response conversation.AgentResponse,
+	completedAt time.Time,
+) (conversation.ConversationTurn, error) {
+	if r == nil || r.db == nil {
+		return conversation.ConversationTurn{}, errors.New("conversation repository is unavailable")
+	}
+	response.Content = strings.TrimSpace(response.Content)
+	if userID == uuid.Nil || turnID == uuid.Nil || response.Validate() != nil {
 		return conversation.ConversationTurn{}, conversation.ErrInvalidMessage
 	}
 	completedAt = completedAt.UTC()
@@ -465,8 +1114,8 @@ WHERE id = ? AND user_id = ?`, turnID, userID).Scan(&turnOwner)
 		var turn conversationTurnRecord
 		query = tx.Raw(`
 SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
-       user_message_id, assistant_message_id, attempt_count, lease_expires_at,
-       completed_at, created_at, updated_at
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
 FROM conversation_turns
 WHERE id = ? AND user_id = ?
 FOR UPDATE`, turnID, userID).Scan(&turn)
@@ -507,15 +1156,19 @@ FOR UPDATE`, turnID, userID).Scan(&turn)
 		}
 		assistantMessage, err := insertConversationMessage(tx, userID, conversation.AppendMessageInput{
 			ConversationID: turn.ConversationID, Role: conversation.MessageRoleAssistant,
-			Content: assistantContent, TaskReferences: createdTaskReferences(userMessage),
+			Content: response.Content, TaskReferences: createdTaskReferences(userMessage),
+			Citations: response.Citations,
 		}, assistantMessageID, completedAt)
 		if err != nil {
 			return err
 		}
+		if err := insertConversationRunObservation(tx, turnID, response.RunObservation, "", completedAt); err != nil {
+			return err
+		}
 		query = tx.Exec(`
 UPDATE conversation_turns
-SET status = ?, assistant_message_id = ?, lease_expires_at = NULL,
-    completed_at = ?, updated_at = ?
+SET status = ?, assistant_message_id = ?, lease_owner = NULL, lease_expires_at = NULL,
+    completed_at = ?, failure_code = NULL, retry_at = NULL, updated_at = ?
 WHERE id = ? AND user_id = ? AND status = ?`,
 			conversation.TurnStatusCompleted, assistantMessageID, completedAt, completedAt,
 			turnID, userID, conversation.TurnStatusRunning)
@@ -524,6 +1177,12 @@ WHERE id = ? AND user_id = ? AND status = ?`,
 		}
 		if query.RowsAffected != 1 {
 			return conversation.ErrTurnLeaseLost
+		}
+		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
+			"assistantMessageId": assistantMessageID.String(),
+			"citationCount":      len(response.Citations),
+		}, completedAt); err != nil {
+			return err
 		}
 		result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
 		return nil
@@ -546,18 +1205,40 @@ func (r *ConversationRepository) FailTurn(
 		return conversation.ErrInvalidMessage
 	}
 	failedAt = failedAt.UTC()
-	query := ResolveDB(ctx, r.db).Exec(`
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		query := tx.Exec(`
 UPDATE conversation_turns
-SET status = ?, lease_expires_at = NULL, updated_at = ?
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, failure_code = ?, retry_at = NULL, updated_at = ?
 WHERE id = ? AND user_id = ? AND status = ?`,
-		conversation.TurnStatusFailed, failedAt, turnID, userID, conversation.TurnStatusRunning)
-	if query.Error != nil {
-		return TranslateError(query.Error)
+			conversation.TurnStatusFailed, "agent_execution_failed", failedAt, turnID, userID, conversation.TurnStatusRunning)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return nil
+		}
+		if query.RowsAffected != 1 {
+			return errors.New("unexpected conversation turn failure update count")
+		}
+		var turn struct {
+			ConversationID uuid.UUID `gorm:"column:conversation_id"`
+		}
+		query = tx.Raw(`SELECT conversation_id FROM conversation_turns WHERE id = ? AND user_id = ?`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		return appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventFailed, map[string]any{
+			"failureCode": "agent_execution_failed",
+			"retryable":   false,
+		}, failedAt)
+	})
+	if err != nil {
+		return TranslateError(err)
 	}
-	if query.RowsAffected == 1 || query.RowsAffected == 0 {
-		return nil
-	}
-	return errors.New("unexpected conversation turn failure update count")
+	return nil
 }
 
 func lockConversation(tx *gorm.DB, userID, conversationID uuid.UUID) error {
@@ -585,9 +1266,9 @@ FOR UPDATE`, conversationID, userID).Scan(&owner)
 func expireRunningTurns(tx *gorm.DB, conversationID uuid.UUID, now time.Time) error {
 	result := tx.Exec(`
 UPDATE conversation_turns
-SET status = ?, lease_expires_at = NULL, updated_at = ?
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, failure_code = ?, retry_at = NULL, updated_at = ?
 WHERE conversation_id = ? AND status = ? AND lease_expires_at <= ?`,
-		conversation.TurnStatusFailed, now, conversationID, conversation.TurnStatusRunning, now)
+		conversation.TurnStatusFailed, "agent_execution_failed", now, conversationID, conversation.TurnStatusRunning, now)
 	if result.Error != nil {
 		return TranslateError(result.Error)
 	}
@@ -595,15 +1276,19 @@ WHERE conversation_id = ? AND status = ? AND lease_expires_at <= ?`,
 }
 
 func ensureNoRunningTurn(tx *gorm.DB, conversationID, excludedTurnID uuid.UUID, now time.Time) error {
-	if err := expireRunningTurns(tx, conversationID, now); err != nil {
+	return ensureNoActiveTurn(tx, conversationID, excludedTurnID, now)
+}
+
+func ensureNoActiveTurn(tx *gorm.DB, conversationID, excludedTurnID uuid.UUID, now time.Time) error {
+	if err := expireOtherRunningTurns(tx, conversationID, excludedTurnID, now); err != nil {
 		return err
 	}
 	var active bool
 	query := tx.Raw(`
 SELECT EXISTS(
     SELECT 1 FROM conversation_turns
-    WHERE conversation_id = ? AND id <> ? AND status = ? AND lease_expires_at > ?
-)`, conversationID, excludedTurnID, conversation.TurnStatusRunning, now).Scan(&active)
+    WHERE conversation_id = ? AND id <> ? AND status IN (?, ?)
+)`, conversationID, excludedTurnID, conversation.TurnStatusQueued, conversation.TurnStatusRunning).Scan(&active)
 	if query.Error != nil {
 		return TranslateError(query.Error)
 	}
@@ -613,12 +1298,29 @@ SELECT EXISTS(
 	return nil
 }
 
+func expireOtherRunningTurns(
+	tx *gorm.DB,
+	conversationID, excludedTurnID uuid.UUID,
+	now time.Time,
+) error {
+	result := tx.Exec(`
+UPDATE conversation_turns
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, failure_code = ?, retry_at = NULL, updated_at = ?
+WHERE conversation_id = ? AND id <> ? AND status = ? AND lease_expires_at <= ?`,
+		conversation.TurnStatusFailed, "agent_execution_failed", now,
+		conversationID, excludedTurnID, conversation.TurnStatusRunning, now)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	return nil
+}
+
 func markTurnFailed(tx *gorm.DB, turnID uuid.UUID, failedAt time.Time) error {
 	result := tx.Exec(`
 UPDATE conversation_turns
-SET status = ?, lease_expires_at = NULL, updated_at = ?
+SET status = ?, lease_owner = NULL, lease_expires_at = NULL, failure_code = ?, retry_at = NULL, updated_at = ?
 WHERE id = ? AND status = ?`,
-		conversation.TurnStatusFailed, failedAt, turnID, conversation.TurnStatusRunning)
+		conversation.TurnStatusFailed, "agent_execution_failed", failedAt, turnID, conversation.TurnStatusRunning)
 	if result.Error != nil {
 		return TranslateError(result.Error)
 	}
@@ -628,7 +1330,7 @@ WHERE id = ? AND status = ?`,
 func reopenTurn(tx *gorm.DB, turnID uuid.UUID, attemptCount int, startedAt, leaseExpiresAt time.Time) error {
 	result := tx.Exec(`
 UPDATE conversation_turns
-SET status = ?, attempt_count = ?, lease_expires_at = ?, updated_at = ?
+SET status = ?, attempt_count = ?, lease_owner = NULL, lease_expires_at = ?, failure_code = NULL, retry_at = NULL, updated_at = ?
 WHERE id = ? AND status = ?`,
 		conversation.TurnStatusRunning, attemptCount, leaseExpiresAt, startedAt, turnID, conversation.TurnStatusFailed)
 	if result.Error != nil {
@@ -711,6 +1413,33 @@ WHERE id = ? AND created_by = ?`, id, ref.Kind, createdAt, ref.TaskID, userID)
 			return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 		}
 	}
+	for position, ref := range input.Attachments {
+		query = tx.Exec(`
+INSERT INTO conversation_message_attachments
+    (message_id, conversation_id, attachment_id, position, purpose, created_at)
+SELECT ?, ?, id, ?, ?, ?
+FROM attachments
+WHERE id = ? AND owner_user_id = ? AND processing_status = 'uploaded'
+  AND (scope = 'personal' OR (scope = 'session' AND conversation_id = ?))`,
+			id, input.ConversationID, position, ref.Purpose, createdAt,
+			ref.AttachmentID, userID, input.ConversationID)
+		if query.Error != nil {
+			return conversation.Message{}, TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+	}
+	for _, citation := range input.Citations {
+		query = tx.Exec(`
+INSERT INTO conversation_message_citations
+    (message_id, position, source_type, source_ref, content_sha256, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			id, citation.Position, citation.SourceType, citation.SourceRef, citation.ContentSHA256, createdAt)
+		if query.Error != nil {
+			return conversation.Message{}, TranslateError(query.Error)
+		}
+	}
 	query = tx.Exec(`
 UPDATE conversations
 SET last_message_at = ?, updated_at = ?
@@ -718,13 +1447,74 @@ WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userI
 	if query.Error != nil {
 		return conversation.Message{}, TranslateError(query.Error)
 	}
-	return conversation.Message{
+	message := conversation.Message{
 		ID: id, ConversationID: input.ConversationID, Seq: nextSeq,
 		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
-		CaseReferences: append([]conversation.CaseReference(nil), input.CaseReferences...),
-		TaskReferences: append([]conversation.TaskReference(nil), input.TaskReferences...),
-		CreatedAt:      createdAt,
-	}, nil
+		CreatedAt: createdAt,
+	}
+	messages := []conversation.Message{message}
+	if err := loadConversationReferences(tx, messages); err != nil {
+		return conversation.Message{}, err
+	}
+	return messages[0], nil
+}
+
+func insertConversationRunObservation(
+	tx *gorm.DB,
+	turnID uuid.UUID,
+	observation *conversation.AgentRunObservation,
+	errorType string,
+	createdAt time.Time,
+) error {
+	if observation == nil {
+		return nil
+	}
+	errorType = strings.TrimSpace(errorType)
+	if turnID == uuid.Nil || observation.Validate() != nil ||
+		(observation.Outcome == conversation.AgentRunFailed) != (errorType != "") {
+		return conversation.ErrInvalidMessage
+	}
+	var persistedErrorType any
+	if errorType != "" {
+		failure := conversation.AgentRunFailureRecord{Observation: *observation, ErrorType: errorType}
+		if failure.Validate() != nil {
+			return conversation.ErrInvalidMessage
+		}
+		persistedErrorType = errorType
+	}
+	channels := observation.DegradedChannels
+	if channels == nil {
+		channels = []string{}
+	}
+	degradedChannels, err := json.Marshal(channels)
+	if err != nil {
+		return fmt.Errorf("encode conversation run degraded channels: %w", err)
+	}
+	query := tx.Exec(`
+INSERT INTO conversation_turn_run_observations
+    (turn_id, model_provider, model_id, prompt_version, outcome,
+     model_calls, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens,
+     duration_millis, degraded_channels, sources_truncated, error_type, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?)`,
+		turnID, observation.ModelProvider, observation.ModelID, observation.PromptVersion, observation.Outcome,
+		observation.Usage.ModelCalls, observation.Usage.PromptTokens, observation.Usage.CompletionTokens,
+		observation.Usage.TotalTokens, observation.Usage.CachedTokens, observation.Usage.ReasoningTokens,
+		observation.DurationMillis, string(degradedChannels), observation.SourcesTruncated,
+		persistedErrorType, createdAt)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	for position, source := range observation.RetrievedSources {
+		query = tx.Exec(`
+INSERT INTO conversation_turn_retrieved_sources
+    (turn_id, position, source_type, source_ref, content_sha256, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+			turnID, position, source.SourceType, source.SourceRef, source.ContentSHA256, createdAt)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+	}
+	return nil
 }
 
 func createdTaskReferences(message conversation.Message) []conversation.TaskReference {
@@ -760,6 +1550,36 @@ WHERE message.id = ? AND message.conversation_id = ? AND conversation.user_id = 
 		return conversation.Message{}, err
 	}
 	return messages[0], nil
+}
+
+func loadConversationHistory(
+	db *gorm.DB,
+	userID, conversationID uuid.UUID,
+	throughSeq int64,
+) ([]conversation.Message, error) {
+	if throughSeq < 1 {
+		return nil, conversation.ErrInvalidMessage
+	}
+	var records []messageRecord
+	query := db.Raw(`
+SELECT message.id, message.conversation_id, message.seq, message.role,
+       message.content, message.content_schema_version, message.created_at
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+WHERE message.conversation_id = ? AND conversation.user_id = ? AND message.seq <= ?
+ORDER BY message.seq DESC
+LIMIT ?`, conversationID, userID, throughSeq, conversation.MaxMessageLimit).Scan(&records)
+	if query.Error != nil {
+		return nil, TranslateError(query.Error)
+	}
+	messages := make([]conversation.Message, len(records))
+	for index, record := range records {
+		messages[len(records)-1-index] = messageFromRecord(record)
+	}
+	if err := loadConversationReferences(db, messages); err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 func loadConversationReferences(db *gorm.DB, messages []conversation.Message) error {
@@ -800,6 +1620,42 @@ WHERE message_id IN ?`, ids).Scan(&taskRefs).Error; err != nil {
 			})
 		}
 	}
+	var attachmentRefs []messageAttachmentRecord
+	if err := db.Raw(`
+SELECT reference.message_id, reference.attachment_id, reference.position, reference.purpose,
+       attachment.original_filename, attachment.content_type, attachment.size_bytes,
+       attachment.content_sha256, attachment.processing_status
+FROM conversation_message_attachments reference
+JOIN attachments attachment ON attachment.id = reference.attachment_id
+WHERE reference.message_id IN ?
+ORDER BY reference.message_id, reference.position`, ids).Scan(&attachmentRefs).Error; err != nil {
+		return TranslateError(err)
+	}
+	for _, ref := range attachmentRefs {
+		if position, ok := index[ref.MessageID]; ok {
+			messages[position].Attachments = append(messages[position].Attachments, conversation.MessageAttachment{
+				AttachmentID: ref.AttachmentID, Position: ref.Position, Purpose: ref.Purpose,
+				OriginalName: ref.OriginalName, MediaType: ref.MediaType, SizeBytes: ref.SizeBytes,
+				ContentSHA256: ref.ContentSHA256, Status: ref.Status,
+			})
+		}
+	}
+	var citations []messageCitationRecord
+	if err := db.Raw(`
+SELECT message_id, position, source_type, source_ref, content_sha256
+FROM conversation_message_citations
+WHERE message_id IN ?
+ORDER BY message_id, position`, ids).Scan(&citations).Error; err != nil {
+		return TranslateError(err)
+	}
+	for _, citation := range citations {
+		if position, ok := index[citation.MessageID]; ok {
+			messages[position].Citations = append(messages[position].Citations, conversation.MessageCitation{
+				Position: citation.Position, SourceType: citation.SourceType,
+				SourceRef: citation.SourceRef, ContentSHA256: citation.ContentSHA256,
+			})
+		}
+	}
 	return nil
 }
 
@@ -813,10 +1669,279 @@ type conversationTurnRecord struct {
 	UserMessageID      uuid.UUID               `gorm:"column:user_message_id"`
 	AssistantMessageID *uuid.UUID              `gorm:"column:assistant_message_id"`
 	AttemptCount       int                     `gorm:"column:attempt_count"`
+	LeaseOwner         *string                 `gorm:"column:lease_owner"`
 	LeaseExpiresAt     *time.Time              `gorm:"column:lease_expires_at"`
 	CompletedAt        *time.Time              `gorm:"column:completed_at"`
+	FailureCode        *string                 `gorm:"column:failure_code"`
+	RetryAt            *time.Time              `gorm:"column:retry_at"`
 	CreatedAt          time.Time               `gorm:"column:created_at"`
 	UpdatedAt          time.Time               `gorm:"column:updated_at"`
+}
+
+type conversationRecordedRunRecord struct {
+	TurnID             uuid.UUID                    `gorm:"column:turn_id"`
+	ConversationID     uuid.UUID                    `gorm:"column:conversation_id"`
+	UserID             uuid.UUID                    `gorm:"column:user_id"`
+	Status             conversation.TurnStatus      `gorm:"column:status"`
+	UserMessageID      uuid.UUID                    `gorm:"column:user_message_id"`
+	AssistantMessageID *uuid.UUID                   `gorm:"column:assistant_message_id"`
+	UserQuery          string                       `gorm:"column:user_query"`
+	ModelProvider      string                       `gorm:"column:model_provider"`
+	ModelID            string                       `gorm:"column:model_id"`
+	PromptVersion      string                       `gorm:"column:prompt_version"`
+	Outcome            conversation.AgentRunOutcome `gorm:"column:outcome"`
+	ModelCalls         int                          `gorm:"column:model_calls"`
+	PromptTokens       int                          `gorm:"column:prompt_tokens"`
+	CompletionTokens   int                          `gorm:"column:completion_tokens"`
+	TotalTokens        int                          `gorm:"column:total_tokens"`
+	CachedTokens       int                          `gorm:"column:cached_tokens"`
+	ReasoningTokens    int                          `gorm:"column:reasoning_tokens"`
+	DurationMillis     int64                        `gorm:"column:duration_millis"`
+	DegradedChannels   []byte                       `gorm:"column:degraded_channels"`
+	SourcesTruncated   bool                         `gorm:"column:sources_truncated"`
+	ErrorType          *string                      `gorm:"column:error_type"`
+	CompletedAt        *time.Time                   `gorm:"column:completed_at"`
+	ObservedAt         time.Time                    `gorm:"column:observed_at"`
+}
+
+type conversationRetrievedSourceRecord struct {
+	Position      int                             `gorm:"column:position"`
+	SourceType    conversation.CitationSourceType `gorm:"column:source_type"`
+	SourceRef     string                          `gorm:"column:source_ref"`
+	ContentSHA256 string                          `gorm:"column:content_sha256"`
+}
+
+// GetRecordedAgentRun is intentionally not part of the HTTP-facing domain
+// Repository interface. It supports local/offline evaluation export by turn ID.
+func (r *ConversationRepository) GetRecordedAgentRun(
+	ctx context.Context,
+	turnID uuid.UUID,
+) (conversation.RecordedAgentRun, error) {
+	if r == nil || r.db == nil {
+		return conversation.RecordedAgentRun{}, errors.New("conversation repository is unavailable")
+	}
+	if turnID == uuid.Nil {
+		return conversation.RecordedAgentRun{}, conversation.ErrInvalidMessage
+	}
+	db := ResolveDB(ctx, r.db)
+	var record conversationRecordedRunRecord
+	query := db.Raw(`
+SELECT observation.turn_id, turn.conversation_id, turn.user_id, turn.user_message_id,
+	   turn.status, turn.assistant_message_id, user_message.content AS user_query,
+	   observation.model_provider, observation.model_id, observation.prompt_version, observation.outcome,
+	   observation.model_calls, observation.prompt_tokens, observation.completion_tokens,
+	   observation.total_tokens, observation.cached_tokens, observation.reasoning_tokens,
+	   observation.duration_millis, observation.degraded_channels, observation.sources_truncated,
+	   observation.error_type, turn.completed_at, observation.created_at AS observed_at
+FROM conversation_turn_run_observations observation
+JOIN conversation_turns turn ON turn.id = observation.turn_id
+JOIN conversation_messages user_message ON user_message.id = turn.user_message_id
+WHERE observation.turn_id = ? AND turn.status IN (?, ?)`,
+		turnID, conversation.TurnStatusCompleted, conversation.TurnStatusFailed).Scan(&record)
+	if query.Error != nil {
+		return conversation.RecordedAgentRun{}, TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return conversation.RecordedAgentRun{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	var degradedChannels []string
+	if err := json.Unmarshal(record.DegradedChannels, &degradedChannels); err != nil {
+		return conversation.RecordedAgentRun{}, errors.New("conversation run degraded channels are invalid")
+	}
+	var sources []conversationRetrievedSourceRecord
+	query = db.Raw(`
+SELECT position, source_type, source_ref, content_sha256
+FROM conversation_turn_retrieved_sources
+WHERE turn_id = ?
+ORDER BY position`, turnID).Scan(&sources)
+	if query.Error != nil {
+		return conversation.RecordedAgentRun{}, TranslateError(query.Error)
+	}
+	observation := conversation.AgentRunObservation{
+		ModelProvider: record.ModelProvider, ModelID: record.ModelID, PromptVersion: record.PromptVersion,
+		Outcome: record.Outcome, DegradedChannels: degradedChannels,
+		Usage: conversation.AgentRunUsage{
+			ModelCalls: record.ModelCalls, PromptTokens: record.PromptTokens,
+			CompletionTokens: record.CompletionTokens, TotalTokens: record.TotalTokens,
+			CachedTokens: record.CachedTokens, ReasoningTokens: record.ReasoningTokens,
+		},
+		DurationMillis: record.DurationMillis, SourcesTruncated: record.SourcesTruncated,
+	}
+	for position, source := range sources {
+		if source.Position != position {
+			return conversation.RecordedAgentRun{}, errors.New("conversation run retrieved source positions are invalid")
+		}
+		observation.RetrievedSources = append(observation.RetrievedSources, conversation.AgentRunSource{
+			SourceType: source.SourceType, SourceRef: source.SourceRef, ContentSHA256: source.ContentSHA256,
+		})
+	}
+	if observation.Validate() != nil {
+		return conversation.RecordedAgentRun{}, errors.New("conversation run observation is invalid")
+	}
+	errorType := ""
+	if record.ErrorType != nil {
+		errorType = strings.TrimSpace(*record.ErrorType)
+	}
+	if (record.Status == conversation.TurnStatusFailed) != (observation.Outcome == conversation.AgentRunFailed) ||
+		(observation.Outcome == conversation.AgentRunFailed) != (errorType != "") {
+		return conversation.RecordedAgentRun{}, errors.New("conversation run terminal outcome is inconsistent")
+	}
+	if observation.Outcome == conversation.AgentRunFailed {
+		if (conversation.AgentRunFailureRecord{Observation: observation, ErrorType: errorType}).Validate() != nil {
+			return conversation.RecordedAgentRun{}, errors.New("conversation run failure record is invalid")
+		}
+	}
+	answer := ""
+	var citations []conversation.MessageCitation
+	if record.AssistantMessageID != nil {
+		assistantMessage, err := loadConversationMessage(
+			db, record.UserID, record.ConversationID, *record.AssistantMessageID,
+		)
+		if err != nil {
+			return conversation.RecordedAgentRun{}, err
+		}
+		answer = assistantMessage.Content
+		citations = assistantMessage.Citations
+	} else if record.Status != conversation.TurnStatusFailed {
+		return conversation.RecordedAgentRun{}, errors.New("completed conversation run has no assistant message")
+	}
+	return conversation.RecordedAgentRun{
+		TurnID: record.TurnID, ConversationID: record.ConversationID,
+		UserMessageID: record.UserMessageID, AssistantMessageID: record.AssistantMessageID,
+		UserQuery: record.UserQuery, Answer: answer, Citations: citations,
+		Observation: observation, ErrorType: errorType, CompletedAt: record.CompletedAt,
+		ObservedAt: record.ObservedAt.UTC(),
+	}, nil
+}
+
+func (r *ConversationRepository) GetTurn(
+	ctx context.Context,
+	userID, conversationID, turnID uuid.UUID,
+) (conversation.TurnDetail, error) {
+	if r == nil || r.db == nil {
+		return conversation.TurnDetail{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || conversationID == uuid.Nil || turnID == uuid.Nil {
+		return conversation.TurnDetail{}, conversation.ErrInvalidMessage
+	}
+	var record conversationTurnRecord
+	query := ResolveDB(ctx, r.db).Raw(`
+SELECT id, conversation_id, user_id, idempotency_key, request_fingerprint, status,
+       user_message_id, assistant_message_id, attempt_count, lease_owner, lease_expires_at,
+       completed_at, failure_code, retry_at, created_at, updated_at
+FROM conversation_turns
+WHERE id = ? AND conversation_id = ? AND user_id = ?`, turnID, conversationID, userID).Scan(&record)
+	if query.Error != nil {
+		return conversation.TurnDetail{}, TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return conversation.TurnDetail{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	return conversationTurnDetailFromRecord(record), nil
+}
+
+func (r *ConversationRepository) ListTurnEvents(
+	ctx context.Context,
+	userID, conversationID, turnID uuid.UUID,
+	afterSeq int64,
+	limit int,
+) (conversation.TurnEventPage, error) {
+	if r == nil || r.db == nil {
+		return conversation.TurnEventPage{}, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || conversationID == uuid.Nil || turnID == uuid.Nil || afterSeq < 0 ||
+		limit < 1 || limit > conversation.MaxTurnEventLimit {
+		return conversation.TurnEventPage{}, conversation.ErrInvalidMessage
+	}
+	var owner struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	query := ResolveDB(ctx, r.db).Raw(`
+SELECT id
+FROM conversation_turns
+WHERE id = ? AND conversation_id = ? AND user_id = ?`, turnID, conversationID, userID).Scan(&owner)
+	if query.Error != nil {
+		return conversation.TurnEventPage{}, TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return conversation.TurnEventPage{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+	}
+	var records []conversationTurnEventRecord
+	query = ResolveDB(ctx, r.db).Raw(`
+SELECT turn_id, conversation_id, seq, event_type, payload, payload_schema_version, created_at
+FROM conversation_turn_events
+WHERE turn_id = ? AND conversation_id = ? AND seq > ?
+ORDER BY seq
+LIMIT ?`, turnID, conversationID, afterSeq, limit+1).Scan(&records)
+	if query.Error != nil {
+		return conversation.TurnEventPage{}, TranslateError(query.Error)
+	}
+	hasMore := len(records) > limit
+	if hasMore {
+		records = records[:limit]
+	}
+	items := make([]conversation.TurnEvent, 0, len(records))
+	nextAfterSeq := afterSeq
+	for _, record := range records {
+		item, err := conversationTurnEventFromRecord(record)
+		if err != nil {
+			return conversation.TurnEventPage{}, err
+		}
+		items = append(items, item)
+		if item.Seq > nextAfterSeq {
+			nextAfterSeq = item.Seq
+		}
+	}
+	return conversation.TurnEventPage{
+		Items: items, AfterSeq: afterSeq, NextAfterSeq: nextAfterSeq, HasMore: hasMore,
+	}, nil
+}
+
+type conversationTurnEventRecord struct {
+	TurnID               uuid.UUID `gorm:"column:turn_id"`
+	ConversationID       uuid.UUID `gorm:"column:conversation_id"`
+	Seq                  int64     `gorm:"column:seq"`
+	EventType            string    `gorm:"column:event_type"`
+	Payload              []byte    `gorm:"column:payload"`
+	PayloadSchemaVersion int       `gorm:"column:payload_schema_version"`
+	CreatedAt            time.Time `gorm:"column:created_at"`
+}
+
+func conversationTurnDetailFromRecord(record conversationTurnRecord) conversation.TurnDetail {
+	detail := conversation.TurnDetail{
+		ID: record.ID, ConversationID: record.ConversationID, UserMessageID: record.UserMessageID,
+		AssistantMessageID: record.AssistantMessageID, Status: record.Status,
+		AttemptCount: record.AttemptCount, RetryAt: record.RetryAt,
+		CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(), CompletedAt: record.CompletedAt,
+	}
+	switch record.Status {
+	case conversation.TurnStatusQueued:
+		if record.RetryAt != nil {
+			detail.FailureSummary = "助手暂时未完成处理，系统将自动重试"
+		}
+	case conversation.TurnStatusFailed:
+		detail.FailureSummary = "助手未能完成处理，请检查输入后重试"
+	}
+	return detail
+}
+
+func conversationTurnEventFromRecord(record conversationTurnEventRecord) (conversation.TurnEvent, error) {
+	eventType := conversation.TurnEventType(strings.TrimSpace(record.EventType))
+	if record.TurnID == uuid.Nil || record.ConversationID == uuid.Nil || record.Seq < 1 || !eventType.Valid() ||
+		record.PayloadSchemaVersion < 1 || record.CreatedAt.IsZero() {
+		return conversation.TurnEvent{}, errors.New("conversation turn event record is invalid")
+	}
+	payload := map[string]any{}
+	if len(record.Payload) > 0 {
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			return conversation.TurnEvent{}, fmt.Errorf("decode conversation turn event payload: %w", err)
+		}
+	}
+	return conversation.TurnEvent{
+		TurnID: record.TurnID, ConversationID: record.ConversationID, Seq: record.Seq,
+		EventType: eventType, Payload: payload, PayloadSchemaVersion: record.PayloadSchemaVersion,
+		CreatedAt: record.CreatedAt.UTC(),
+	}, nil
 }
 
 func (r *ConversationRepository) AppendMessage(
@@ -863,8 +1988,8 @@ FOR UPDATE`, input.ConversationID, userID).Scan(&ownerStatus)
 		if err := tx.Raw(`
 SELECT EXISTS(
     SELECT 1 FROM conversation_turns
-    WHERE conversation_id = ? AND status = ? AND lease_expires_at > ?
-)`, input.ConversationID, conversation.TurnStatusRunning, createdAt).Scan(&activeTurn).Error; err != nil {
+    WHERE conversation_id = ? AND status IN (?, ?)
+)`, input.ConversationID, conversation.TurnStatusQueued, conversation.TurnStatusRunning).Scan(&activeTurn).Error; err != nil {
 			return TranslateError(err)
 		}
 		if activeTurn {
@@ -929,4 +2054,24 @@ type taskReferenceRecord struct {
 	MessageID uuid.UUID                  `gorm:"column:message_id"`
 	TaskID    uuid.UUID                  `gorm:"column:task_id"`
 	Kind      conversation.ReferenceKind `gorm:"column:reference_kind"`
+}
+
+type messageAttachmentRecord struct {
+	MessageID     uuid.UUID `gorm:"column:message_id"`
+	AttachmentID  uuid.UUID `gorm:"column:attachment_id"`
+	Position      int       `gorm:"column:position"`
+	Purpose       string    `gorm:"column:purpose"`
+	OriginalName  string    `gorm:"column:original_filename"`
+	MediaType     string    `gorm:"column:content_type"`
+	SizeBytes     int64     `gorm:"column:size_bytes"`
+	ContentSHA256 string    `gorm:"column:content_sha256"`
+	Status        string    `gorm:"column:processing_status"`
+}
+
+type messageCitationRecord struct {
+	MessageID     uuid.UUID                       `gorm:"column:message_id"`
+	Position      int                             `gorm:"column:position"`
+	SourceType    conversation.CitationSourceType `gorm:"column:source_type"`
+	SourceRef     string                          `gorm:"column:source_ref"`
+	ContentSHA256 string                          `gorm:"column:content_sha256"`
 }

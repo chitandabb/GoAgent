@@ -65,7 +65,7 @@ func (r *DiagnosisTaskRepository) createTaskInTx(
 	var existing diagnosisTaskRecord
 	lookup := db.Where("created_by = ? AND idempotency_key = ?", input.CreatedBy, input.IdempotencyKey).Take(&existing)
 	if lookup.Error == nil {
-		return replayOrConflict(existing, input.RequestFingerprint)
+		return r.replayOrConflict(ctx, existing, input.RequestFingerprint)
 	}
 	if err := TranslateError(lookup.Error); err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return diagnosis.TaskCreateResult{}, err
@@ -144,7 +144,7 @@ RETURNING id`,
 		if err := db.Where("created_by = ? AND idempotency_key = ?", input.CreatedBy, input.IdempotencyKey).Take(&concurrent).Error; err != nil {
 			return diagnosis.TaskCreateResult{}, TranslateError(err)
 		}
-		return replayOrConflict(concurrent, input.RequestFingerprint)
+		return r.replayOrConflict(ctx, concurrent, input.RequestFingerprint)
 	}
 	if scanErr != nil {
 		return diagnosis.TaskCreateResult{}, TranslateError(scanErr)
@@ -219,6 +219,44 @@ SELECT EXISTS (
 		}
 	}
 
+	if len(input.Attachments) > 0 {
+		if input.AttachmentSource == nil {
+			return diagnosis.TaskCreateResult{}, diagnosis.ErrAttachmentContextRequired
+		}
+		for _, current := range input.Attachments {
+			result := db.Exec(`
+INSERT INTO diagnosis_task_attachments
+    (task_id, attachment_id, source_message_id, purpose, created_at)
+SELECT ?, item.id, message.id, ?, ?
+FROM conversation_message_attachments reference
+JOIN conversation_messages message
+  ON message.id = reference.message_id AND message.conversation_id = reference.conversation_id
+JOIN conversations conversation
+  ON conversation.id = message.conversation_id AND conversation.user_id = ?
+JOIN attachments item
+  ON item.id = reference.attachment_id AND item.owner_user_id = conversation.user_id
+WHERE reference.conversation_id = ? AND reference.message_id = ? AND reference.attachment_id = ?
+  AND message.role = 'user' AND item.scope = 'session'
+	  AND message.id = (
+	      SELECT latest.id
+	      FROM conversation_messages latest
+	      WHERE latest.conversation_id = conversation.id
+	      ORDER BY latest.seq DESC
+	      LIMIT 1
+	  )
+  AND item.conversation_id = conversation.id AND item.processing_status = 'uploaded'`,
+				taskID, current.Purpose, input.CreatedAt, input.CreatedBy,
+				input.AttachmentSource.ConversationID, input.AttachmentSource.MessageID, current.AttachmentID,
+			)
+			if result.Error != nil {
+				return diagnosis.TaskCreateResult{}, TranslateError(result.Error)
+			}
+			if result.RowsAffected != 1 {
+				return diagnosis.TaskCreateResult{}, diagnosis.ErrTaskAttachmentForbidden
+			}
+		}
+	}
+
 	taskCreatedPayload, err := json.Marshal(map[string]any{
 		"taskId":         taskID.String(),
 		"caseSnapshotId": snapshotID.String(),
@@ -259,14 +297,26 @@ VALUES (?, 'diagnosis.execute', 'diagnosis_task', ?, ?, NULL, ?, 1, 0, ?, 0, ?)`
 	if err != nil {
 		return diagnosis.TaskCreateResult{}, err
 	}
+	task.Attachments, err = r.loadTaskAttachments(ctx, taskID)
+	if err != nil {
+		return diagnosis.TaskCreateResult{}, err
+	}
 	return diagnosis.TaskCreateResult{Task: task, Replayed: false}, nil
 }
 
-func replayOrConflict(record diagnosisTaskRecord, requestFingerprint string) (diagnosis.TaskCreateResult, error) {
+func (r *DiagnosisTaskRepository) replayOrConflict(
+	ctx context.Context,
+	record diagnosisTaskRecord,
+	requestFingerprint string,
+) (diagnosis.TaskCreateResult, error) {
 	if record.RequestFingerprint != requestFingerprint {
 		return diagnosis.TaskCreateResult{}, diagnosis.ErrIdempotencyConflict
 	}
 	task, err := diagnosisTaskFromRecord(record)
+	if err != nil {
+		return diagnosis.TaskCreateResult{}, err
+	}
+	task.Attachments, err = r.loadTaskAttachments(ctx, record.ID)
 	if err != nil {
 		return diagnosis.TaskCreateResult{}, err
 	}
@@ -297,7 +347,40 @@ WHERE task.id = ?`, taskID).Scan(&record)
 	if result.RowsAffected == 0 {
 		return diagnosis.DiagnosisTask{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 	}
-	return diagnosisTaskFromRecord(record)
+	task, err := diagnosisTaskFromRecord(record)
+	if err != nil {
+		return diagnosis.DiagnosisTask{}, err
+	}
+	task.Attachments, err = r.loadTaskAttachments(ctx, taskID)
+	if err != nil {
+		return diagnosis.DiagnosisTask{}, err
+	}
+	return task, nil
+}
+
+func (r *DiagnosisTaskRepository) loadTaskAttachments(
+	ctx context.Context,
+	taskID uuid.UUID,
+) ([]diagnosis.TaskAttachmentSummary, error) {
+	var records []diagnosisTaskAttachmentRecord
+	if err := ResolveDB(ctx, r.db).Raw(`
+SELECT reference.attachment_id, reference.source_message_id, reference.purpose,
+       item.original_filename, item.content_type, item.size_bytes, item.content_sha256
+FROM diagnosis_task_attachments reference
+JOIN attachments item ON item.id = reference.attachment_id
+WHERE reference.task_id = ?
+ORDER BY reference.created_at, reference.attachment_id`, taskID).Scan(&records).Error; err != nil {
+		return nil, TranslateError(err)
+	}
+	result := make([]diagnosis.TaskAttachmentSummary, 0, len(records))
+	for _, record := range records {
+		result = append(result, diagnosis.TaskAttachmentSummary{
+			AttachmentID: record.AttachmentID, SourceMessageID: record.SourceMessageID,
+			Purpose: record.Purpose, OriginalName: record.OriginalName, MediaType: record.MediaType,
+			SizeBytes: record.SizeBytes, ContentSHA256: record.ContentSHA256,
+		})
+	}
+	return result, nil
 }
 
 func (r *DiagnosisTaskRepository) ListTaskEvents(
@@ -612,6 +695,16 @@ type diagnosisTaskRecord struct {
 	CreatedAt                 time.Time            `gorm:"column:created_at"`
 	UpdatedAt                 time.Time            `gorm:"column:updated_at"`
 	ReportID                  string               `gorm:"column:report_id"`
+}
+
+type diagnosisTaskAttachmentRecord struct {
+	AttachmentID    uuid.UUID `gorm:"column:attachment_id"`
+	SourceMessageID uuid.UUID `gorm:"column:source_message_id"`
+	Purpose         string    `gorm:"column:purpose"`
+	OriginalName    string    `gorm:"column:original_filename"`
+	MediaType       string    `gorm:"column:content_type"`
+	SizeBytes       int64     `gorm:"column:size_bytes"`
+	ContentSHA256   string    `gorm:"column:content_sha256"`
 }
 
 func (diagnosisTaskRecord) TableName() string { return "diagnosis_tasks" }

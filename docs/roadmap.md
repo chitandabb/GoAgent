@@ -6,7 +6,7 @@ domain, database, API, and system-architecture design documents. Agent
 execution order and acceptance gates are defined in
 [`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
 
-## Current Stage: M2-B5 Conversation Task Status Tool Implemented
+## Current Stage: Resume Point 3 Backend Closure Complete; Point 4 Planning Next
 
 - [x] `cmd/internal` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -30,9 +30,24 @@ execution order and acceptance gates are defined in
       Tool scope, final assistant-message persistence, and the `/turns` endpoint.
 - [x] PostgreSQL `conversation_turns` ledger with request fingerprint, client UUID idempotency,
       single-active-turn lease, failed-attempt retry and completed-result replay.
+- [x] Asynchronous conversation execution: API transaction writes user message + queued turn +
+      Outbox, RabbitMQ routes `conversation.turn.execute`, and a dedicated Worker uses heartbeat,
+      retry/dead queues and lease-owner fencing to persist the final assistant message.
+- [x] Conversation turn status query and durable turn-event stream: PostgreSQL persists ordered
+      `turn_queued/turn_running/turn_retry_scheduled/turn_completed/turn_failed` events; JSON and
+      SSE endpoints support `afterSeq`/`Last-Event-ID`, safe payloads, heartbeats, terminal close,
+      application shutdown and Session absolute-expiry handling.
 - [x] Reference-gated `get_diagnosis_task_status` Tool with dynamic TaskScope exposure, latest-message
       validation, owner/admin authorization reuse, and report-availability summary.
-- [ ] Background/resumable conversation execution, message SSE, attachment reads, and citation preview.
+- [x] Conversation-scoped attachment upload with MinIO immutable objects, PostgreSQL idempotency,
+      atomic message associations, message-gated `read_attachment`, and safe attachment/knowledge-chunk
+      citation preview APIs.
+- [x] Diagnosis task attachment snapshot: a Conversation Agent command may freeze the current user
+      message's selected/all session attachments into `diagnosis_task_attachments`; task creation,
+      Outbox and attachment associations share one PostgreSQL transaction. Diagnosis Worker loads only
+      owner-scoped attachment metadata and exposes the same bounded `read_attachment` Tool through a
+      task-id fence, producing `attachment` evidence.
+- [ ] Frontend adoption of turn SSE, attachment upload/read traces, and citation preview.
 
 ## M0: Before Business Code
 
@@ -466,7 +481,7 @@ Current M2-A7 implementation state:
   Parse-output `LayoutStage` now execute inside the Knowledge Worker when enabled. PDFium-WASM
   rendering, ONNX Runtime 1.28.0, PP-DocLayout-M conversion/manifest checks, explicit region
   OCR/VLM plans, document-level crop budgets, duplicate whole-page suppression and Artifact
-  schema v5 provenance with provider Token usage are implemented. Confirmed text-only pages skip rendering; only
+  schema v6 provenance with provider Token usage and structured table metadata are implemented. Confirmed text-only pages skip rendering; only
   actionable routes within the count/byte budgets retain crops.
 - pinned scripts reproduce the ONNX model and Windows/Linux runtime. A real upstream fixture
   passed the Go adapter with table/caption/text detections; no route-quality metric is inferred.
@@ -482,7 +497,7 @@ Current M2-A7 implementation state:
   quality unchanged while cutting P95 from 6.59 s to 2.62 s and peak working set from 786.5 MiB
   to 584.1 MiB. One 72-DPI prose page now has paired OCR evidence, but 8M is not promoted until
   small-font, scanned-table and degraded-scan quality is measured.
-- `element-merge-v1` now runs before Chunk creation. It keeps all raw Elements in Artifact v5
+- `element-merge-v1` now runs before Chunk creation. It keeps all raw Elements in Artifact v6
   but removes explainable same-page duplicates from the searchable projection: exact normalized
   duplicates, OCR fully covered by native text, and highly contained overlapping OCR. It does
   not fuzzy-deduplicate VLM descriptions.
@@ -557,6 +572,41 @@ Compression axis has all five. Deterministic whole-Chunk compression and Evidenc
 Agentic re-retrieval are now implemented. The five quality Cases did not reach the production budget; a
 separate long-parent pressure Case repeatedly reduced 7/1507 neighbor chunks/runes to 6/1438 while preserving
 Gold Context Recall. This is a threshold check, not an aggregate Token claim.
+
+### M2-A9: Region-level Structured Table Recovery
+
+The provider-free backend slice is implemented:
+
+- `table_recovery` now maps to an independent `TableRecoveryProcessor` instead of sharing the
+  generic OCR+VLM route used by pictures and charts;
+- the provider-neutral contract validates Markdown, cells, row/column coordinates, spans, header
+  flags, confidence, warnings, provider/model/Prompt identity and Token usage under hard limits;
+- `[models.table]` owns a separate Prompt and output budget. The first DashScope adapter uses
+  strict JSON and rejects unknown fields, duplicate coordinates, invalid spans, trailing content
+  and empty structures;
+- structured cells remain in Element metadata inside MinIO Artifact schema v6, while the database
+  Chunk stores the Markdown `ElementTable` projection. No cell relationship table or migration is
+  added;
+- an unavailable table processor may use the generic visual path only as an explicit partial
+  fallback. It cannot be recorded as a completed structured table;
+- a mixed-page test verifies that native text, table, picture and decorative regions reach only
+  `native/table/vision/skip`, that whole-page assets are superseded, and that merge/Chunk runs after
+  both processors. Oversized Markdown tables split on complete rows and repeat their header.
+
+The bounded real smoke used the ONNX-detected table region on NIST IR 8107 page 15. Two
+`qwen3-vl-plus` calls preserved the important identifiers and searchable Markdown, using 2,507
+Tokens and approximately CNY 0.014432 in total. Both calls collapsed three visible rows below a
+vertically merged cell into one multiline cell, even after a stricter Prompt. The adapter now marks
+that shape `partial` with `multiline_cell_structure_ambiguous` and caps confidence at 0.8 instead of
+publishing an inaccurate span as complete. The provider and searchable-table chain therefore pass;
+exact merged-cell fidelity remains an explicit, measured enhancement rather than a claimed accuracy
+result.
+
+The compact Conversation knowledge-answer gate has now passed. One 4-8 document cross-format
+full-chain pair remains before resume point 3 can be closed. Full multi-column reading order, cross-page tables,
+Office SmartArt/chart recovery and a PP-StructureV3 sidecar remain explicit non-blocking extensions.
+The fixed contract, paid result and review boundary are recorded in
+`docs/evaluations/table-recovery-v1.md`.
 
 ### Completed Backend Checkpoint: Formal Diagnosis Report Read API
 
@@ -704,8 +754,51 @@ references to an independent conversation, and the conversation Agent may create
 task through a guarded command Tool. Conversations do not own task lifecycle. The backend now persists
 independent conversations, user messages and structured references; the command service and narrow Tool
 contract are implemented and wired to the diagnosis application service. The independent Conversation
-Agent Runtime and `/turns` assistant-message path are now implemented on the backend; the frontend still
-uses the direct task route until it generates stable turn idempotency keys and adopts the pending SSE semantics.
+Agent Runtime and `/turns` assistant-message path are now implemented on the backend. `/turns` atomically writes
+the user message, queued turn and Outbox, then a dedicated Conversation Worker claims a fenced lease and writes
+the final assistant message. The HTTP process no longer initializes or calls the model runtime. The frontend still
+uses the direct task route until it generates stable turn idempotency keys and adopts queued/running plus message
+SSE semantics.
+
+### Partial Backend Checkpoint: Conversation Answer Quality Contract
+
+`internal/agent/conversation_quality_evaluation.go` now defines a provider-free, versioned quality
+contract for the unified Conversation entry: knowledge Chunk, attachment, and public Web sources are
+scored by exact source identity and content SHA-256. The aggregator reports Context Precision/Recall,
+Citation Precision/Recall, preview hash consistency, explicit degradation-channel recall, nearest-rank
+P50/P95, provider usage, and estimated cost. Optional human/LLM Judge faithfulness and relevance scores
+are averaged separately; lexical answer terms are deliberately named signals and are not presented as
+semantic faithfulness. `mesguard-conversation-quality-eval` rejects mixed seeded/recorded observations,
+unknown JSON fields, duplicate Cases/Runs, and invalid source hashes.
+
+The checked-in three-Case `seeded_contract` run passes all deterministic gates with zero Provider calls;
+its usage, duration, and estimated-cost fields are formula fixtures rather than actual billing observations.
+The runtime now persists structured assistant citations plus successful/degraded and safely classified terminal
+failure run-ledger facts, and an offline exporter can build recorded observations from selected completed or failed
+turns. A real PostgreSQL + MinIO HTTP smoke now covers a 49-byte UTF-8 TXT upload, idempotent replay,
+message-gated Tool read, citation preview, cross-user denial, secret-coordinate non-disclosure and cleanup, with
+zero Provider calls. A second, transaction-scoped observer now pins five public knowledge Cases over four documents
+and 21 Chunks, performs provider-free validation/cost planning, and requires explicit execution. Fourteen bounded probes
+on one Case exposed post-call Token settlement, repeated-search termination, Tool-history protocol and strict citation
+alignment boundaries. An earlier Qwen run completed a two-call source-bound answer with full required-citation recall
+and preview consistency, but failed Context/Citation Precision. `conversation-v2` made literal marker syntax explicit;
+`conversation-v3` required equal claim/source specificity, and `conversation-v4` limited source-backed answers to
+the question asked and directly supported claims. `conversation-v5` added backend-generated exact markers, but a
+different transaction Case still produced zero citations. `conversation-v6` therefore adds one failure-triggered,
+Tool-free strict-JSON citation repair using the same model; valid original answers pay no extra call, while repaired
+answers still pass the same-run source/hash allowlist and shared Token budget. The final transaction Case passed with
+Citation Precision/Recall, preview consistency and answer-term recall all `1.0`, 7,025 Chat Tokens, 3,869 ms and an
+estimated `0.008141 CNY` online cost. Context Precision remains `0.5`, so retrieval candidate compression remains
+visible rather than being hidden by the passing answer. The observer keeps the Tool schema for history compatibility, forbids a new Tool Call after evidence,
+isolates usage callbacks and pins the fixed-set candidate size to `K=3` without changing production defaults.
+The independent `rag-judge-v2` path now exports self-contained inputs from human gold facts and recorded runs,
+rejects answer-model self-judging, validates evidence hashes and raw/resolved mappings, executes behind one-Case
+and cost gates, and merges only auxiliary semantic scores into the existing evaluator. Its current one-Case input
+passes provider-free validation and had a conservative `0.034864 CNY` preflight. One explicitly authorized
+`qwen3-max` run used 3,225 tokens, took 16,595 ms and cost an estimated `0.018604 CNY`; human review agreed with
+the reported unsupported claims and extra citation. The config was restored to disabled after the run.
+Methodology, estimated cost and non-claiming boundaries are in
+`docs/evaluations/conversation-quality-v1.md`.
 
 ### Partial Backend Checkpoint: Knowledge Ingestion Throughput Baseline
 
@@ -765,21 +858,81 @@ run used 80 requests, 96,060 Tokens and approximately CNY 0.04803, with zero tem
 This supports the bounded worker-core 40%+ claim; the two-document/two-class scope remains explicit and is not the
 40-document mixed-visual acceptance result.
 
-## Target Milestones, Not Yet Implemented
+## M2 Milestone Status and Remaining Work
 
+- M2-A9 (bounded closure complete): independent table contract, strict DashScope adapter, mixed-page
+  route isolation, Artifact v6 structured metadata, explicit visual fallback and row-aware table
+  Chunking are implemented. The real NIST region verified searchable output and exposed a repeatable
+  merged-cell defect; the deterministic partial guard prevents false completion. Exact span recovery is
+  retained as a measured enhancement and no general table-accuracy claim is made;
 - M2-B1: expand the checked-in pressure dataset beyond one long-parent Case, add failed/repeated/no-selection second-retrieval and answer-quality cases, complete the remaining Parent/Rewrite pairs, and measure aggregate compression rate and repeated-run stability; implementation is present but broad sample quality is unproven;
 - M2-B2: run the bounded one-Search/one-Scrape Firecrawl smoke when a Key is available, then add a small public-answer/citation quality set; backend Provider, authorization, safety, citation and dependency-degradation paths are implemented;
 - M2-B3: completed independent conversation/message persistence, read API and the guarded
   `create_diagnosis_task` command boundary;
 - M2-B4: completed Conversation Agent `/turns` with bounded history, dynamic Tool scope, final
   assistant-message persistence and a durable idempotent turn ledger;
-- M2-B5: completed reference-gated diagnosis task-status Tool; remaining conversation work is
-  background/resumable execution, knowledge-QA streaming, message SSE, citation preview and
-  attachment content access;
-- M2-C: retain the completed 40-document/eight-class corpus as the provider-free parser/chunk compatibility gate;
-  use a 4-8 document representative set for budgeted full-chain smoke and controlled pairs, then decide whether
-  the full 40-document/five-pair synchronous cost is justified before adding RabbitMQ delivery to the
-  upload-to-publish baseline;
+- M2-B5: completed reference-gated diagnosis task-status Tool;
+- M2-B6: completed background/resumable conversation execution with transactional Outbox,
+  dedicated RabbitMQ Worker, heartbeat, expired-lease reclaim, owner fencing and completed replay;
+  temporary failures return to queued with `retry_at`; only exhausted attempts enter failed. PostgreSQL
+  integration coverage also verifies that reclaim cleanup excludes the very turn being reclaimed, so an
+  expired lease is not first converted to failed and then rejected by the new owner;
+- M2-B7: completed Conversation Turn status query and durable JSON/SSE events with PostgreSQL replay,
+  `afterSeq`/`Last-Event-ID`, safe payloads and terminal stream closure;
+- M2-B8: completed session-scoped attachment upload and bounded content access: immutable MinIO objects,
+      PostgreSQL idempotency and owner/conversation constraints, atomic message associations, dynamic
+      attachment Tool exposure, message-level read authorization, and safe attachment/knowledge-chunk
+      citation previews. Images and scanned-only pages currently return visual-content metadata rather than
+      invoking OCR/VLM; personal attachments, orphan cleanup and frontend adoption remain later work;
+- M2-B9: completed explicit promotion of current-message attachments into a new diagnosis task. The
+  command defaults to freezing all current message attachments, permits a bounded subset, and the SQL
+  transaction rechecks latest-user-message, conversation, owner, scope and uploaded status before writing
+  task associations. Worker context loads safe metadata and task-scoped reads; direct HTTP task creation
+  still rejects non-empty attachment lists because it has no message authorization context;
+- M2-B10 (bounded resume gate complete): completed the provider-free Conversation answer-quality contract and aggregator, plus
+  same-run source-backed assistant citations for knowledge chunks, attachments and fetched HTTPS pages.
+  The Runner exposes only backend-validated source identities, rejects fabricated answer markers, and the
+  Worker transaction persists the actually cited source type/ref/hash/position for API replay. Successful and
+  degraded runs now also persist model/prompt identity, provider usage, latency, validated retrieved sources and
+  stable degraded channels; terminal failed runs persist the final safe attempt plus a stable error type under the
+  same lease-owner fence without fabricating an assistant message or usage. An offline exporter builds
+  `recorded_run` JSONL for completed and failed Turns from a bounded case-to-turn manifest; explicit failed-Turn
+  replay clears the stale ledger atomically. A real PostgreSQL + MinIO small-TXT HTTP smoke now verifies upload,
+  idempotent replay, message-level Tool authorization, citation preview, cross-user denial and cleanup without model
+  calls. A pinned 5-Case/4-document/21-Chunk real-observation command now has explicit one-Case execution and
+  estimated-cost gates. Its first fourteen low-cost probes retrieved 2/2 gold Chunks whenever retrieval ran and exposed
+  repeated retrieval, usage-after-return budget settlement and provider Tool-history compatibility boundaries. Compact
+  cache replay reduced one like-for-like run by 18.1%, but a prompt-only stop notice did not prevent a third search.
+  The observer now keeps the search Tool schema after evidence to preserve prior Tool Call/Result protocol, sends
+  `ToolChoiceForbidden` to prevent a new Tool Call, and retains valid cache replay as defense; production search behavior
+  is unchanged. Two post-fix StepFun probes kept 2/2 gold recall but ended before a valid final answer. Content-free
+  message-shape diagnostics and `-chat-profile` selection are now implemented. The first
+  `qwen-qa-eval` comparison returned `assistant + content + stop` without calling knowledge search, and also exposed
+  duplicate usage accounting between the outer Agent node and inner OpenAI-compatible Client. The observer now forces
+  the sole knowledge Tool on its first answer-quality call, forbids Tools after evidence, and isolates inner callbacks.
+  The corrected bounded Qwen rerun completed two model calls and returned a source-bound answer with Outcome Accuracy,
+  Context Recall, Citation Recall, answer-term recall and preview consistency all `1.0`; it remains a strict failure
+  because Context/Citation Precision were `0.5/0.6667` after the latest `K=3` run. The raw fixed-set contract now separates relevant chunks
+  from the required-citation subset without changing that gold label, and the observer pins `K=3` instead of accepting
+  the production default of 8 when the model omits `maxResults`. The latest answer still contains uncited plausible
+  risks. A claim-level `rag-judge-v2` exporter, independent model client, strict JSON decoder, cost-gated CLI and
+  evaluator merge are now implemented. The Provider-free export keeps 2 gold sources and all 3 actual citations
+  separate. The first explicit Judge run used 3,225 tokens and an estimated `0.018604 CNY`; its `partial` verdict,
+  unsupported-claim list and extra-citation finding matched human review. Merged auxiliary Faithfulness/Relevance/
+  Citation Alignment are `0.50/0.50/0.25`, while deterministic pass remained zero for that historical Case. Judge scores
+  cannot override exact citation facts. A different transaction Case then exposed two zero-marker answers and motivated
+  the failure-triggered `conversation-citation-repair-v1` path. The final `conversation-v6` observation used three model
+  calls and 7,025 Tokens, returned only the two required citations, passed Citation Precision/Recall and preview
+  consistency at `1.0`, and passed human unsupported-claim review. Broader multi-Case stability remains an enhancement,
+  not a blocker for the bounded resume gate;
+- M2-C (bounded resume gate complete): retained the 40-document/eight-class corpus as the provider-free parser/chunk
+  compatibility gate and completed a budgeted four-document/four-class Worker-core pair over scanned PDF, PPTX,
+  XLSX and PNG. Both arms preserved the same succeeded/partial/failed sets, 36 searchable Elements, 223 Chunks,
+  23 Embedding requests and 25,419 Tokens, so `IntegrityPreserved=true`; document concurrency `1 -> 2` changed
+  duration `6492 -> 5498 ms` and throughput by `+18.08%`. Actual two-arm usage was 50,838 Tokens, approximately
+  `0.025419 CNY`, with no OCR/VLM calls. This cross-format pair is a completion/integrity gate and does not replace
+  the existing five-pair `+46.48%` bounded Worker-core metric. Full 40-document/five-pair synchronous execution,
+  RabbitMQ upload-to-publish measurement and visual-provider throughput remain optional production-scale work;
 - M4: isolated SQL performance laboratory.
 
 Do not mark a target milestone as complete here until its acceptance criteria

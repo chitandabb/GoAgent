@@ -248,6 +248,11 @@ func testAgentConfig() config.Config {
 			ConversationPromptVersion: "conversation-test-v1",
 			ConversationPromptFile:    filepath.Join(configRoot, "prompts", "conversation-system.md"),
 		},
-		Models: config.ModelsConfig{Chat: config.ChatModelConfig{Enabled: true}},
+		Models: config.ModelsConfig{Chat: config.ChatModelConfig{
+			Enabled: true, ActiveProfileName: "test",
+			Profiles: map[string]config.ChatModelProfileConfig{
+				"test": {Provider: "dashscope", Model: "fixture-v1"},
+			},
+		}},
 	}
 }

@@ -27,8 +27,12 @@ const (
 
 type ConversationRunnerConfig struct {
 	ChatModel             model.ToolCallingChatModel
+	CitationRepairer      ConversationCitationRepairer
 	ToolCatalog           *ToolCatalog
 	SystemInstruction     string
+	ModelProvider         string
+	ModelID               string
+	PromptVersion         string
 	AvailableDependencies []ToolDependency
 	Logger                *zap.Logger
 	MaxIterations         int
@@ -44,8 +48,12 @@ type ConversationRunnerConfig struct {
 // schema or Evidence Gate and cannot synchronously perform a full diagnosis.
 type ConversationRunner struct {
 	chatModel             model.ToolCallingChatModel
+	citationRepairer      ConversationCitationRepairer
 	toolCatalog           *ToolCatalog
 	systemInstruction     string
+	modelProvider         string
+	modelID               string
+	promptVersion         string
 	availableDependencies []ToolDependency
 	log                   *zap.Logger
 	maxIterations         int
@@ -61,8 +69,17 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		return nil, errors.New("conversation runner model, catalog, and logger are required")
 	}
 	cfg.SystemInstruction = strings.TrimSpace(cfg.SystemInstruction)
-	if cfg.SystemInstruction == "" {
-		return nil, errors.New("conversation runner system instruction is required")
+	cfg.ModelProvider = strings.TrimSpace(cfg.ModelProvider)
+	cfg.ModelID = strings.TrimSpace(cfg.ModelID)
+	cfg.PromptVersion = strings.TrimSpace(cfg.PromptVersion)
+	if cfg.SystemInstruction == "" || cfg.ModelProvider == "" || cfg.ModelID == "" || cfg.PromptVersion == "" {
+		return nil, errors.New("conversation runner instruction and model/prompt identity are required")
+	}
+	if (conversation.AgentRunObservation{
+		ModelProvider: cfg.ModelProvider, ModelID: cfg.ModelID, PromptVersion: cfg.PromptVersion,
+		Outcome: conversation.AgentRunAnswered,
+	}).Validate() != nil {
+		return nil, errors.New("conversation runner model or prompt identity is invalid")
 	}
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = defaultConversationMaxIterations
@@ -110,8 +127,9 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		return nil, errors.New("conversation runner dependencies contain duplicates")
 	}
 	return &ConversationRunner{
-		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
-		systemInstruction: cfg.SystemInstruction, availableDependencies: dependencies,
+		chatModel: cfg.ChatModel, citationRepairer: cfg.CitationRepairer, toolCatalog: cfg.ToolCatalog,
+		systemInstruction: cfg.SystemInstruction, modelProvider: cfg.ModelProvider,
+		modelID: cfg.ModelID, promptVersion: cfg.PromptVersion, availableDependencies: dependencies,
 		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
@@ -123,7 +141,23 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, conversation.ErrAgentUnavailable
 	}
 	startedAt := time.Now()
+	var citationTrace *conversationCitationTrace
+	var usageTrace *modelUsageTrace
+	observeFailure := false
 	defer func() {
+		if err != nil && observeFailure {
+			if _, alreadyWrapped := conversation.AgentRunFailureRecordFrom(err); !alreadyWrapped {
+				observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, conversation.AgentRunFailed)
+				record := conversation.AgentRunFailureRecord{
+					Observation: observation,
+					ErrorType:   conversationAgentErrorType(err),
+				}
+				if record.Validate() == nil {
+					result.RunObservation = &observation
+					err = conversation.NewAgentRunFailure(err, record)
+				}
+			}
+		}
 		fields := []zap.Field{zap.Duration("duration", time.Since(startedAt))}
 		if err != nil {
 			r.log.Warn("conversation Agent run failed", append(fields, zap.Error(err))...)
@@ -154,7 +188,10 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	}))
 	trace := &executionTrace{}
 	runCtx = withExecutionTrace(runCtx, trace)
-	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
+	citationTrace = &conversationCitationTrace{}
+	runCtx = withConversationCitationTrace(runCtx, citationTrace)
+	usageTrace = &modelUsageTrace{onUsage: budget.recordUsage}
+	observeFailure = true
 	tools, err := r.toolCatalog.ToolsFor(runCtx, scope)
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tools: %w", err)
@@ -209,7 +246,98 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if answer == "" {
 		return conversation.AgentResponse{}, errors.New("conversation Agent returned no final answer")
 	}
-	return conversation.AgentResponse{Content: answer}, nil
+	citations, err := conversation.ResolveAnswerCitations(answer, citationTrace.snapshot())
+	if err != nil {
+		return conversation.AgentResponse{}, conversation.ErrAgentResponseInvalid
+	}
+	_, _, sourceToolAttempted, _ := citationTrace.observationSnapshot()
+	if sourceToolAttempted && len(citations) == 0 && r.citationRepairer != nil {
+		if evidence, repairable := citationTrace.repairSnapshot(); repairable {
+			repaired, repairErr := r.citationRepairer.Repair(runCtx, ConversationCitationRepairRequest{
+				UserQuery: request.UserMessage.Content, Draft: answer,
+				Evidence: evidence, Sources: citationTrace.snapshot(),
+			})
+			usageTrace.appendUsage(repaired.Usage)
+			if budget.exhausted() {
+				return conversation.AgentResponse{}, ErrTokenBudgetExhausted
+			}
+			if repairErr == nil {
+				repairedCitations, resolveErr := conversation.ResolveAnswerCitations(
+					repaired.Answer, citationTrace.snapshot(),
+				)
+				if resolveErr == nil && len(repairedCitations) > 0 {
+					answer, citations = repaired.Answer, repairedCitations
+				}
+			}
+		}
+	}
+	_, degradedChannels, sourceToolAttempted, _ := citationTrace.observationSnapshot()
+	outcome := conversation.AgentRunAnswered
+	if len(degradedChannels) > 0 {
+		outcome = conversation.AgentRunDegraded
+	} else if sourceToolAttempted && len(citations) == 0 {
+		outcome = conversation.AgentRunInsufficientEvidence
+	}
+	observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, outcome)
+	if observation.Validate() != nil {
+		return conversation.AgentResponse{}, conversation.ErrAgentResponseInvalid
+	}
+	return conversation.AgentResponse{Content: answer, Citations: citations, RunObservation: &observation}, nil
+}
+
+func (r *ConversationRunner) buildRunObservation(
+	startedAt time.Time,
+	citationTrace *conversationCitationTrace,
+	usageTrace *modelUsageTrace,
+	outcome conversation.AgentRunOutcome,
+) conversation.AgentRunObservation {
+	var retrievedSources []conversation.AgentRunSource
+	var degradedChannels []string
+	var sourcesTruncated bool
+	if citationTrace != nil {
+		retrievedSources, degradedChannels, _, sourcesTruncated = citationTrace.observationSnapshot()
+	}
+	var usage ModelUsage
+	if usageTrace != nil {
+		usage = usageTrace.snapshot()
+	}
+	if minimumTotal := usage.PromptTokens + usage.CompletionTokens; usage.TotalTokens < minimumTotal {
+		usage.TotalTokens = minimumTotal
+	}
+	durationMillis := time.Since(startedAt).Milliseconds()
+	maxDurationMillis := int64((5 * time.Minute) / time.Millisecond)
+	if durationMillis > maxDurationMillis {
+		durationMillis = maxDurationMillis
+	}
+	return conversation.AgentRunObservation{
+		ModelProvider: r.modelProvider, ModelID: r.modelID, PromptVersion: r.promptVersion,
+		Outcome: outcome, RetrievedSources: retrievedSources, DegradedChannels: degradedChannels,
+		Usage: conversation.AgentRunUsage{
+			ModelCalls: usage.ModelCalls, PromptTokens: usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens,
+			CachedTokens: usage.CachedTokens, ReasoningTokens: usage.ReasoningTokens,
+		},
+		DurationMillis: durationMillis, SourcesTruncated: sourcesTruncated,
+	}
+}
+
+func conversationAgentErrorType(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "agent_timeout"
+	case errors.Is(err, context.Canceled):
+		return "agent_cancelled"
+	case errors.Is(err, ErrAgentToolRunLimitExhausted):
+		return "agent_tool_run_limit_exhausted"
+	case errors.Is(err, ErrToolCallBudgetExhausted):
+		return "tool_call_budget_exhausted"
+	case errors.Is(err, ErrTokenBudgetExhausted):
+		return "token_budget_exhausted"
+	case errors.Is(err, conversation.ErrAgentResponseInvalid):
+		return "agent_response_invalid"
+	default:
+		return "agent_execution_failed"
+	}
 }
 
 func (r *ConversationRunner) conversationScope(actor conversation.Actor, message conversation.Message) (TaskScope, error) {
@@ -229,6 +357,9 @@ func (r *ConversationRunner) conversationScope(actor conversation.Actor, message
 	}
 	if len(message.TaskReferences) > 0 {
 		capabilities = append(capabilities, ToolCapabilityTask)
+	}
+	if len(message.Attachments) > 0 {
+		capabilities = append(capabilities, ToolCapabilityAttachment)
 	}
 	return NewTaskScope(TaskScopeConfig{
 		UserID: actor.UserID, Role: role, TaskType: TaskTypeConversation,
@@ -278,7 +409,7 @@ func conversationMessagePrompt(message conversation.Message) string {
 	if content == "" {
 		return ""
 	}
-	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 {
+	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 && len(message.Attachments) == 0 {
 		return content
 	}
 	var contextBlock strings.Builder
@@ -288,6 +419,14 @@ func conversationMessagePrompt(message conversation.Message) string {
 	}
 	for _, reference := range message.TaskReferences {
 		fmt.Fprintf(&contextBlock, "task id=%s kind=%s\n", reference.TaskID, reference.Kind)
+	}
+	for _, reference := range message.Attachments {
+		fmt.Fprintf(
+			&contextBlock,
+			"attachment id=%s name=%q media_type=%s purpose=%s size_bytes=%d status=%s\n",
+			reference.AttachmentID, reference.OriginalName, reference.MediaType,
+			reference.Purpose, reference.SizeBytes, reference.Status,
+		)
 	}
 	contextBlock.WriteString("</message_references>\n")
 	contextBlock.WriteString(content)
@@ -308,6 +447,28 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 			}
 			startedAt := time.Now()
 			output, err := next(ctx, input)
+			if trace := conversationCitationTraceFromContext(ctx); trace != nil {
+				snapshot := ""
+				if output != nil {
+					snapshot = output.Result
+				}
+				trace.observeTool(input.Name, snapshot, err)
+			}
+			if err == nil && output != nil && len(output.Result) <= maxResultBytes {
+				if sources, ok := conversationCitationSourcesFromTool(input.Name, output.Result); ok {
+					trace := conversationCitationTraceFromContext(ctx)
+					if augmented, augmentedOK := augmentConversationToolResultWithCitationSources(
+						output.Result, sources, maxResultBytes,
+					); augmentedOK && trace.append(sources) {
+						output.Result = augmented
+						trace.appendRepairEvidence(augmented)
+					} else {
+						trace.markDegraded("citation_sources_omitted")
+					}
+				} else if conversationCitationProducingTool(input.Name) {
+					conversationCitationTraceFromContext(ctx).markDegraded("citation_source_validation_failed")
+				}
+			}
 			if output != nil && len(output.Result) > maxResultBytes {
 				output.Result = strings.ToValidUTF8(output.Result[:maxResultBytes], "?") +
 					"\n[tool result truncated by MESGuard]"

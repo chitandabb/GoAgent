@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -31,10 +32,19 @@ func (s Status) Valid() bool { return s == StatusActive || s == StatusArchived }
 type TurnStatus string
 
 const (
+	TurnStatusQueued    TurnStatus = "queued"
 	TurnStatusRunning   TurnStatus = "running"
 	TurnStatusFailed    TurnStatus = "failed"
 	TurnStatusCompleted TurnStatus = "completed"
 )
+
+func (s TurnStatus) Valid() bool {
+	return s == TurnStatusQueued || s == TurnStatusRunning || s == TurnStatusFailed || s == TurnStatusCompleted
+}
+
+func (s TurnStatus) IsTerminal() bool {
+	return s == TurnStatusFailed || s == TurnStatusCompleted
+}
 
 type MessageRole string
 
@@ -79,15 +89,35 @@ var (
 	ErrTurnIdempotencyConflict = errors.New("conversation turn idempotency key conflicts")
 	ErrTurnInProgress          = errors.New("conversation turn is already in progress")
 	ErrTurnLeaseLost           = errors.New("conversation turn execution lease is no longer owned")
+	ErrAsyncTurnUnavailable    = errors.New("asynchronous conversation turns are unavailable")
+	ErrTurnAlreadyCompleted    = errors.New("conversation turn is already completed")
 )
 
 const (
-	DefaultPageSize = 20
-	MaxPageSize     = 100
-	MaxMessageLimit = 100
-	MaxContentRunes = 20000
-	MaxTitleRunes   = 200
+	DefaultPageSize           = 20
+	MaxPageSize               = 100
+	MaxMessageLimit           = 100
+	MaxContentRunes           = 20000
+	MaxTitleRunes             = 200
+	MaxAttachmentsPerMessage  = 8
+	MaxAttachmentPurposeRunes = 64
+	MaxCitationsPerMessage    = 20
+	MaxCitationSourcesPerRun  = 200
+	MaxCitationSourceRefBytes = 2048
+	MaxRunDegradedChannels    = 32
 )
+
+type CitationSourceType string
+
+const (
+	CitationSourceKnowledgeChunk CitationSourceType = "knowledge_chunk"
+	CitationSourceAttachment     CitationSourceType = "attachment"
+	CitationSourceWeb            CitationSourceType = "web"
+)
+
+func (s CitationSourceType) Valid() bool {
+	return s == CitationSourceKnowledgeChunk || s == CitationSourceAttachment || s == CitationSourceWeb
+}
 
 type Conversation struct {
 	ID            uuid.UUID
@@ -118,7 +148,189 @@ type Message struct {
 	ContentSchemaVersion int
 	CaseReferences       []CaseReference
 	TaskReferences       []TaskReference
+	Attachments          []MessageAttachment
+	Citations            []MessageCitation
 	CreatedAt            time.Time
+}
+
+// MessageCitation is a safe, immutable source identity attached to an assistant
+// message. It never contains object-storage coordinates, credentials, raw
+// binary data, or a permanent private URL.
+type MessageCitation struct {
+	Position      int                `json:"position"`
+	SourceType    CitationSourceType `json:"sourceType"`
+	SourceRef     string             `json:"sourceRef"`
+	ContentSHA256 string             `json:"contentSha256"`
+}
+
+func (c MessageCitation) Validate() error {
+	if c.Position < 0 || c.Position >= MaxCitationsPerMessage || validateCitationIdentity(c) != nil {
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+type AgentRunOutcome string
+
+const (
+	AgentRunAnswered             AgentRunOutcome = "answered"
+	AgentRunInsufficientEvidence AgentRunOutcome = "insufficient_evidence"
+	AgentRunDegraded             AgentRunOutcome = "degraded"
+	AgentRunFailed               AgentRunOutcome = "failed"
+)
+
+func (o AgentRunOutcome) Valid() bool {
+	return o == AgentRunAnswered || o == AgentRunInsufficientEvidence ||
+		o == AgentRunDegraded || o == AgentRunFailed
+}
+
+type AgentRunSource struct {
+	SourceType    CitationSourceType
+	SourceRef     string
+	ContentSHA256 string
+}
+
+func (s AgentRunSource) Validate() error {
+	return validateCitationIdentity(MessageCitation{
+		SourceType: s.SourceType, SourceRef: s.SourceRef, ContentSHA256: s.ContentSHA256,
+	})
+}
+
+type AgentRunUsage struct {
+	ModelCalls       int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	CachedTokens     int
+	ReasoningTokens  int
+}
+
+func (u AgentRunUsage) Validate() error {
+	if u.ModelCalls < 0 || u.PromptTokens < 0 || u.CompletionTokens < 0 || u.TotalTokens < 0 ||
+		u.CachedTokens < 0 || u.ReasoningTokens < 0 || u.TotalTokens < u.PromptTokens+u.CompletionTokens {
+		return ErrAgentResponseInvalid
+	}
+	return nil
+}
+
+// AgentRunObservation contains only bounded operational facts needed to build
+// recorded quality observations. It deliberately excludes prompts, raw tool
+// payloads, reasoning text, object-store coordinates, and user content.
+type AgentRunObservation struct {
+	ModelProvider    string
+	ModelID          string
+	PromptVersion    string
+	Outcome          AgentRunOutcome
+	RetrievedSources []AgentRunSource
+	DegradedChannels []string
+	Usage            AgentRunUsage
+	DurationMillis   int64
+	SourcesTruncated bool
+}
+
+// AgentRunFailureRecord is the bounded, persistence-safe projection carried
+// with an Agent execution error. ErrorType is a stable machine label; raw
+// provider or Tool error text is deliberately excluded from the run ledger.
+type AgentRunFailureRecord struct {
+	Observation AgentRunObservation
+	ErrorType   string
+}
+
+func (r AgentRunFailureRecord) Validate() error {
+	if r.Observation.Outcome != AgentRunFailed || r.Observation.Validate() != nil ||
+		!validAgentRunMachineLabel(r.ErrorType, 64) {
+		return ErrAgentResponseInvalid
+	}
+	return nil
+}
+
+// AgentRunFailure preserves the original error for retry and errors.Is/errors.As
+// decisions while carrying only a validated, bounded record toward persistence.
+type AgentRunFailure struct {
+	cause  error
+	record AgentRunFailureRecord
+}
+
+func NewAgentRunFailure(cause error, record AgentRunFailureRecord) error {
+	if cause == nil {
+		cause = ErrAgentResponseInvalid
+	}
+	return &AgentRunFailure{cause: cause, record: record}
+}
+
+func (e *AgentRunFailure) Error() string {
+	if e == nil || e.cause == nil {
+		return ErrAgentResponseInvalid.Error()
+	}
+	return e.cause.Error()
+}
+
+func (e *AgentRunFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func AgentRunFailureRecordFrom(err error) (AgentRunFailureRecord, bool) {
+	var failure *AgentRunFailure
+	if !errors.As(err, &failure) || failure == nil || failure.record.Validate() != nil {
+		return AgentRunFailureRecord{}, false
+	}
+	record := failure.record
+	record.Observation.RetrievedSources = append([]AgentRunSource(nil), record.Observation.RetrievedSources...)
+	record.Observation.DegradedChannels = append([]string(nil), record.Observation.DegradedChannels...)
+	return record, true
+}
+
+func (o AgentRunObservation) Validate() error {
+	if !validAgentRunMachineLabel(o.ModelProvider, 64) || !validAgentRunLabel(o.ModelID, 256) ||
+		!validAgentRunMachineLabel(o.PromptVersion, 128) || !o.Outcome.Valid() ||
+		len(o.RetrievedSources) > MaxCitationSourcesPerRun ||
+		len(o.DegradedChannels) > MaxRunDegradedChannels || o.DurationMillis < 0 ||
+		o.DurationMillis > int64((5*time.Minute)/time.Millisecond) || o.Usage.Validate() != nil {
+		return ErrAgentResponseInvalid
+	}
+	seenSources := make(map[string]struct{}, len(o.RetrievedSources))
+	for _, source := range o.RetrievedSources {
+		if source.Validate() != nil {
+			return ErrAgentResponseInvalid
+		}
+		if _, exists := seenSources[source.SourceRef]; exists {
+			return ErrAgentResponseInvalid
+		}
+		seenSources[source.SourceRef] = struct{}{}
+	}
+	seenChannels := make(map[string]struct{}, len(o.DegradedChannels))
+	for _, channel := range o.DegradedChannels {
+		if !validAgentRunMachineLabel(channel, 64) {
+			return ErrAgentResponseInvalid
+		}
+		if _, exists := seenChannels[channel]; exists {
+			return ErrAgentResponseInvalid
+		}
+		seenChannels[channel] = struct{}{}
+	}
+	return nil
+}
+
+// MessageAttachment is a safe message projection. It contains display
+// metadata only; MinIO bucket/object coordinates stay in the attachment
+// service and are never part of the conversation model context.
+type MessageAttachment struct {
+	AttachmentID  uuid.UUID
+	Position      int
+	Purpose       string
+	OriginalName  string
+	MediaType     string
+	SizeBytes     int64
+	ContentSHA256 string
+	Status        string
+}
+
+type MessageAttachmentInput struct {
+	AttachmentID uuid.UUID
+	Purpose      string
 }
 
 type ListQuery struct {
@@ -180,6 +392,8 @@ type AppendMessageInput struct {
 	Content        string
 	CaseReferences []CaseReference
 	TaskReferences []TaskReference
+	Attachments    []MessageAttachmentInput
+	Citations      []MessageCitation
 }
 
 // AgentRequest is the bounded input passed to the independent conversation Agent.
@@ -192,7 +406,14 @@ type AgentRequest struct {
 }
 
 type AgentResponse struct {
-	Content string
+	Content        string
+	Citations      []MessageCitation
+	RunObservation *AgentRunObservation
+}
+
+func (r AgentResponse) Validate() error {
+	_, err := prepareAgentResponse(r)
+	return err
 }
 
 // AgentResponder is implemented by the Eino-backed runtime in internal/agent.
@@ -208,9 +429,37 @@ type ConversationTurn struct {
 }
 
 type ConversationTurnResult struct {
+	TurnID   uuid.UUID
 	Turn     ConversationTurn
+	Status   TurnStatus
 	Created  bool
 	Replayed bool
+}
+
+type TurnExecution struct {
+	TurnID       uuid.UUID
+	Turn         ConversationTurn
+	Conversation Conversation
+	Actor        Actor
+	History      []Message
+	AttemptCount int
+}
+
+// RecordedAgentRun is the safe export projection used by offline quality
+// tooling. It contains persisted user/assistant text and bounded source facts,
+// but no prompt, raw Tool payload, reasoning trace, lease owner, or credentials.
+type RecordedAgentRun struct {
+	TurnID             uuid.UUID
+	ConversationID     uuid.UUID
+	UserMessageID      uuid.UUID
+	AssistantMessageID *uuid.UUID
+	UserQuery          string
+	Answer             string
+	Citations          []MessageCitation
+	Observation        AgentRunObservation
+	ErrorType          string
+	CompletedAt        *time.Time
+	ObservedAt         time.Time
 }
 
 type BeginTurnInput struct {
@@ -219,12 +468,22 @@ type BeginTurnInput struct {
 	RequestFingerprint string
 	StartedAt          time.Time
 	LeaseExpiresAt     time.Time
+	ExecutionMode      TurnExecutionMode
+	CorrelationID      uuid.UUID
 }
+
+type TurnExecutionMode string
+
+const (
+	TurnExecutionSynchronous  TurnExecutionMode = "synchronous"
+	TurnExecutionAsynchronous TurnExecutionMode = "asynchronous"
+)
 
 type BeginTurnResult struct {
 	TurnID           uuid.UUID
 	UserMessage      Message
 	AssistantMessage *Message
+	Status           TurnStatus
 	Created          bool
 }
 
@@ -238,8 +497,20 @@ type Repository interface {
 	GetLatestMessage(ctx context.Context, userID, conversationID uuid.UUID) (Message, error)
 	AppendTaskReference(ctx context.Context, userID, messageID, taskID uuid.UUID, kind ReferenceKind, createdAt time.Time) error
 	BeginTurn(ctx context.Context, userID uuid.UUID, input BeginTurnInput) (BeginTurnResult, error)
-	CompleteTurn(ctx context.Context, userID, turnID uuid.UUID, assistantContent string, completedAt time.Time) (ConversationTurn, error)
+	CompleteTurn(ctx context.Context, userID, turnID uuid.UUID, response AgentResponse, completedAt time.Time) (ConversationTurn, error)
 	FailTurn(ctx context.Context, userID, turnID uuid.UUID, failedAt time.Time) error
+	GetTurn(ctx context.Context, userID, conversationID, turnID uuid.UUID) (TurnDetail, error)
+	ListTurnEvents(ctx context.Context, userID, conversationID, turnID uuid.UUID, afterSeq int64, limit int) (TurnEventPage, error)
+}
+
+type AsyncRepository interface {
+	Repository
+	AcceptTurn(ctx context.Context, userID uuid.UUID, input BeginTurnInput) (BeginTurnResult, error)
+	ClaimTurn(ctx context.Context, turnID uuid.UUID, workerID string, claimedAt, leaseExpiresAt time.Time) (TurnExecution, error)
+	RenewTurnExecution(ctx context.Context, turnID uuid.UUID, workerID string, renewedAt, leaseExpiresAt time.Time) (bool, error)
+	QueueTurnRetry(ctx context.Context, userID, turnID uuid.UUID, workerID string, scheduledAt, retryAt time.Time) error
+	CompleteTurnExecution(ctx context.Context, userID, turnID uuid.UUID, workerID string, response AgentResponse, completedAt time.Time) (ConversationTurn, error)
+	FailTurnExecution(ctx context.Context, userID, turnID uuid.UUID, workerID string, failure *AgentRunFailureRecord, failedAt time.Time) error
 }
 
 // DiagnosisTaskCreator is the application command boundary. The conversation
@@ -451,12 +722,15 @@ func (s *Service) ExecuteTurn(
 	}
 	if started.AssistantMessage != nil {
 		return ConversationTurnResult{
-			Turn:    ConversationTurn{UserMessage: started.UserMessage, AssistantMessage: *started.AssistantMessage},
-			Created: started.Created, Replayed: true,
+			TurnID: started.TurnID,
+			Turn:   ConversationTurn{UserMessage: started.UserMessage, AssistantMessage: *started.AssistantMessage},
+			Status: TurnStatusCompleted, Created: started.Created, Replayed: true,
 		}, nil
 	}
 	result := ConversationTurnResult{
+		TurnID:  started.TurnID,
 		Turn:    ConversationTurn{UserMessage: started.UserMessage},
+		Status:  TurnStatusRunning,
 		Created: started.Created,
 	}
 	current, err := s.repository.Get(ctx, actor.UserID, input.ConversationID)
@@ -487,18 +761,121 @@ func (s *Service) ExecuteTurn(
 	if err != nil {
 		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
 	}
-	response.Content = strings.TrimSpace(response.Content)
-	if response.Content == "" || len([]rune(response.Content)) > MaxContentRunes {
+	response, err = prepareAgentResponse(response)
+	if err != nil {
 		return result, s.failTurn(ctx, actor.UserID, started.TurnID, ErrAgentResponseInvalid)
 	}
 	completed, err := s.repository.CompleteTurn(
-		ctx, actor.UserID, started.TurnID, response.Content, s.clock().UTC(),
+		ctx, actor.UserID, started.TurnID, response, s.clock().UTC(),
 	)
 	if err != nil {
 		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
 	}
 	result.Turn = completed
+	result.Status = TurnStatusCompleted
 	return result, nil
+}
+
+// AcceptTurn persists a user turn and its Outbox event without invoking the
+// model in the HTTP process. Completed idempotent requests replay immediately.
+func (s *Service) AcceptTurn(
+	ctx context.Context,
+	actor Actor,
+	idempotencyKey string,
+	input AppendMessageInput,
+) (ConversationTurnResult, error) {
+	if s == nil || s.repository == nil {
+		return ConversationTurnResult{}, errors.New("conversation service is unavailable")
+	}
+	asyncRepository, ok := s.repository.(AsyncRepository)
+	if !ok {
+		return ConversationTurnResult{}, ErrAsyncTurnUnavailable
+	}
+	parsedKey, err := uuid.Parse(strings.TrimSpace(idempotencyKey))
+	if err != nil {
+		return ConversationTurnResult{}, ErrInvalidMessage
+	}
+	input.Role = MessageRoleUser
+	input, err = prepareMessageInput(actor, input)
+	if err != nil {
+		return ConversationTurnResult{}, err
+	}
+	fingerprint, err := turnRequestFingerprint(input)
+	if err != nil {
+		return ConversationTurnResult{}, err
+	}
+	acceptedAt := s.clock().UTC()
+	accepted, err := asyncRepository.AcceptTurn(ctx, actor.UserID, BeginTurnInput{
+		Message: input, IdempotencyKey: parsedKey.String(), RequestFingerprint: fingerprint,
+		StartedAt: acceptedAt, ExecutionMode: TurnExecutionAsynchronous, CorrelationID: uuid.New(),
+	})
+	if err != nil {
+		return ConversationTurnResult{}, err
+	}
+	if accepted.TurnID == uuid.Nil || accepted.UserMessage.ID == uuid.Nil || !accepted.Status.Valid() {
+		return ConversationTurnResult{}, ErrInvalidMessage
+	}
+	switch accepted.Status {
+	case TurnStatusCompleted:
+		if accepted.AssistantMessage == nil || accepted.AssistantMessage.ID == uuid.Nil {
+			return ConversationTurnResult{}, ErrInvalidMessage
+		}
+	case TurnStatusQueued, TurnStatusRunning:
+		if accepted.AssistantMessage != nil {
+			return ConversationTurnResult{}, ErrInvalidMessage
+		}
+	default:
+		return ConversationTurnResult{}, ErrInvalidMessage
+	}
+	result := ConversationTurnResult{
+		TurnID: accepted.TurnID, Turn: ConversationTurn{UserMessage: accepted.UserMessage}, Status: accepted.Status,
+		Created: accepted.Created,
+	}
+	if accepted.AssistantMessage != nil {
+		result.Turn.AssistantMessage = *accepted.AssistantMessage
+		result.Status = TurnStatusCompleted
+		result.Replayed = true
+	}
+	return result, nil
+}
+
+// ExecuteAcceptedTurn is called by the background worker after it acquires the
+// turn lease. It rebuilds the same bounded Agent request from durable facts.
+func (s *Service) ExecuteAcceptedTurn(ctx context.Context, execution TurnExecution, workerID string) (ConversationTurn, error) {
+	if s == nil || s.repository == nil {
+		return ConversationTurn{}, errors.New("conversation service is unavailable")
+	}
+	asyncRepository, ok := s.repository.(AsyncRepository)
+	if !ok || s.agent == nil {
+		return ConversationTurn{}, ErrAsyncTurnUnavailable
+	}
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" || execution.TurnID == uuid.Nil || execution.Conversation.ID == uuid.Nil ||
+		execution.Turn.UserMessage.ID == uuid.Nil || execution.Turn.UserMessage.ConversationID != execution.Conversation.ID ||
+		execution.Actor.UserID == uuid.Nil || execution.Actor.UserID != execution.Conversation.UserID || execution.AttemptCount < 1 {
+		return ConversationTurn{}, ErrInvalidMessage
+	}
+	commandCtx := WithCommandContext(ctx, CommandContext{
+		ConversationID: execution.Conversation.ID,
+		UserMessageID:  execution.Turn.UserMessage.ID,
+		Actor:          execution.Actor,
+	})
+	response, err := s.agent.Respond(commandCtx, AgentRequest{
+		Conversation: execution.Conversation,
+		UserMessage:  execution.Turn.UserMessage,
+		History:      execution.History,
+	})
+	if err != nil {
+		return ConversationTurn{}, err
+	}
+	response, err = prepareAgentResponse(response)
+	if err != nil {
+		return ConversationTurn{}, ErrAgentResponseInvalid
+	}
+	return asyncRepository.CompleteTurnExecution(
+		ctx, execution.Actor.UserID, execution.TurnID, workerID,
+		response, s.clock().UTC(),
+	)
 }
 
 func (s *Service) failTurn(ctx context.Context, userID, turnID uuid.UUID, cause error) error {
@@ -530,10 +907,112 @@ func prepareMessageInput(actor Actor, input AppendMessageInput) (AppendMessageIn
 	if input.Content == "" || len([]rune(input.Content)) > MaxContentRunes {
 		return AppendMessageInput{}, ErrInvalidMessage
 	}
+	if input.Role == MessageRoleAssistant {
+		prepared, err := prepareAgentResponse(AgentResponse{Content: input.Content, Citations: input.Citations})
+		if err != nil {
+			return AppendMessageInput{}, ErrInvalidMessage
+		}
+		input.Content, input.Citations = prepared.Content, prepared.Citations
+	} else if len(input.Citations) > 0 {
+		return AppendMessageInput{}, ErrInvalidMessage
+	}
+	for index := range input.Attachments {
+		input.Attachments[index].Purpose = strings.TrimSpace(input.Attachments[index].Purpose)
+		if input.Attachments[index].Purpose == "" {
+			input.Attachments[index].Purpose = "context"
+		}
+	}
 	if err := validateReferences(input); err != nil {
 		return AppendMessageInput{}, err
 	}
 	return input, nil
+}
+
+func prepareAgentResponse(response AgentResponse) (AgentResponse, error) {
+	response.Content = strings.TrimSpace(response.Content)
+	if response.Content == "" || len([]rune(response.Content)) > MaxContentRunes ||
+		len(response.Citations) > MaxCitationsPerMessage {
+		return AgentResponse{}, ErrAgentResponseInvalid
+	}
+	resolved, err := ResolveAnswerCitations(response.Content, response.Citations)
+	if err != nil || !slices.Equal(resolved, response.Citations) {
+		return AgentResponse{}, ErrAgentResponseInvalid
+	}
+	response.Citations = append([]MessageCitation(nil), resolved...)
+	if response.RunObservation != nil {
+		if response.RunObservation.Validate() != nil {
+			return AgentResponse{}, ErrAgentResponseInvalid
+		}
+		retrievedByRef := make(map[string]AgentRunSource, len(response.RunObservation.RetrievedSources))
+		for _, source := range response.RunObservation.RetrievedSources {
+			retrievedByRef[source.SourceRef] = source
+		}
+		for _, citation := range response.Citations {
+			source, exists := retrievedByRef[citation.SourceRef]
+			if !exists || source.SourceType != citation.SourceType || source.ContentSHA256 != citation.ContentSHA256 {
+				return AgentResponse{}, ErrAgentResponseInvalid
+			}
+		}
+		if response.RunObservation.Outcome == AgentRunInsufficientEvidence && len(response.Citations) > 0 {
+			return AgentResponse{}, ErrAgentResponseInvalid
+		}
+		observation := *response.RunObservation
+		observation.RetrievedSources = append([]AgentRunSource(nil), observation.RetrievedSources...)
+		observation.DegradedChannels = append([]string(nil), observation.DegradedChannels...)
+		response.RunObservation = &observation
+	}
+	return response, nil
+}
+
+// ResolveAnswerCitations accepts only source markers backed by sources exposed
+// during the same Agent run. Repeated markers are allowed in answer text but
+// become one ordered citation record.
+func FormatAnswerCitationMarker(citation MessageCitation) (string, error) {
+	if validateCitationIdentity(citation) != nil {
+		return "", ErrInvalidMessage
+	}
+	return "[source:" + citation.SourceRef + "]", nil
+}
+
+func ResolveAnswerCitations(content string, available []MessageCitation) ([]MessageCitation, error) {
+	if len(available) > MaxCitationSourcesPerRun {
+		return nil, ErrInvalidMessage
+	}
+	availableByRef := make(map[string]MessageCitation, len(available))
+	for _, citation := range available {
+		if validateCitationIdentity(citation) != nil {
+			return nil, ErrInvalidMessage
+		}
+		if _, exists := availableByRef[citation.SourceRef]; exists {
+			return nil, ErrInvalidMessage
+		}
+		availableByRef[citation.SourceRef] = citation
+	}
+	markerRefs, err := citationMarkerRefs(content)
+	if err != nil {
+		return nil, err
+	}
+	if len(markerRefs) > MaxCitationSourcesPerRun {
+		return nil, ErrInvalidMessage
+	}
+	resolved := make([]MessageCitation, 0, len(markerRefs))
+	seen := make(map[string]struct{}, len(markerRefs))
+	for _, sourceRef := range markerRefs {
+		if _, duplicate := seen[sourceRef]; duplicate {
+			continue
+		}
+		if len(resolved) >= MaxCitationsPerMessage {
+			return nil, ErrInvalidMessage
+		}
+		citation, exists := availableByRef[sourceRef]
+		if !exists {
+			return nil, ErrInvalidMessage
+		}
+		citation.Position = len(resolved)
+		resolved = append(resolved, citation)
+		seen[sourceRef] = struct{}{}
+	}
+	return resolved, nil
 }
 
 func turnRequestFingerprint(input AppendMessageInput) (string, error) {
@@ -552,15 +1031,17 @@ func turnRequestFingerprint(input AppendMessageInput) (string, error) {
 		return strings.Compare(string(left.Kind), string(right.Kind))
 	})
 	payload := struct {
-		ConversationID uuid.UUID       `json:"conversationId"`
-		Content        string          `json:"content"`
-		CaseReferences []CaseReference `json:"caseReferences"`
-		TaskReferences []TaskReference `json:"taskReferences"`
+		ConversationID uuid.UUID                `json:"conversationId"`
+		Content        string                   `json:"content"`
+		CaseReferences []CaseReference          `json:"caseReferences"`
+		TaskReferences []TaskReference          `json:"taskReferences"`
+		Attachments    []MessageAttachmentInput `json:"attachments"`
 	}{
 		ConversationID: input.ConversationID,
 		Content:        input.Content,
 		CaseReferences: caseReferences,
 		TaskReferences: taskReferences,
+		Attachments:    input.Attachments,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -571,7 +1052,8 @@ func turnRequestFingerprint(input AppendMessageInput) (string, error) {
 }
 
 func validateReferences(input AppendMessageInput) error {
-	if len(input.CaseReferences) > 20 || len(input.TaskReferences) > 20 {
+	if len(input.CaseReferences) > 20 || len(input.TaskReferences) > 20 ||
+		len(input.Attachments) > MaxAttachmentsPerMessage || len(input.Citations) > MaxCitationsPerMessage {
 		return ErrInvalidMessage
 	}
 	caseSeen := make(map[uuid.UUID]struct{}, len(input.CaseReferences))
@@ -596,6 +1078,116 @@ func validateReferences(input AppendMessageInput) error {
 		}
 		taskSeen[ref.TaskID] = struct{}{}
 	}
+	attachmentSeen := make(map[uuid.UUID]struct{}, len(input.Attachments))
+	for _, ref := range input.Attachments {
+		if ref.AttachmentID == uuid.Nil || strings.TrimSpace(ref.Purpose) == "" ||
+			len([]rune(ref.Purpose)) > MaxAttachmentPurposeRunes {
+			return ErrInvalidMessage
+		}
+		if _, exists := attachmentSeen[ref.AttachmentID]; exists {
+			return ErrInvalidMessage
+		}
+		attachmentSeen[ref.AttachmentID] = struct{}{}
+	}
+	citationSeen := make(map[string]struct{}, len(input.Citations))
+	for index, citation := range input.Citations {
+		if citation.Position != index || citation.Validate() != nil {
+			return ErrInvalidMessage
+		}
+		if _, exists := citationSeen[citation.SourceRef]; exists {
+			return ErrInvalidMessage
+		}
+		citationSeen[citation.SourceRef] = struct{}{}
+	}
+	return nil
+}
+
+func citationMarkerRefs(content string) ([]string, error) {
+	const markerPrefix = "[source:"
+	refs := make([]string, 0)
+	remaining := content
+	for {
+		start := strings.Index(remaining, markerPrefix)
+		if start < 0 {
+			return refs, nil
+		}
+		valueStart := start + len(markerPrefix)
+		end := strings.IndexByte(remaining[valueStart:], ']')
+		if end < 0 {
+			return nil, ErrInvalidMessage
+		}
+		sourceRef := remaining[valueStart : valueStart+end]
+		if strings.TrimSpace(sourceRef) == "" || sourceRef != strings.TrimSpace(sourceRef) ||
+			len(sourceRef) > MaxCitationSourceRefBytes {
+			return nil, ErrInvalidMessage
+		}
+		refs = append(refs, sourceRef)
+		remaining = remaining[valueStart+end+1:]
+	}
+}
+
+func validCitationSourceRef(sourceType CitationSourceType, sourceRef string) bool {
+	if strings.TrimSpace(sourceRef) == "" || sourceRef != strings.TrimSpace(sourceRef) ||
+		len(sourceRef) > MaxCitationSourceRefBytes || strings.ContainsAny(sourceRef, "[]\r\n") {
+		return false
+	}
+	switch sourceType {
+	case CitationSourceKnowledgeChunk:
+		if !strings.HasPrefix(sourceRef, "knowledge:") {
+			return false
+		}
+		parts := strings.Split(strings.TrimPrefix(sourceRef, "knowledge:"), "/")
+		if len(parts) != 2 {
+			return false
+		}
+		versionID, versionErr := uuid.Parse(parts[0])
+		chunkID, chunkErr := uuid.Parse(parts[1])
+		return versionErr == nil && chunkErr == nil && versionID.String() == parts[0] && chunkID.String() == parts[1]
+	case CitationSourceAttachment:
+		if !strings.HasPrefix(sourceRef, "attachment:") {
+			return false
+		}
+		value := strings.TrimPrefix(sourceRef, "attachment:")
+		attachmentID, err := uuid.Parse(value)
+		return err == nil && attachmentID.String() == value
+	case CitationSourceWeb:
+		parsed, err := url.ParseRequestURI(sourceRef)
+		return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	default:
+		return false
+	}
+}
+
+func validCitationSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validAgentRunLabel(value string, maxBytes int) bool {
+	return strings.TrimSpace(value) != "" && value == strings.TrimSpace(value) &&
+		len(value) <= maxBytes && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validAgentRunMachineLabel(value string, maxBytes int) bool {
+	if !validAgentRunLabel(value, maxBytes) {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCitationIdentity(citation MessageCitation) error {
+	if !citation.SourceType.Valid() || !validCitationSourceRef(citation.SourceType, citation.SourceRef) ||
+		!validCitationSHA256(citation.ContentSHA256) {
+		return ErrInvalidMessage
+	}
 	return nil
 }
 
@@ -616,8 +1208,13 @@ func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosis
 		len([]rune(strings.TrimSpace(input.DiagnosisGoal))) > MaxContentRunes {
 		return CreateDiagnosisResult{}, ErrInvalidMessage
 	}
-	if len(input.AttachmentIDs) > 0 {
-		return CreateDiagnosisResult{}, diagnosis.ErrAttachmentsUnsupported
+	if len(input.AttachmentIDs) > MaxAttachmentsPerMessage {
+		return CreateDiagnosisResult{}, ErrInvalidMessage
+	}
+	for _, attachmentID := range input.AttachmentIDs {
+		if attachmentID == uuid.Nil {
+			return CreateDiagnosisResult{}, ErrInvalidMessage
+		}
 	}
 	message, err := s.repository.GetMessage(ctx, actor.UserID, commandContext.ConversationID, commandContext.UserMessageID)
 	if err != nil {
@@ -637,6 +1234,10 @@ func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosis
 		message.CaseReferences[0].ExternalCaseID != input.ExternalCaseID {
 		return CreateDiagnosisResult{}, ErrCaseReferenceRequired
 	}
+	attachments, err := taskAttachmentsFromMessage(message.Attachments, input.AttachmentIDs)
+	if err != nil {
+		return CreateDiagnosisResult{}, err
+	}
 	if input.ParentTaskID != nil {
 		if *input.ParentTaskID == uuid.Nil {
 			return CreateDiagnosisResult{}, ErrInvalidMessage
@@ -654,9 +1255,17 @@ func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosis
 	if item == nil || item.ID != input.ExternalCaseID || strings.TrimSpace(item.SourceFingerprint) == "" {
 		return CreateDiagnosisResult{}, repository.ErrNotFound
 	}
+	var attachmentSource *diagnosis.TaskAttachmentSource
+	if len(attachments) > 0 {
+		attachmentSource = &diagnosis.TaskAttachmentSource{
+			ConversationID: commandContext.ConversationID,
+			MessageID:      commandContext.UserMessageID,
+		}
+	}
 	result, err := s.diagnosisTasks.Create(ctx, diagnosis.TaskActor{UserID: actor.UserID, IsAdmin: actor.IsAdmin}, diagnosis.CreateTaskInput{
 		ExternalCaseID: input.ExternalCaseID, ExpectedSourceFingerprint: item.SourceFingerprint,
 		RequestText: strings.TrimSpace(input.DiagnosisGoal), RetryOfTaskID: input.ParentTaskID,
+		Attachments: attachments, AttachmentSource: attachmentSource,
 		IdempotencyKey: commandIdempotencyKey(actor.UserID, commandContext.UserMessageID, input.ExternalCaseID, input.ParentTaskID),
 		CorrelationID:  uuid.New(),
 	})
@@ -667,6 +1276,46 @@ func (s *Service) CreateDiagnosisTask(ctx context.Context, input CreateDiagnosis
 		return CreateDiagnosisResult{}, err
 	}
 	return CreateDiagnosisResult{Task: result.Task, Replayed: result.Replayed}, nil
+}
+
+func taskAttachmentsFromMessage(
+	messageAttachments []MessageAttachment,
+	requestedIDs []uuid.UUID,
+) ([]diagnosis.TaskAttachment, error) {
+	if len(messageAttachments) == 0 {
+		if len(requestedIDs) > 0 {
+			return nil, ErrReferenceNotFound
+		}
+		return nil, nil
+	}
+	available := make(map[uuid.UUID]MessageAttachment, len(messageAttachments))
+	for _, current := range messageAttachments {
+		available[current.AttachmentID] = current
+	}
+	selected := requestedIDs
+	if len(selected) == 0 {
+		selected = make([]uuid.UUID, 0, len(messageAttachments))
+		for _, current := range messageAttachments {
+			selected = append(selected, current.AttachmentID)
+		}
+	}
+	seen := make(map[uuid.UUID]struct{}, len(selected))
+	result := make([]diagnosis.TaskAttachment, 0, len(selected))
+	for _, attachmentID := range selected {
+		current, ok := available[attachmentID]
+		if !ok {
+			return nil, ErrReferenceNotFound
+		}
+		if _, duplicate := seen[attachmentID]; duplicate {
+			return nil, ErrInvalidMessage
+		}
+		seen[attachmentID] = struct{}{}
+		result = append(result, diagnosis.TaskAttachment{
+			AttachmentID: attachmentID,
+			Purpose:      current.Purpose,
+		})
+	}
+	return result, nil
 }
 
 // GetDiagnosisTaskStatus reads only a task explicitly referenced by the latest
