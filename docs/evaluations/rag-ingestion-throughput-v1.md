@@ -4,7 +4,8 @@
 
 该评测用于回答“混合文档入库的优化版本是否在保持产物完整性的前提下，使处理吞吐提升至少
 40%”。当前完成了一个公开原生 PDF 的 `worker-core pilot`、三文档 PostgreSQL 批写消融、双文档
-文档并发五轮消融，以及四十文档的零成本 Parser/Chunking corpus audit。五轮并发消融可以支撑
+文档并发五轮消融、四格式低成本代表集 pair，以及四十文档的零成本 Parser/Chunking corpus audit。
+五轮并发消融可以支撑
 “受控 Worker-core 吞吐提升 40%+”的简历口径；其余结果用于验证链路、扩充语料和定位瓶颈，不能
 把局部结果外推成四十文档混合视觉端到端指标。
 
@@ -199,6 +200,40 @@ Embedding 并发和数据库写入策略下，只改变文档并发 `1 -> 2`，�
 文档处理吞吐提升 40%+”的简历口径。它仍只有 2 文档/2 格式，当前全规模门禁继续给出
 `AcceptanceEligible=false`、`MeetsTarget=false`；不能表述成 40 文档混合视觉端到端提升 46.48%。
 
+## 2026-08-09 四格式低成本代表集配对
+
+在上述五轮指标之外，按默认 `0.05 CNY` 硬预算选取 4 份公开文档，补充验证此前吞吐正向集没有
+覆盖的 Office 表格和纯视觉任务终态：
+
+| 文档 | 格式 | 本地审计状态 | Worker 终态 |
+| --- | --- | --- | --- |
+| USPTO US4575330 | 扫描 PDF | `visual_enrichment_required` | `failed/dead_letter`，明确要求视觉增强 |
+| ICS 工控安全海报 | PPTX | `text_ready_visual_pending` | `partial_succeeded`，保留 35 个可检索 Element 与视觉候选 |
+| NIST SP 800-171r2 安全要求 | XLSX | `text_ready` | `succeeded` |
+| Wikimedia CNC 车床图 | PNG | `visual_enrichment_required` | `failed/dead_letter`，明确要求视觉增强 |
+
+零成本 audit 结果为 4 文档、4 格式、3,051,974 bytes、38 个原始 Element、28 个视觉候选、223 个
+Chunk、0 个 Parser 失败。观测器没有装配 Layout/OCR/Table/VLM Processor，因此两份纯视觉文档的
+失败是固定且安全的预期结果，不是处理回退；扫描页和图片仍保留为待增强证据，也没有产生视觉模型
+费用。
+
+预检估算双臂共 46 次 Embedding 请求、97,306 Token、`0.0487 CNY`。真实运行只改变文档并发
+`1 -> 2`，两臂均为 1 succeeded、1 partial、2 failed，且都保留 36 个可检索 Element、223 个 Chunk、
+23 次 Embedding 请求、25,419 Token 和 `3+3` 个 Chunk/向量写入批次：
+
+| 指标 | 文档并发 1 | 文档并发 2 | 变化 |
+| --- | ---: | ---: | ---: |
+| 总耗时 | 6,492 ms | 5,498 ms | -15.31% |
+| 文档吞吐 | 36.97/min | 43.65/min | +18.08% |
+| Element / Chunk | 36 / 223 | 36 / 223 | 0 |
+| Embedding 请求 / Token | 23 / 25,419 | 23 / 25,419 | 0 |
+
+汇总结果为 `IntegrityPreserved=true`；实际共 50,838 Token，按 0.5 元/百万 Token 约 `0.025419 CNY`。
+由于只有 1 个 pair、4 文档和 4 格式，`AcceptanceEligible=false`、`MeetsTarget=false` 是正确结果。
+本次实验只证明跨格式任务状态、产物和计量在受控并发下保持一致，不替代前述五轮 `+46.48%` 指标，
+也不外推为包含 OCR/VLM、RabbitMQ 或上传 API 的生产端到端增幅。原始 Observation 与 Summary 位于
+被 Git 忽略的 `output/evaluation/rag-ingestion-resume-closure-v1.*`。
+
 ## 2026-08-07 四十文档 Provider Pilot（无效）
 
 文档数与格式门禁通过后，运行了一个只改变文档并发 `1 -> 2` 的 40 文档 pair；两边均保持
@@ -295,11 +330,11 @@ Observation 和 summary 位于被 Git 忽略的 `output/evaluation/`；评测记
 
 ## 下一步
 
-1. 在已完成的双文档 5-pair 指标基础上，对 4 到 8 份代表性小文档运行 `-estimate-only`，只在默认
-   0.05 元预算内补一个跨格式 Provider smoke，不再重复烧钱追逐同一增幅，也不自动运行 40 文档 pair；
-2. 把 40 文档/8 格式保留为零成本兼容性与 Parser/Chunk 吞吐证据，把小规模真实 Provider pair
-   用于完整链路 smoke 和单变量消融；二者分别报告，不能把局部增幅外推为全规模端到端增幅；
-3. 是否仍投入 40 文档/5 pair 的同步 Provider 费用，须在预检给出总 Token/费用后单独决定；Batch API
+1. 已完成默认 0.05 元预算内的四文档/四格式代表性 Provider pair；后续不重复烧钱追逐同一增幅，
+   也不自动运行 40 文档 pair；
+2. 继续把 40 文档/8 格式作为零成本兼容性与 Parser/Chunk 证据，把小规模真实 Provider pair
+   作为 Worker-core 完整性和单变量消融；两种口径分别报告，不能把局部增幅外推为全规模端到端增幅；
+3. 是否投入 40 文档/5 pair 的同步 Provider 费用，须在预检给出总 Token/费用后单独决定；Batch API
    虽价格减半且不受同步限流，但异步语义不同，不能替代同步延迟对照；
 4. 增加非 NIST 发布方与视觉质量难例，避免文档数量达标掩盖来源集中；
 5. 为不可中断的 PDF 页文本提取增加进程级隔离或等价的可终止边界，防止异常 PDF 长时间占用 Worker；

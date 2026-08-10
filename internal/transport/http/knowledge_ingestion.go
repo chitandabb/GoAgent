@@ -336,6 +336,10 @@ func validateKnowledgeFile(path, originalName string) (string, string, error) {
 	ext := strings.ToLower(filepath.Ext(name))
 	mediaTypes := map[string]string{
 		".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+		".log": "text/plain; charset=utf-8", ".json": "text/plain; charset=utf-8",
+		".csv": "text/plain; charset=utf-8", ".sql": "text/plain; charset=utf-8",
+		".xml": "text/plain; charset=utf-8", ".yaml": "text/plain; charset=utf-8",
+		".yml": "text/plain; charset=utf-8",
 		".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -346,7 +350,7 @@ func validateKnowledgeFile(path, originalName string) (string, string, error) {
 		return "", "", invalidUploadField("file", "文件格式不受支持")
 	}
 	switch ext {
-	case ".txt", ".md":
+	case ".txt", ".md", ".log", ".json", ".csv", ".sql", ".xml", ".yaml", ".yml":
 		if err := validateUTF8File(path); err != nil {
 			return "", "", invalidUploadField("file", "文本文件必须是 UTF-8 且不能包含 NUL 字符")
 		}

@@ -31,6 +31,8 @@ func TestOpenAPIYAMLParsesAndContainsTaskControlPaths(t *testing.T) {
 		"/api/v1/admin/knowledge-documents/{documentId}/versions",
 		"/api/v1/admin/knowledge-ingestion-tasks/{taskId}",
 		"/api/v1/admin/knowledge-ingestion-tasks/{taskId}/cancel",
+		"/api/v1/conversations/{conversationId}/turns/{turnId}",
+		"/api/v1/conversations/{conversationId}/turns/{turnId}/events",
 	} {
 		if _, ok := document.Paths[path]; !ok {
 			t.Fatalf("OpenAPI path %q is missing", path)
@@ -65,5 +67,22 @@ func TestOpenAPIYAMLParsesAndContainsTaskControlPaths(t *testing.T) {
 	contentMap, ok := okResponse["content"].(map[string]any)
 	if !ok || contentMap["application/json"] == nil || contentMap["text/event-stream"] == nil {
 		t.Fatal("task events must document JSON and text/event-stream representations")
+	}
+	conversationEvents := document.Paths["/api/v1/conversations/{conversationId}/turns/{turnId}/events"]["get"]
+	conversationOperation, ok := conversationEvents.(map[string]any)
+	if !ok {
+		t.Fatal("conversation turn events GET operation is invalid")
+	}
+	conversationResponses, ok := conversationOperation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("conversation turn events responses are invalid")
+	}
+	conversationOK, ok := conversationResponses["200"].(map[string]any)
+	if !ok {
+		t.Fatal("conversation turn events 200 response is missing")
+	}
+	conversationContent, ok := conversationOK["content"].(map[string]any)
+	if !ok || conversationContent["application/json"] == nil || conversationContent["text/event-stream"] == nil {
+		t.Fatal("conversation turn events must document JSON and text/event-stream representations")
 	}
 }

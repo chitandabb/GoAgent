@@ -55,6 +55,31 @@ func TestChunkMarkdownSplitsLongContentWithBoundedOverlap(t *testing.T) {
 	}
 }
 
+func TestChunkElementsSplitsMarkdownTableByRowsAndRepeatsHeader(t *testing.T) {
+	page := 2
+	table := "| alarm | meaning |\n| --- | --- |\n" +
+		"| E01 | motor overload detected during startup |\n" +
+		"| E02 | pressure sensor signal is unavailable |\n" +
+		"| E03 | controller heartbeat timed out |\n" +
+		"| E04 | emergency stop circuit is open |"
+	chunks, err := ChunkElements([]DocumentElement{{
+		Index: 0, PageNumber: &page, ElementType: ElementTable, ContentText: table,
+	}}, TextChunkOptions{MaxRunes: 128, OverlapRunes: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %+v", chunks)
+	}
+	for _, chunk := range chunks {
+		if chunk.ElementType != ElementTable || chunk.PageNumber == nil || *chunk.PageNumber != page ||
+			!strings.HasPrefix(chunk.ContentText, "| alarm | meaning |\n| --- | --- |\n") ||
+			len([]rune(chunk.ContentText)) > 128 {
+			t.Fatalf("chunk = %+v", chunk)
+		}
+	}
+}
+
 func TestNormalizeSearchTextSupportsChineseAndTechnicalIdentifiers(t *testing.T) {
 	got := NormalizeSearchText("设备报工失败 WO-2026 SQLServer")
 	wantTerms := []string{"设备", "备报", "报工", "工失", "失败", "wo", "2026", "sqlserver"}

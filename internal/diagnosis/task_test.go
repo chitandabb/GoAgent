@@ -109,6 +109,7 @@ func TestNormalizeTaskRequestScopeValidatesCapabilitiesAndSkill(t *testing.T) {
 		{name: "unknown", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "shell"}}, wantErr: true},
 		{name: "knowledge is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "knowledge"}}, wantErr: true},
 		{name: "web search is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "web_search"}}, wantErr: true},
+		{name: "attachment is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "attachment"}}, wantErr: true},
 		{
 			name: "code skill without capability", scope: map[string]any{
 				RequestScopeKeyRequestedSkill:      RequestedSkillCodeInvestigation,
@@ -171,11 +172,44 @@ func TestDiagnosisTaskServiceRejectsAttachmentsInsteadOfDroppingThem(t *testing.
 		ExternalCaseID: uuid.New(), ExpectedSourceFingerprint: "sha256:source", RequestText: "检查",
 		Attachments: []TaskAttachment{{AttachmentID: uuid.New(), Purpose: "problem_image"}}, IdempotencyKey: uuid.NewString(),
 	})
-	if !errors.Is(err, ErrAttachmentsUnsupported) {
-		t.Fatalf("Create() error = %v, want ErrAttachmentsUnsupported", err)
+	if !errors.Is(err, ErrAttachmentContextRequired) {
+		t.Fatalf("Create() error = %v, want ErrAttachmentContextRequired", err)
 	}
 	if reader.calls != 0 || repo.createCalls != 0 {
 		t.Fatalf("reader/repository calls = %d/%d, want 0/0", reader.calls, repo.createCalls)
+	}
+}
+
+func TestDiagnosisTaskServiceFreezesMessageAuthorizedAttachments(t *testing.T) {
+	caseID, ownerID, conversationID, messageID, attachmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	repo := &taskRepositoryStub{}
+	reader := &taskCaseReaderStub{item: &externalcase.ExternalCase{
+		ID: caseID, DataSourceID: uuid.New(), SourceFingerprint: "sha256:source",
+		ReportedAt: time.Now().UTC(), SourceUpdatedAt: time.Now().UTC(),
+	}}
+	service, _ := NewDiagnosisTaskService(repo, reader)
+	_, err := service.Create(context.Background(), TaskActor{UserID: ownerID}, CreateTaskInput{
+		ExternalCaseID: caseID, ExpectedSourceFingerprint: "sha256:source", RequestText: "检查附件",
+		Attachments:      []TaskAttachment{{AttachmentID: attachmentID, Purpose: " log_file "}},
+		AttachmentSource: &TaskAttachmentSource{ConversationID: conversationID, MessageID: messageID},
+		IdempotencyKey:   uuid.NewString(),
+	})
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+	if repo.createCalls != 1 || len(repo.createInput.Attachments) != 1 ||
+		repo.createInput.Attachments[0].Purpose != "log_file" || repo.createInput.AttachmentSource == nil ||
+		repo.createInput.AttachmentSource.ConversationID != conversationID ||
+		repo.createInput.AttachmentSource.MessageID != messageID {
+		t.Fatalf("repository attachment input=%+v source=%+v", repo.createInput.Attachments, repo.createInput.AttachmentSource)
+	}
+	var persistedScope map[string]any
+	if err := json.Unmarshal(repo.createInput.RequestScope, &persistedScope); err != nil {
+		t.Fatalf("decode persisted request scope: %v", err)
+	}
+	capabilities, err := TaskCapabilitiesFromRequestScope(persistedScope)
+	if err != nil || !slicesContainsCapability(capabilities, TaskCapabilityAttachment) {
+		t.Fatalf("request scope capabilities=%v error=%v", capabilities, err)
 	}
 }
 

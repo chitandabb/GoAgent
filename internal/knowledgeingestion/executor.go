@@ -19,13 +19,14 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledgeenrichment"
 	"github.com/chitandabb/GoAgent/internal/knowledgelayout"
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
+	"github.com/chitandabb/GoAgent/internal/knowledgetable"
 	"github.com/chitandabb/GoAgent/internal/knowledgeworker"
 	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
-const elementArtifactSchemaVersion = 5
+const elementArtifactSchemaVersion = 6
 
 type Config struct {
 	MaxSourceBytes   int64
@@ -33,6 +34,7 @@ type Config struct {
 	ChunkOptions     knowledge.TextChunkOptions
 	VisualConfig     knowledgeenrichment.Config
 	VisualProcessor  knowledgeenrichment.Processor
+	TableProcessor   knowledgetable.Processor
 	LayoutStage      *LayoutStage
 	Embedding        *EmbeddingConfig
 	Clock            func() time.Time
@@ -70,7 +72,9 @@ func NewExecutor(store objectstore.Store, parser Parser, cfg Config) (*Executor,
 	if cfg.MaxSourceBytes < 1 || cfg.MaxArtifactBytes < 1 {
 		return nil, errors.New("knowledge ingestion executor byte limits must be positive")
 	}
-	visualEnricher, err := knowledgeenrichment.New(cfg.VisualConfig, cfg.VisualProcessor)
+	visualEnricher, err := knowledgeenrichment.NewWithTableProcessor(
+		cfg.VisualConfig, cfg.VisualProcessor, cfg.TableProcessor,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +435,9 @@ func layoutEnrichmentRoute(route knowledgelayout.ProcessingRoute) (knowledgeenri
 	switch route {
 	case knowledgelayout.RouteCloudOCR:
 		return knowledgeenrichment.RouteOCR, true
-	case knowledgelayout.RouteTableRecovery, knowledgelayout.RouteCloudVision:
+	case knowledgelayout.RouteTableRecovery:
+		return knowledgeenrichment.RouteTable, true
+	case knowledgelayout.RouteCloudVision:
 		return knowledgeenrichment.RouteOCRVLM, true
 	case knowledgelayout.RouteNativeText, knowledgelayout.RouteSkip:
 		return knowledgeenrichment.RouteSkip, false

@@ -15,6 +15,7 @@ import (
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformrabbitmq "github.com/chitandabb/GoAgent/internal/platform/rabbitmq"
+	platformtablemodel "github.com/chitandabb/GoAgent/internal/platform/tablemodel"
 	platformvisualmodel "github.com/chitandabb/GoAgent/internal/platform/visualmodel"
 
 	"github.com/google/uuid"
@@ -95,6 +96,11 @@ func NewKnowledgeWorkerApp(ctx context.Context, cfg config.Config, log *zap.Logg
 		closeDependencies()
 		return nil, err
 	}
+	tableProcessor, err := buildTableProcessor(ctx, cfg)
+	if err != nil {
+		closeDependencies()
+		return nil, err
+	}
 	layoutRuntime, err = openKnowledgeLayoutRuntime(ctx, cfg.Knowledge)
 	if err != nil {
 		closeDependencies()
@@ -142,6 +148,7 @@ func NewKnowledgeWorkerApp(ctx context.Context, cfg config.Config, log *zap.Logg
 			MinPixels:      cfg.Knowledge.MinVisualPixels,
 		},
 		VisualProcessor: visualProcessor,
+		TableProcessor:  tableProcessor,
 		LayoutStage:     layoutStage,
 		Embedding:       embeddingConfig,
 	})
@@ -208,6 +215,24 @@ func buildVisualProcessor(ctx context.Context, cfg config.Config) (knowledgeenri
 		return nil, nil
 	}
 	return platformvisualmodel.NewProcessor(ocrEndpoint, visionEndpoint)
+}
+
+func buildTableProcessor(ctx context.Context, cfg config.Config) (*platformtablemodel.Processor, error) {
+	if !cfg.Models.Table.Enabled {
+		return nil, nil
+	}
+	prompt, err := cfg.Models.Table.LoadPrompt("models.table")
+	if err != nil {
+		return nil, err
+	}
+	generator, err := platformvisualmodel.NewDashScopeModel(ctx, cfg.Models.Table, "models.table")
+	if err != nil {
+		return nil, err
+	}
+	return platformtablemodel.NewProcessor(platformtablemodel.Endpoint{
+		Generator: generator, Provider: cfg.Models.Table.Provider, Model: cfg.Models.Table.Model,
+		Prompt: prompt, PromptVersion: cfg.Models.Table.PromptVersion,
+	})
 }
 
 func (a *KnowledgeWorkerApp) Run(ctx context.Context) error {

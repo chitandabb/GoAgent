@@ -15,8 +15,13 @@ promptVersion = "diagnosis-v2"
 systemPromptFile = "config/prompts/diagnosis-system.md"
 baselinePromptFile = "config/prompts/evaluation-baseline.md"
 reportContractFile = "config/prompts/report-contract.md"
-conversationPromptVersion = "conversation-v1"
+conversationPromptVersion = "conversation-v6"
 conversationPromptFile = "config/prompts/conversation-system.md"
+conversationCitationRepairEnabled = true
+conversationCitationRepairPromptVersion = "conversation-citation-repair-v1"
+conversationCitationRepairPromptFile = "config/prompts/conversation-citation-repair.md"
+conversationCitationRepairTimeoutMillis = 30000
+conversationCitationRepairMaxOutputTokens = 768
 conversationMaxIterations = 8
 conversationMaxContextRunes = 32000
 conversationTimeoutMillis = 60000
@@ -49,6 +54,26 @@ temperature = 0.0
 timeoutMillis = 3000
 maxOutputTokens = 256
 
+[models.chat.profiles.qwen-qa-eval]
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3.6-flash"
+thinkingMode = "disabled"
+temperature = 0.0
+timeoutMillis = 30000
+maxOutputTokens = 1024
+
+[models.chat.profiles.qwen-qa-strong-eval]
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3-max"
+thinkingMode = "disabled"
+temperature = 0.0
+timeoutMillis = 60000
+maxOutputTokens = 1024
+
 [models.judge]
 enabled = false
 provider = "dashscope"
@@ -56,7 +81,7 @@ baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 apiKeyEnv = "DASHSCOPE_API_KEY"
 model = "qwen3-max"
 promptFile = "config/prompts/rag-judge.md"
-promptVersion = "rag-judge-v1"
+promptVersion = "rag-judge-v2"
 timeoutMillis = 120000
 maxOutputTokens = 2048
 
@@ -108,6 +133,17 @@ promptVersion = "visual-description-v2"
 timeoutMillis = 120000
 maxOutputTokens = 2048
 
+[models.table]
+enabled = true
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3-vl-plus"
+promptFile = "config/prompts/table-recovery.md"
+promptVersion = "table-recovery-v2"
+timeoutMillis = 120000
+maxOutputTokens = 4096
+
 [log]
 level = "debug"
 format = "console"
@@ -141,6 +177,8 @@ urlEnv = "MESGUARD_RABBITMQ_URL"
 exchange = "mesguard.tasks"
 diagnosisQueue = "mesguard.diagnosis.execute"
 diagnosisRoutingKey = "diagnosis.execute"
+conversationQueue = "mesguard.conversation.turn.execute"
+conversationRoutingKey = "conversation.turn.execute"
 knowledgeIngestionQueue = "mesguard.knowledge.ingest"
 knowledgeIngestionRoutingKey = "knowledge.ingest"
 relayBatchSize = 10

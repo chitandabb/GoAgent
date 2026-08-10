@@ -97,10 +97,41 @@ ORDER BY source.id`, lease.TaskID).Scan(&sourceRecords).Error; err != nil {
 	if !seenCaseSource {
 		return diagnosisworker.Task{}, fmt.Errorf("%w: case source is not active or not bound", diagnosis.ErrInvalidTask)
 	}
+	var attachmentRecords []workerTaskAttachmentRecord
+	if err := ResolveDB(ctx, r.db).Raw(`
+SELECT reference.attachment_id, reference.purpose, item.original_filename,
+       item.content_type, item.size_bytes, item.content_sha256
+FROM diagnosis_task_attachments reference
+JOIN attachments item ON item.id = reference.attachment_id
+WHERE reference.task_id = ? AND item.owner_user_id = ? AND item.processing_status = 'uploaded'
+ORDER BY reference.created_at, reference.attachment_id`, lease.TaskID, record.CreatedBy).Scan(&attachmentRecords).Error; err != nil {
+		return diagnosisworker.Task{}, TranslateError(err)
+	}
+	attachments := make([]diagnosisworker.TaskAttachment, 0, len(attachmentRecords))
+	for _, current := range attachmentRecords {
+		attachments = append(attachments, diagnosisworker.TaskAttachment{
+			ID: current.AttachmentID, Purpose: current.Purpose, OriginalName: current.OriginalName,
+			MediaType: current.MediaType, SizeBytes: current.SizeBytes, ContentSHA256: current.ContentSHA256,
+		})
+	}
+	capabilities, err := diagnosis.TaskCapabilitiesFromRequestScope(requestScope)
+	if err != nil {
+		return diagnosisworker.Task{}, fmt.Errorf("%w: attachment capability: %v", diagnosis.ErrInvalidTask, err)
+	}
+	hasAttachmentCapability := false
+	for _, capability := range capabilities {
+		if capability == diagnosis.TaskCapabilityAttachment {
+			hasAttachmentCapability = true
+			break
+		}
+	}
+	if hasAttachmentCapability != (len(attachments) > 0) {
+		return diagnosisworker.Task{}, fmt.Errorf("%w: attachment scope and frozen task attachments disagree", diagnosis.ErrInvalidTask)
+	}
 	return diagnosisworker.Task{
 		ID: record.ID, CreatedBy: record.CreatedBy, Role: record.Role,
 		RequestText: record.RequestText, RequestScope: requestScope,
-		CaseSnapshot: caseSnapshot, DataSources: dataSources,
+		CaseSnapshot: caseSnapshot, DataSources: dataSources, Attachments: attachments,
 	}, nil
 }
 
@@ -521,4 +552,13 @@ type workerDataSourceRecord struct {
 	ID         uuid.UUID `gorm:"column:id"`
 	Role       string    `gorm:"column:source_role"`
 	SafetyMode string    `gorm:"column:safety_mode"`
+}
+
+type workerTaskAttachmentRecord struct {
+	AttachmentID  uuid.UUID `gorm:"column:attachment_id"`
+	Purpose       string    `gorm:"column:purpose"`
+	OriginalName  string    `gorm:"column:original_filename"`
+	MediaType     string    `gorm:"column:content_type"`
+	SizeBytes     int64     `gorm:"column:size_bytes"`
+	ContentSHA256 string    `gorm:"column:content_sha256"`
 }

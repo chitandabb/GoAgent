@@ -181,7 +181,7 @@ func NewTaskScope(cfg TaskScopeConfig) (TaskScope, error) {
 		}
 		if cfg.TaskType == TaskTypeConversation && capability != ToolCapabilityCase &&
 			capability != ToolCapabilityKnowledge && capability != ToolCapabilityWebSearch &&
-			capability != ToolCapabilityTask {
+			capability != ToolCapabilityTask && capability != ToolCapabilityAttachment {
 			return TaskScope{}, fmt.Errorf("conversation task scope cannot use capability %q", capability)
 		}
 	}

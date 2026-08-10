@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：`M2-A1 至 M2-A8 后端链路已完成 / M2-B1 部分完成 / M2-B2 实现完成待真实 smoke`
+- 状态：`M2-A1 至 M2-A8 后端链路已完成 / M2-A9 表格链路与有界真实 smoke 已完成，精确 merged-cell 为增强项 / M2-B1 部分完成 / M2-B2 实现完成待真实 smoke`
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
@@ -24,7 +24,7 @@
 - 独立 Knowledge Worker、Element Artifact、fenced Chunk staging 与原子 `ready/current` 发布；
 - UTF-8 TXT/Markdown、嵌入文本 PDF、DOCX、XLSX、PPTX 的确定性解析；
 - PDF 无文本页、PNG/JPEG 独立图片和 Office media 的受限视觉资产提取、引用定位及后端路由；
-- Artifact schema v5 的视觉/版面/provider usage/Element合并 provenance、`partial_ready` 降级和视觉-only 永久失败语义；
+- Artifact schema v6 的视觉/版面/provider usage/Element合并 provenance、结构化表格 metadata、`partial_ready` 降级和视觉-only 永久失败语义；
 - 固定 PP-DocLayout-M/ONNX Runtime 契约、PDFium-WASM 页面渲染、区域级 OCR/VLM 显式路由与整页重复调用抑制；
 - PDF 页数/文本预算以及 OOXML 条目、展开大小、XML、工作表行列等资源边界；
 - PDF/DOCX/XLSX/PPTX 真实服务链路 smoke，均验证 Parser 版本、Chunk 和 Artifact SHA-256。
@@ -41,11 +41,12 @@
 
 当前尚未实现：
 
-- 附件领域表以及附件上传/内容代理读取 API；
-- 内容代理读取、孤儿清理和完整对象生命周期；
+- `personal` 附件范围、失败上传租约/孤儿清理和完整对象生命周期；会话附件上传、消息/任务级
+  读取授权、引用预览与诊断任务冻结已实现，扫描附件仍不会隐式触发 OCR/VLM；
 - 更大规模 OCR/VLM provider 配对测评、扫描表格/小字体/退化扫描质量、复杂图表区域语义和丰富 Office 视觉语义；
 - XLSX 公式表达式、隐藏 Sheet/Slide 语义和 PPTX 演讲者备注等丰富 Office 语义；
-- 物化 Parent 索引和面向用户的知识问答 HTTP/SSE 运行链路；受控 Query Rewrite 与逻辑 Parent
+- 物化 Parent 索引；面向用户的知识问答已经接入统一会话 HTTP/SSE，并已有一条通过最终引用、预览
+  和人工无证据扩写门禁的真实 Provider Case；更大多 Case 稳定性仍待扩展。受控 Query Rewrite 与逻辑 Parent
   邻接扩展各完成一个 paired Case，Compression 质量轴已完成 5 Case，另有单压力 Case 触发生产阈值；
   Agentic 二次检索已完成三 Case 真实模型决策固定集，但答案质量、失败/重复证据和多轮稳定性仍待扩展；
 - Web Search Tool、公开页面抓取和 `web` 引用链已实现；真实 Firecrawl smoke 与公网问答质量固定集仍待 Key/额度验证；
@@ -189,7 +190,7 @@
 | --- | --- | --- | --- |
 | Agent Chat | 命名 Profile Resolver + 通用 Factory；已注册 StepFun/DeepSeek/DashScope Adapter | 装配层可以；目标 Profile 仍需准入 | Tool Calling、推理参数、Usage、取消和 Agent paired baseline |
 | Query Rewrite | 独立 `modelProfile`，不再复用主 Agent；默认候选 `qwen-rewrite` | 装配层可以；当前仍默认关闭 | 严格 JSON、protected signals、质量净收益、P95 和每千次成本 |
-| LLM Judge | 只有默认关闭的 DashScope 配置骨架 | 否 | 独立适配器、Judge Prompt/Schema、与人工黄金事实的一致性校准 |
+| LLM Judge | 默认关闭的 DashScope 独立适配器、严格 Prompt/Schema、导出/执行/聚合 CLI | DashScope 内可换模型；跨 Provider 否 | 人工黄金事实一致性校准、正式模型版本冻结和 Provider 准入 |
 | Embedding | `Embedder` 接口，DashScope `text-embedding-v4` 适配器 | 否，且不能原地换向量空间 | 新 `EmbeddingProfile`、全量回填、固定集评测、原子 active 切换和旧 profile 回滚 |
 | Rerank | `Reranker` 接口，DashScope `qwen3-rerank` 适配器 | 否 | 请求/分数契约、候选上限、超时降级和排序质量/成本 paired 评测；不需要重建向量 |
 | OCR / VLM | 通用 Generator/Processor 端口，Bootstrap 固定 DashScope | 否 | 图片输入格式、严格 JSON、Prompt、视觉质量、限流和 Token/费用字段映射 |
@@ -632,8 +633,9 @@ TXT/Markdown、原生 PDF、扫描 PDF、DOCX、XLSX、PPTX、PNG/JPEG；同时�
 
 已新增默认关闭的 `[models.judge]` 配置骨架，首个 Provider 使用百炼 DashScope 的 OpenAI 兼容
 端点，Key 只从 `DASHSCOPE_API_KEY` 读取。模型、Prompt 文件、Prompt 版本、超时和输出上限均可
-配置；`config/prompts/rag-judge.md` 固定 JSON 输出和 0-4 分评分锚点。当前只完成配置与契约，
-Judge 客户端、评测命令和 Observation 持久化尚未实现。
+配置；`config/prompts/rag-judge.md` 当前使用 `rag-judge-v2`，固定严格 JSON 输出和 0-4 分评分锚点。
+现已实现独立客户端、Provider-free 输入导出器、带费用门禁的执行命令和 JSONL Observation 与会话
+质量聚合器的合并；默认配置仍为 `enabled=false`，尚未执行真实 Judge，也没有产生语义质量分数。
 
 Judge 输入固定为问题、answerable、人工黄金事实、允许来源、候选答案和实际引用证据。处理顺序为：
 
@@ -641,14 +643,28 @@ Judge 输入固定为问题、answerable、人工黄金事实、允许来源、�
 确定性检查（引用存在/权限/定位/黄金事实匹配）
   -> 独立 Judge 辅助评估 correctness/faithfulness/citation/refusal
   -> 严格 JSON 解码和 0-4 语义校验
-  -> 保存 request model、response model、promptVersion、prompt SHA-256 和原始评分
+  -> 保存 provider、request model、promptVersion、prompt SHA-256、usage、耗时、费用估算和原始评分
   -> 评测程序计算汇总，Judge 不直接决定简历指标
 ```
 
+输入导出器同时读取 Chunk 固定集、resolved Case、`recorded_run` 与人工 gold facts，并将每条证据正文
+和 SHA-256 固化到自包含 JSONL。答案实际引用但不属于黄金来源的证据仍保留在 `cited_evidence`，不会
+被“洗”进 `allowed_sources`。raw/resolved K、Query、信号词、标签、必需引用映射或正文哈希任一漂移
+都会 fail closed。执行命令默认最多 1 Case，要求在 `-validate-only`、`-estimate-only` 和
+`-execute-provider` 中显式选择一个模式；费用门禁是调用前和逐 Case 结算门禁，不是 Provider 侧硬限额。
+
+当前已有一条 Qwen 失败答案的零调用导出：2 条人工 gold facts、2 个允许来源、3 条实际引用证据。
+按当前 `qwen3-max` Judge 配置保守规划 Prompt `<=2572`、Completion `<=2048`、约 `0.034864 CNY`；
+一次显式授权的单 Case 执行实际使用 `2512/713/3225` Prompt/Completion/Total Token、耗时
+`16595 ms`、估算费用 `0.018604 CNY`，执行后已恢复默认关闭。Judge 识别出的两条无证据扩展断言、
+一条非黄金引用和“无关键事实缺失”均与人工复核一致。输出通过
+`mesguard-conversation-quality-eval -judge <observations.jsonl>` 合并后，Faithfulness、Answer Relevance
+和 Citation Alignment 为 `0.50/0.50/0.25`，确定性 `passedRuns` 仍为 0，说明辅助分数没有覆盖原失败事实。
+
 生成答案的 ChatModel 不能评自己的答案。Judge 超时、限流、格式错误或未配置时，该样本只缺少
 辅助评分，人工黄金事实、Retrieval 和确定性 Citation 指标仍可完成；禁止把 Judge 失败样本从分母
-删除。若配置使用会动态升级的模型别名，Observation 必须记录供应商响应中的实际模型标识；正式
-test run 优先固定模型版本并冻结 Prompt SHA-256。
+删除。当前 Observation 固定记录请求模型和 Prompt SHA-256；若配置使用会动态升级的模型别名，正式
+test run 必须改用可冻结版本，或补齐供应商响应中的实际模型标识后才允许跨时间比较。
 
 ### 公开大型技术语料候选（2026-08-04）
 
@@ -1179,7 +1195,7 @@ M2-A4 收工时仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表
 当前已经固定 PP-DocLayout-M commit、23 类映射、`640x640` 预处理、opset 17 和转换后 SHA-256；
 PDFium-WASM、ONNX Runtime 1.28.0、常驻 Session/取消/并发边界均已实现。`LayoutStage` 已在开关
 启用时接入 Knowledge Worker Executor，actionable crop 转为 `layout_region` 并显式路由 OCR 或
-OCR+VLM，整页资产标记 superseded 以避免重复调用；Artifact schema v5 持久化 bbox、置信度、
+OCR+VLM，整页资产标记 superseded 以避免重复调用；Artifact schema v6 持久化 bbox、置信度、
 reason、模型/渲染器、crop 哈希和 provider Token usage。文档级区域数和 crop 总字节预算在云调用前抑制超限区域并保留
 suppression reason。上游语义样例已检出 table/caption/text，但这只证明接线正确。
 真实公开固定集 `layout-routing-public-v1` 已固定 7 份 PDF/DOCX 的来源、使用依据、大小和哈希，
@@ -1196,8 +1212,70 @@ suppression reason。上游语义样例已检出 table/caption/text，但这只�
 
 `element-merge-v1` 已在 Chunk 前执行：同页完全归一化重复、被原生文本完整覆盖的 OCR、以及
 至少 85% 包含的重叠 OCR 会从检索投影中抑制；结构化 table/原生 text 优先，VLM 描述不做模糊
-语义去重。原始 Element、winner index 和 reason 全部保留在 Artifact v5，避免为了少量 Token
+语义去重。原始 Element、winner index 和 reason 全部保留在 Artifact v6，避免为了少量 Token
 丢失可审计证据。
+
+#### “结构优先”的实际顺序与剩余缺口
+
+结构优先不表示可以在完全不读取文件的情况下先划分页/区域。生产链路需要一次轻量预解析来取得
+原生文本层、页、Office relationship 和可渲染资源，然后才做布局分区；最终 Chunk 和 Embedding
+始终位于布局、区域处理和 Element 合并之后：
+
+```text
+格式签名与轻量原生预解析
+  -> 页面/区域布局检测
+  -> native text 保留 / 扫描文字 OCR / 表格结构恢复 / 图表与截图 VLM
+  -> 阅读顺序、图注和区域关系恢复
+  -> 统一 Element Artifact 与去重
+  -> 结构感知 Chunk
+  -> FTS/Vector
+```
+
+这与 Docling 的“格式后端 -> 可配置解析流水线 -> 统一 DoclingDocument -> 序列化/Chunk”以及
+PP-StructureV3 的“布局分析 -> 元素分析 -> 数据格式化”一致。Unstructured 的 `auto/fast/hi_res`
+分层也验证了原生文本快速路径和布局模型路径应并存；其文档同时明确 `hi_res` 在多栏阅读顺序上
+仍有困难，因此不能把接入一个通用解析器等同于阅读顺序问题自动消失。
+
+当前 MESGuard 对 PDF/图片已经完成上述主顺序。M2-A9 又完成了第一个有界补强：
+
+1. `table_recovery` 已不再与 `cloud_vision` 合并到同一个通用路由。独立
+   `TableRecoveryProcessor` 要求 Markdown、cell row/column、rowSpan/columnSpan、header、置信度、
+   warning、provider/model/Prompt version 和 Usage；严格拒绝未知 JSON 字段、重复坐标、非法跨度、
+   无有效单元格和越界输出；
+2. `[models.table]` 使用独立 Prompt 和输出预算，当前 DashScope `qwen3-vl-plus` 是第一个适配器。
+   表格结构写入 Element metadata/MinIO Artifact，`ElementTable.ContentText` 保存 Markdown 检索投影，
+   不新增 cell 关系表；Provider 不可用时可以回退通用视觉文字，但必须标记 partial；
+3. 同页 native text、table、picture 和 decorative 四路测试已验证只裁剪 table/picture，分别调用
+   Table/Vision Processor，整页资产被 supersede，最后才合并、Chunk。超长 Markdown 表格按完整行
+   切分并重复表头，不再按 rune 在单元格中间截断；
+4. Artifact 从 schema v5 升到 v6；原始 Element、表格 cell、bbox、路由和抑制决策仍可审计。
+
+仍保留两个不阻塞第三点收口的增强方向：
+
+1. 检测区域当前主要按 top/left 排序，尚未形成跨栏标题、正文、图注和跨页表格的统一阅读顺序；
+2. DOCX/XLSX/PPTX 的原生段落、表格和内嵌媒体可以解析，但 Office 图表、SmartArt 和混排页尚未
+   进入与 PDF 相同的页面级布局恢复链路。
+
+不在当前阶段整体替换为 Docling/MinerU。继续保留 Go 主链；如果真实扫描表格 smoke 暴露当前
+VLM 的行列恢复不足，再把 PP-StructureV3 作为只处理 table crop 的可选 Python sidecar，而不是
+预先引入完整 Python 运行时。后续阅读顺序可以由 Go 的 `ReadingOrderResolver` 基于 bbox、栏分组、
+跨栏元素和 caption 邻接确定，并把顺序/关系写入 Artifact 后再 Chunk。这样新增能力只命中高价值
+区域，不让所有文档承担 Python 服务和云调用成本。
+
+零调用合同、真实 smoke 费用门禁和人工复核字段见
+[`evaluations/table-recovery-v1.md`](../evaluations/table-recovery-v1.md)。NIST IR 8107 单区域两次真实
+调用共使用 2,507 Token、约 0.014432 元；关键文字可检索，但两次都没有恢复纵向合并单元格的
+三行 span。适配器现把 multiline/`<br>` cell 强制标记为 partial 并限制置信度。该结果不能宣称通用
+表格准确率，精确 merged-cell 恢复保留为 PP-StructureV3 或更强表格模型的增强依据。
+
+参考：
+
+- Docling architecture：<https://docling-project.github.io/docling/concepts/architecture/>
+- Docling pipeline options：<https://docling-project.github.io/docling/reference/pipeline_options/>
+- PaddleOCR PP-StructureV3：<https://paddlepaddle.github.io/PaddleOCR/v3.0.3/en/version3.x/pipeline_usage/PP-StructureV3.html>
+- PaddleOCR table structure recognition：<https://paddlepaddle.github.io/PaddleOCR/v3.0.3/en/version3.x/module_usage/table_structure_recognition.html>
+- Unstructured partitioning strategies：<https://docs.unstructured.io/open-source/core-functionality/partitioning>
+- Azure Document Intelligence layout：<https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/prebuilt/layout>
 
 `vlm-quality-local-v1` 已把三个真实课件图示裁成 SHA 固定区域，并用相同 Prompt、严格 JSON、
 超时和 2,048 输出-Token 上限比较 `qwen3-vl-plus` 与 `step-3.7-flash` low reasoning。两者最终
@@ -1277,6 +1355,13 @@ Element。27 份文档可直接文本检索，10 份文本可检索且等待视�
 文档并发 `1 -> 2` 的五轮复测中位耗时 `2124 -> 1450 ms`、吞吐增加 46.48%；整轮 80 次请求、
 96,060 Token、约 0.04803 元，其余 Element、Chunk、Token 和写入批次完全一致。该结果支持受控
 Worker-core 的 40%+ 口径，但双文档/双格式边界必须保留，不能作为 40 文档混合视觉验收指标。
+
+2026-08-09 又以扫描 PDF、PPTX、XLSX、PNG 四文档做了一个默认 `0.05 CNY` 预算内的代表集 pair。
+两臂均为 1 succeeded、1 partial、2 个预期视觉待增强 failed，并保持 36 个可检索 Element、223 个
+Chunk、23 次 Embedding 请求、25,419 Token 和相同写入批次，故 `IntegrityPreserved=true`。文档
+并发 `1 -> 2` 的耗时为 `6492 -> 5498 ms`、吞吐 `+18.08%`，真实总费用约 `0.025419 CNY`；观测器
+未装配 OCR/VLM。该结果完成跨格式 Worker-core 完整性门禁，但不替代五轮 `+46.48%` 指标，也不使
+40 文档/8 格式/5 pair 的生产级门禁变为通过。
 
 40 文档零成本估算为 12,864 个 Chunk：逐 Chunk 参考路径需要 12,864 次 Embedding 请求，生产
 batch=10 路径需要 1,306 次。因此全规模验收先选择只改变文档并发 `1 -> 2` 的 pair，确认真实

@@ -14,6 +14,8 @@ func TestAgentConfigLoadPrompts(t *testing.T) {
 	cfg.BaselinePromptFile = writePromptFileForTest(t, directory, "baseline.md", "baseline instruction")
 	cfg.ReportContractFile = writePromptFileForTest(t, directory, "report.md", "report contract")
 	cfg.ConversationPromptFile = writePromptFileForTest(t, directory, "conversation.md", "conversation instruction")
+	cfg.ConversationCitationRepairEnabled = true
+	cfg.ConversationCitationRepairPromptFile = writePromptFileForTest(t, directory, "citation-repair.md", "citation repair instruction")
 
 	prompts, err := cfg.LoadPrompts()
 	if err != nil {
@@ -22,7 +24,8 @@ func TestAgentConfigLoadPrompts(t *testing.T) {
 	if prompts.SystemInstruction != "system instruction" ||
 		prompts.BaselineInstruction != "baseline instruction" ||
 		prompts.ReportContractInstruction != "report contract" ||
-		prompts.ConversationInstruction != "conversation instruction" {
+		prompts.ConversationInstruction != "conversation instruction" ||
+		prompts.ConversationCitationRepairInstruction != "citation repair instruction" {
 		t.Fatalf("unexpected prompts: %+v", prompts)
 	}
 }

@@ -11,7 +11,7 @@ func validJudgeModelConfig() JudgeModelConfig {
 		Enabled: true, Provider: "dashscope",
 		BaseURL:   "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		APIKeyEnv: "DASHSCOPE_API_KEY", Model: "qwen3-max",
-		PromptFile: "config/prompts/rag-judge.md", PromptVersion: "rag-judge-v1",
+		PromptFile: "config/prompts/rag-judge.md", PromptVersion: "rag-judge-v2",
 		TimeoutMillis: 120_000, MaxOutputTokens: 2048,
 	}
 }

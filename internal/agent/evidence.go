@@ -21,6 +21,7 @@ const (
 	EvidenceSourceSQLDefinition  EvidenceSourceType = "sql_object_definition"
 	EvidenceSourceSQLQuery       EvidenceSourceType = "sql_query"
 	EvidenceSourceCodeSearch     EvidenceSourceType = "code_search"
+	EvidenceSourceAttachment     EvidenceSourceType = "attachment"
 	EvidenceSourceKnowledgeChunk EvidenceSourceType = "knowledge_chunk"
 	EvidenceSourceWebPage        EvidenceSourceType = "web"
 )
@@ -57,6 +58,11 @@ func newToolEvidenceItem(toolName, snapshot string, truncated bool) (EvidenceIte
 		}
 	} else if toolName == ToolFetchPublicPage {
 		location, ok = webPageEvidenceLocation(snapshot)
+		if !ok {
+			return EvidenceItem{}, false
+		}
+	} else if toolName == ToolReadAttachment {
+		location, ok = attachmentEvidenceLocation(snapshot)
 		if !ok {
 			return EvidenceItem{}, false
 		}
@@ -104,6 +110,8 @@ func evidenceSourceTypeForTool(toolName string) (EvidenceSourceType, bool) {
 		return EvidenceSourceSQLDefinition, true
 	case ToolExecuteReadonlyQuery:
 		return EvidenceSourceSQLQuery, true
+	case ToolReadAttachment:
+		return EvidenceSourceAttachment, true
 	case ToolSearchKnowledge:
 		return EvidenceSourceKnowledgeChunk, true
 	case ToolFetchPublicPage:
@@ -115,6 +123,30 @@ func evidenceSourceTypeForTool(toolName string) (EvidenceSourceType, bool) {
 		}
 	}
 	return "", false
+}
+
+func attachmentEvidenceLocation(snapshot string) (string, bool) {
+	var payload struct {
+		SourceType    string `json:"sourceType"`
+		SourceRef     string `json:"sourceRef"`
+		AttachmentID  string `json:"attachmentId"`
+		ContentSHA256 string `json:"contentSha256"`
+	}
+	if err := json.Unmarshal([]byte(snapshot), &payload); err != nil || payload.SourceType != "attachment" {
+		return "", false
+	}
+	attachmentID, err := uuid.Parse(strings.TrimSpace(payload.AttachmentID))
+	if err != nil || strings.TrimSpace(payload.SourceRef) != "attachment:"+attachmentID.String() {
+		return "", false
+	}
+	contentHash := strings.TrimSpace(payload.ContentSHA256)
+	if len(contentHash) != 64 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(contentHash); err != nil {
+		return "", false
+	}
+	return payload.SourceRef, true
 }
 
 func summarizeToolEvidence(toolName, snapshot string) string {

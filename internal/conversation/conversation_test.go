@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,6 +236,140 @@ func TestServiceExecuteTurnRejectsIdempotencyKeyReuseWithDifferentRequest(t *tes
 	}
 }
 
+func TestServiceAcceptTurnQueuesWithoutCallingAgent(t *testing.T) {
+	userID, conversationID, turnID, userMessageID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	repository := &asyncTurnRepositoryStub{
+		turnRepositoryStub: &turnRepositoryStub{conversation: Conversation{
+			ID: conversationID, UserID: userID, Status: StatusActive,
+		}},
+		accepted: BeginTurnResult{
+			TurnID: turnID, Status: TurnStatusQueued, Created: true,
+			UserMessage: Message{
+				ID: userMessageID, ConversationID: conversationID, Seq: 1,
+				Role: MessageRoleUser, Content: "诊断这个工单",
+			},
+		},
+	}
+	service, err := NewService(repository)
+	if err != nil {
+		t.Fatalf("NewService(): %v", err)
+	}
+	result, err := service.AcceptTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "诊断这个工单",
+	})
+	if err != nil {
+		t.Fatalf("AcceptTurn(): %v", err)
+	}
+	if result.TurnID != turnID || result.Status != TurnStatusQueued || !result.Created || result.Turn.UserMessage.ID != userMessageID {
+		t.Fatalf("result = %+v", result)
+	}
+	if repository.gotAccept.ExecutionMode != TurnExecutionAsynchronous || repository.gotAccept.CorrelationID == uuid.Nil ||
+		!repository.gotAccept.LeaseExpiresAt.IsZero() {
+		t.Fatalf("AcceptTurn input = %+v", repository.gotAccept)
+	}
+}
+
+func TestServiceExecuteAcceptedTurnUsesDurableCommandContextAndCompletesLease(t *testing.T) {
+	userID, conversationID, turnID, userMessageID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	userMessage := Message{
+		ID: userMessageID, ConversationID: conversationID, Seq: 1,
+		Role: MessageRoleUser, Content: "诊断当前工单",
+	}
+	assistantMessage := Message{
+		ID: uuid.New(), ConversationID: conversationID, Seq: 2,
+		Role: MessageRoleAssistant, Content: "诊断任务已创建。",
+	}
+	repository := &asyncTurnRepositoryStub{
+		turnRepositoryStub: &turnRepositoryStub{conversation: Conversation{
+			ID: conversationID, UserID: userID, Status: StatusActive,
+		}},
+		completed: ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage},
+	}
+	sourceRef := "https://example.com/diagnosis-guide"
+	agent := &conversationAgentResponderStub{response: AgentResponse{
+		Content: "  诊断任务已创建。[source:" + sourceRef + "]  ",
+		Citations: []MessageCitation{{
+			Position: 0, SourceType: CitationSourceWeb,
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("a", 64),
+		}},
+	}}
+	agent.hook = func(ctx context.Context, request AgentRequest) error {
+		command, ok := CommandContextFromContext(ctx)
+		if !ok || command.ConversationID != conversationID || command.UserMessageID != userMessageID ||
+			command.Actor.UserID != userID || request.UserMessage.ID != userMessageID {
+			t.Fatalf("command=%+v ok=%v request=%+v", command, ok, request)
+		}
+		return nil
+	}
+	service, err := NewService(repository)
+	if err != nil {
+		t.Fatalf("NewService(): %v", err)
+	}
+	if _, err := service.WithAgentResponder(agent); err != nil {
+		t.Fatalf("WithAgentResponder(): %v", err)
+	}
+	execution := TurnExecution{
+		TurnID: turnID, Turn: ConversationTurn{UserMessage: userMessage},
+		Conversation: repository.conversation, Actor: Actor{UserID: userID},
+		History: []Message{userMessage}, AttemptCount: 1,
+	}
+	completed, err := service.ExecuteAcceptedTurn(context.Background(), execution, "conversation-worker-test")
+	if err != nil {
+		t.Fatalf("ExecuteAcceptedTurn(): %v", err)
+	}
+	if completed.AssistantMessage.ID != assistantMessage.ID ||
+		repository.completedContent != "诊断任务已创建。[source:"+sourceRef+"]" ||
+		len(repository.completedCitations) != 1 || repository.completedCitations[0].SourceRef != sourceRef ||
+		repository.completedWorker != "conversation-worker-test" {
+		t.Fatalf("completed=%+v content=%q worker=%q", completed, repository.completedContent, repository.completedWorker)
+	}
+}
+
+func TestResolveAnswerCitationsRejectsUnknownAndDeduplicatesRepeatedMarkers(t *testing.T) {
+	knowledgeRef := "knowledge:" + uuid.NewString() + "/" + uuid.NewString()
+	attachmentRef := "attachment:" + uuid.NewString()
+	available := []MessageCitation{
+		{SourceType: CitationSourceKnowledgeChunk, SourceRef: knowledgeRef, ContentSHA256: strings.Repeat("a", 64)},
+		{SourceType: CitationSourceAttachment, SourceRef: attachmentRef, ContentSHA256: strings.Repeat("b", 64)},
+	}
+	resolved, err := ResolveAnswerCitations(
+		"先看知识 [source:"+knowledgeRef+"]，附件也一致 [source:"+attachmentRef+"]，再次引用 [source:"+knowledgeRef+"]。",
+		available,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 2 || resolved[0].Position != 0 || resolved[0].SourceRef != knowledgeRef ||
+		resolved[1].Position != 1 || resolved[1].SourceRef != attachmentRef {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+	if _, err := ResolveAnswerCitations("伪造 [source:https://example.com/unknown]", available); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("unknown source error = %v", err)
+	}
+	if _, err := ResolveAnswerCitations("损坏 [source:"+knowledgeRef, available); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("malformed source error = %v", err)
+	}
+}
+
+func TestFormatAnswerCitationMarkerUsesValidatedIdentity(t *testing.T) {
+	citation := MessageCitation{
+		SourceType:    CitationSourceKnowledgeChunk,
+		SourceRef:     "knowledge:11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222",
+		ContentSHA256: strings.Repeat("a", 64),
+	}
+	marker, err := FormatAnswerCitationMarker(citation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker != "[source:"+citation.SourceRef+"]" {
+		t.Fatalf("marker = %q", marker)
+	}
+	citation.SourceRef = "knowledge:invalid"
+	if _, err := FormatAnswerCitationMarker(citation); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("invalid citation error = %v", err)
+	}
+}
+
 type conversationRepositoryStub struct {
 	message     Message
 	gotInput    AppendMessageInput
@@ -313,7 +448,8 @@ func (s *turnRepositoryStub) AppendMessage(_ context.Context, userID uuid.UUID, 
 		ID: uuid.New(), ConversationID: input.ConversationID, Seq: int64(len(s.messages) + 1),
 		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
 		CaseReferences: append([]CaseReference(nil), input.CaseReferences...),
-		TaskReferences: append([]TaskReference(nil), input.TaskReferences...), CreatedAt: createdAt,
+		TaskReferences: append([]TaskReference(nil), input.TaskReferences...),
+		Citations:      append([]MessageCitation(nil), input.Citations...), CreatedAt: createdAt,
 	}
 	s.messages = append(s.messages, message)
 	return message, nil
@@ -385,7 +521,7 @@ func (s *turnRepositoryStub) BeginTurn(_ context.Context, userID uuid.UUID, inpu
 	return BeginTurnResult{TurnID: state.id, UserMessage: message, Created: true}, nil
 }
 
-func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid.UUID, content string, completedAt time.Time) (ConversationTurn, error) {
+func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid.UUID, response AgentResponse, completedAt time.Time) (ConversationTurn, error) {
 	for _, state := range s.turns {
 		if state.id != turnID {
 			continue
@@ -408,7 +544,7 @@ func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid
 		}
 		assistant, err := s.AppendMessage(context.Background(), userID, AppendMessageInput{
 			ConversationID: s.conversation.ID, Role: MessageRoleAssistant,
-			Content: content, TaskReferences: created,
+			Content: response.Content, TaskReferences: created, Citations: response.Citations,
 		}, completedAt)
 		if err != nil {
 			return ConversationTurn{}, err
@@ -430,6 +566,52 @@ func (s *turnRepositoryStub) FailTurn(ctx context.Context, _ uuid.UUID, turnID u
 		}
 	}
 	return repository.ErrNotFound
+}
+
+func (s *turnRepositoryStub) GetTurn(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (TurnDetail, error) {
+	return TurnDetail{}, nil
+}
+
+func (s *turnRepositoryStub) ListTurnEvents(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, int) (TurnEventPage, error) {
+	return TurnEventPage{}, nil
+}
+
+type asyncTurnRepositoryStub struct {
+	*turnRepositoryStub
+	accepted           BeginTurnResult
+	gotAccept          BeginTurnInput
+	completed          ConversationTurn
+	completedContent   string
+	completedCitations []MessageCitation
+	completedWorker    string
+}
+
+func (s *asyncTurnRepositoryStub) AcceptTurn(_ context.Context, _ uuid.UUID, input BeginTurnInput) (BeginTurnResult, error) {
+	s.gotAccept = input
+	return s.accepted, nil
+}
+
+func (s *asyncTurnRepositoryStub) ClaimTurn(context.Context, uuid.UUID, string, time.Time, time.Time) (TurnExecution, error) {
+	return TurnExecution{}, nil
+}
+
+func (s *asyncTurnRepositoryStub) RenewTurnExecution(context.Context, uuid.UUID, string, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *asyncTurnRepositoryStub) QueueTurnRetry(context.Context, uuid.UUID, uuid.UUID, string, time.Time, time.Time) error {
+	return nil
+}
+
+func (s *asyncTurnRepositoryStub) CompleteTurnExecution(_ context.Context, _ uuid.UUID, _ uuid.UUID, workerID string, response AgentResponse, _ time.Time) (ConversationTurn, error) {
+	s.completedWorker = workerID
+	s.completedContent = response.Content
+	s.completedCitations = append([]MessageCitation(nil), response.Citations...)
+	return s.completed, nil
+}
+
+func (s *asyncTurnRepositoryStub) FailTurnExecution(context.Context, uuid.UUID, uuid.UUID, string, *AgentRunFailureRecord, time.Time) error {
+	return nil
 }
 
 func (s *conversationRepositoryStub) Create(context.Context, uuid.UUID, CreateInput, time.Time) (Conversation, error) {
@@ -470,12 +652,20 @@ func (s *conversationRepositoryStub) BeginTurn(context.Context, uuid.UUID, Begin
 	return BeginTurnResult{}, nil
 }
 
-func (s *conversationRepositoryStub) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (ConversationTurn, error) {
+func (s *conversationRepositoryStub) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, AgentResponse, time.Time) (ConversationTurn, error) {
 	return ConversationTurn{}, nil
 }
 
 func (s *conversationRepositoryStub) FailTurn(context.Context, uuid.UUID, uuid.UUID, time.Time) error {
 	return nil
+}
+
+func (s *conversationRepositoryStub) GetTurn(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (TurnDetail, error) {
+	return TurnDetail{}, nil
+}
+
+func (s *conversationRepositoryStub) ListTurnEvents(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, int) (TurnEventPage, error) {
+	return TurnEventPage{}, nil
 }
 
 func TestCreateDiagnosisTaskRequiresLatestDirectDiagnosisMessage(t *testing.T) {
@@ -495,10 +685,11 @@ func TestCreateDiagnosisTaskRequiresLatestDirectDiagnosisMessage(t *testing.T) {
 }
 
 func TestCreateDiagnosisTaskUsesSelectedReferenceAndServerIdempotency(t *testing.T) {
-	userID, conversationID, messageID, caseID, taskID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	userID, conversationID, messageID, caseID, taskID, attachmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	message := Message{
 		ID: messageID, ConversationID: conversationID, Role: MessageRoleUser,
 		Content: "请诊断这个工单", CaseReferences: []CaseReference{{ExternalCaseID: caseID, Kind: ReferenceKindSelected}},
+		Attachments: []MessageAttachment{{AttachmentID: attachmentID, Purpose: "log_file", OriginalName: "error.log"}},
 	}
 	repositoryStub := &commandRepositoryStub{message: message, latest: message}
 	taskCreator := &commandTaskCreatorStub{result: diagnosis.TaskCreateResult{Task: diagnosis.DiagnosisTask{ID: taskID, Status: diagnosis.TaskPending}}}
@@ -515,6 +706,11 @@ func TestCreateDiagnosisTaskUsesSelectedReferenceAndServerIdempotency(t *testing
 	}
 	if taskCreator.input.ExpectedSourceFingerprint != "sha256:case" || taskCreator.input.ExternalCaseID != caseID {
 		t.Fatalf("task input leaked incorrect source facts: %+v", taskCreator.input)
+	}
+	if len(taskCreator.input.Attachments) != 1 || taskCreator.input.Attachments[0].AttachmentID != attachmentID ||
+		taskCreator.input.Attachments[0].Purpose != "log_file" || taskCreator.input.AttachmentSource == nil ||
+		taskCreator.input.AttachmentSource.ConversationID != conversationID || taskCreator.input.AttachmentSource.MessageID != messageID {
+		t.Fatalf("task attachment input=%+v source=%+v", taskCreator.input.Attachments, taskCreator.input.AttachmentSource)
 	}
 }
 
@@ -627,11 +823,17 @@ func (s *commandRepositoryStub) AppendTaskReference(context.Context, uuid.UUID, 
 func (s *commandRepositoryStub) BeginTurn(context.Context, uuid.UUID, BeginTurnInput) (BeginTurnResult, error) {
 	return BeginTurnResult{}, nil
 }
-func (s *commandRepositoryStub) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (ConversationTurn, error) {
+func (s *commandRepositoryStub) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, AgentResponse, time.Time) (ConversationTurn, error) {
 	return ConversationTurn{}, nil
 }
 func (s *commandRepositoryStub) FailTurn(context.Context, uuid.UUID, uuid.UUID, time.Time) error {
 	return nil
+}
+func (s *commandRepositoryStub) GetTurn(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (TurnDetail, error) {
+	return TurnDetail{}, nil
+}
+func (s *commandRepositoryStub) ListTurnEvents(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, int) (TurnEventPage, error) {
+	return TurnEventPage{}, nil
 }
 
 type commandTaskCreatorStub struct {

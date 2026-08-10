@@ -73,7 +73,7 @@ high-value visual miss rate, CPU/RAM, and avoided OCR/VLM calls.
   library without adding those dependencies to the API or Diagnosis Worker images.
 - Windows and Linux packaging, warm-session startup, bounded inference threads, and model
   checksum verification become explicit release concerns.
-- Artifact schema v5 stores page class, bounding boxes, route reasons, model, renderer and provider usage
+- Artifact schema v6 stores page class, bounding boxes, route reasons, model, renderer, provider usage and structured table metadata
   provenance, requested/effective DPI, crop hashes, the generated visual-asset index, and
   deterministic element-merge decisions. M2-A6 file/page routing remains the fallback for
   formats without page rasters.
@@ -117,7 +117,7 @@ The production code path is implemented but the feature switch remains disabled 
   calls. Document-level region-count and total-crop-byte budgets suppress excess crops before
   cloud calls while retaining the suppression reason. Prompt v2 requests Markdown table
   structure and formula transcription.
-- Artifact schema v5 persists layout/model/render/crop provenance, provider Token usage, and every raw element before
+- Artifact schema v6 persists layout/model/render/crop provenance, provider Token usage, structured table cells, and every raw element before
   Chunk creation. `element-merge-v1` suppresses only explainable same-page duplicates from the
   searchable projection: exact normalized duplicates, OCR fully covered by native text, and
   at least 85% contained overlapping OCR. Structured tables/native text win; VLM descriptions

@@ -124,7 +124,11 @@ func ChunkElements(elements []DocumentElement, options TextChunkOptions) ([]Chun
 		if err := element.Validate(); err != nil {
 			return nil, err
 		}
-		for _, part := range splitRunes(element.ContentText, options.MaxRunes, options.OverlapRunes) {
+		parts := splitRunes(element.ContentText, options.MaxRunes, options.OverlapRunes)
+		if element.ElementType == ElementTable {
+			parts = splitMarkdownTable(element.ContentText, options.MaxRunes, options.OverlapRunes)
+		}
+		for _, part := range parts {
 			searchSource := strings.TrimSpace(strings.Join(element.SectionPath, " ") + " " + part)
 			searchText := NormalizeSearchText(searchSource)
 			if searchText == "" {
@@ -147,6 +151,80 @@ func ChunkElements(elements []DocumentElement, options TextChunkOptions) ([]Chun
 		return nil, errors.New("knowledge document produced no searchable chunks")
 	}
 	return chunks, nil
+}
+
+func splitMarkdownTable(value string, maxRunes, overlapRunes int) []string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n"))
+	if len([]rune(trimmed)) <= maxRunes {
+		return []string{trimmed}
+	}
+	lines := make([]string, 0, strings.Count(trimmed, "\n")+1)
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) < 3 || !isMarkdownTableDelimiter(lines[1]) {
+		return splitRunes(trimmed, maxRunes, overlapRunes)
+	}
+	header := lines[0] + "\n" + lines[1]
+	headerRunes := len([]rune(header))
+	if headerRunes >= maxRunes {
+		return splitRunes(trimmed, maxRunes, overlapRunes)
+	}
+	rows := lines[2:]
+	for _, row := range rows {
+		if headerRunes+1+len([]rune(row)) > maxRunes {
+			return splitRunes(trimmed, maxRunes, overlapRunes)
+		}
+	}
+	parts := make([]string, 0, len(rows))
+	for start := 0; start < len(rows); {
+		end := start
+		currentRunes := headerRunes
+		for end < len(rows) {
+			rowRunes := 1 + len([]rune(rows[end]))
+			if currentRunes+rowRunes > maxRunes {
+				break
+			}
+			currentRunes += rowRunes
+			end++
+		}
+		if end == start {
+			return splitRunes(trimmed, maxRunes, overlapRunes)
+		}
+		parts = append(parts, header+"\n"+strings.Join(rows[start:end], "\n"))
+		if end == len(rows) {
+			break
+		}
+		next := end
+		if overlapRunes > 0 {
+			overlap := 0
+			for index := end - 1; index > start; index-- {
+				rowRunes := len([]rune(rows[index])) + 1
+				if overlap+rowRunes > overlapRunes {
+					break
+				}
+				overlap += rowRunes
+				next = index
+			}
+		}
+		start = next
+	}
+	return parts
+}
+
+func isMarkdownTableDelimiter(line string) bool {
+	if strings.Count(line, "|") < 2 {
+		return false
+	}
+	for _, current := range line {
+		if current != '|' && current != '-' && current != ':' && !unicode.IsSpace(current) {
+			return false
+		}
+	}
+	return strings.ContainsRune(line, '-')
 }
 
 // ChunkMarkdown preserves the existing deterministic baseline while making the

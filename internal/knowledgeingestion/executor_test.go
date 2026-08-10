@@ -15,6 +15,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledgeenrichment"
 	"github.com/chitandabb/GoAgent/internal/knowledgelayout"
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
+	"github.com/chitandabb/GoAgent/internal/knowledgetable"
 	"github.com/chitandabb/GoAgent/internal/knowledgeworker"
 	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/google/uuid"
@@ -216,7 +217,7 @@ func TestExecutorPersistsMissingVisualAssetsAsPartialArtifact(t *testing.T) {
 	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
 		t.Fatal(err)
 	}
-	if artifact.SchemaVersion != 5 || artifact.ElementMerge.Version != elementMergeVersion ||
+	if artifact.SchemaVersion != 6 || artifact.ElementMerge.Version != elementMergeVersion ||
 		len(artifact.VisualAssets) != 1 ||
 		artifact.VisualAssets[0].Status != knowledgeenrichment.StatusMissing ||
 		artifact.VisualAssets[0].SourcePart != "word/document.xml" ||
@@ -255,29 +256,31 @@ func TestExecutorUsesLayoutRegionPlanWithoutDuplicatingWholeImageCall(t *testing
 			)},
 		}}, nil
 	}))
-	processorCalls := 0
-	processor := processorFunc(func(_ context.Context, request knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error) {
-		processorCalls++
-		if request.Asset.Kind != knowledgeparser.VisualAssetLayoutRegion ||
-			request.Route != knowledgeenrichment.RouteOCRVLM || request.Asset.Index != 1 {
+	tableCalls := 0
+	tableProcessor := tableProcessorFunc(func(_ context.Context, request knowledgetable.Request) (knowledgetable.Result, error) {
+		tableCalls++
+		if request.Asset.Kind != knowledgeparser.VisualAssetLayoutRegion || request.Asset.Index != 1 ||
+			request.Reason != string(knowledgelayout.ReasonTableStructureRequired) {
 			t.Fatalf("request = %+v", request)
 		}
-		return knowledgeenrichment.ProviderResult{
-			Provider: "dashscope", Model: "qwen3-vl-plus",
-			Usage: &knowledgeenrichment.ProviderUsage{
+		return knowledgetable.Result{
+			Provider: "dashscope", Model: "qwen3-vl-plus", PromptVersion: "table-recovery-v1",
+			Markdown: "| alarm | count |\n| --- | ---: |\n| E42 | 3 |", Confidence: 0.95,
+			Cells: []knowledgetable.Cell{
+				{Row: 0, Column: 0, RowSpan: 1, ColumnSpan: 1, Text: "alarm", Header: true},
+				{Row: 1, Column: 0, RowSpan: 1, ColumnSpan: 1, Text: "E42"},
+			},
+			Usage: &knowledgetable.Usage{
 				PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150,
 			},
-			Elements: []knowledge.DocumentElement{{
-				ElementType: knowledge.ElementOCRText, ContentText: "| alarm | count |\n| --- | --- |\n| E42 | 3 |",
-			}},
 		}, nil
 	})
 	store := &memoryStore{source: content}
 	executor, err := NewExecutor(store, parser, Config{
 		MaxSourceBytes: int64(len(content)) + 1, MaxArtifactBytes: 32 * 1024,
-		ChunkOptions:    knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16},
-		VisualConfig:    knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
-		VisualProcessor: processor, LayoutStage: stage,
+		ChunkOptions:   knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16},
+		VisualConfig:   knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
+		TableProcessor: tableProcessor, LayoutStage: stage,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -289,14 +292,14 @@ func TestExecutorUsesLayoutRegionPlanWithoutDuplicatingWholeImageCall(t *testing
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if processorCalls != 1 || len(result.Chunks) != 1 || result.Partial {
-		t.Fatalf("calls=%d chunks=%d partial=%v", processorCalls, len(result.Chunks), result.Partial)
+	if tableCalls != 1 || len(result.Chunks) != 1 || result.Chunks[0].ElementType != knowledge.ElementTable || result.Partial {
+		t.Fatalf("calls=%d chunks=%d partial=%v", tableCalls, len(result.Chunks), result.Partial)
 	}
 	var artifact elementArtifact
 	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
 		t.Fatal(err)
 	}
-	if artifact.SchemaVersion != 5 || artifact.ElementMerge.Version != elementMergeVersion ||
+	if artifact.SchemaVersion != 6 || artifact.ElementMerge.Version != elementMergeVersion ||
 		len(artifact.VisualAssets) != 2 || artifact.Layout == nil ||
 		len(artifact.Layout.Pages) != 1 || len(artifact.Layout.Pages[0].Regions) != 1 {
 		t.Fatalf("artifact = %+v", artifact)
@@ -314,6 +317,138 @@ func TestExecutorUsesLayoutRegionPlanWithoutDuplicatingWholeImageCall(t *testing
 	if region.AssetIndex == nil || *region.AssetIndex != 1 || region.Crop == nil ||
 		region.Route != knowledgelayout.RouteTableRecovery {
 		t.Fatalf("layout region = %+v", region)
+	}
+}
+
+func TestExecutorRoutesMixedPageRegionsToIndependentProcessors(t *testing.T) {
+	raster := ingestionLayoutRasterFixture(t, 200, 120)
+	content := raster.Content
+	page := 1
+	parser := parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{
+			ParserVersion: "mixed-page-parser-v1",
+			Elements: []knowledge.DocumentElement{{
+				Index: 0, PageNumber: &page, ElementType: knowledge.ElementText,
+				ContentText: "Alarm summary and recovery guidance.",
+			}},
+			VisualAssets: []knowledgeparser.VisualAsset{{
+				Index: 0, Kind: knowledgeparser.VisualAssetSourceImage, SourcePath: "source",
+				MediaType: "image/png", SizeBytes: int64(len(content)),
+				SHA256: knowledge.SHA256Hex(string(content)), Width: 200, Height: 120,
+				Content: content,
+			}},
+			Pages: []knowledgeparser.PageObservation{{
+				PageNumber: 1, NativeTextRunes: 36, NonWhitespaceRunes: 32,
+				PrintableRatio: 1, ExtractionComplete: true,
+				VisualCandidateCount: 3, VisualCandidatesKnown: true,
+			}},
+			Metadata: json.RawMessage(`{"mediaType":"image/png"}`),
+		}, nil
+	})
+	routes := []knowledgelayout.RegionRoute{
+		mixedPageRoute(0, knowledgelayout.RegionText, knowledgelayout.RouteNativeText,
+			knowledgelayout.ReasonNativeTextRegion, knowledgelayout.BoundingBox{Left: 0, Top: 0, Right: 1, Bottom: 0.2}),
+		mixedPageRoute(1, knowledgelayout.RegionTable, knowledgelayout.RouteTableRecovery,
+			knowledgelayout.ReasonTableStructureRequired, knowledgelayout.BoundingBox{Left: 0, Top: 0.2, Right: 0.6, Bottom: 0.75}),
+		mixedPageRoute(2, knowledgelayout.RegionPicture, knowledgelayout.RouteCloudVision,
+			knowledgelayout.ReasonVisualSemanticsRequired, knowledgelayout.BoundingBox{Left: 0.6, Top: 0.2, Right: 1, Bottom: 0.75}),
+		mixedPageRoute(3, knowledgelayout.RegionDecorative, knowledgelayout.RouteSkip,
+			knowledgelayout.ReasonDecorativeRegion, knowledgelayout.BoundingBox{Left: 0, Top: 0.75, Right: 0.2, Bottom: 1}),
+	}
+	stage := testLayoutStage(t, pageAnalyzerFunc(func(
+		context.Context, knowledgelayout.AnalysisRequest,
+	) (knowledgelayout.AnalysisResult, error) {
+		return knowledgelayout.AnalysisResult{Plan: knowledgelayout.Plan{
+			PageClass: knowledgelayout.PageMixed, Routes: routes,
+		}}, nil
+	}))
+	visualCalls := 0
+	visualProcessor := processorFunc(func(_ context.Context, request knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error) {
+		visualCalls++
+		if request.Route != knowledgeenrichment.RouteOCRVLM || request.Asset.Kind != knowledgeparser.VisualAssetLayoutRegion ||
+			request.Asset.Index != 2 || request.Reason != string(knowledgelayout.ReasonVisualSemanticsRequired) {
+			t.Fatalf("visual request = %+v", request)
+		}
+		return knowledgeenrichment.ProviderResult{
+			Provider: "dashscope", Model: "qwen3-vl-plus",
+			Elements: []knowledge.DocumentElement{{
+				ElementType: knowledge.ElementImageDescription,
+				ContentText: "The trend chart shows the E42 alarm count increasing.",
+			}},
+		}, nil
+	})
+	tableCalls := 0
+	tableProcessor := tableProcessorFunc(func(_ context.Context, request knowledgetable.Request) (knowledgetable.Result, error) {
+		tableCalls++
+		if request.Asset.Index != 1 || request.Reason != string(knowledgelayout.ReasonTableStructureRequired) {
+			t.Fatalf("table request = %+v", request)
+		}
+		return knowledgetable.Result{
+			Provider: "dashscope", Model: "qwen3-vl-plus", PromptVersion: "table-recovery-v1",
+			Markdown: "| alarm | count |\n| --- | ---: |\n| E42 | 3 |", Confidence: 0.94,
+			Cells: []knowledgetable.Cell{
+				{Row: 0, Column: 0, RowSpan: 1, ColumnSpan: 1, Text: "alarm", Header: true},
+				{Row: 0, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "count", Header: true},
+				{Row: 1, Column: 0, RowSpan: 1, ColumnSpan: 1, Text: "E42"},
+				{Row: 1, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "3"},
+			},
+		}, nil
+	})
+	store := &memoryStore{source: content}
+	executor, err := NewExecutor(store, parser, Config{
+		MaxSourceBytes: int64(len(content)) + 1, MaxArtifactBytes: 64 * 1024,
+		ChunkOptions:    knowledge.TextChunkOptions{MaxRunes: 256, OverlapRunes: 16},
+		VisualConfig:    knowledgeenrichment.Config{MaxEnrichments: 4, MinPixels: 1},
+		VisualProcessor: visualProcessor, TableProcessor: tableProcessor, LayoutStage: stage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(
+		context.Background(), executorTask(content, "image/png"),
+		func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visualCalls != 1 || tableCalls != 1 || result.Partial || len(result.Chunks) != 3 {
+		t.Fatalf("visualCalls=%d tableCalls=%d partial=%v chunks=%+v", visualCalls, tableCalls, result.Partial, result.Chunks)
+	}
+	chunkTypes := map[knowledge.ElementType]int{}
+	for _, chunk := range result.Chunks {
+		chunkTypes[chunk.ElementType]++
+	}
+	if chunkTypes[knowledge.ElementText] != 1 || chunkTypes[knowledge.ElementTable] != 1 ||
+		chunkTypes[knowledge.ElementImageDescription] != 1 {
+		t.Fatalf("chunk types = %v", chunkTypes)
+	}
+	var artifact elementArtifact
+	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.VisualAssets) != 3 || artifact.VisualAssets[0].Status != knowledgeenrichment.StatusSkipped ||
+		artifact.VisualAssets[0].Reason != "superseded_by_layout_regions" || artifact.Layout == nil ||
+		len(artifact.Layout.Pages) != 1 || len(artifact.Layout.Pages[0].Regions) != 4 {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+	regions := artifact.Layout.Pages[0].Regions
+	if regions[0].AssetIndex != nil || regions[3].AssetIndex != nil ||
+		regions[1].AssetIndex == nil || *regions[1].AssetIndex != 1 ||
+		regions[2].AssetIndex == nil || *regions[2].AssetIndex != 2 {
+		t.Fatalf("regions = %+v", regions)
+	}
+}
+
+func mixedPageRoute(
+	ordinal int,
+	regionType knowledgelayout.RegionType,
+	route knowledgelayout.ProcessingRoute,
+	reason knowledgelayout.ReasonCode,
+	box knowledgelayout.BoundingBox,
+) knowledgelayout.RegionRoute {
+	return knowledgelayout.RegionRoute{
+		Ordinal: ordinal, RegionType: regionType, Box: box, Confidence: 0.95,
+		Route: route, Reason: reason,
 	}
 }
 
@@ -370,7 +505,7 @@ func TestExecutorSuppressesDuplicateOCRBeforeChunking(t *testing.T) {
 	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
 		t.Fatal(err)
 	}
-	if artifact.SchemaVersion != 5 || len(artifact.Elements) != 2 ||
+	if artifact.SchemaVersion != 6 || len(artifact.Elements) != 2 ||
 		artifact.ElementMerge.SuppressedCount != 1 ||
 		artifact.ElementMerge.Decisions[1].DuplicateOfIndex == nil ||
 		*artifact.ElementMerge.Decisions[1].DuplicateOfIndex != 0 {
@@ -462,6 +597,12 @@ type memoryStore struct {
 type parserFunc func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error)
 
 type processorFunc func(context.Context, knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error)
+
+type tableProcessorFunc func(context.Context, knowledgetable.Request) (knowledgetable.Result, error)
+
+func (f tableProcessorFunc) Recover(ctx context.Context, request knowledgetable.Request) (knowledgetable.Result, error) {
+	return f(ctx, request)
+}
 
 type recordingEmbedder struct {
 	mu         sync.Mutex

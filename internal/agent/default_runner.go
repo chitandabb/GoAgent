@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/auth"
 
 	"github.com/cloudwego/eino/components/model"
@@ -29,6 +30,7 @@ type DefaultRunnerDependencies struct {
 	WebSearch             tool.BaseTool
 	FetchPublicPage       tool.BaseTool
 	CreateDiagnosisTask   DiagnosisTaskCreator
+	AttachmentReader      attachment.Reader
 	Logger                *zap.Logger
 }
 
@@ -44,6 +46,7 @@ type DefaultToolCatalogDependencies struct {
 	FetchPublicPage      tool.BaseTool
 	CreateDiagnosisTask  DiagnosisTaskCreator
 	DiagnosisTaskStatus  DiagnosisTaskStatusReader
+	AttachmentReader     attachment.Reader
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -65,6 +68,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
 		KnowledgeSearch: dependencies.KnowledgeSearch, WebSearch: dependencies.WebSearch,
 		FetchPublicPage: dependencies.FetchPublicPage, CreateDiagnosisTask: dependencies.CreateDiagnosisTask,
+		AttachmentReader: dependencies.AttachmentReader,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -129,7 +133,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 		}
 		registrations = append(registrations, ToolRegistration{
 			Tool: createDiagnosisTask, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
 		})
@@ -143,6 +147,18 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			Tool: getDiagnosisTaskStatus, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityTask},
+		})
+	}
+	if dependencies.AttachmentReader != nil {
+		readAttachment, err := NewReadAttachmentTool(dependencies.AttachmentReader)
+		if err != nil {
+			return nil, fmt.Errorf("build read attachment Tool: %w", err)
+		}
+		registrations = append(registrations, ToolRegistration{
+			Tool: readAttachment, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityAttachment},
+			RequiredDependencies: []ToolDependency{ToolDependencyAttachment},
 		})
 	}
 	for _, sqlTool := range []tool.BaseTool{

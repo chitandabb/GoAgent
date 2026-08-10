@@ -16,8 +16,18 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ConversationMaxIterations = 8
 	configured.ConversationMaxContextRunes = 32000
 	configured.ConversationTimeoutMillis = 60000
+	configured.ConversationCitationRepairEnabled = true
+	configured.ConversationCitationRepairPromptVersion = "citation-repair-v1"
+	configured.ConversationCitationRepairPromptFile = "config/prompts/conversation-citation-repair.md"
+	configured.ConversationCitationRepairTimeoutMillis = 30000
+	configured.ConversationCitationRepairMaxOutputTokens = 768
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured budgets: %v", err)
+	}
+	invalidRepair := configured
+	invalidRepair.ConversationCitationRepairMaxOutputTokens = 64
+	if err := invalidRepair.Validate(); err == nil {
+		t.Fatal("Validate accepted too-small citation repair output budget")
 	}
 	if err := (AgentConfig{}).Validate(); err == nil {
 		t.Fatal("Validate accepted empty skillsDirectory")

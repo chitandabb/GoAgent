@@ -3,8 +3,8 @@
 ## 文档状态
 
 - 本文定义 MESGuard 的 PostgreSQL Outbox、RabbitMQ 拓扑、发布确认、消费者确认、重试、死信、幂等和故障恢复规则。
-- 当前仓库已通过 `00007`/`00008` 建立 TaskEvent、Outbox、执行轨迹、证据和报告事实表。任务创建、事件 JSON 查询、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer、三级 TTL 重试/最终死信，以及真实 Agent Worker 的 fenced 终态事务均已实现。
-- 当前异步诊断后端已形成可运行闭环，正式报告读取 API、TaskEvent SSE 和受审计的管理员失败恢复入口均已接通；仍需完成进程崩溃、模型故障与 RabbitMQ 重试/死信的可重复联合演练。
+- 当前仓库已实现诊断、知识入库和会话回合三条 Outbox/RabbitMQ Worker 链路。三者均使用严格消息信封、Publisher Confirm、手动 ACK、三级 TTL 重试/最终死信和 PostgreSQL lease/fencing；业务终态只在 fenced 数据库事务成功后 ACK。
+- 当前异步诊断后端已形成可运行闭环，正式报告读取 API、TaskEvent SSE 和受审计的管理员失败恢复入口均已接通；会话 `/turns` 也已从同步 HTTP 模型调用迁到独立 Conversation Worker，并提供回合状态查询与可续传事件 SSE。仍需完成跨进程崩溃、模型故障与 RabbitMQ 重试/死信的可重复联合演练。
 - PostgreSQL 是业务事实来源，RabbitMQ 只负责唤醒和分发，不保存任务、报告或证据的唯一副本。
 
 ## 设计目标
@@ -36,7 +36,7 @@ Diagnosis Worker
 
 ### M2
 
-M2 增加文档入库消息，但不改变 M1 的可靠性语义：
+M2 增加文档入库和会话回合消息，但不改变 M1 的可靠性语义：
 
 ```text
 API/Admin 事务：KnowledgeDocument + IngestionTask + OutboxEvent
@@ -48,7 +48,17 @@ knowledge.ingest.v1
 Ingestion Worker
 ```
 
-诊断和文档入库拥有独立队列、重试链路、并发上限和死信队列，避免大型文档处理挤占诊断任务。
+```text
+API 事务：ConversationMessage + queued ConversationTurn + OutboxEvent
+    ↓
+Outbox Relay
+    ↓
+conversation.turn.execute.v1
+    ↓
+Conversation Worker
+```
+
+诊断、文档入库和会话回合拥有独立队列、重试链路、并发上限和死信队列，避免大型文档处理或交互式问答挤占诊断任务。
 
 ## 运行角色
 
@@ -64,8 +74,11 @@ mesguard-outbox-relay
 mesguard-diagnosis-worker
     消费诊断队列，执行诊断步骤
 
-mesguard-ingestion-worker
+mesguard-knowledge-worker
     M2 消费入库队列，执行解析、OCR、VLM 和 Embedding
+
+mesguard-conversation-worker
+    M2 消费会话回合队列，执行轻量 Agent 与受控任务命令
 ```
 
 这不是微服务拆分。各角色共享领域包、Repository 接口和基础设施适配器，使用同一镜像或同一代码构建的不同启动命令。Relay 独立运行是为了让文档入库消息不依赖 Diagnosis Worker 是否存活，也让发布吞吐可以独立调节。
@@ -78,8 +91,12 @@ mesguard-ingestion-worker
 
 ```text
 mesguard.tasks (durable, direct)
-└─ diagnosis.execute
-     └─ mesguard.diagnosis.execute
+├─ diagnosis.execute
+│    └─ mesguard.diagnosis.execute
+├─ knowledge.ingest
+│    └─ mesguard.knowledge.ingest
+└─ conversation.turn.execute
+     └─ mesguard.conversation.turn.execute
 ```
 
 主队列要求：
@@ -111,7 +128,7 @@ mesguard.diagnosis.execute
 
 Worker 在确认原消息前，先把同一个信封发布到对应的 TTL 重试队列并等待 Publisher Confirm；确认成功后再 ACK 原消息。TTL 到期后由死信交换机把消息重新路由到主交换机。重试队列只承载等待时间，不作为业务事实存储。
 
-当前 M1 Consumer 在启动时声明三个固定 TTL 队列，并通过 `x-dead-letter-exchange`/`x-dead-letter-routing-key` 回到主交换机；最终失败副本发布到持久化 dead queue，收到 Publisher Confirm 后才 ACK 原消息。生产部署若需要动态调整延迟，再把这些参数迁移到可审查的 RabbitMQ policy，不能同时保留冲突的队列参数。
+当前各 Consumer 在启动时为自己的主队列声明三个固定 TTL 队列，并通过 `x-dead-letter-exchange`/`x-dead-letter-routing-key` 回到主交换机；最终失败副本发布到持久化 dead queue，收到 Publisher Confirm 后才 ACK 原消息。生产部署若需要动态调整延迟，再把这些参数迁移到可审查的 RabbitMQ policy，不能同时保留冲突的队列参数。
 
 ### 队列类型
 
@@ -202,7 +219,7 @@ Relay 必须启用 Publisher Confirm，并对每条发布等待 ACK/NACK 或有�
 - 通道断开或超时：不能假设未发布，保留未发布状态并允许重复发布；
 - 发布确认不等于消费者已经执行成功，只表示 RabbitMQ 接受了消息。
 
-当前实现使用官方 `amqp091-go` 的单条 Deferred Confirm：发布 Context 具有独立超时，ACK 后才以 `id + locked_by` 条件写入 `published_at`；NACK、超时或连接错误会关闭失效连接、保留原 `message_id`、增加 `attempt_count`、清除租约并按 1/2/4/.../64 秒退避。Publisher 在下一次调用时重新建连并重新声明持久 direct exchange、诊断主队列和 binding。重试队列、死信 policy 与 Consumer ACK 仍属后续 Worker 切片。
+当前实现使用官方 `amqp091-go` 的单条 Deferred Confirm：发布 Context 具有独立超时，ACK 后才以 `id + locked_by` 条件写入 `published_at`；NACK、超时或连接错误会关闭失效连接、保留原 `message_id`、增加 `attempt_count`、清除租约并按 1/2/4/.../64 秒退避。Publisher 在下一次调用时重新建连并重新声明持久 direct exchange、诊断/知识/会话主队列和 binding。三个 Consumer 都使用手动 ACK，并在 retry/dead 副本获得 Publisher Confirm 后才确认原消息。
 
 ## Worker 消费流程
 
@@ -225,6 +242,20 @@ basic.deliver
 ```
 
 当前 Worker 已完整执行该流程：`pending` 或租约过期的 `running` 任务可以被领取，活跃租约进入 30 秒延迟队列，取消中和终态任务返回显式 disposition；长执行按配置续租，正式结果只在 fenced PostgreSQL 事务提交后 ACK。
+
+Conversation Worker 使用同一可靠性骨架，但领域状态为 `queued -> running -> completed/failed`：
+API 不增加执行次数，首次 claim 才把 `attempt_count` 从 0 增到 1；`completed` 重复消息直接 ACK，
+活跃租约进入 30 秒延迟队列。临时模型/Tool 错误由当前 owner fenced 转为带 `retry_at` 的 queued
+回合，并追加 `turn_retry_scheduled`，再按 30 秒/2 分钟/10 分钟投递重试；达到上限才 fenced
+进入 failed 终态并追加 `turn_failed`。新 claim 可领取到期的 queued、failed 或过期 running，但
+`retry_at` 之前的 queued 回合不能被提前抢占，旧回合已不是最新用户消息时会拒绝执行。助手消息和
+turn completed 状态在同一事务提交，防止出现“消息可见但回合仍运行”的半状态。
+
+`conversation_turn_events` 是 PostgreSQL 事实表，事件按 `(turn_id, seq)` 追加。HTTP JSON 查询和
+SSE 都从该表补读，使用 `afterSeq`/`Last-Event-ID` 续传；RabbitMQ 的重试副本和 Redis 通知不承担
+历史恢复。事件只携带安全状态摘要和最终助手消息引用，不携带租约 owner、Prompt、原始 Tool 结果
+或模型推理内容。发送 `turn_completed`/`turn_failed` 后 SSE 关闭；应用关闭和 Session 绝对过期也会
+结束连接，但不会修改回合状态。
 
 ### 领取条件
 
@@ -259,6 +290,9 @@ WHERE id = $task_id
 ```
 
 更新行数为 0 时，旧 Worker 必须停止后续业务写入并释放外部调用。fencing token 防止旧租约持有者覆盖新 Worker 的结果。
+
+会话回合使用 `lease_owner + lease_expires_at` 作为 fencing 条件；由于一个 turn 的 attempt 单调递增且
+每次 claim 覆盖 owner，旧 Worker 即使在网络恢复后返回，也无法插入助手消息或把新结果改成 failed。
 
 ### 续租和崩溃恢复
 

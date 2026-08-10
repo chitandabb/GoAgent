@@ -322,6 +322,13 @@ UNIQUE(external_case_id, snapshot_no)
 
 附件与任务、消息、知识文档之间使用关联表，不通过多个可空外键承担所有关系。
 
+`00021_create_attachments.sql` 当前只落地会话附件的最小闭环：`scope` 约束已预留
+`session/personal`，但公开上传接口只创建 `session`；`processing_status` 当前固定为
+`uploaded`，对象写入成功后才插入附件事实，因此尚未实现 `uploading/failed` 状态、上传租约、
+失败接管、孤儿清理和软删除。实际列名为 `content_sha256`、`storage_bucket`、
+`storage_object_key` 和 `storage_etag`。这些服务端存储坐标只供 Repository/ObjectStore 使用，
+不会进入消息 DTO、Tool 返回或引用预览。
+
 ### diagnosis_tasks
 
 表示一次完整诊断尝试，是M1的核心聚合根。
@@ -377,10 +384,14 @@ UNIQUE(external_case_id, snapshot_no)
 
 - `task_id UUID REFERENCES diagnosis_tasks(id)`；
 - `attachment_id UUID REFERENCES attachments(id)`；
+- `source_message_id UUID REFERENCES conversation_messages(id)`；
 - `purpose`，例如 `problem_image`、`chat_screenshot`、`log_file`；
 - `created_at`。
 
-主键为 `(task_id, attachment_id)`。该关联不会自动把 `session` 附件提升为个人知识库。
+`00022_create_diagnosis_task_attachments.sql` 已落地该表，主键为 `(task_id, attachment_id)`，并为
+附件和来源消息建立反查索引。创建事务通过消息附件、消息、会话和附件联表校验任务创建者、会话、
+最新 user message、`session` scope 和 `uploaded` 状态；任一附件不满足时整个任务事务回滚。该关联
+不会把 `session` 附件提升为个人知识库。
 
 ### diagnosis_steps
 
@@ -622,11 +633,56 @@ M2再增加以下表，避免M1提前引入知识库的复杂状态：
 引用存在性校验和会话 `last_message_at` 更新在同一 PostgreSQL 事务内完成；任务引用只记录来源，
 不会把诊断任务生命周期绑定到会话。
 
-`00018_create_conversation_turns.sql` 增加同步 Agent 回合账本。`conversation_turns` 以
+`00018_create_conversation_turns.sql` 增加 Agent 回合账本。`conversation_turns` 以
 `(conversation_id, idempotency_key)` 唯一约束绑定请求指纹、用户消息、可选助手消息、尝试次数、
-状态和租约；部分唯一索引保证一个会话同时最多一个 `running` 回合。创建 turn 与用户消息原子
-提交，失败/过期重试复用同一用户消息，完成回放复用同一助手消息，同 key 不同指纹拒绝。助手
-最终消息已经落地，附件关系、摘要、消息 SSE 和后台 Conversation Worker 仍是后续增量。
+状态和租约。`00019_async_conversation_turns.sql` 增加 `queued` 与 `lease_owner`，将部分唯一索引
+扩展为一个会话同时最多一个 `queued/running` 回合，并为 Worker claim 建立索引。异步受理事务
+原子提交用户消息、queued turn 和 `conversation.turn.execute` Outbox；首次 Worker claim 才把
+`attempt_count` 从 0 增到 1。`00020_conversation_turn_events.sql` 增加 `failure_code/retry_at`
+以及追加式 `conversation_turn_events` 事实表。事件表使用 `(turn_id, seq)` 主键保存
+`turn_queued`、`turn_running`、`turn_retry_scheduled`、`turn_completed`、`turn_failed`，payload
+只允许安全结构化状态信息。临时失败转为带 `retry_at` 的 queued 回合，达到自动重试上限才进入
+failed 终态；过期接管、续租、完成和失败都要求当前 `lease_owner` 和未过期 deadline。完成事务同时
+写助手消息、复制 created task 引用、清理租约并追加 completed 事件。事件表是 SSE 补读事实源，
+不依赖 Redis 或 RabbitMQ 的历史保存能力。
+
+`00023_create_conversation_message_citations.sql` 增加 `conversation_message_citations`。它只关联
+assistant message，按 `position` 保存答案实际使用的 `source_type`、`source_ref` 和
+`content_sha256`；类型限定为 `knowledge_chunk`、`attachment`、`web`，每条消息最多 20 个去重
+来源。`source_ref` 按 UTF-8 字节限制为 2,048，既与 Go 运行时一致，也避免超出 PostgreSQL B-tree
+索引项边界。知识引用格式为 `knowledge:<documentVersionId>/<chunkId>`，附件为
+`attachment:<attachmentId>`，网页为无凭证 HTTPS URL。该表有意不外键关联知识版本或附件：来源
+后续退役/删除时历史回答仍保留不可变引用和当时内容哈希，但正文预览仍必须重新通过当前 owner、
+scope 和版本状态门禁。表中不保存 MinIO bucket/object key、永久 URL、原始 Tool 结果或正文。
+
+Worker 完成事务先校验回答 marker 与本轮运行时来源集合一致，再同时写助手消息、引用行、turn
+完成状态和事件。未知 marker、来源类型/哈希冲突或超限引用都会在事务前失败；幂等回放和消息补读
+从引用表恢复同一顺序。租约接管时，过期清理只处理同一会话中的其他 running 回合，不得先把
+当前待重领回合改成 failed。
+
+`00024_create_conversation_turn_run_observations.sql` 增加质量观测事实：
+
+- `conversation_turn_run_observations` 以 `turn_id` 为主键，保存模型供应商/ID、Prompt 版本、
+  `answered/insufficient_evidence/degraded/failed` outcome、Provider usage、端到端毫秒耗时、稳定降级
+  通道和来源截断标志；
+- `conversation_turn_retrieved_sources` 按 position 保存本轮真正暴露给模型的已验证来源，最多 200
+  项，不保存检索 Query、正文或原始 Tool JSON；
+- 成功/降级完成时，观测、检索来源、助手消息、实际引用、turn 状态和 completed 事件在同一事务
+  提交，旧 lease owner 无法单独留下观测；
+- 离线导出按 turn ID 读取 user/assistant 消息、检索来源、引用与 usage。该读取能力不加入公开 HTTP
+  Repository/API，只供本地质量工具使用。
+
+`00025_add_conversation_run_failure_type.sql` 补齐终态失败观测：
+
+- `error_type` 只接受最多 64 字节的稳定小写机器标签，并由数据库约束为仅 `failed` outcome 必填；
+  原始 Provider/Tool 错误、异常堆栈和用户内容不进入 Run Ledger；
+- Runner 在通过会话授权后采集最后一次尝试的模型/Prompt 身份、Provider usage、耗时、已验证来源和
+  降级通道；Worker 只在自动重试耗尽时把该安全记录交给仓储，中间重试不冒充终态样本；
+- `running -> failed`、`failure_code`、Run 观测、检索来源和 `turn_failed` 事件使用同一
+  `lease_owner + lease_expires_at` fencing 事务。Provider 未返回 usage 时允许真实的零调用/零 Token，
+  但不会从字符数或错误文本伪造用量；
+- failed 回合没有 assistant message 也可以离线导出。若相同幂等 Turn 被用户显式重跑，重新入队事务
+  会级联清除旧失败观测，后续终态写入当前结果，避免主键冲突和导出过期事实。
 
 M2初期消息发送后不可编辑，不支持对话分支。用户修正问题时发送新消息；重新生成回答也创建新的追加记录，不修改已被摘要或引用的历史消息。
 
@@ -651,6 +707,24 @@ M2初期消息发送后不可编辑，不支持对话分支。用户修正问题
 主键为 `(message_id, attachment_id)`，并增加`UNIQUE(message_id, position)`保证附件展示顺序唯一。`position`是附件在消息中的顺序，不是PDF页码；模型读取的页码或区域记录在ToolExecution和EvidenceItem的定位信息中。
 
 诊断任务附件和消息附件是两条独立关联，不通过修改附件的归属范围实现权限提升。
+
+当前迁移中的实际表名为 `conversation_message_attachments`，关联写入与 user message、
+工单引用和任务引用处于同一 PostgreSQL 事务。Repository 同时校验消息 owner、会话、附件 owner
+和附件 conversation；`read_attachment` 在此基础上再绑定当前 `message_id`，所以“已上传但未随
+当前消息发送”的附件不会获得 Conversation Agent 读取权限。`diagnosis_task_attachments` 已由
+`00022` 落地；只有 Conversation Agent 命令携带消息授权来源时可写入。直接创建诊断任务的 HTTP
+契约继续拒绝非空附件列表。
+
+### conversation_turn_events
+
+回合事件是面向用户的生命周期轨迹，不是模型日志。每行包含 `turn_id`、`conversation_id`、
+单调 `seq`、事件类型、JSON payload、payload schema version 和创建时间。Repository 在持有
+回合行锁的生命周期事务中分配下一序号并插入事件；SSE 建流时只做一次会话/回合 owner 校验，
+后续通过 `(turn_id, seq > afterSeq)` 补读，断线时使用 `Last-Event-ID` 续传。
+
+事件 payload 禁止包含 `lease_owner`、请求指纹、模型 Prompt、原始 Tool 返回、凭证、完整异常堆栈
+和模型推理内容。`turn_completed` 只携带助手消息 ID；`turn_failed` 只携带稳定的失败类别；
+`turn_retry_scheduled` 只携带尝试次数、等待秒数和安全失败类别。
 
 ### conversation_summaries
 
@@ -940,7 +1014,7 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 - `users`、`sessions`、`data_sources`；
 - `schema_catalog_versions`、`schema_catalog_entries`；
 - `external_cases`、`case_snapshots`；
-- `attachments`及诊断任务附件关联；
+- `attachments` 会话上传事实与 `conversation_message_attachments` 已由 `00021` 建立，`diagnosis_task_attachments` 已由 `00022` 建立；
 - `diagnosis_tasks`、`diagnosis_task_data_sources`（当前已通过 `00005` 建立）。
 
 ### M1第二批
@@ -952,12 +1026,12 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 ### M1第三批
 
 - `evidence_items`、`report_evidence`；
-- `diagnosis_reports` 的完整证据关联和 `report_reviews` 的正式任务联调；当前 `00006` 已先建立报告最小元数据和追加反馈表，任务创建基础已接通，但正式报告仍待 Worker。
+- `diagnosis_reports` 的完整证据关联和 `report_reviews` 的正式任务联调已经接通；
 - 数据库查询、并发、重复消息和取消测试。
 
 ### M2
 
-- `conversations`、`messages`、`message_attachments`、`conversation_summaries`；
+- `conversations`、`conversation_messages`、结构化引用、`conversation_turns`、回合事件和消息附件关联已落地；`conversation_summaries` 仍待上下文治理阶段；
 - 知识文档、解析版本、Chunk、Embedding和评测结果；
 - pgvector扩展和向量索引在实际Embedding维度确定后加入迁移。
 
@@ -973,7 +1047,7 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 6. 两个Worker并发领取时不会领取同一任务。
 7. SSE使用TaskEvent序号可以补读，不依赖Redis计数。
 8. 任务、报告和证据不能被普通删除接口物理删除。
-9. 附件权限、孤儿清理和报告引用检查可重复测试。
+9. 附件 owner/conversation/message 权限与知识引用 scope 已有集成测试；孤儿清理和报告引用检查仍待实现后再验收。
 10. 迁移、索引和关键查询使用测试数据执行`EXPLAIN`验证。
 
 ## 参考资料
@@ -989,4 +1063,4 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ## 后续工作
 
-用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、Worker执行结果、正式报告和失败恢复审计基础已经落地；TaskEvent JSON/SSE、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer 和管理员恢复也已实现。后续按`docs/roadmap.md`完成故障演练和固定数据集验收。
+用户、Session、DataSource、ExternalCase、CaseSnapshot、DiagnosisTask、TaskEvent、Outbox、Worker执行结果、正式报告和失败恢复审计基础已经落地；TaskEvent 与 Conversation Turn Event 的 JSON/SSE、取消命令、Worker Claim/续租/fencing、Outbox Relay、RabbitMQ Consumer 和管理员恢复也已实现。会话附件事实、原子消息关联、消息级读取门禁、附件/知识 Chunk 引用预览，以及诊断任务附件冻结和任务级读取门禁已完成。后续按`docs/roadmap.md`完成 personal 附件、失败上传租约、孤儿清理、前端接入、故障演练和固定数据集验收。

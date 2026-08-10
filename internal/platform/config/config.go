@@ -50,6 +50,7 @@ type ModelsConfig struct {
 	Rerank    RerankModelConfig     `toml:"rerank"`
 	OCR       MultimodalModelConfig `toml:"ocr"`
 	Vision    MultimodalModelConfig `toml:"vision"`
+	Table     MultimodalModelConfig `toml:"table"`
 }
 
 // ChatModelConfig 通过命名 Profile 隔离不同模型职责和 Provider 参数。
@@ -211,21 +212,26 @@ func (c JudgeModelConfig) APIKey() (string, error) {
 
 // AgentConfig 声明 Skill/Prompt 文件位置、Prompt 发布标签和一次诊断的外层 Evidence Gate 总预算。
 type AgentConfig struct {
-	SkillsDirectory             string `toml:"skillsDirectory"`
-	PromptVersion               string `toml:"promptVersion"`
-	SystemPromptFile            string `toml:"systemPromptFile"`
-	BaselinePromptFile          string `toml:"baselinePromptFile"`
-	ReportContractFile          string `toml:"reportContractFile"`
-	ConversationPromptVersion   string `toml:"conversationPromptVersion"`
-	ConversationPromptFile      string `toml:"conversationPromptFile"`
-	ConversationMaxIterations   int    `toml:"conversationMaxIterations"`
-	ConversationMaxContextRunes int    `toml:"conversationMaxContextRunes"`
-	ConversationTimeoutMillis   int    `toml:"conversationTimeoutMillis"`
-	MaxAgentRuns                int    `toml:"maxAgentRuns"`
-	MaxToolCalls                int    `toml:"maxToolCalls"`
-	MaxEvidenceItems            int    `toml:"maxEvidenceItems"`
-	MaxTotalTokens              int    `toml:"maxTotalTokens"`
-	TimeoutMillis               int    `toml:"timeoutMillis"`
+	SkillsDirectory                           string `toml:"skillsDirectory"`
+	PromptVersion                             string `toml:"promptVersion"`
+	SystemPromptFile                          string `toml:"systemPromptFile"`
+	BaselinePromptFile                        string `toml:"baselinePromptFile"`
+	ReportContractFile                        string `toml:"reportContractFile"`
+	ConversationPromptVersion                 string `toml:"conversationPromptVersion"`
+	ConversationPromptFile                    string `toml:"conversationPromptFile"`
+	ConversationCitationRepairEnabled         bool   `toml:"conversationCitationRepairEnabled"`
+	ConversationCitationRepairPromptVersion   string `toml:"conversationCitationRepairPromptVersion"`
+	ConversationCitationRepairPromptFile      string `toml:"conversationCitationRepairPromptFile"`
+	ConversationCitationRepairTimeoutMillis   int    `toml:"conversationCitationRepairTimeoutMillis"`
+	ConversationCitationRepairMaxOutputTokens int    `toml:"conversationCitationRepairMaxOutputTokens"`
+	ConversationMaxIterations                 int    `toml:"conversationMaxIterations"`
+	ConversationMaxContextRunes               int    `toml:"conversationMaxContextRunes"`
+	ConversationTimeoutMillis                 int    `toml:"conversationTimeoutMillis"`
+	MaxAgentRuns                              int    `toml:"maxAgentRuns"`
+	MaxToolCalls                              int    `toml:"maxToolCalls"`
+	MaxEvidenceItems                          int    `toml:"maxEvidenceItems"`
+	MaxTotalTokens                            int    `toml:"maxTotalTokens"`
+	TimeoutMillis                             int    `toml:"timeoutMillis"`
 }
 
 func (c AgentConfig) Validate() error {
@@ -237,6 +243,10 @@ func (c AgentConfig) Validate() error {
 	}
 	if !modelName.MatchString(strings.TrimSpace(c.ConversationPromptVersion)) {
 		return errors.New("agent conversationPromptVersion is invalid")
+	}
+	if c.ConversationCitationRepairEnabled &&
+		!modelName.MatchString(strings.TrimSpace(c.ConversationCitationRepairPromptVersion)) {
+		return errors.New("agent conversationCitationRepairPromptVersion is invalid")
 	}
 	for _, promptFile := range []struct {
 		name string
@@ -254,6 +264,19 @@ func (c AgentConfig) Validate() error {
 		}
 		if len(path) > 512 {
 			return fmt.Errorf("agent %s must not exceed 512 characters", name)
+		}
+	}
+	if c.ConversationCitationRepairEnabled {
+		path := strings.TrimSpace(c.ConversationCitationRepairPromptFile)
+		if path == "" || len(path) > 512 {
+			return errors.New("agent conversationCitationRepairPromptFile is required and must not exceed 512 characters")
+		}
+		if c.ConversationCitationRepairTimeoutMillis < 1000 || c.ConversationCitationRepairTimeoutMillis > 60_000 {
+			return errors.New("agent conversationCitationRepairTimeoutMillis must be between 1000 and 60000")
+		}
+		if c.ConversationCitationRepairMaxOutputTokens < 128 ||
+			c.ConversationCitationRepairMaxOutputTokens > 2048 {
+			return errors.New("agent conversationCitationRepairMaxOutputTokens must be between 128 and 2048")
 		}
 	}
 	if c.MaxAgentRuns < 0 || c.MaxAgentRuns > 4 {
@@ -829,6 +852,8 @@ type RabbitMQConfig struct {
 	Exchange                     string `toml:"exchange"`
 	DiagnosisQueue               string `toml:"diagnosisQueue"`
 	DiagnosisRoutingKey          string `toml:"diagnosisRoutingKey"`
+	ConversationQueue            string `toml:"conversationQueue"`
+	ConversationRoutingKey       string `toml:"conversationRoutingKey"`
 	KnowledgeIngestionQueue      string `toml:"knowledgeIngestionQueue"`
 	KnowledgeIngestionRoutingKey string `toml:"knowledgeIngestionRoutingKey"`
 	RelayBatchSize               int    `toml:"relayBatchSize"`
@@ -852,6 +877,8 @@ func (c RabbitMQConfig) Validate() error {
 	for name, value := range map[string]string{
 		"exchange": c.Exchange, "diagnosisQueue": c.DiagnosisQueue,
 		"diagnosisRoutingKey":          c.DiagnosisRoutingKey,
+		"conversationQueue":            c.ConversationQueue,
+		"conversationRoutingKey":       c.ConversationRoutingKey,
 		"knowledgeIngestionQueue":      c.KnowledgeIngestionQueue,
 		"knowledgeIngestionRoutingKey": c.KnowledgeIngestionRoutingKey,
 	} {
@@ -1271,6 +1298,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Models.Vision.Validate("models.vision"); err != nil {
+		return err
+	}
+	if err := c.Models.Table.Validate("models.table"); err != nil {
 		return err
 	}
 	if err := c.Log.Validate(); err != nil {

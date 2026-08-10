@@ -77,9 +77,11 @@ analyst 访问 admin 路由重定向首页,未登录访问任何页面重定向 
 会话 Agent 调用受控 `create_diagnosis_task` Tool，中间区域再显示任务进度、报告与复核。
 选择工单本身不触发模型调用或任务创建。
 
-当前后端已经提供 conversation/message 持久化和 `/turns` Agent 回合；但前端仍可继续使用
-直接任务创建 API，直到为每次发送生成稳定 UUID 幂等键、处理 `200 replay/409 running`、
-完成助手消息回放和后续 SSE 适配。当前
+当前后端已经提供 conversation/message 持久化和异步 `/turns` Agent 回合；前端发送时必须生成
+稳定 UUID 幂等键，将 `202 queued/running` 显示为当前助手占位状态，并对 `200 completed replay`
+恢复原助手消息。后端已提供回合状态查询和事件 SSE；前端应按 `afterSeq`/`Last-Event-ID` 补读并
+续传 `turn_queued/turn_running/turn_retry_scheduled/turn_completed/turn_failed`，不能把 HTTP 连接
+保持时间当作模型执行进度。当前
 `workspaceId`、卷宗选择及 taskId 关联仍保留浏览器 `sessionStorage` 导航适配层。
 目标边界见 ADR 004；`/assistant` 兼容路由已重定向至工作台，但知识会话尚未接入统一外壳。
 保留 `/tasks/:id` 和报告深链接用于刷新恢复、分享和运维定位。
@@ -111,7 +113,7 @@ DESIGN-apple.md 是营销站规范,工作台按以下决策"翻译":
 | SSE 连接 | 补读历史(灰)/实时连接(绿)/断线续传(橙)/重试停止(红)/已结束(灰) | 执行过程卡头部 |
 | 报告结论 | 分开展示业务摘要、技术摘要、结论、风险、置信度、限制、缺失证据和运行元数据 | 报告页 |
 | ReportReview | 最新一条为当前有效反馈,历史倒序展示 | 报告页反馈区 |
-| Message 生成 | 旧 Mock 原型保留流式光标与 interrupted 状态，但页面未挂载 | 知识助手 |
+| ConversationTurn | queued 显示“等待处理”，running 显示“正在处理”，completed 替换为最终助手消息，failed 显示可重试；状态来自服务端，不显示虚构百分比 | 统一工作台消息流 |
 | Attachment/文档入库 | 已上传/处理中(轮询刷新)/可检索/处理失败(含原因,不伪装成功) | 知识库 |
 | Catalog 版本 | draft(可编辑白名单)/ published / retired;未发布数据源标"不可用于 Text-to-SQL" | admin 数据源 |
 
@@ -128,8 +130,10 @@ DESIGN-apple.md 是营销站规范,工作台按以下决策"翻译":
   普通网络故障直接判定为 Session 过期。收到 succeeded/failed/cancelled 后关闭流并刷新任务摘要。
   管理员成功恢复同一任务后重新建立流。
 - 关闭页面只断开 SSE,不取消任务;取消走独立命令接口。
-- 知识助手的旧 Mock 流式实现不经过任务队列，但当前页面未挂载；待服务端
-  conversation/message 契约落地后再接入统一外壳。
+- 会话 turn 已由独立 Worker 执行，后端已提供 `GET /conversations/{id}/turns/{turnId}` 状态查询
+  和 `/events` JSON/SSE。前端接入时应先补读事件，再用 `Last-Event-ID` 建立 SSE；按 `seq` 去重，
+  收到 `turn_completed`/`turn_failed` 后关闭流并刷新消息游标。不能继续以消息列表轮询或 HTTP 超时
+  猜测 failed，也不能把 `turn_retry_scheduled` 显示为终态。
 
 ## 认证流程
 
@@ -156,7 +160,7 @@ DESIGN-apple.md 是营销站规范,工作台按以下决策"翻译":
 | task 列表/工单历史诊断 | 后端未实现；只提供本会话 taskId 导航记录 |
 | 任务证据明细/工具执行 | 后端未实现；页面显示未开放状态 |
 | admin 系统监控/死信 | 后端未实现；页面显示未接入状态 |
-| 服务端 conversation/message | 后端已实现持久化、结构化引用、`/turns`、turn 幂等账本和任务引用门禁的状态 Tool；前端尚未接入稳定 key、助手回放、消息 SSE 和附件内容 |
+| 服务端 conversation/message | 后端已实现持久化、用户结构化工单/任务引用、助手知识/附件/网页引用、异步 `/turns`、Outbox/Conversation Worker、租约 fencing、完成回放、任务状态 Tool、会话附件上传/消息关联/受控读取和附件/知识引用预览；前端尚未接入稳定 key、queued/running 展示、turn SSE、附件和引用 UI |
 | 知识助手 | 旧 Mock 页面不再挂载，`/assistant` 重定向工作台；知识问答可由后端会话 Agent 处理，但前端接入仍待完成 |
 | 知识库、用户与 Catalog 管理 | 仍为 Mock；不属于本次 M1 诊断闭环 |
 
@@ -177,11 +181,15 @@ mock 保留了与 api.md 一致的错误语义(40101/40301/40401/40901/40921/
 ## 已知未实现(原型边界)
 
 - 服务端任务列表、工单全量诊断历史、任务级证据/工具执行明细、管理员系统监控与死信接口。
-- 服务端 conversation/message、消息工单引用、会话任务引用与 Agent 创建任务 Tool；跨浏览器、跨设备不保留本地会话编排。
-- read_attachment 工具调用痕迹在助手消息中的展示;知识文档详情页(chunk
-  预览、原图关联);失败文档的重新解析入口。
+- 服务端能力已具备，但前端尚未把工作台切换到 conversation/message/turn、结构化工单/任务引用和 Agent 创建任务 Tool；当前本地会话编排仍不能跨浏览器、跨设备恢复。
+- 附件上传/消息发送、`read_attachment` Tool 调用痕迹、附件/知识 Chunk 引用预览和原图关联；失败文档的重新解析入口。
+- assistant message 已返回有序 `citations`。前端应以该数组渲染引用 Chip，并隐藏或替换正文中的
+  完整机器 marker（例如
+  `[source:knowledge:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222]`）；
+  尖括号、引号和反引号不属于 marker。知识和附件点击后调用受权预览 API，网页只打开 HTTPS
+  `sourceRef`。不能根据正文中的任意 UUID/URL 自行生成可点击引用。
 - 统一工作台在桌面显示三栏；移动端中心流保持单列，会话与卷宗使用左右抽屉。
-- 真实附件上传；当前创建诊断契约明确只接受空附件列表。
+- 后端已支持 Conversation Agent 从当前消息冻结诊断任务附件；前端仍未接入该会话命令。直接创建诊断任务的 HTTP 契约继续只接受空附件列表。
 - 修改密码真实接口、OpenAPI 自动类型生成。
 - 知识与管理 Mock 数据存于内存,整页刷新后运行期新建的数据会重置。
 

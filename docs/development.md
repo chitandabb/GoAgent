@@ -132,8 +132,8 @@ Sheet/Slide handling are not implemented.
 Start or rebuild the runnable path with:
 
 ```powershell
-docker compose up -d --build migrate backend outbox-relay knowledge-worker
-docker compose ps backend outbox-relay knowledge-worker
+docker compose up -d --build migrate backend outbox-relay knowledge-worker conversation-worker
+docker compose ps backend outbox-relay knowledge-worker conversation-worker
 ```
 
 Run the opt-in storage and messaging integrations against the local defaults with
@@ -460,6 +460,35 @@ requests, 9606 Tokens and 2+2 Chunk/vector batches. `IntegrityPreserved=true` an
 was `0|0`. This supports the bounded worker-core 40%+ claim, but remains ineligible for the 40-document/eight-format
 full-scale gate because the selected workload contains only two documents and two format classes.
 
+The 2026-08-09 resume-closure pair adds scanned PDF, PPTX, XLSX and PNG under the unchanged default CNY 0.05
+hard budget. Run it only after loading the local `.env`; a local CLI also needs the same MinIO development
+credentials that Compose expands by default. The observer itself does not load `.env`.
+
+```powershell
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -audit-only `
+  -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
+  -audit-output output/evaluation/rag-ingestion-corpus-audit-resume-closure-v1.json
+
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -estimate-only -document-concurrency-ablation `
+  -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
+  -repetitions 1 -max-provider-cost-cny 0.05
+
+go run ./cmd/mesguard-ingestion-throughput-observe `
+  -execute-provider -document-concurrency-ablation `
+  -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
+  -repetitions 1 -timeout 15m -max-provider-cost-cny 0.05 `
+  -output output/evaluation/rag-ingestion-resume-closure-v1.observations.jsonl
+```
+
+Preflight estimated 46 requests, 97,306 Tokens and CNY 0.0487. Actual usage was 46 requests, 50,838 Tokens and
+approximately CNY 0.025419. Both arms retained the same `1 succeeded / 1 partial / 2 failed` set, 36 searchable
+Elements and 223 Chunks; the two failed inputs are the expected scanned-PDF/PNG fail-closed result while visual
+processors are absent. `IntegrityPreserved=true`; duration changed from 6492 ms to 5498 ms and document throughput
+increased 18.08%. This one pair closes representative cross-format integrity only. It does not satisfy or replace
+the 40-document/eight-format/five-pair production-scale gate, and it made no OCR/VLM calls.
+
 The zero-cost audit now covers 40 public documents and all 8 format classes with 5,946 raw Elements,
 5,854 searchable Elements, 12,864 Chunks, 139 visual candidates and zero parser failures. It applies the production
 Element merge before Chunking and records 92 suppressed duplicate/nonsemantic Elements. It counts only materialized visual bytes; PDF
@@ -478,21 +507,52 @@ limits are 1,800 RPM and 1,200,000 TPM, so rolling Token bursts, not a permanent
 the 429. A first 429 now cancels the evaluation, and the 40-document corpus remains provider-free unless its
 preflight cost receives explicit approval.
 
-Docker Compose must pass `DASHSCOPE_API_KEY` to both `knowledge-worker` and `diagnosis-worker`. The first
-creates document vectors during ingestion; the second creates query vectors during diagnosis retrieval.
-If only the Knowledge Worker receives the key, ingestion can succeed while diagnosis silently logs
-`knowledge vector search unavailable` and degrades to FTS. Recreate the affected application container after
+Docker Compose must pass `DASHSCOPE_API_KEY` to `knowledge-worker`, `diagnosis-worker` and
+`conversation-worker`. The first creates document vectors during ingestion; the latter two create query vectors
+during diagnosis or conversational knowledge retrieval. If only the Knowledge Worker receives the key, ingestion
+can succeed while Agent retrieval silently degrades to FTS. Recreate the affected application container after
 changing environment variables; no database or object-store volume reset is required.
 
 `[knowledge.layout]` may be enabled only after `modelPath`, `manifestPath` and
-`runtimeLibraryPath` resolve inside the Knowledge Worker environment. Artifact schema v5
-then records model, renderer, requested/effective DPI, bbox, crop and explicit OCR/VLM routing
-provenance plus `element-merge-v1` keep/suppress decisions. The first eight-page public run is
+`runtimeLibraryPath` resolve inside the Knowledge Worker environment. Artifact schema v6
+then records model, renderer, requested/effective DPI, bbox, crop, explicit OCR/VLM/Table routing,
+structured table cells and `element-merge-v1` keep/suppress decisions. The first eight-page public run is
 recorded, but its cloud-bound-region avoidance is a routing proxy rather than measured API/Token
 savings. One bounded OCR pair, a nine-file PPTX parser benchmark, an eight-slide PPTX structure
 set and a three-candidate ONNX thread A/B are recorded in
 `docs/evaluations/knowledge-ingestion-quality-v1.md`; remaining work is broader OCR/VLM fixtures,
 and cloud-enriched merge quality.
+
+Structured table recovery uses the independent `[models.table]` profile and
+`config/prompts/table-recovery.md`. It currently shares the configured DashScope API credential but
+does not share the Vision Prompt or response schema. `table_recovery` regions produce Markdown plus
+bounded cell coordinates/spans/header flags in Element metadata; only Markdown is projected into
+PostgreSQL Chunk content. If the table processor is unavailable, generic OCR/VLM text is allowed only
+as a `partial` fallback. Provider-free verification is:
+
+```powershell
+go test ./internal/knowledgetable ./internal/platform/tablemodel `
+  ./internal/knowledgeenrichment ./internal/knowledgeingestion ./internal/knowledge -count=1
+```
+
+These tests include a mixed page with native text, a table, a picture and a decorative region. They
+do not call DashScope and are not table-quality evidence. A paid observation must first validate the
+crop and estimate cost:
+
+```powershell
+go run ./cmd/mesguard-table-quality-eval `
+  -mode validate `
+  -input output/evaluation/layout-routing-preview/nist-8107-page-15.png `
+  -bbox 0.10691961899302364,0.11920245006831005,0.9089730455984477,0.30269819317442
+```
+
+The 2026-08-09 bounded NIST observation stopped after two `qwen3-vl-plus` calls. It used 2,507
+Tokens and approximately CNY 0.014432 in total. Both responses preserved searchable text but
+collapsed three visible rows beneath a vertically merged cell. A Prompt-only retry did not repair
+the structure. The adapter therefore treats multiline cell content or `<br>` as
+`multiline_cell_structure_ambiguous`, forces `partial`, caps confidence at 0.8 and emits a stable
+warning. This is a truthful degradation gate, not a general table-accuracy result. Raw execution
+details and the current enhancement boundary are in `docs/evaluations/table-recovery-v1.md`.
 
 Prepare and build the optional Linux/amd64 layout Worker without placing model assets in Git or
 the default backend build context:
@@ -678,6 +738,113 @@ unknown JSON fields, and mismatched model/reasoning settings in a pair. The
 checked-in `sample` files only verify the scoring program; they must not be
 reported as production accuracy or Token reduction.
 
+To verify the unified Conversation answer-quality contract without calling a
+Provider, run:
+
+```powershell
+go run ./cmd/mesguard-conversation-quality-eval `
+  -dataset testdata/conversation-quality-v1.jsonl `
+  -input testdata/conversation-quality-v1.seeded.observations.jsonl
+```
+
+This command separates retrieval, citation, preview, degradation, latency,
+Token, cost, and optional human/LLM Judge metrics. The checked-in observations
+are `seeded_contract` fixtures and must not be reported as model quality. They
+cannot be mixed with exported `recorded_run` observations. See
+`docs/evaluations/conversation-quality-v1.md` for formulas, run-ledger export and
+remaining real-sample work.
+
+To prepare and validate an independent claim-level Judge input without calling
+any model, use:
+
+```powershell
+go run ./cmd/mesguard-conversation-quality-judge-export -overwrite
+go run ./cmd/mesguard-rag-judge `
+  -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
+  -validate-only
+go run ./cmd/mesguard-rag-judge `
+  -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
+  -estimate-only
+```
+
+The exporter joins the pinned corpus, raw/resolved Cases, human gold facts and
+recorded observations. It includes all actually cited evidence but never turns
+an extra citation into an allowed gold source. The Judge command requires
+exactly one of `-validate-only`, `-estimate-only`, or `-execute-provider`,
+defaults to one Case and a `0.05 CNY` guard, and rejects the same provider/model
+that generated the answer. Current config uses `rag-judge-v2` with
+`[models.judge] enabled=false`; the existing one-Case input validates locally
+and preflights at about `0.034864 CNY`. One explicitly authorized `qwen3-max`
+run used `2512/713/3225` Prompt/Completion/Total Tokens, took `16595 ms`, and
+cost an estimated `0.018604 CNY`; config was then restored to disabled. Human
+review agreed with its two unsupported-claim findings, extra-citation finding,
+and no-missing-fact result. Passing that JSONL to
+`mesguard-conversation-quality-eval -judge <path>` yields auxiliary
+Faithfulness/Relevance/Citation Alignment `0.50/0.50/0.25` without changing the
+deterministic failed result.
+
+The transaction-scoped real-observation command uses a pinned public corpus and
+defaults to provider-free validation or planning:
+
+```powershell
+go run ./cmd/mesguard-conversation-quality-observe -validate-only -max-cases 5
+go run ./cmd/mesguard-conversation-quality-observe -estimate-only -max-cases 1 -chat-profile qwen-qa-eval
+```
+
+The checked-in set contains five knowledge Cases over four documents and 21
+Chunks. Real execution is opt-in with `-execute-provider`, defaults to one Case,
+disables Query Rewrite and Rerank, and rolls all fixture database facts back.
+The observer pins `maxResults=3` for each Case (the raw dataset can override it
+within the normal 1..20 boundary), so model-generated Tool arguments cannot
+silently change the Context Precision denominator. Production search defaults
+remain unchanged.
+The CNY guard is an admission and post-Case estimate, not a provider-side hard
+limit: usage is settled only after an in-flight call returns. Review the printed
+plan and `docs/evaluations/conversation-quality-v1.md` before executing it.
+
+To avoid charging for repeated retrieval during this bounded evaluation, the
+observer forces the sole `search_knowledge` Tool on the first model call, executes
+it once per user message, and returns that same
+validated result with a stop notice on subsequent attempts. Production
+Conversation behavior is unchanged; Tool-selection quality is measured by the
+independent `tool-selection-v1` set. A real probe showed that a prompt-only stop
+notice can still be ignored, even though compact cache replay reduced total
+Tokens from 10,188 to 8,349. After the first Tool result the observer keeps the
+`search_knowledge` schema for protocol continuity; removing it breaks providers
+that validate prior Tool Call/Result history. It sends `ToolChoiceForbidden` to reject a new
+Tool Call. A scripted model verifies that only
+one search decision and one final cited answer remain. Two post-fix StepFun
+probes still retrieved both gold Chunks and used about 2,000 Chat Tokens each,
+but produced no Eino-valid final answer. Do not repeat the same paid probe or
+report it as model quality. The observer now accepts `-chat-profile` and prints
+content-free protocol diagnostics: Tool names, role, content presence,
+ToolChoice, finish reason and stable error type only. A first `qwen-qa-eval`
+probe used one actual model call and returned `assistant + content + stop`
+without searching, so it failed Context/Citation Recall. It also exposed that
+the outer Agent node and inner OpenAI-compatible Client could count the same
+usage twice. The Wrapper now isolates inner callbacks and forces the first
+knowledge retrieval. The latest bounded Qwen rerun completed two actual model
+calls, returned a source-bound answer, recalled both required citations and matched
+both previews, but failed strict Context/Citation Precision (`0.5/0.6667`). With
+fixed `K=3`, three hits plus one Parent context source were exposed.
+`conversation-v4` removed the over-specific parameter claim, yet the answer still
+added plausible risks not directly supported by the two required chunks. This is
+retained as a failed quality observation; do not expand gold labels or repeat
+Prompt-only paid probes to make it pass. A different transaction Case then returned a correct draft but no
+markers under both `conversation-v4` and `conversation-v5`. `conversation-v6` adds a failure-triggered citation
+repair: valid original answers have zero extra calls; zero-citation source-backed drafts get at most one Tool-free,
+temperature-zero, strict-JSON call using the same model. The repair input is bounded to 64 KiB of same-run evidence,
+the configured output limit is 768 Tokens, and every returned marker is revalidated against the same source/hash
+allowlist. Invalid, truncated, timed-out, unknown-marker or zero-marker repairs keep `insufficient_evidence`.
+
+The final `transaction-commit-failure` run passed with Context Recall `1.0`, Citation Precision/Recall `1.0`, preview
+consistency `1.0`, answer-term recall `1.0`, 7,025 Chat Tokens, 3,869 ms, and estimated online cost `0.008141 CNY`.
+It used three calls because repair was triggered; human review found only the two directly supported claims. Context
+Precision remains `0.5`, so retrieval candidate compression is still visible. The claim-level human/LLM Judge input,
+strict execution and aggregation path remains available; the first historical Judge call and human calibration are
+complete. No OCR, VLM, Web
+Search, Query Rewrite, or Rerank call is part of this command.
+
 The SQL investigation runtime exposes `execute_readonly_query` only when both
 the SQL Server pool and PostgreSQL Schema Catalog are available. Its query
 policy is configured under `[sqlserver.investigation]`:
@@ -724,6 +891,12 @@ GET /api/v1/conversations/<conversationId>
 GET /api/v1/conversations/<conversationId>/messages?afterSeq=0&limit=20
 POST /api/v1/conversations/<conversationId>/messages
 POST /api/v1/conversations/<conversationId>/turns
+GET /api/v1/conversations/<conversationId>/turns/<turnId>
+GET /api/v1/conversations/<conversationId>/turns/<turnId>/events?afterSeq=0&limit=100
+GET /api/v1/conversations/<conversationId>/turns/<turnId>/events  (Accept: text/event-stream)
+POST /api/v1/conversations/<conversationId>/attachments
+GET /api/v1/conversations/<conversationId>/attachments/<attachmentId>/preview
+GET /api/v1/knowledge-citations/<chunkId>
 ```
 
 Message writes require `X-CSRF-Token`. The message request may carry `caseReferences` and
@@ -733,15 +906,101 @@ PostgreSQL transaction. Selecting a case alone does not create a diagnosis task.
 Conversation Agent through `/turns`. A unique `selected` case reference plus explicit diagnosis
 intent is required before that Tool is exposed. The command only creates a durable diagnosis task;
 the Diagnosis Worker remains asynchronous and independent from conversation lifecycle. `/turns`
-requires a client-generated UUID `Idempotency-Key`. PostgreSQL atomically binds that key and a
-canonical request fingerprint to the user message and execution lease; a failed retry reuses the
-same user message, and a completed retry returns the original assistant message with `200` and
-`replayed=true`. Reusing a key for a different request or sending another message while the turn is
-running returns `409`. A user turn carrying a verified `taskReferences` entry dynamically exposes
+requires a client-generated UUID `Idempotency-Key`. PostgreSQL atomically writes the user message,
+the `queued` turn, and a `conversation.turn.execute` Outbox event; the API returns `202` without
+calling a model. The independent `mesguard-conversation-worker` claims and renews
+`lease_owner + lease_expires_at`, executes the Agent, and transactionally persists the final
+assistant message. Failed retries reuse the same user message; completed retries return the original
+assistant message with `200/replayed=true`. Turn status is independently queryable, and turn events can
+be replayed from PostgreSQL with `afterSeq` or `Last-Event-ID` over JSON/SSE. A changed request with the same key, or another message
+while a turn is queued/running, returns `409`; the same queued/running request returns its current
+state with `202`. A user turn carrying a verified `taskReferences` entry dynamically exposes
 the internal `get_diagnosis_task_status` Tool. The Tool rechecks the latest message reference and
 owner/admin authorization, then returns persisted task status and report availability without an
-invented progress percentage. Message SSE, attachments, citation preview and background conversation
-execution remain later slices.
+invented progress percentage.
+
+Attachment upload also requires `X-CSRF-Token`, a UUID `Idempotency-Key`, and exactly one multipart
+`file` field. The route fixes the scope to the authenticated user's current conversation. The supported
+formats match the existing parser boundary: UTF-8 text/Markdown/log/JSON/CSV/SQL/XML/YAML, PDF,
+DOCX/XLSX/PPTX, PNG and JPEG. A user message may carry up to eight attachment references;
+the server validates owner and conversation before writing the message and links all references in the
+same transaction. Upload does not itself authorize the Agent. `read_attachment` is exposed only when the
+current user message carries an attachment and then rechecks user, conversation, message and attachment
+IDs before parsing at most 12,000 runes. The preview route returns at most 2,000 runes. Neither route
+returns MinIO bucket/object coordinates, ETags, credentials, permanent URLs or Base64. Images and
+scan-only pages report visual content but do not trigger paid OCR/VLM calls.
+
+Knowledge citation preview accepts a Chunk UUID, permits global scope or a personal document owned by
+the current user, and only reads ready/retired versions. Missing, deleted, processing and unauthorized
+personal content all return not found. The frontend still needs to adopt turn SSE, attachment upload/Tool
+traces and both citation preview paths. The Conversation Agent can now freeze all or a selected subset of
+the current user message attachments into a new task; the transaction rechecks the latest message, owner,
+conversation and attachment state. Diagnosis Worker metadata and `read_attachment` are then task-scoped,
+and successful reads become `attachment` evidence. Direct HTTP diagnosis creation still rejects attachments
+because it has no message authorization context. Personal attachment upload, failed-upload leases and orphan
+cleanup remain later backend slices.
+
+Assistant citations are not accepted as arbitrary model JSON. Valid knowledge, attachment, and fetched-page
+Tool results receive backend-owned `citationSources` inside the same Conversation run. Each entry includes a
+backend-formatted full marker; the final answer may refer to one by copying it verbatim, for example
+`[source:knowledge:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222]`.
+Angle brackets, quotes, and backticks are not part of the marker. The
+Runner rejects any marker that was not exposed in that run.
+`[agent].conversationCitationRepair*` controls the optional zero-citation repair Prompt, version, timeout and output
+budget. The repair uses the same configured main model identity and contributes usage to the original turn budget;
+it is not a second hidden Provider profile.
+Only the actually cited source type/ref/SHA-256/position is written with the assistant message and returned by
+message reads or completed-turn replay. Retrieved-but-unused sources are not persisted as citations. The
+database/API never exposes MinIO coordinates or raw Tool payloads, and preview authorization is evaluated again
+when a user opens a knowledge or attachment citation.
+
+Completed Conversation runs persist a separate bounded run ledger with provider/model/prompt identity, provider
+usage, duration, validated retrieved source identities, and stable degraded channels. To export real evaluation
+observations, prepare one strict JSONL row per dataset Case:
+
+```json
+{"caseId":"knowledge-answer","turnId":"<completed-turn-uuid>","estimatedCostCny":0.001,"previewContentSha256ByRef":{"knowledge:<version>/<chunk>":"<preview-sha256>"}}
+```
+
+Validate the mapping without database or provider access, then export to a new mode-0600 file:
+
+```powershell
+go run ./cmd/mesguard-conversation-quality-export `
+  -dataset testdata/conversation-quality-v1.jsonl `
+  -selections <recorded-run-selections.jsonl> `
+  -validate-only
+
+go run ./cmd/mesguard-conversation-quality-export `
+  -dataset testdata/conversation-quality-v1.jsonl `
+  -selections <recorded-run-selections.jsonl> `
+  -output output/evaluation/conversation-quality-v1.recorded.observations.jsonl
+```
+
+The exporter performs read-only PostgreSQL access and no model/provider calls. It refuses query/case mismatches,
+turn reuse, unknown JSON fields, non-cited preview hashes, and an existing output path. `estimatedCostCny` comes
+from the reviewed provider price/bill; Token counts come only from persisted provider usage. Completed Turns export
+their assistant answer and citations. Terminal failed Turns can be exported without an assistant message and carry
+only the final safe run facts plus a stable `errorType`; zero usage is accepted only when the Provider returned no
+usage and must not be interpreted as a free request. Explicitly requeueing the same failed Turn clears its previous
+run ledger in the requeue transaction, so selections must target the current terminal state.
+
+To verify the real attachment boundary without calling any model/provider, run the bounded PostgreSQL + MinIO
+HTTP smoke against local development services:
+
+```powershell
+$env:MESGUARD_TEST_POSTGRES_DSN = "postgres://..."
+$env:MESGUARD_TEST_MINIO_ENDPOINT = "127.0.0.1:9000"
+$env:MESGUARD_TEST_MINIO_ACCESS_KEY = "..."
+$env:MESGUARD_TEST_MINIO_SECRET_KEY = "..."
+go test -tags=integration ./internal/transport/http `
+  -run TestAttachmentHTTPMinIOSmoke -count=1 -v
+```
+
+The test uploads a 49-byte UTF-8 TXT through the real Gin multipart route and real MinIO, then verifies upload
+idempotency, denial before message association, exact-message `read_attachment` authorization, citation preview,
+cross-user 404 behavior, and object-store coordinate/credential non-disclosure. PostgreSQL facts are wrapped in a
+rollback transaction and dedicated `mesguard-http-*` test buckets are removed. The test does not call OCR, VLM,
+Embedding, Rerank, Web Search, or a chat model.
 
 The complete implemented contract is in [`../api/openapi.yaml`](../api/openapi.yaml).
 
