@@ -28,6 +28,7 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				t.Fatalf("%q conversation memory Tool exposure is not static_frozen", path)
 			}
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
+				!cfg.Agent.ContextMemory.DiagnosisPreflightEnabled ||
 				!cfg.Agent.ContextMemory.ContinuousTailEnabled ||
 				!cfg.Agent.ContextMemory.SummaryTailEnabled ||
 				!cfg.Agent.ContextMemory.AsyncCompactionEnabled ||
@@ -37,6 +38,10 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				cfg.Agent.ContextMemory.MemoryCacheTTL != "2h" ||
 				cfg.Agent.ContextMemory.MemoryCacheJitterRatio != 0.10 ||
 				cfg.Agent.ContextMemory.MemoryCacheTimeoutMillis != 50 ||
+				!cfg.Agent.ContextMemory.SourceRecoveryEnabled ||
+				cfg.Agent.ContextMemory.SourceRecoveryMaxMessages != 20 ||
+				cfg.Agent.ContextMemory.SourceRecoveryMaxTokens != 8192 ||
+				cfg.Agent.ContextMemory.SourceRecoveryMaxCalls != 2 ||
 				cfg.Agent.ContextMemory.MemoryMaxRatio != 0.20 ||
 				cfg.Agent.ContextMemory.SummaryMaxRatio != 0.05 ||
 				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
@@ -79,7 +84,8 @@ func TestConfigRejectsConversationMemoryOutputThatExceedsActiveSummaryBudget(t *
 	active.PromptSafetyMarginTokens = 256
 	active.PromptSafetyMarginRatio = 0
 	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = active
-	cfg.Agent.ContextMemory.ToolGrowthReserveTokens = 128
+	cfg.Agent.ContextMemory.ToolGrowthReserveTokens = 256
+	cfg.Agent.ContextMemory.SourceRecoveryMaxTokens = 256
 
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "active profile Summary budget") {

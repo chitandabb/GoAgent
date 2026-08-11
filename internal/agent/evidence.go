@@ -27,8 +27,8 @@ const (
 )
 
 // EvidenceItem 是一次 Agent 运行中成功工具结果的不可变快照元数据。
-// Snapshot 是已经经过 Tool 自身脱敏/限流，以及 Runner 结果字节限制后的内容；
-// 它只存在于当前运行结果中，正式任务持久化会在 P7 的 DiagnosisTask 链路完成。
+// Snapshot 是经过 Tool 自身脱敏和领域限流后的完整事实结果。Runner 对模型可见
+// 投影的字节限制不会修改 Snapshot；正式任务链路会将该值持久化为证据制品。
 type EvidenceItem struct {
 	ID          string             `json:"id"`
 	SourceType  EvidenceSourceType `json:"sourceType"`

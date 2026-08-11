@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -186,9 +187,15 @@ func (e diagnosisAgentExecutor) Execute(
 			return diagnosisworker.ExecutionResult{}, fmt.Errorf("%w: build web research run scope: %v", diagnosis.ErrInvalidTask, err)
 		}
 	}
+	caseSnapshot, err := json.Marshal(task.CaseSnapshot)
+	if err != nil {
+		return diagnosisworker.ExecutionResult{}, fmt.Errorf(
+			"%w: encode frozen case snapshot: %v", diagnosis.ErrInvalidTask, err,
+		)
+	}
 	result, err := e.runtime.orchestrator.Invoke(runCtx, agent.RunRequest{
 		UserQuery: diagnosisAgentQuery(task), ExternalCaseID: task.CaseSnapshot.ID.String(),
-		RequestedSkill: requestedSkill,
+		RequestedSkill: requestedSkill, CaseSnapshot: string(caseSnapshot),
 	})
 	if err != nil {
 		return diagnosisworker.ExecutionResult{}, err

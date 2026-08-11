@@ -374,24 +374,29 @@ type AgentConfig struct {
 // preflight so every activated prompt still produces the same bounded manifest;
 // the Rune selector remains an explicit rollback path.
 type ContextMemoryConfig struct {
-	ShadowPreflightEnabled   bool                            `toml:"shadowPreflightEnabled"`
-	ContinuousTailEnabled    bool                            `toml:"continuousTailEnabled"`
-	SummaryTailEnabled       bool                            `toml:"summaryTailEnabled"`
-	AsyncCompactionEnabled   bool                            `toml:"asyncCompactionEnabled"`
-	AsyncMaxAttempts         int                             `toml:"asyncMaxAttempts"`
-	RetryJitterRatio         float64                         `toml:"retryJitterRatio"`
-	MemoryCacheEnabled       bool                            `toml:"memoryCacheEnabled"`
-	MemoryCacheTTL           string                          `toml:"memoryCacheTTL"`
-	MemoryCacheJitterRatio   float64                         `toml:"memoryCacheJitterRatio"`
-	MemoryCacheTimeoutMillis int                             `toml:"memoryCacheTimeoutMillis"`
-	MemoryMaxRatio           float64                         `toml:"memoryMaxRatio"`
-	SummaryMaxRatio          float64                         `toml:"summaryMaxRatio"`
-	TailMaxRatio             float64                         `toml:"tailMaxRatio"`
-	PreflightTimeoutMillis   int                             `toml:"preflightTimeoutMillis"`
-	SoftThresholdRatio       float64                         `toml:"softThresholdRatio"`
-	HardThresholdRatio       float64                         `toml:"hardThresholdRatio"`
-	ToolGrowthReserveTokens  int                             `toml:"toolGrowthReserveTokens"`
-	Summary                  ConversationMemorySummaryConfig `toml:"summary"`
+	ShadowPreflightEnabled    bool                            `toml:"shadowPreflightEnabled"`
+	DiagnosisPreflightEnabled bool                            `toml:"diagnosisPreflightEnabled"`
+	ContinuousTailEnabled     bool                            `toml:"continuousTailEnabled"`
+	SummaryTailEnabled        bool                            `toml:"summaryTailEnabled"`
+	AsyncCompactionEnabled    bool                            `toml:"asyncCompactionEnabled"`
+	AsyncMaxAttempts          int                             `toml:"asyncMaxAttempts"`
+	RetryJitterRatio          float64                         `toml:"retryJitterRatio"`
+	MemoryCacheEnabled        bool                            `toml:"memoryCacheEnabled"`
+	MemoryCacheTTL            string                          `toml:"memoryCacheTTL"`
+	MemoryCacheJitterRatio    float64                         `toml:"memoryCacheJitterRatio"`
+	MemoryCacheTimeoutMillis  int                             `toml:"memoryCacheTimeoutMillis"`
+	SourceRecoveryEnabled     bool                            `toml:"sourceRecoveryEnabled"`
+	SourceRecoveryMaxMessages int                             `toml:"sourceRecoveryMaxMessages"`
+	SourceRecoveryMaxTokens   int                             `toml:"sourceRecoveryMaxTokens"`
+	SourceRecoveryMaxCalls    int                             `toml:"sourceRecoveryMaxCalls"`
+	MemoryMaxRatio            float64                         `toml:"memoryMaxRatio"`
+	SummaryMaxRatio           float64                         `toml:"summaryMaxRatio"`
+	TailMaxRatio              float64                         `toml:"tailMaxRatio"`
+	PreflightTimeoutMillis    int                             `toml:"preflightTimeoutMillis"`
+	SoftThresholdRatio        float64                         `toml:"softThresholdRatio"`
+	HardThresholdRatio        float64                         `toml:"hardThresholdRatio"`
+	ToolGrowthReserveTokens   int                             `toml:"toolGrowthReserveTokens"`
+	Summary                   ConversationMemorySummaryConfig `toml:"summary"`
 }
 
 // ConversationMemorySummaryConfig controls the independently callable Summary
@@ -477,7 +482,24 @@ func (c ContextMemoryConfig) Validate() error {
 			return errors.New("agent contextMemory memoryCacheTimeoutMillis must be between 5 and 1000")
 		}
 	}
-	if !c.ShadowPreflightEnabled {
+	if c.SourceRecoveryEnabled {
+		if !c.SummaryTailEnabled || !c.Summary.Enabled {
+			return errors.New("agent contextMemory source recovery requires Summary + Tail")
+		}
+		if c.SourceRecoveryMaxMessages < 1 || c.SourceRecoveryMaxMessages > 20 {
+			return errors.New("agent contextMemory sourceRecoveryMaxMessages must be between 1 and 20")
+		}
+		if c.SourceRecoveryMaxTokens < 256 || c.SourceRecoveryMaxTokens > 8192 {
+			return errors.New("agent contextMemory sourceRecoveryMaxTokens must be between 256 and 8192")
+		}
+		if c.SourceRecoveryMaxCalls < 1 || c.SourceRecoveryMaxCalls > 2 {
+			return errors.New("agent contextMemory sourceRecoveryMaxCalls must be between 1 and 2")
+		}
+		if c.SourceRecoveryMaxTokens > c.ToolGrowthReserveTokens {
+			return errors.New("agent contextMemory sourceRecoveryMaxTokens cannot exceed toolGrowthReserveTokens")
+		}
+	}
+	if !c.ShadowPreflightEnabled && !c.DiagnosisPreflightEnabled {
 		return nil
 	}
 	if c.ContinuousTailEnabled && !contextgovernance.ValidTailWindowRatio(c.TailMaxRatio) {
@@ -1587,7 +1609,8 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if c.Agent.ContextMemory.ShadowPreflightEnabled && c.Models.Chat.Enabled {
+	if (c.Agent.ContextMemory.ShadowPreflightEnabled ||
+		c.Agent.ContextMemory.DiagnosisPreflightEnabled) && c.Models.Chat.Enabled {
 		profile, err := c.Models.Chat.ActiveProfile()
 		if err != nil {
 			return err

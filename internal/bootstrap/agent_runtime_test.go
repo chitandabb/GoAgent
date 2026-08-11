@@ -131,6 +131,48 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 	}
 }
 
+func TestBuildAgentRuntimeSharesActiveMemoryWithSourceRecovery(t *testing.T) {
+	cfg := testAgentConfig()
+	profile := cfg.Models.Chat.Profiles["test"]
+	profile.ContextWindowTokens = 4096
+	profile.MaxOutputTokens = 512
+	profile.PromptSafetyMarginTokens = 256
+	profile.TokenizerStrategy = config.TokenizerStrategyLocalCalibrated
+	cfg.Models.Chat.Profiles["test"] = profile
+	cfg.Agent.ContextMemory = config.ContextMemoryConfig{
+		ShadowPreflightEnabled: true, ContinuousTailEnabled: true, SummaryTailEnabled: true,
+		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
+		PreflightTimeoutMillis: 250, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+		ToolGrowthReserveTokens: 256,
+		SourceRecoveryEnabled:   true, SourceRecoveryMaxMessages: 20,
+		SourceRecoveryMaxTokens: 8192, SourceRecoveryMaxCalls: 2,
+	}
+	memoryBuildCount := 0
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, &gorm.DB{}, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+			knowledgeSearch: func(
+				context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger,
+			) (tool.BaseTool, error) {
+				return nil, nil
+			},
+			conversationMemory: func(context.Context, *gorm.DB, config.Config) (agent.ConversationMemory, error) {
+				memoryBuildCount++
+				return stubConversationMemory{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime(): %v", err)
+	}
+	defer runtime.close()
+	if memoryBuildCount != 1 || runtime.conversation == nil {
+		t.Fatalf("memory build count/runtime = %d/%+v", memoryBuildCount, runtime.conversation)
+	}
+}
+
 func TestBuildDiagnosisAgentRuntimeDoesNotRequireConversationMemory(t *testing.T) {
 	cfg := testAgentConfig()
 	profile := cfg.Models.Chat.Profiles["test"]

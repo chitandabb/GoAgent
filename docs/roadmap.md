@@ -2,13 +2,13 @@
 
 This file tracks the repository's current implementation state. Target
 milestones and product acceptance boundaries are defined in the product,
-domain, database, API, and system-architecture design documents. Agent
-execution order and acceptance gates are defined in
-[`design/agent-implementation-plan.md`](design/agent-implementation-plan.md).
+domain, database, API, system-architecture, code-organization and
+context-governance design documents.
+Ordered next slices are maintained directly in this file.
 
-## Current Stage: Resume Point 3 Backend Closure Complete; Point 4 Planning Next
+## Current Stage: Resume Point 3 Backend Closure Complete; Point 4 Design Locked
 
-- [x] `cmd/internal` project layout.
+- [x] Production `cmd/`, classified `tools/`, and private `internal/` project layout.
 - [x] Typed TOML and `.env` configuration.
 - [x] Manual dependency injection in `bootstrap`.
 - [x] Gin Router and `/healthz` endpoint.
@@ -48,6 +48,53 @@ execution order and acceptance gates are defined in
       owner-scoped attachment metadata and exposes the same bounded `read_attachment` Tool through a
       task-id fence, producing `attachment` evidence.
 - [ ] Frontend adoption of turn SSE, attachment upload/read traces, and citation preview.
+
+## Current Next Slice: M3 Dynamic Context Governance and Layered Memory
+
+Target design: [`design/context-governance-and-memory.md`](design/context-governance-and-memory.md).
+Implementation spec: [`specs/m3-context-governance-and-layered-memory.md`](specs/m3-context-governance-and-layered-memory.md).
+The design interview is complete. Context contract, shadow preflight, Continuous Token Tail, structured
+Snapshot, hard-threshold Summary + Tail, soft-threshold Memory Outbox/Worker, source recovery and Diagnosis
+per-call preflight are implemented; measured acceptance has not started. `60%+` remains an acceptance target
+and must be replaced by the fixed-set result if the measured value differs.
+
+- [x] Confirm Conversation-only isolated memory; cross-conversation long-term memory remains an enhancement.
+- [x] Confirm shared Provider-independent TokenBudgetPlanner for Conversation and Diagnosis.
+- [x] Confirm local-first TokenEstimator with actual Provider Usage calibration and hard-window preflight.
+- [x] Confirm soft `70%` asynchronous and hard `85%` synchronous compaction thresholds.
+- [x] Confirm immutable structured Snapshot with source message sequences, correction and Todo semantics.
+- [x] Confirm `Summary + Continuous Tail <= 20%`, with Summary `<=5%` and Tail `<=15%`.
+- [x] Confirm PostgreSQL facts, degradable Redis hot cache, Worker Lease/Fencing and CAS activation.
+- [x] Confirm bounded `read_conversation_memory_sources`; authorized deterministic relevant-window retrieval is
+      complete, while vector-semantic history retrieval remains an enhancement.
+- [x] Confirm Prompt Epoch, actual-content Fingerprints and stable TaskScope Tool Schema per Epoch.
+- [x] Confirm progressive Skill loading does not grant Tool permissions or mutate the current Tool Schema.
+- [x] Confirm Provider-native Tool exposure/Compaction are optional adapter capabilities, not correctness dependencies.
+- [x] Confirm Current/Baseline/Experiment fixed-set methodology, quality gates and evaluation cost guard.
+- [x] Add Chat Profile context-window/output/safety/tokenizer and Tool/Compaction capability configuration;
+      select the future fast conversation-memory model through an independent named Profile.
+- [x] Implement local-first TokenEstimator, Provider-independent TokenBudgetPlanner and shadow Prompt Manifest observation;
+      isolate its short timeout from the model run and persist bounded failure manifests instead of silent gaps.
+- [x] Replace Rune history selection with a continuous Token Tail behind a Feature Flag; count bounded references,
+      preserve the current User Message and block every Provider request whose conservative bound exceeds the window.
+- [x] Add immutable structured Snapshot migrations, domain types, serialized predecessor chain and real
+      PostgreSQL integration tests.
+- [x] Implement Shadow structured MemoryCompactor, deterministic Validator and bounded retry semantics;
+      candidates are persisted without a deterministic low-quality fallback.
+- [x] Add hard-threshold synchronous compaction, CAS Active publication, `Summary <= 5%` plus continuous
+      `Tail <= 15%`, Prompt Epoch replacement, old-Snapshot fallback and fail-closed hard-window protection.
+- [x] Add Memory Outbox/Worker, Lease/Fencing and CAS publication; real PostgreSQL tests cover transaction
+      scheduling, concurrent Claim, expired Worker fencing, overlapping Job convergence and retry Outbox.
+- [x] Add Redis Active Snapshot hot-cache fallback with PostgreSQL Active Identity as the fact source;
+      TTL/jitter, strict payload validation, degraded observations and best-effort deletion are covered by
+      contract plus real Redis/PostgreSQL tests. Tail Projection caching remains benchmark-gated because
+      durable History is already loaded before Runner selection.
+- [x] Add source-recovery Tool and current-Conversation authorization tests; use authorized relevant windows,
+      single-source Rune offsets, Run-only cursors and an explicit second-call turn-budget truncation contract.
+- [x] Apply shared preflight and bounded Tool Result accounting to Diagnosis without adding diagnosis memory;
+      persist high-water, model-projection truncation and hard-window block observations in the formal report.
+- [ ] Run Pilot then Acceptance evaluation; update the resume metric only from measured results.
+- [ ] Hand the completed backend contract to the frontend task.
 
 ## M0: Before Business Code
 
@@ -299,11 +346,10 @@ is used. The datasets, observations, and summaries are stored under
 `testdata/sql-safety-v1.*` and `testdata/text-to-sql-v1.*`.
 
 The single-Agent inner loop is now the production Runner baseline. See
-[`design/agent-implementation-plan.md`](design/agent-implementation-plan.md)
-for the ordered migration and [`design/agent-orchestration.md`](design/agent-orchestration.md)
-for the target boundaries.
+[`design/agent-orchestration.md`](design/agent-orchestration.md) for execution boundaries and
+[`design/code-organization.md`](design/code-organization.md) for package responsibilities.
 
-## Next Slice
+## Historical Delivery Narrative
 
 P0 through P5 的评测契约与统计基础已完成。P5 的 GitHub 工具级分层评测切片和首组四类
 Agent baseline/experiment paired 样本也已完成；
@@ -621,7 +667,7 @@ The fixed contract, paid result and review boundary are recorded in
    dedicated evidence endpoint;
 5. return `409` when the task exists but no report can currently be read, while
    preserving `404` for a missing task and `403` for an unauthorized actor;
-6. update `api/openapi.yaml`, `docs/design/openapi.json`, repository integration
+6. update `api/openapi.yaml`, repository integration
    tests, service authorization tests, and HTTP contract tests together.
 
 Verified acceptance: a task owner and admin can read the same committed report generated

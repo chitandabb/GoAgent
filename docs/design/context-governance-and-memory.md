@@ -298,16 +298,41 @@ supersedesEntryId（可选）
 read_conversation_memory_sources
 ```
 
-它只允许根据当前 Active Snapshot 中声明的 Entry 或消息序号，恢复当前 Conversation 原文：
+它只允许根据当前 Active Snapshot 中声明的 Entry 或消息序号，恢复当前 Conversation 的有界原文：
 
 ```text
 每次最多 20 条消息
 每次最多 8K Tokens
 每轮最多调用 2 次
-超限返回 continuation cursor
+第一次超限返回 Run 级 continuation cursor
+第二次后仍有内容则标记单轮预算截断，不返回不可用 cursor
 只能读取当前用户有权访问的 Conversation
 读取写入 Tool Trace
 ```
+
+当前实现已完成：Tool 不接受 `conversationId`，Actor 和 Conversation 只来自当前
+`CommandContext`；`memory` capability 由 Conversation `TaskScope` 在 Epoch 开始时授权，
+不会根据模型选择的 Entry 动态改变 Tool Schema。Entry、直接序号和 Continuation Cursor
+必须三选一；可在 Entry/直接序号选择器上附加最多 256 Rune 的 `query`，以确定性词项匹配、
+CJK bigram、800 Rune 分块评分和相邻窗口合并定位相关原文。单条明确源序号也可附加
+`contentOffsetRunes` 做无状态偏移读取，但不能与 Entry、Query 或 Cursor 混用。superseded/未知
+Entry 与未声明序号在访问 PostgreSQL 前拒绝。PostgreSQL 读取在同一条查询中 JOIN Conversation
+所有者，并要求授权序号完整命中。
+
+Cursor 是随机、不持久化、Run 级受校验句柄，绑定用户、Conversation、Active Snapshot、
+授权序号、读取模式、相关窗口、消息索引和 Rune 偏移；不能跨 Run、用户、Conversation 或
+Snapshot 使用，成功续传后旧 Cursor 失效。单条超长消息也可按 Rune 偏移继续读取，避免
+“单条消息超过 8K”时生成无法前进的 Cursor。Token 计数复用当前 Chat Profile 的本地
+TokenEstimator，并按
+`UpperBoundTokens` 保守门禁。条数、Token 和每轮调用次数均配置化，但配置不能突破
+`20 / 8192 / 2` 的硬上限；单次恢复 Token 上限还不能超过 `toolGrowthReserveTokens`，保证
+Prompt Planner 为下一次 Tool Result 预留的窗口覆盖最坏返回量。
+
+最终取舍是维持 Run-only Cursor 和每 Turn 两次上限，不引入跨 Turn Cursor 持久状态，也不宣称
+任意 20K Rune 消息都能完整回放。第二次调用后若底层仍有内容，Tool 返回 `hasMore=true`、
+`continuationAvailable=false`、`truncatedByTurnBudget=true`，让模型知道证据仍不完整但本轮不可
+继续。优先使用相关窗口通常无需顺序翻阅整条消息；完整大日志、文档或多媒体内容进入附件解析
+链路。这一取舍控制 Prompt 膨胀和状态复杂度，同时保留明确的证据不足语义。
 
 该能力解决“摘要保留结论但丢失细节”，不能解决“摘要完全遗漏某个话题”。后者通过固定集
 质量门控制；完整历史关键词/语义检索、分层摘要、重要性自适应压缩、双模型验证和摘要漂移
@@ -444,6 +469,21 @@ Diagnosis 共用 TokenBudgetPlanner，但首版不生成 Conversation Summary：
 - 如果真实固定集频繁超过 70%，再实现模型请求、宿主执行的 Diagnosis Compaction Epoch；
 - 不能只依赖模型主动调用压缩 Tool，因为请求发送前超窗时模型没有机会执行 Tool。
 
+当前实现由每次 Diagnosis Run 独占的 `diagnosisContextGuardModel` 包装主模型边界。
+首个调用额外预算 Worker 冻结的 CaseSnapshot；后续调用依据 ADK 当前消息重新预算，System、
+预加载 Skill、动态 Tool Contract、Evidence Index 和模型可见 Tool Result 分段计数。
+CaseSnapshot 只作为预算 Seed，不重复注入用户 Prompt，模型仍通过 `read_external_case` 获取证据。
+
+Tool 返回经过自身脱敏和领域限流的完整结果后，Runner 先生成不可变 EvidenceItem，再创建不超过
+`maxToolResultBytes` 的模型可见 Envelope。Envelope 超限时只保留 `evidenceRef/sourceType/truncated`
+和必要句柄，完整 Snapshot 与哈希不受模型投影截断影响。每次预算仍保留
+`toolGrowthReserveTokens`，而 Chat Profile 的 `maxOutputTokens` 预留给结构化报告输出。
+
+保守上界超过硬窗口时 Guard 在 Provider 调用前阻断。估算失败同样 fail-closed；Evidence
+Orchestrator 将两者收敛为 `context_window_exceeded/context_preflight_failed` 部分报告，不在相同
+上下文上重复尝试。正式报告的 `technical_summary.contextObservation` 记录 Preflight 调用与失败数、
+最大上界/可用输入/水位比例、模型投影截断数、硬窗口拦截数、两类预留和估算方法。
+
 ## 12. Provider 原生 Compaction
 
 MESGuard-managed Compaction 仍可调用远端快速小模型，它与“本地模型摘要”不是同义词。默认路径
@@ -497,6 +537,7 @@ enabled = false
 
 [agent.contextMemory]
 shadowPreflightEnabled = true
+diagnosisPreflightEnabled = true
 continuousTailEnabled = true
 summaryTailEnabled = true
 softThresholdRatio = 0.70
@@ -646,8 +687,8 @@ First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装�
 5. ConversationMemoryAssembler 接入硬阈值 Summary + Tail（已完成）；
 6. Memory Outbox/Worker、Lease/Fencing（已完成）；
 7. Redis Active Snapshot 热记忆缓存与 PostgreSQL 回源（已完成；Tail Projection 缓存改为基准驱动增强）；
-8. `read_conversation_memory_sources` Tool；
-9. Diagnosis Context Preflight 与有界 Tool Result；
+8. `read_conversation_memory_sources` Tool（已完成：相关窗口、单条偏移、Run 级 Cursor 与单轮预算截断）；
+9. Diagnosis Context Preflight 与有界 Tool Result（已完成）；
 10. Provider 原生 Compaction/Tool Exposure 接口预留；
 11. Pilot、Acceptance、指标核验和简历最终口径；
 12. 后端闭环后统一设计前端压缩状态和管理员观测页。

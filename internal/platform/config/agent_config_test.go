@@ -22,13 +22,14 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ConversationCitationRepairTimeoutMillis = 30000
 	configured.ConversationCitationRepairMaxOutputTokens = 768
 	configured.ContextMemory = ContextMemoryConfig{
-		ShadowPreflightEnabled:  true,
-		ContinuousTailEnabled:   true,
-		TailMaxRatio:            0.15,
-		PreflightTimeoutMillis:  250,
-		SoftThresholdRatio:      0.70,
-		HardThresholdRatio:      0.85,
-		ToolGrowthReserveTokens: 8192,
+		ShadowPreflightEnabled:    true,
+		DiagnosisPreflightEnabled: true,
+		ContinuousTailEnabled:     true,
+		TailMaxRatio:              0.15,
+		PreflightTimeoutMillis:    250,
+		SoftThresholdRatio:        0.70,
+		HardThresholdRatio:        0.85,
+		ToolGrowthReserveTokens:   8192,
 	}
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured budgets: %v", err)
@@ -76,6 +77,13 @@ func TestAgentConfigValidate(t *testing.T) {
 	if err := continuousWithoutPreflight.Validate(); err == nil {
 		t.Fatal("Validate accepted continuous Tail without shadow preflight")
 	}
+	diagnosisOnly := configured
+	diagnosisOnly.ContextMemory.ShadowPreflightEnabled = false
+	diagnosisOnly.ContextMemory.ContinuousTailEnabled = false
+	diagnosisOnly.ContextMemory.DiagnosisPreflightEnabled = true
+	if err := diagnosisOnly.Validate(); err != nil {
+		t.Fatalf("Validate diagnosis-only preflight: %v", err)
+	}
 	invalidTailRatio := configured
 	invalidTailRatio.ContextMemory.TailMaxRatio = 0.21
 	if err := invalidTailRatio.Validate(); err == nil {
@@ -96,6 +104,10 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ContextMemory.MemoryCacheTTL = "2h"
 	configured.ContextMemory.MemoryCacheJitterRatio = 0.10
 	configured.ContextMemory.MemoryCacheTimeoutMillis = 50
+	configured.ContextMemory.SourceRecoveryEnabled = true
+	configured.ContextMemory.SourceRecoveryMaxMessages = 20
+	configured.ContextMemory.SourceRecoveryMaxTokens = 8192
+	configured.ContextMemory.SourceRecoveryMaxCalls = 2
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured Summary + Tail: %v", err)
 	}
@@ -151,6 +163,31 @@ func TestAgentConfigValidate(t *testing.T) {
 	invalidCacheTimeout.ContextMemory.MemoryCacheTimeoutMillis = 1_001
 	if err := invalidCacheTimeout.Validate(); err == nil {
 		t.Fatal("Validate accepted memory cache timeout above one second")
+	}
+	invalidSourceMessages := configured
+	invalidSourceMessages.ContextMemory.SourceRecoveryMaxMessages = 21
+	if err := invalidSourceMessages.Validate(); err == nil {
+		t.Fatal("Validate accepted source recovery above the 20 message hard limit")
+	}
+	invalidSourceTokens := configured
+	invalidSourceTokens.ContextMemory.SourceRecoveryMaxTokens = 8193
+	if err := invalidSourceTokens.Validate(); err == nil {
+		t.Fatal("Validate accepted source recovery above the 8192 token hard limit")
+	}
+	invalidSourceCalls := configured
+	invalidSourceCalls.ContextMemory.SourceRecoveryMaxCalls = 3
+	if err := invalidSourceCalls.Validate(); err == nil {
+		t.Fatal("Validate accepted source recovery above the two-call hard limit")
+	}
+	insufficientSourceReserve := configured
+	insufficientSourceReserve.ContextMemory.ToolGrowthReserveTokens = 8191
+	if err := insufficientSourceReserve.Validate(); err == nil {
+		t.Fatal("Validate accepted source recovery above the Tool growth reserve")
+	}
+	sourceWithoutSummaryTail := configured
+	sourceWithoutSummaryTail.ContextMemory.SummaryTailEnabled = false
+	if err := sourceWithoutSummaryTail.Validate(); err == nil {
+		t.Fatal("Validate accepted source recovery without Summary + Tail")
 	}
 }
 

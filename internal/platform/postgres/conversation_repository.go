@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ type ConversationRepositoryConfig struct {
 
 var _ conversation.Repository = (*ConversationRepository)(nil)
 var _ conversation.AsyncRepository = (*ConversationRepository)(nil)
+var _ conversationmemory.SourceMessageReader = (*ConversationRepository)(nil)
 
 func NewConversationRepository(db *gorm.DB) *ConversationRepository {
 	return &ConversationRepository{db: db}
@@ -185,6 +187,51 @@ LIMIT ?`, conversationID, query.AfterSeq, query.Limit+1).Scan(&records)
 		nextAfterSeq = items[len(items)-1].Seq
 	}
 	return conversation.MessagePage{Items: items, AfterSeq: query.AfterSeq, NextAfterSeq: nextAfterSeq, HasMore: hasMore}, nil
+}
+
+// ReadSourceMessages returns exactly the requested conversation messages after
+// verifying ownership in the same query. Callers must authorize the sequence
+// set against the Active Snapshot before reaching this repository boundary.
+func (r *ConversationRepository) ReadSourceMessages(
+	ctx context.Context,
+	userID, conversationID uuid.UUID,
+	sequences []int64,
+) ([]conversation.Message, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("conversation repository is unavailable")
+	}
+	if userID == uuid.Nil || conversationID == uuid.Nil || len(sequences) == 0 ||
+		len(sequences) > 32 || !slices.IsSorted(sequences) {
+		return nil, conversationmemory.ErrSourceMessagesInvalid
+	}
+	for index, sequence := range sequences {
+		if sequence < 1 || index > 0 && sequences[index-1] == sequence {
+			return nil, conversationmemory.ErrSourceMessagesInvalid
+		}
+	}
+
+	var records []messageRecord
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT message.id, message.conversation_id, message.seq, message.role,
+       message.content, message.content_schema_version, message.created_at
+FROM conversation_messages message
+JOIN conversations conversation ON conversation.id = message.conversation_id
+WHERE message.conversation_id = ? AND conversation.user_id = ? AND message.seq IN ?
+ORDER BY message.seq ASC`, conversationID, userID, sequences).Scan(&records)
+	if result.Error != nil {
+		return nil, TranslateError(result.Error)
+	}
+	if len(records) != len(sequences) {
+		return nil, conversationmemory.ErrSourceMessagesInvalid
+	}
+	messages := make([]conversation.Message, 0, len(records))
+	for index, record := range records {
+		if record.Seq != sequences[index] {
+			return nil, conversationmemory.ErrSourceMessagesInvalid
+		}
+		messages = append(messages, messageFromRecord(record))
+	}
+	return messages, nil
 }
 
 func (r *ConversationRepository) GetMessage(
