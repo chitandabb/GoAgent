@@ -55,23 +55,70 @@ type ModelsConfig struct {
 
 // ChatModelConfig 通过命名 Profile 隔离不同模型职责和 Provider 参数。
 type ChatModelConfig struct {
-	Enabled           bool                              `toml:"enabled"`
-	ActiveProfileName string                            `toml:"activeProfile"`
-	Profiles          map[string]ChatModelProfileConfig `toml:"profiles"`
+	Enabled                       bool                              `toml:"enabled"`
+	ActiveProfileName             string                            `toml:"activeProfile"`
+	ConversationMemoryProfileName string                            `toml:"conversationMemoryProfile"`
+	Profiles                      map[string]ChatModelProfileConfig `toml:"profiles"`
+}
+
+type TokenizerStrategy string
+
+const (
+	TokenizerStrategyLocalExact            TokenizerStrategy = "local_exact"
+	TokenizerStrategyLocalCalibrated       TokenizerStrategy = "local_calibrated"
+	TokenizerStrategyConservativeHeuristic TokenizerStrategy = "conservative_heuristic"
+)
+
+func (s TokenizerStrategy) Valid() bool {
+	switch TokenizerStrategy(strings.ToLower(strings.TrimSpace(string(s)))) {
+	case TokenizerStrategyLocalExact,
+		TokenizerStrategyLocalCalibrated,
+		TokenizerStrategyConservativeHeuristic:
+		return true
+	default:
+		return false
+	}
+}
+
+type ToolExposureStrategy string
+
+const (
+	ToolExposureStrategyStaticFrozen   ToolExposureStrategy = "static_frozen"
+	ToolExposureStrategyNativeDeferred ToolExposureStrategy = "native_deferred"
+	ToolExposureStrategyEpochRebind    ToolExposureStrategy = "epoch_rebind"
+	ToolExposureStrategyGateway        ToolExposureStrategy = "gateway"
+)
+
+func (s ToolExposureStrategy) Valid() bool {
+	switch ToolExposureStrategy(strings.ToLower(strings.TrimSpace(string(s)))) {
+	case ToolExposureStrategyStaticFrozen,
+		ToolExposureStrategyNativeDeferred,
+		ToolExposureStrategyEpochRebind,
+		ToolExposureStrategyGateway:
+		return true
+	default:
+		return false
+	}
 }
 
 // ChatModelProfileConfig 是单个 OpenAI 兼容模型端点的静态配置。
 // Provider 专有参数由 chatmodel Adapter 校验和映射。
 type ChatModelProfileConfig struct {
-	Provider        string   `toml:"provider"`
-	BaseURL         string   `toml:"baseURL"`
-	APIKeyEnv       string   `toml:"apiKeyEnv"`
-	Model           string   `toml:"model"`
-	ReasoningEffort string   `toml:"reasoningEffort"`
-	ThinkingMode    string   `toml:"thinkingMode"`
-	Temperature     *float32 `toml:"temperature"`
-	TimeoutMillis   int      `toml:"timeoutMillis"`
-	MaxOutputTokens int      `toml:"maxOutputTokens"`
+	Provider                        string               `toml:"provider"`
+	BaseURL                         string               `toml:"baseURL"`
+	APIKeyEnv                       string               `toml:"apiKeyEnv"`
+	Model                           string               `toml:"model"`
+	ReasoningEffort                 string               `toml:"reasoningEffort"`
+	ThinkingMode                    string               `toml:"thinkingMode"`
+	Temperature                     *float32             `toml:"temperature"`
+	TimeoutMillis                   int                  `toml:"timeoutMillis"`
+	ContextWindowTokens             int                  `toml:"contextWindowTokens"`
+	MaxOutputTokens                 int                  `toml:"maxOutputTokens"`
+	PromptSafetyMarginTokens        int                  `toml:"promptSafetyMarginTokens"`
+	PromptSafetyMarginRatio         float64              `toml:"promptSafetyMarginRatio"`
+	TokenizerStrategy               TokenizerStrategy    `toml:"tokenizerStrategy"`
+	ToolExposureStrategy            ToolExposureStrategy `toml:"toolExposureStrategy"`
+	ProviderNativeCompactionEnabled bool                 `toml:"providerNativeCompactionEnabled"`
 }
 
 var modelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -84,11 +131,19 @@ func (c ChatModelConfig) Validate() error {
 		if err := profile.Validate(); err != nil {
 			return fmt.Errorf("models.chat profile %q: %w", name, err)
 		}
+		if c.Enabled {
+			if err := profile.requireContextContract(); err != nil {
+				return fmt.Errorf("models.chat profile %q: %w", name, err)
+			}
+		}
 	}
 	if !c.Enabled {
 		return nil
 	}
 	if _, err := c.ActiveProfile(); err != nil {
+		return err
+	}
+	if _, err := c.ConversationMemoryProfile(); err != nil {
 		return err
 	}
 	return nil
@@ -100,6 +155,18 @@ func (c ChatModelConfig) ActiveProfile() (ChatModelProfileConfig, error) {
 		return ChatModelProfileConfig{}, errors.New("models.chat activeProfile is invalid")
 	}
 	return c.Profile(name)
+}
+
+func (c ChatModelConfig) ConversationMemoryProfile() (ChatModelProfileConfig, error) {
+	name := strings.TrimSpace(c.ConversationMemoryProfileName)
+	if !modelName.MatchString(name) {
+		return ChatModelProfileConfig{}, errors.New("models.chat conversationMemoryProfile is invalid")
+	}
+	profile, err := c.Profile(name)
+	if err != nil {
+		return ChatModelProfileConfig{}, fmt.Errorf("models.chat conversationMemoryProfile: %w", err)
+	}
+	return profile, nil
 }
 
 func (c ChatModelConfig) Profile(name string) (ChatModelProfileConfig, error) {
@@ -148,6 +215,70 @@ func (c ChatModelProfileConfig) Validate() error {
 	}
 	if c.MaxOutputTokens <= 0 || c.MaxOutputTokens > 65_536 {
 		return errors.New("maxOutputTokens must be between 1 and 65536")
+	}
+	if c.hasContextContract() {
+		return c.validateContextContract()
+	}
+	return nil
+}
+
+func (c ChatModelProfileConfig) EffectivePromptSafetyMarginTokens() int {
+	ratioMargin := int(math.Ceil(float64(c.ContextWindowTokens) * c.PromptSafetyMarginRatio))
+	if ratioMargin > c.PromptSafetyMarginTokens {
+		return ratioMargin
+	}
+	return c.PromptSafetyMarginTokens
+}
+
+func (c ChatModelProfileConfig) EffectiveToolExposureStrategy() ToolExposureStrategy {
+	strategy := ToolExposureStrategy(strings.ToLower(strings.TrimSpace(string(c.ToolExposureStrategy))))
+	if strategy == "" {
+		return ToolExposureStrategyStaticFrozen
+	}
+	return strategy
+}
+
+func (c ChatModelProfileConfig) hasContextContract() bool {
+	return c.ContextWindowTokens != 0 || c.PromptSafetyMarginTokens != 0 ||
+		c.PromptSafetyMarginRatio != 0 || strings.TrimSpace(string(c.TokenizerStrategy)) != "" ||
+		strings.TrimSpace(string(c.ToolExposureStrategy)) != "" || c.ProviderNativeCompactionEnabled
+}
+
+// requireContextContract keeps direct role-specific Provider clients compatible while
+// requiring every enabled named Chat profile to opt into the M3 context contract.
+func (c ChatModelProfileConfig) requireContextContract() error {
+	if !c.hasContextContract() {
+		return errors.New("contextWindowTokens, prompt safety margin, and tokenizerStrategy are required")
+	}
+	return nil
+}
+
+func (c ChatModelProfileConfig) validateContextContract() error {
+	if c.ContextWindowTokens < 1024 || c.ContextWindowTokens > 4_000_000 {
+		return errors.New("contextWindowTokens must be between 1024 and 4000000")
+	}
+	if c.MaxOutputTokens >= c.ContextWindowTokens {
+		return errors.New("maxOutputTokens must be less than contextWindowTokens")
+	}
+	if c.PromptSafetyMarginTokens < 0 || c.PromptSafetyMarginTokens >= c.ContextWindowTokens {
+		return errors.New("promptSafetyMarginTokens must be non-negative and less than contextWindowTokens")
+	}
+	if math.IsNaN(c.PromptSafetyMarginRatio) || math.IsInf(c.PromptSafetyMarginRatio, 0) ||
+		c.PromptSafetyMarginRatio < 0 || c.PromptSafetyMarginRatio > 0.5 {
+		return errors.New("promptSafetyMarginRatio must be between 0 and 0.5")
+	}
+	if !c.TokenizerStrategy.Valid() {
+		return errors.New("tokenizerStrategy must be local_exact, local_calibrated, or conservative_heuristic")
+	}
+	if !c.EffectiveToolExposureStrategy().Valid() {
+		return errors.New("toolExposureStrategy must be static_frozen, native_deferred, epoch_rebind, or gateway")
+	}
+	margin := c.EffectivePromptSafetyMarginTokens()
+	if margin == 0 {
+		return errors.New("prompt safety margin must be positive")
+	}
+	if c.MaxOutputTokens+margin >= c.ContextWindowTokens {
+		return errors.New("maxOutputTokens and prompt safety margin must leave input capacity")
 	}
 	return nil
 }

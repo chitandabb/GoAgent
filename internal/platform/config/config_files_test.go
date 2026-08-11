@@ -19,6 +19,13 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate(%q): %v", path, err)
 			}
+			memoryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
+			if err != nil {
+				t.Fatalf("ConversationMemoryProfile(%q): %v", path, err)
+			}
+			if memoryProfile.EffectiveToolExposureStrategy() != ToolExposureStrategyStaticFrozen {
+				t.Fatalf("%q conversation memory Tool exposure is not static_frozen", path)
+			}
 			if cfg.Models.Judge.Enabled {
 				t.Fatalf("%q enables the offline Judge by default", path)
 			}
