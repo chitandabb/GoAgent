@@ -12,12 +12,16 @@ import (
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 type ConversationContextPreflightConfig struct {
 	Enabled                 bool
 	Planner                 contextgovernance.TokenBudgetPlanner
+	TailSelector            *contextgovernance.ContinuousTailSelector
 	ModelProfile            contextgovernance.ModelProfile
+	ContinuousTailEnabled   bool
+	TailMaxRatio            float64
 	SoftThresholdRatio      float64
 	HardThresholdRatio      float64
 	ToolGrowthReserveTokens int
@@ -29,6 +33,9 @@ type ConversationContextPreflightConfig struct {
 const defaultConversationPreflightTimeout = 250 * time.Millisecond
 
 func (c ConversationContextPreflightConfig) validate(modelProvider, modelID string) error {
+	if c.ContinuousTailEnabled && !c.Enabled {
+		return errors.New("conversation continuous Tail requires context preflight")
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -47,6 +54,10 @@ func (c ConversationContextPreflightConfig) validate(modelProvider, modelID stri
 	if c.SummaryFingerprint != "" && !contextgovernance.IsSHA256Hex(c.SummaryFingerprint) {
 		return errors.New("conversation context preflight summary fingerprint is invalid")
 	}
+	if c.ContinuousTailEnabled && (c.TailSelector == nil ||
+		!contextgovernance.ValidTailWindowRatio(c.TailMaxRatio)) {
+		return errors.New("conversation continuous Tail configuration is invalid")
+	}
 	return nil
 }
 
@@ -57,7 +68,24 @@ func (c ConversationContextPreflightConfig) effectiveTimeout() time.Duration {
 	return defaultConversationPreflightTimeout
 }
 
-func (r *ConversationRunner) shadowPromptManifest(
+func (c ConversationContextPreflightConfig) plan(
+	ctx context.Context,
+	segments []contextgovernance.PromptSegment,
+) (contextgovernance.TokenBudgetPlan, error) {
+	profile := c.ModelProfile
+	return c.Planner.Plan(ctx, contextgovernance.TokenBudgetRequest{
+		ContextWindowTokens: profile.ContextWindowTokens,
+		MaxOutputTokens:     profile.MaxOutputTokens,
+		SafetyMarginTokens:  profile.SafetyMarginTokens,
+		SoftThresholdRatio:  c.SoftThresholdRatio,
+		HardThresholdRatio:  c.HardThresholdRatio,
+		Prompt: contextgovernance.PromptInput{
+			Profile: profile.Name, Segments: segments,
+		},
+	})
+}
+
+func (r *ConversationRunner) buildConversationPromptManifest(
 	ctx context.Context,
 	tools []tool.BaseTool,
 	projection conversationPromptProjection,
@@ -70,7 +98,7 @@ func (r *ConversationRunner) shadowPromptManifest(
 	defer cancel()
 	contract, err := canonicalConversationToolContract(preflightCtx, tools)
 	if err != nil {
-		return r.failedShadowPromptManifest(projection, startedAt, nil, "tool_schema_failed"), err
+		return r.failedConversationPromptManifest(projection, startedAt, nil, "tool_schema_failed"), err
 	}
 	identity, err := contextgovernance.BuildPromptIdentity(contextgovernance.PromptIdentityInput{
 		ModelProfile:          r.contextPreflight.ModelProfile.Name,
@@ -83,7 +111,7 @@ func (r *ConversationRunner) shadowPromptManifest(
 		SummaryFingerprint:    r.contextPreflight.SummaryFingerprint,
 	})
 	if err != nil {
-		return r.failedShadowPromptManifest(projection, startedAt, nil, "prompt_identity_failed"), err
+		return r.failedConversationPromptManifest(projection, startedAt, nil, "prompt_identity_failed"), err
 	}
 	history, dynamicReferences, currentUser := conversationPromptSegments(projection)
 	segments := []contextgovernance.PromptSegment{
@@ -97,18 +125,9 @@ func (r *ConversationRunner) shadowPromptManifest(
 		{Kind: contextgovernance.PromptSegmentToolGrowthReserve, ReservedTokens: r.contextPreflight.ToolGrowthReserveTokens},
 	}
 	profile := r.contextPreflight.ModelProfile
-	plan, err := r.contextPreflight.Planner.Plan(preflightCtx, contextgovernance.TokenBudgetRequest{
-		ContextWindowTokens: profile.ContextWindowTokens,
-		MaxOutputTokens:     profile.MaxOutputTokens,
-		SafetyMarginTokens:  profile.SafetyMarginTokens,
-		SoftThresholdRatio:  r.contextPreflight.SoftThresholdRatio,
-		HardThresholdRatio:  r.contextPreflight.HardThresholdRatio,
-		Prompt: contextgovernance.PromptInput{
-			Profile: profile.Name, Segments: segments,
-		},
-	})
+	plan, err := r.contextPreflight.plan(preflightCtx, segments)
 	if err != nil {
-		return r.failedShadowPromptManifest(projection, startedAt, &identity, "token_estimation_failed"), err
+		return r.failedConversationPromptManifest(projection, startedAt, &identity, "token_estimation_failed"), err
 	}
 	degradedReasons := append([]string(nil), plan.EstimatorDegradedReasons...)
 	contextDegraded := !projection.tailContinuous
@@ -146,12 +165,12 @@ func (r *ConversationRunner) shadowPromptManifest(
 		DegradedReasons:           degradedReasons,
 	}
 	if err := manifest.Validate(); err != nil {
-		return nil, fmt.Errorf("validate shadow prompt manifest: %w", err)
+		return nil, fmt.Errorf("validate conversation prompt manifest: %w", err)
 	}
 	return manifest, nil
 }
 
-func (r *ConversationRunner) failedShadowPromptManifest(
+func (r *ConversationRunner) failedConversationPromptManifest(
 	projection conversationPromptProjection,
 	startedAt time.Time,
 	identity *contextgovernance.PromptIdentity,
@@ -194,7 +213,7 @@ func canonicalConversationToolContract(
 	ctx context.Context,
 	tools []tool.BaseTool,
 ) (contextgovernance.CanonicalToolContract, error) {
-	definitions := make([]contextgovernance.ToolDefinition, 0, len(tools))
+	infos := make([]*schema.ToolInfo, 0, len(tools))
 	for _, current := range tools {
 		if current == nil {
 			return contextgovernance.CanonicalToolContract{}, errors.New("conversation Tool is nil")
@@ -203,6 +222,19 @@ func canonicalConversationToolContract(
 		if err != nil {
 			return contextgovernance.CanonicalToolContract{}, fmt.Errorf("read conversation Tool schema: %w", err)
 		}
+		if info == nil {
+			return contextgovernance.CanonicalToolContract{}, errors.New("conversation Tool schema is nil")
+		}
+		infos = append(infos, info)
+	}
+	return canonicalConversationToolInfoContract(infos)
+}
+
+func canonicalConversationToolInfoContract(
+	infos []*schema.ToolInfo,
+) (contextgovernance.CanonicalToolContract, error) {
+	definitions := make([]contextgovernance.ToolDefinition, 0, len(infos))
+	for _, info := range infos {
 		if info == nil {
 			return contextgovernance.CanonicalToolContract{}, errors.New("conversation Tool schema is nil")
 		}

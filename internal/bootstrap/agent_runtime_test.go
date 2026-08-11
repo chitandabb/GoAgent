@@ -74,6 +74,7 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 	cfg.Models.Chat.Profiles["test"] = profile
 	cfg.Agent.ContextMemory = config.ContextMemoryConfig{
 		ShadowPreflightEnabled: true,
+		ContinuousTailEnabled:  true, TailMaxRatio: 0.15,
 		PreflightTimeoutMillis: 250,
 		SoftThresholdRatio:     0.70, HardThresholdRatio: 0.85,
 		ToolGrowthReserveTokens: 256,

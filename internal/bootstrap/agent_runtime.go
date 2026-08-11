@@ -307,9 +307,16 @@ func buildAgentRuntime(
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation TokenBudgetPlanner: %w", plannerErr)
 		}
+		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(estimator)
+		if tailSelectorErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
+		}
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
-			Enabled: true, Planner: planner,
-			PreflightTimeout: time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
+			Enabled: true, Planner: planner, TailSelector: tailSelector,
+			ContinuousTailEnabled: cfg.Agent.ContextMemory.ContinuousTailEnabled,
+			TailMaxRatio:          cfg.Agent.ContextMemory.TailMaxRatio,
+			PreflightTimeout:      time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
 			ModelProfile: contextgovernance.ModelProfile{
 				Name:                strings.TrimSpace(cfg.Models.Chat.ActiveProfileName),
 				Provider:            strings.ToLower(strings.TrimSpace(profile.Provider)),

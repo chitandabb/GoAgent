@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
+
 	"github.com/BurntSushi/toml"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -366,11 +368,14 @@ type AgentConfig struct {
 	ContextMemory                             ContextMemoryConfig `toml:"contextMemory"`
 }
 
-// ContextMemoryConfig starts with a shadow-only preflight switch. Later M3
-// tickets add Summary/Tail activation without changing this observation
-// contract or the existing Rune rollback path.
+// ContextMemoryConfig controls prompt observation and the staged activation of
+// Token-aware conversation assembly. Continuous Tail depends on shadow
+// preflight so every activated prompt still produces the same bounded manifest;
+// the Rune selector remains an explicit rollback path.
 type ContextMemoryConfig struct {
 	ShadowPreflightEnabled  bool    `toml:"shadowPreflightEnabled"`
+	ContinuousTailEnabled   bool    `toml:"continuousTailEnabled"`
+	TailMaxRatio            float64 `toml:"tailMaxRatio"`
 	PreflightTimeoutMillis  int     `toml:"preflightTimeoutMillis"`
 	SoftThresholdRatio      float64 `toml:"softThresholdRatio"`
 	HardThresholdRatio      float64 `toml:"hardThresholdRatio"`
@@ -378,8 +383,14 @@ type ContextMemoryConfig struct {
 }
 
 func (c ContextMemoryConfig) Validate() error {
+	if c.ContinuousTailEnabled && !c.ShadowPreflightEnabled {
+		return errors.New("agent contextMemory continuous Tail requires shadow preflight")
+	}
 	if !c.ShadowPreflightEnabled {
 		return nil
+	}
+	if c.ContinuousTailEnabled && !contextgovernance.ValidTailWindowRatio(c.TailMaxRatio) {
+		return errors.New("agent contextMemory tailMaxRatio must satisfy 0 < tail <= 0.20")
 	}
 	if c.PreflightTimeoutMillis < 5 || c.PreflightTimeoutMillis > 5_000 {
 		return errors.New("agent contextMemory preflightTimeoutMillis must be between 5 and 5000")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +25,11 @@ const (
 	defaultConversationMaxIterations   = 8
 	defaultConversationTimeout         = 60 * time.Second
 	defaultConversationMaxContextRunes = 32_000
+)
+
+var (
+	ErrConversationPromptWindowExceeded     = errors.New("conversation prompt exceeds the model hard window")
+	ErrConversationContextPreparationFailed = errors.New("conversation context preparation failed")
 )
 
 type ConversationRunnerConfig struct {
@@ -151,6 +157,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	var citationTrace *conversationCitationTrace
 	var usageTrace *modelUsageTrace
 	var promptManifest *contextgovernance.PromptManifest
+	var runtimePromptObservation *conversationRuntimePromptObservation
 	observeFailure := false
 	defer func() {
 		if err != nil && observeFailure {
@@ -197,6 +204,9 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	}
 	budget := newExecutionBudget(r.maxToolCalls, r.maxTotalTokens)
 	runCtx = withExecutionBudget(runCtx, budget)
+	runCtx = withConversationToolResultStore(
+		runCtx, newConversationToolResultStore(r.maxToolCalls, r.maxToolResultBytes),
+	)
 	runCtx = withAgentToolRunPolicy(runCtx, newAgentToolRunPolicy(nil, map[string]int{
 		ToolCreateDiagnosisTask: 1,
 	}))
@@ -210,15 +220,19 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tools: %w", err)
 	}
-	projection := buildConversationPromptProjection(request.History, request.UserMessage, r.maxContextRunes)
+	projection, err := r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage)
+	if err != nil {
+		return conversation.AgentResponse{}, err
+	}
 	messages := projection.messages
 	if len(messages) == 0 {
 		return conversation.AgentResponse{}, conversation.ErrInvalidMessage
 	}
-	promptManifest, err = r.shadowPromptManifest(runCtx, tools, projection)
+	promptManifest, err = r.buildConversationPromptManifest(runCtx, tools, projection)
 	if err != nil {
-		// Shadow observation must never make a previously valid model request fail.
-		r.log.Warn("conversation shadow prompt preflight failed",
+		// Observation-only rollout remains fail-open. Once Continuous Tail is
+		// active, the same preflight is a safety gate and must fail closed.
+		r.log.Warn("conversation prompt preflight failed",
 			zap.String("service_role", "conversation_agent"),
 			zap.String("user_id", commandContext.Actor.UserID.String()),
 			zap.String("conversation_id", request.Conversation.ID.String()),
@@ -226,17 +240,28 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 			zap.String("model_profile", r.contextPreflight.ModelProfile.Name),
 			zap.Error(err),
 		)
+		if r.contextPreflight.ContinuousTailEnabled {
+			return conversation.AgentResponse{}, fmt.Errorf("%w: %v", ErrConversationContextPreparationFailed, err)
+		}
+	}
+	if r.contextPreflight.ContinuousTailEnabled && promptManifest != nil &&
+		promptManifest.EstimateAvailable && promptManifest.ExceedsHardWindow {
+		return conversation.AgentResponse{}, ErrConversationPromptWindowExceeded
 	}
 	if r.contextPreflight.Enabled {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
 		defer cancel()
 	}
+	chatModel := r.chatModel
+	if r.contextPreflight.ContinuousTailEnabled {
+		chatModel, runtimePromptObservation = newConversationWindowGuardModel(chatModel, r.contextPreflight)
+	}
 	agentInstance, err := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
 		Name:        "mesguard-conversation",
 		Description: "回答企业知识问题并将明确诊断请求转换为异步任务",
 		Instruction: r.systemInstruction,
-		Model:       r.chatModel,
+		Model:       chatModel,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools:               tools,
 			ExecuteSequentially: true,
@@ -260,6 +285,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 			break
 		}
 		if event.Err != nil {
+			promptManifest = runtimePromptObservation.apply(promptManifest)
 			return conversation.AgentResponse{}, event.Err
 		}
 		if event.Output == nil || event.Output.MessageOutput == nil {
@@ -344,11 +370,16 @@ func (r *ConversationRunner) buildRunObservation(
 	}
 	if promptManifest != nil {
 		manifest := *promptManifest
-		initialUsage, available := usageTrace.initialSnapshot()
-		manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
-			Available: available, PromptTokens: initialUsage.PromptTokens,
-			CachedTokens: initialUsage.CachedTokens, CompletionTokens: initialUsage.CompletionTokens,
-		}, durationMillis)
+		if slices.Contains(manifest.DegradedReasons, "react_prompt_blocked") ||
+			slices.Contains(manifest.DegradedReasons, "runtime_preflight_failed") {
+			manifest.RunDurationMillis = durationMillis
+		} else {
+			initialUsage, available := usageTrace.initialSnapshot()
+			manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
+				Available: available, PromptTokens: initialUsage.PromptTokens,
+				CachedTokens: initialUsage.CachedTokens, CompletionTokens: initialUsage.CompletionTokens,
+			}, durationMillis)
+		}
 		promptManifest = &manifest
 	}
 	return conversation.AgentRunObservation{
@@ -376,6 +407,10 @@ func conversationAgentErrorType(err error) string {
 		return "tool_call_budget_exhausted"
 	case errors.Is(err, ErrTokenBudgetExhausted):
 		return "token_budget_exhausted"
+	case errors.Is(err, ErrConversationPromptWindowExceeded):
+		return "prompt_window_exceeded"
+	case errors.Is(err, ErrConversationContextPreparationFailed):
+		return "context_preparation_failed"
 	case errors.Is(err, conversation.ErrAgentResponseInvalid):
 		return "agent_response_invalid"
 	default:
@@ -419,15 +454,70 @@ type conversationPromptProjection struct {
 	tailContinuous   bool
 }
 
-func buildConversationPromptProjection(
+func (r *ConversationRunner) buildConversationPromptProjection(
+	ctx context.Context,
+	history []conversation.Message,
+	current conversation.Message,
+) (conversationPromptProjection, error) {
+	if !r.contextPreflight.ContinuousTailEnabled {
+		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes), nil
+	}
+	ordered := conversationHistoryThroughCurrent(history, current)
+	candidates := make([]conversation.Message, 0, len(ordered))
+	nextSequence := current.Seq + 1
+	for index := len(ordered) - 1; index >= 0; index-- {
+		item := ordered[index]
+		if item.Seq != nextSequence-1 ||
+			(item.Role != conversation.MessageRoleUser && item.Role != conversation.MessageRoleAssistant) ||
+			conversationMessagePrompt(item) == "" {
+			break
+		}
+		candidates = append(candidates, item)
+		nextSequence = item.Seq
+	}
+	slices.Reverse(candidates)
+	if len(candidates) == 0 || candidates[len(candidates)-1].ID != current.ID {
+		return conversationPromptProjection{}, conversation.ErrInvalidMessage
+	}
+	tailMessages := make([]contextgovernance.TailMessage, 0, len(candidates))
+	for _, item := range candidates {
+		tailMessages = append(tailMessages, contextgovernance.TailMessage{
+			Sequence: item.Seq, Content: conversationMessagePrompt(item), Current: item.ID == current.ID,
+		})
+	}
+	tailBudget := int(math.Floor(float64(r.contextPreflight.ModelProfile.ContextWindowTokens) *
+		r.contextPreflight.TailMaxRatio))
+	selectionCtx, cancel := context.WithTimeout(ctx, r.contextPreflight.effectiveTimeout())
+	defer cancel()
+	selection, err := r.contextPreflight.TailSelector.Select(selectionCtx, contextgovernance.ContinuousTailRequest{
+		Profile: r.contextPreflight.ModelProfile.Name, MaxTokens: tailBudget, Messages: tailMessages,
+	})
+	if err != nil {
+		return conversationPromptProjection{}, fmt.Errorf("select continuous conversation Tail: %w", err)
+	}
+	selectedDomain := candidates[len(candidates)-len(selection.Messages):]
+	selected := make([]*schema.Message, 0, len(selectedDomain))
+	for _, item := range selectedDomain {
+		content := conversationMessagePrompt(item)
+		if item.Role == conversation.MessageRoleUser {
+			selected = append(selected, schema.UserMessage(content))
+		} else {
+			selected = append(selected, schema.AssistantMessage(content, nil))
+		}
+	}
+	return conversationPromptProjection{
+		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
+		tailFromSeq: selectedDomain[0].Seq, tailThroughSeq: selectedDomain[len(selectedDomain)-1].Seq,
+		tailContinuous: true,
+	}, nil
+}
+
+func buildRuneConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
 	maxRunes int,
 ) conversationPromptProjection {
-	ordered := append([]conversation.Message(nil), history...)
-	if len(ordered) == 0 || ordered[len(ordered)-1].ID != current.ID {
-		ordered = append(ordered, current)
-	}
+	ordered := conversationHistoryThroughCurrent(history, current)
 	selected := make([]*schema.Message, 0, len(ordered))
 	selectedDomain := make([]conversation.Message, 0, len(ordered))
 	usedRunes := 0
@@ -471,6 +561,28 @@ func buildConversationPromptProjection(
 		}
 	}
 	return projection
+}
+
+func conversationHistoryThroughCurrent(history []conversation.Message, current conversation.Message) []conversation.Message {
+	ordered := make([]conversation.Message, 0, len(history)+1)
+	for _, item := range history {
+		if item.ID == current.ID || item.Seq > current.Seq {
+			continue
+		}
+		ordered = append(ordered, item)
+	}
+	ordered = append(ordered, current)
+	slices.SortFunc(ordered, func(left, right conversation.Message) int {
+		switch {
+		case left.Seq < right.Seq:
+			return -1
+		case left.Seq > right.Seq:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return ordered
 }
 
 func conversationMessagePrompt(message conversation.Message) string {
@@ -546,8 +658,13 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 				}
 			}
 			if output != nil && len(output.Result) > maxResultBytes {
-				output.Result = strings.ToValidUTF8(output.Result[:maxResultBytes], "?") +
-					"\n[tool result truncated by MESGuard]"
+				bounded, boundedErr := boundedConversationToolResult(ctx, output.Result, maxResultBytes)
+				if boundedErr != nil {
+					err = boundedErr
+					output = nil
+				} else {
+					output.Result = bounded
+				}
 			}
 			entry := ToolExecution{
 				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(), Succeeded: err == nil,
@@ -559,6 +676,34 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 			return output, err
 		}
 	}}
+}
+
+func boundedConversationToolResult(
+	ctx context.Context,
+	result string,
+	maxResultBytes int,
+) (string, error) {
+	if len(result) <= maxResultBytes {
+		return result, nil
+	}
+	store := conversationToolResultStoreFromContext(ctx)
+	if store == nil {
+		return "", errors.New("conversation Tool result store is unavailable")
+	}
+	ref, err := store.put(result)
+	if err != nil {
+		return "", err
+	}
+	suffix := fmt.Sprintf(
+		"\n[tool result truncated by MESGuard; ref=%s; original_bytes=%d; "+
+			"read with %s using this ref and offsetBytes]",
+		ref, len(result), ToolReadConversationToolResult,
+	)
+	previewBytes := maxResultBytes - len(suffix)
+	if previewBytes < 1 {
+		return strings.ToValidUTF8(suffix[len(suffix)-maxResultBytes:], "?"), nil
+	}
+	return strings.ToValidUTF8(result[:previewBytes], "?") + suffix, nil
 }
 
 var _ conversation.AgentResponder = (*ConversationRunner)(nil)
