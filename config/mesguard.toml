@@ -40,6 +40,14 @@ softThresholdRatio = 0.70
 hardThresholdRatio = 0.85
 toolGrowthReserveTokens = 8192
 
+[agent.contextMemory.summary]
+enabled = true
+promptFile = "config/prompts/conversation-memory-summary.md"
+promptVersion = "conversation-memory-v1"
+maxPayloadBytes = 65536
+maxAttempts = 3
+retryBaseDelayMillis = 250
+
 [models.chat]
 enabled = true
 activeProfile = "stepfun-main"

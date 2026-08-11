@@ -60,6 +60,23 @@ func TestAgentConfigLoadPromptsRejectsInvalidFiles(t *testing.T) {
 	}
 }
 
+func TestConversationMemorySummaryConfigLoadsBoundedPrompt(t *testing.T) {
+	directory := t.TempDir()
+	cfg := ConversationMemorySummaryConfig{
+		Enabled:       true,
+		PromptFile:    writePromptFileForTest(t, directory, "memory.md", " structured memory instruction \n"),
+		PromptVersion: "conversation-memory-v1", MaxPayloadBytes: 64 * 1024,
+		MaxAttempts: 3, RetryBaseDelayMillis: 250,
+	}
+	prompt, err := cfg.LoadPrompt()
+	if err != nil {
+		t.Fatalf("LoadPrompt() error = %v", err)
+	}
+	if prompt != "structured memory instruction" {
+		t.Fatalf("LoadPrompt() = %q", prompt)
+	}
+}
+
 func writePromptFileForTest(t *testing.T, directory, name, content string) string {
 	t.Helper()
 	path := filepath.Join(directory, name)
