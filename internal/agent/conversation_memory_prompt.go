@@ -61,7 +61,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 		prepared, prepareErr := r.contextPreflight.Memory.PrepareActive(ctx, conversationmemory.PrepareActiveRequest{
 			ConversationID:    request.Conversation.ID,
 			CompletedMessages: completedConversationMessages(request.History, request.UserMessage),
-			ActivationGate:    conversationSummaryActivationGate{runner: r},
+			ActivationGate:    conversationSummaryActivationGate{preflight: r.contextPreflight},
 		})
 		if prepareErr != nil {
 			if active == nil {
@@ -171,14 +171,38 @@ func (r *ConversationRunner) summaryTailCoverageComplete(
 }
 
 type conversationSummaryActivationGate struct {
-	runner *ConversationRunner
+	preflight ConversationContextPreflightConfig
+}
+
+// NewConversationMemoryActivationGate exposes the exact Summary budget gate
+// used by the synchronous Conversation Runner without requiring an async
+// memory worker to construct the full main-model Agent runtime.
+func NewConversationMemoryActivationGate(
+	preflight ConversationContextPreflightConfig,
+) (conversationmemory.ActivationGate, error) {
+	if !preflight.Enabled || !preflight.SummaryTailEnabled || preflight.Planner == nil ||
+		preflight.ModelProfile.Validate() != nil ||
+		math.IsNaN(preflight.MemoryMaxRatio) || math.IsInf(preflight.MemoryMaxRatio, 0) ||
+		math.IsNaN(preflight.SummaryMaxRatio) || math.IsInf(preflight.SummaryMaxRatio, 0) ||
+		math.IsNaN(preflight.TailMaxRatio) || math.IsInf(preflight.TailMaxRatio, 0) ||
+		math.IsNaN(preflight.SoftThresholdRatio) || math.IsInf(preflight.SoftThresholdRatio, 0) ||
+		math.IsNaN(preflight.HardThresholdRatio) || math.IsInf(preflight.HardThresholdRatio, 0) ||
+		preflight.MemoryMaxRatio <= 0 || preflight.MemoryMaxRatio > contextgovernance.MaxTailWindowRatio ||
+		preflight.SummaryMaxRatio <= 0 || preflight.SummaryMaxRatio > 0.05 ||
+		!contextgovernance.ValidTailWindowRatio(preflight.TailMaxRatio) ||
+		preflight.SoftThresholdRatio <= 0 || preflight.HardThresholdRatio <= preflight.SoftThresholdRatio ||
+		preflight.HardThresholdRatio >= 1 ||
+		preflight.SummaryMaxRatio+preflight.TailMaxRatio > preflight.MemoryMaxRatio+1e-12 {
+		return nil, errors.New("conversation memory activation gate configuration is invalid")
+	}
+	return conversationSummaryActivationGate{preflight: preflight}, nil
 }
 
 func (g conversationSummaryActivationGate) ValidateForActivation(
 	ctx context.Context,
 	snapshot conversationmemory.Snapshot,
 ) error {
-	if g.runner == nil || (snapshot.Status != conversationmemory.SnapshotStatusCandidate &&
+	if g.preflight.Planner == nil || (snapshot.Status != conversationmemory.SnapshotStatusCandidate &&
 		snapshot.Status != conversationmemory.SnapshotStatusActive) {
 		return ErrConversationContextPreparationFailed
 	}
@@ -186,28 +210,36 @@ func (g conversationSummaryActivationGate) ValidateForActivation(
 	if err != nil {
 		return err
 	}
-	_, err = g.runner.summaryTailTokenBudget(ctx, content)
+	_, err = summaryTailTokenBudgetForPreflight(ctx, g.preflight, content)
 	return err
 }
 
 func (r *ConversationRunner) summaryTailTokenBudget(ctx context.Context, summaryContent string) (int, error) {
-	profile := r.contextPreflight.ModelProfile
+	return summaryTailTokenBudgetForPreflight(ctx, r.contextPreflight, summaryContent)
+}
+
+func summaryTailTokenBudgetForPreflight(
+	ctx context.Context,
+	preflight ConversationContextPreflightConfig,
+	summaryContent string,
+) (int, error) {
+	profile := preflight.ModelProfile
 	summaryTokens := 0
 	if summaryContent != "" {
-		plan, err := r.contextPreflight.plan(ctx, []contextgovernance.PromptSegment{{
+		plan, err := preflight.plan(ctx, []contextgovernance.PromptSegment{{
 			Kind: contextgovernance.PromptSegmentSummary, Content: summaryContent,
 		}})
 		if err != nil {
 			return 0, fmt.Errorf("estimate conversation Summary: %w", err)
 		}
 		summaryTokens = plan.EstimatedUpperBoundTokens
-		maxSummaryTokens := int(math.Floor(float64(profile.ContextWindowTokens) * r.contextPreflight.SummaryMaxRatio))
+		maxSummaryTokens := int(math.Floor(float64(profile.ContextWindowTokens) * preflight.SummaryMaxRatio))
 		if summaryTokens > maxSummaryTokens {
 			return 0, fmt.Errorf("%w: active Summary exceeds configured Token budget", ErrConversationContextPreparationFailed)
 		}
 	}
-	memoryBudget := int(math.Floor(float64(profile.ContextWindowTokens) * r.contextPreflight.MemoryMaxRatio))
-	tailBudget := int(math.Floor(float64(profile.ContextWindowTokens) * r.contextPreflight.TailMaxRatio))
+	memoryBudget := int(math.Floor(float64(profile.ContextWindowTokens) * preflight.MemoryMaxRatio))
+	tailBudget := int(math.Floor(float64(profile.ContextWindowTokens) * preflight.TailMaxRatio))
 	if remaining := memoryBudget - summaryTokens; tailBudget > remaining {
 		tailBudget = remaining
 	}

@@ -87,6 +87,9 @@ func TestAgentConfigValidate(t *testing.T) {
 		MaxAttempts: 3, RetryBaseDelayMillis: 250,
 	}
 	configured.ContextMemory.SummaryTailEnabled = true
+	configured.ContextMemory.AsyncCompactionEnabled = true
+	configured.ContextMemory.AsyncMaxAttempts = 3
+	configured.ContextMemory.RetryJitterRatio = 0.10
 	configured.ContextMemory.MemoryMaxRatio = 0.20
 	configured.ContextMemory.SummaryMaxRatio = 0.05
 	if err := configured.Validate(); err != nil {
@@ -116,6 +119,16 @@ func TestAgentConfigValidate(t *testing.T) {
 	invalidSummary.ContextMemory.Summary.MaxAttempts = 6
 	if err := invalidSummary.Validate(); err == nil {
 		t.Fatal("Validate accepted Summary retry count above the bounded limit")
+	}
+	invalidAsyncAttempts := configured
+	invalidAsyncAttempts.ContextMemory.AsyncMaxAttempts = 0
+	if err := invalidAsyncAttempts.Validate(); err == nil {
+		t.Fatal("Validate accepted async compaction without bounded attempts")
+	}
+	invalidJitter := configured
+	invalidJitter.ContextMemory.RetryJitterRatio = 0.51
+	if err := invalidJitter.Validate(); err == nil {
+		t.Fatal("Validate accepted async compaction jitter above 50 percent")
 	}
 }
 

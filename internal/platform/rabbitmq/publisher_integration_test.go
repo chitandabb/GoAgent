@@ -29,6 +29,7 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 		Enabled: true, URLEnv: "MESGUARD_TEST_RABBITMQ_URL_ACTIVE", Exchange: exchange,
 		DiagnosisQueue: queue, DiagnosisRoutingKey: "diagnosis.execute",
 		ConversationQueue: queue + ".conversation", ConversationRoutingKey: "conversation.turn.execute",
+		MemoryCompactionQueue: queue + ".memory", MemoryCompactionRoutingKey: "conversation.memory.compact",
 		KnowledgeIngestionQueue: queue + ".knowledge", KnowledgeIngestionRoutingKey: "knowledge.ingest",
 		RelayBatchSize: 1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,
 		PublishConfirmTimeoutMillis: 1000, WorkerLeaseMillis: 30000,
@@ -51,6 +52,7 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_, _ = channel.QueueDelete(queue+".conversation", false, false, false)
+		_, _ = channel.QueueDelete(queue+".memory", false, false, false)
 		_, _ = channel.QueueDelete(queue+".knowledge", false, false, false)
 		_, _ = channel.QueueDelete(queue, false, false, false)
 		_ = channel.ExchangeDelete(exchange, false, false)
@@ -82,5 +84,28 @@ func TestPublisherAgainstRabbitMQ(t *testing.T) {
 	}
 	if err := delivery.Ack(false); err != nil {
 		t.Fatalf("ack inspection delivery: %v", err)
+	}
+
+	memoryEventID, jobID, conversationID := uuid.New(), uuid.New(), uuid.New()
+	err = publisher.Publish(ctx, messaging.OutboxEvent{
+		ID: memoryEventID, EventType: "conversation.memory.compact", AggregateType: "conversation_memory_job",
+		AggregateID: jobID, CorrelationID: uuid.New(),
+		Payload:              json.RawMessage(`{"jobId":"` + jobID.String() + `","conversationId":"` + conversationID.String() + `"}`),
+		PayloadSchemaVersion: 1, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Publish(memory compaction): %v", err)
+	}
+	memoryDelivery, ok, err := channel.Get(queue+".memory", false)
+	if err != nil || !ok {
+		t.Fatalf("get published memory message: ok=%v err=%v", ok, err)
+	}
+	if memoryDelivery.MessageId != memoryEventID.String() || memoryDelivery.Type != "conversation.memory.compact" ||
+		!json.Valid(memoryDelivery.Body) {
+		t.Fatalf("memory delivery messageId=%q type=%q body=%s",
+			memoryDelivery.MessageId, memoryDelivery.Type, memoryDelivery.Body)
+	}
+	if err := memoryDelivery.Ack(false); err != nil {
+		t.Fatalf("ack inspection memory delivery: %v", err)
 	}
 }

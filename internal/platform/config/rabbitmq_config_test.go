@@ -10,6 +10,7 @@ func TestRabbitMQConfigValidate(t *testing.T) {
 		Enabled: true, URLEnv: "MESGUARD_RABBITMQ_URL", Exchange: "mesguard.tasks",
 		DiagnosisQueue: "mesguard.diagnosis.execute", DiagnosisRoutingKey: "diagnosis.execute",
 		ConversationQueue: "mesguard.conversation.turn.execute", ConversationRoutingKey: "conversation.turn.execute",
+		MemoryCompactionQueue: "mesguard.conversation.memory.compact", MemoryCompactionRoutingKey: "conversation.memory.compact",
 		KnowledgeIngestionQueue: "mesguard.knowledge.ingest", KnowledgeIngestionRoutingKey: "knowledge.ingest",
 		RelayBatchSize: 10, RelayPollIntervalMillis: 1000, RelayLeaseMillis: 300000,
 		PublishConfirmTimeoutMillis: 5000, WorkerLeaseMillis: 120000,

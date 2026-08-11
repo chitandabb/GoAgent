@@ -85,3 +85,20 @@ func TestPublisherBuildPublishingRoutesConversationTurn(t *testing.T) {
 		t.Fatalf("routingKey = %q, message type = %q", routingKey, message.Type)
 	}
 }
+
+func TestPublisherBuildPublishingRoutesConversationMemoryCompaction(t *testing.T) {
+	jobID := uuid.New()
+	publisher := &Publisher{config: config.RabbitMQConfig{MemoryCompactionRoutingKey: "conversation.memory.compact"}}
+	routingKey, message, err := publisher.buildPublishing(messaging.OutboxEvent{
+		ID: uuid.New(), EventType: "conversation.memory.compact", AggregateType: "conversation_memory_job",
+		AggregateID: jobID, CorrelationID: uuid.New(),
+		Payload:              json.RawMessage(`{"jobId":"` + jobID.String() + `"}`),
+		PayloadSchemaVersion: 1, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("buildPublishing(): %v", err)
+	}
+	if routingKey != "conversation.memory.compact" || message.Type != "conversation.memory.compact" {
+		t.Fatalf("routingKey = %q, message type = %q", routingKey, message.Type)
+	}
+}

@@ -316,24 +316,12 @@ func buildAgentRuntimeForRole(
 	}
 	var contextPreflight mesagent.ConversationContextPreflightConfig
 	if cfg.Agent.ContextMemory.ShadowPreflightEnabled {
-		profile, profileErr := cfg.Models.Chat.ActiveProfile()
-		if profileErr != nil {
+		tokenBudget, tokenBudgetErr := buildConversationTokenBudgetRuntime(cfg)
+		if tokenBudgetErr != nil {
 			_ = runtime.close()
-			return nil, fmt.Errorf("resolve conversation context profile: %w", profileErr)
+			return nil, tokenBudgetErr
 		}
-		estimator, estimatorErr := contextgovernance.NewLocalTokenEstimator(
-			contextgovernance.EstimationMethod(profile.TokenizerStrategy), nil,
-		)
-		if estimatorErr != nil {
-			_ = runtime.close()
-			return nil, fmt.Errorf("build conversation TokenEstimator: %w", estimatorErr)
-		}
-		planner, plannerErr := contextgovernance.NewTokenBudgetPlanner(estimator)
-		if plannerErr != nil {
-			_ = runtime.close()
-			return nil, fmt.Errorf("build conversation TokenBudgetPlanner: %w", plannerErr)
-		}
-		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(estimator)
+		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(tokenBudget.estimator)
 		if tailSelectorErr != nil {
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
@@ -356,22 +344,15 @@ func buildAgentRuntimeForRole(
 			}
 		}
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
-			Enabled: true, Planner: planner, TailSelector: tailSelector,
-			ContinuousTailEnabled: cfg.Agent.ContextMemory.ContinuousTailEnabled,
-			SummaryTailEnabled:    summaryTailEnabled,
-			Memory:                conversationMemory,
-			MemoryMaxRatio:        cfg.Agent.ContextMemory.MemoryMaxRatio,
-			SummaryMaxRatio:       cfg.Agent.ContextMemory.SummaryMaxRatio,
-			TailMaxRatio:          cfg.Agent.ContextMemory.TailMaxRatio,
-			PreflightTimeout:      time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
-			ModelProfile: contextgovernance.ModelProfile{
-				Name:                strings.TrimSpace(cfg.Models.Chat.ActiveProfileName),
-				Provider:            strings.ToLower(strings.TrimSpace(profile.Provider)),
-				ModelID:             strings.TrimSpace(profile.Model),
-				ContextWindowTokens: profile.ContextWindowTokens,
-				MaxOutputTokens:     profile.MaxOutputTokens,
-				SafetyMarginTokens:  profile.EffectivePromptSafetyMarginTokens(),
-			},
+			Enabled: true, Planner: tokenBudget.planner, TailSelector: tailSelector,
+			ContinuousTailEnabled:   cfg.Agent.ContextMemory.ContinuousTailEnabled,
+			SummaryTailEnabled:      summaryTailEnabled,
+			Memory:                  conversationMemory,
+			MemoryMaxRatio:          cfg.Agent.ContextMemory.MemoryMaxRatio,
+			SummaryMaxRatio:         cfg.Agent.ContextMemory.SummaryMaxRatio,
+			TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio,
+			PreflightTimeout:        time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
+			ModelProfile:            tokenBudget.profile,
 			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
 			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
 			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,

@@ -140,6 +140,14 @@ func (p *Publisher) connectLocked() error {
 	); err != nil {
 		return cleanup(fmt.Errorf("bind rabbitmq conversation queue: %w", err))
 	}
+	if _, err := channel.QueueDeclare(p.config.MemoryCompactionQueue, true, false, false, false, nil); err != nil {
+		return cleanup(fmt.Errorf("declare rabbitmq memory compaction queue: %w", err))
+	}
+	if err := channel.QueueBind(
+		p.config.MemoryCompactionQueue, p.config.MemoryCompactionRoutingKey, p.config.Exchange, false, nil,
+	); err != nil {
+		return cleanup(fmt.Errorf("bind rabbitmq memory compaction queue: %w", err))
+	}
 	if _, err := channel.QueueDeclare(p.config.KnowledgeIngestionQueue, true, false, false, false, nil); err != nil {
 		return cleanup(fmt.Errorf("declare rabbitmq knowledge ingestion queue: %w", err))
 	}
@@ -189,6 +197,8 @@ func (p *Publisher) buildPublishing(event messaging.OutboxEvent) (string, amqp.P
 		routingKey = p.config.DiagnosisRoutingKey
 	case "conversation.turn.execute":
 		routingKey = p.config.ConversationRoutingKey
+	case messaging.EventTypeConversationMemoryCompact:
+		routingKey = p.config.MemoryCompactionRoutingKey
 	case "knowledge.ingest":
 		routingKey = p.config.KnowledgeIngestionRoutingKey
 	default:

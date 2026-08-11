@@ -376,6 +376,9 @@ type ContextMemoryConfig struct {
 	ShadowPreflightEnabled  bool                            `toml:"shadowPreflightEnabled"`
 	ContinuousTailEnabled   bool                            `toml:"continuousTailEnabled"`
 	SummaryTailEnabled      bool                            `toml:"summaryTailEnabled"`
+	AsyncCompactionEnabled  bool                            `toml:"asyncCompactionEnabled"`
+	AsyncMaxAttempts        int                             `toml:"asyncMaxAttempts"`
+	RetryJitterRatio        float64                         `toml:"retryJitterRatio"`
 	MemoryMaxRatio          float64                         `toml:"memoryMaxRatio"`
 	SummaryMaxRatio         float64                         `toml:"summaryMaxRatio"`
 	TailMaxRatio            float64                         `toml:"tailMaxRatio"`
@@ -432,6 +435,18 @@ func (c ContextMemoryConfig) Validate() error {
 	}
 	if c.SummaryTailEnabled && !c.Summary.Enabled {
 		return errors.New("agent contextMemory Summary + Tail requires the Summary model")
+	}
+	if c.AsyncCompactionEnabled {
+		if !c.SummaryTailEnabled || !c.Summary.Enabled {
+			return errors.New("agent contextMemory async compaction requires Summary + Tail")
+		}
+		if c.AsyncMaxAttempts < 1 || c.AsyncMaxAttempts > 10 {
+			return errors.New("agent contextMemory asyncMaxAttempts must be between 1 and 10")
+		}
+		if math.IsNaN(c.RetryJitterRatio) || math.IsInf(c.RetryJitterRatio, 0) ||
+			c.RetryJitterRatio < 0 || c.RetryJitterRatio > 0.50 {
+			return errors.New("agent contextMemory retryJitterRatio must be between 0 and 0.50")
+		}
 	}
 	if !c.ShadowPreflightEnabled {
 		return nil
@@ -1084,6 +1099,8 @@ type RabbitMQConfig struct {
 	DiagnosisRoutingKey          string `toml:"diagnosisRoutingKey"`
 	ConversationQueue            string `toml:"conversationQueue"`
 	ConversationRoutingKey       string `toml:"conversationRoutingKey"`
+	MemoryCompactionQueue        string `toml:"memoryCompactionQueue"`
+	MemoryCompactionRoutingKey   string `toml:"memoryCompactionRoutingKey"`
 	KnowledgeIngestionQueue      string `toml:"knowledgeIngestionQueue"`
 	KnowledgeIngestionRoutingKey string `toml:"knowledgeIngestionRoutingKey"`
 	RelayBatchSize               int    `toml:"relayBatchSize"`
@@ -1109,6 +1126,8 @@ func (c RabbitMQConfig) Validate() error {
 		"diagnosisRoutingKey":          c.DiagnosisRoutingKey,
 		"conversationQueue":            c.ConversationQueue,
 		"conversationRoutingKey":       c.ConversationRoutingKey,
+		"memoryCompactionQueue":        c.MemoryCompactionQueue,
+		"memoryCompactionRoutingKey":   c.MemoryCompactionRoutingKey,
 		"knowledgeIngestionQueue":      c.KnowledgeIngestionQueue,
 		"knowledgeIngestionRoutingKey": c.KnowledgeIngestionRoutingKey,
 	} {

@@ -296,6 +296,17 @@ type PrepareActiveRequest struct {
 	ActivationGate        ActivationGate
 }
 
+// PreparedActivation separates model-backed candidate generation from the
+// final CAS publication. Async workers may persist CandidateSnapshot first,
+// then publish it only inside the transaction that verifies their lease and
+// fencing token. CurrentSnapshot is returned when the Active Snapshot already
+// covers the requested messages.
+type PreparedActivation struct {
+	CandidateSnapshot        *Snapshot
+	CurrentSnapshot          *Snapshot
+	ExpectedActiveSnapshotID *uuid.UUID
+}
+
 // ActivationGate validates caller-specific runtime constraints after the
 // immutable candidate is saved but before it can replace the current Active
 // Snapshot. Structural and provenance validation remains owned by this module.
@@ -316,7 +327,7 @@ func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Sn
 	if errors.Is(err, ErrSnapshotNotFound) {
 		previous = nil
 	}
-	return s.generateCandidate(ctx, request, previous)
+	return s.generateCandidate(ctx, request, previous, 1, s.maxAttempts)
 }
 
 func (s *Service) Active(ctx context.Context, conversationID uuid.UUID) (*Snapshot, error) {
@@ -326,49 +337,94 @@ func (s *Service) Active(ctx context.Context, conversationID uuid.UUID) (*Snapsh
 	return s.repository.Active(ctx, conversationID)
 }
 
-// PrepareActive synchronously generates and CAS-activates a validated Snapshot.
-// A competing activation may win; an equal-or-newer winner is returned so the
-// caller can safely continue without overwriting it.
-func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveRequest) (Snapshot, error) {
+// PrepareActivationCandidate generates and validates an immutable candidate
+// based on the current Active Snapshot, but deliberately does not activate it.
+func (s *Service) PrepareActivationCandidate(
+	ctx context.Context,
+	request PrepareActiveRequest,
+) (PreparedActivation, error) {
+	return s.prepareActivationCandidate(ctx, request, 1, s.maxAttempts)
+}
+
+// PrepareActivationCandidateOnce performs exactly one model-backed compaction
+// attempt. Async Jobs call it once per durable attempt so their configured Job
+// limit is also the total model-call limit rather than multiplying the
+// Service's synchronous repair loop.
+func (s *Service) PrepareActivationCandidateOnce(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	attempt int,
+) (PreparedActivation, error) {
+	if attempt < 1 || attempt > 10 {
+		return PreparedActivation{}, ErrInvalidShadowInput
+	}
+	return s.prepareActivationCandidate(ctx, request, attempt, attempt)
+}
+
+func (s *Service) prepareActivationCandidate(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	firstAttempt, lastAttempt int,
+) (PreparedActivation, error) {
 	if s == nil || request.ConversationID == uuid.Nil || request.ActivationGate == nil {
-		return Snapshot{}, ErrInvalidShadowInput
+		return PreparedActivation{}, ErrInvalidShadowInput
 	}
 	previous, err := s.repository.Active(ctx, request.ConversationID)
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
-		return Snapshot{}, fmt.Errorf("load active conversation memory snapshot: %w", err)
+		return PreparedActivation{}, fmt.Errorf("load active conversation memory snapshot: %w", err)
 	}
 	if errors.Is(err, ErrSnapshotNotFound) {
 		previous = nil
 	}
 	if previous != nil && (previous.ConversationID != request.ConversationID || previous.Validate() != nil) {
-		return Snapshot{}, ErrInvalidShadowInput
+		return PreparedActivation{}, ErrInvalidShadowInput
 	}
 	if _, err := validatedCompletedMessages(request.ConversationID, request.CompletedMessages); err != nil {
-		return Snapshot{}, err
+		return PreparedActivation{}, err
 	}
 	if previous != nil && noMessagesAfter(request.CompletedMessages, previous.ThroughSeq) {
-		current := *cloneSnapshot(previous)
-		if err := request.ActivationGate.ValidateForActivation(ctx, current); err != nil {
-			return Snapshot{}, fmt.Errorf("validate active conversation memory snapshot: %w", err)
+		current := cloneSnapshot(previous)
+		if err := request.ActivationGate.ValidateForActivation(ctx, *current); err != nil {
+			return PreparedActivation{}, fmt.Errorf("validate active conversation memory snapshot: %w", err)
 		}
-		return current, nil
+		return PreparedActivation{CurrentSnapshot: current}, nil
 	}
 	candidate, err := s.generateCandidate(ctx, ShadowRequest{
 		ConversationID: request.ConversationID, CompletedMessages: request.CompletedMessages,
 		KnownReportReferences: request.KnownReportReferences,
-	}, previous)
+	}, previous, firstAttempt, lastAttempt)
+	if err != nil {
+		return PreparedActivation{}, err
+	}
+	if err := request.ActivationGate.ValidateForActivation(ctx, candidate); err != nil {
+		return PreparedActivation{}, fmt.Errorf("validate conversation memory candidate for activation: %w", err)
+	}
+	result := PreparedActivation{CandidateSnapshot: cloneSnapshot(&candidate)}
+	if previous != nil {
+		result.ExpectedActiveSnapshotID = cloneUUIDPointer(&previous.ID)
+	}
+	return result, nil
+}
+
+// PrepareActive synchronously generates and CAS-activates a validated Snapshot.
+// A competing activation may win; an equal-or-newer winner is returned so the
+// caller can safely continue without overwriting it.
+func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveRequest) (Snapshot, error) {
+	prepared, err := s.PrepareActivationCandidate(ctx, request)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := request.ActivationGate.ValidateForActivation(ctx, candidate); err != nil {
-		return Snapshot{}, fmt.Errorf("validate conversation memory candidate for activation: %w", err)
+	if prepared.CurrentSnapshot != nil {
+		return *prepared.CurrentSnapshot, nil
 	}
+	if prepared.CandidateSnapshot == nil {
+		return Snapshot{}, ErrInvalidSnapshot
+	}
+	candidate := *prepared.CandidateSnapshot
 	activation := ActivationRequest{
 		ConversationID: request.ConversationID, CandidateSnapshotID: candidate.ID,
-		ActivatedAt: s.clock().UTC(),
-	}
-	if previous != nil {
-		activation.ExpectedActiveSnapshotID = &previous.ID
+		ExpectedActiveSnapshotID: cloneUUIDPointer(prepared.ExpectedActiveSnapshotID),
+		ActivatedAt:              s.clock().UTC(),
 	}
 	activated, err := s.repository.Activate(ctx, activation)
 	if err == nil {
@@ -390,7 +446,15 @@ func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveReques
 	return Snapshot{}, ErrSnapshotActivationConflict
 }
 
-func (s *Service) generateCandidate(ctx context.Context, request ShadowRequest, previous *Snapshot) (Snapshot, error) {
+func (s *Service) generateCandidate(
+	ctx context.Context,
+	request ShadowRequest,
+	previous *Snapshot,
+	firstAttempt, lastAttempt int,
+) (Snapshot, error) {
+	if firstAttempt < 1 || lastAttempt < firstAttempt || lastAttempt > 10 {
+		return Snapshot{}, ErrInvalidShadowInput
+	}
 	newMessages, fromSeq, throughSeq, err := prepareMessages(request.ConversationID, request.CompletedMessages, previous)
 	if err != nil {
 		return Snapshot{}, err
@@ -398,9 +462,9 @@ func (s *Service) generateCandidate(ctx context.Context, request ShadowRequest, 
 	validation := buildValidationContext(fromSeq, throughSeq, s.maxPayloadBytes, previous, newMessages, request.KnownReportReferences)
 	repairCode := ""
 	var lastErr error
-	for attempt := 1; attempt <= s.maxAttempts; attempt++ {
-		if attempt > 1 && s.retryBaseDelay > 0 {
-			if err := waitForRetry(ctx, s.retryBaseDelay*time.Duration(1<<(attempt-2))); err != nil {
+	for attempt := firstAttempt; attempt <= lastAttempt; attempt++ {
+		if attempt > firstAttempt && s.retryBaseDelay > 0 {
+			if err := waitForRetry(ctx, s.retryBaseDelay*time.Duration(1<<(attempt-firstAttempt-1))); err != nil {
 				return Snapshot{}, fmt.Errorf("%w: %v", ErrCompactionFailed, err)
 			}
 		}
@@ -445,7 +509,8 @@ func (s *Service) generateCandidate(ctx context.Context, request ShadowRequest, 
 		}
 		return s.repository.Save(ctx, candidate)
 	}
-	return Snapshot{}, fmt.Errorf("%w after %d attempts: %v", ErrCompactionFailed, s.maxAttempts, lastErr)
+	return Snapshot{}, fmt.Errorf("%w after %d attempts: %v", ErrCompactionFailed,
+		lastAttempt-firstAttempt+1, lastErr)
 }
 
 func noMessagesAfter(messages []conversation.Message, throughSeq int64) bool {

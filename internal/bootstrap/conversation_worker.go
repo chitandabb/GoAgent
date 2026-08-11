@@ -45,7 +45,17 @@ func NewConversationWorkerApp(
 	}
 	closeDependencies := func() { _ = deps.close() }
 
-	conversationRepository := platformpostgres.NewConversationRepository(deps.db)
+	conversationRepository, err := platformpostgres.NewConversationRepositoryWithConfig(
+		deps.db,
+		platformpostgres.ConversationRepositoryConfig{
+			AsyncMemoryJobsEnabled: cfg.Agent.ContextMemory.AsyncCompactionEnabled,
+			MemoryJobMaxAttempts:   cfg.Agent.ContextMemory.AsyncMaxAttempts,
+		},
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build conversation repository: %w", err)
+	}
 	conversationService, err := conversation.NewService(conversationRepository)
 	if err != nil {
 		closeDependencies()

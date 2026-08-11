@@ -30,6 +30,9 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
 				!cfg.Agent.ContextMemory.ContinuousTailEnabled ||
 				!cfg.Agent.ContextMemory.SummaryTailEnabled ||
+				!cfg.Agent.ContextMemory.AsyncCompactionEnabled ||
+				cfg.Agent.ContextMemory.AsyncMaxAttempts != 3 ||
+				cfg.Agent.ContextMemory.RetryJitterRatio != 0.10 ||
 				cfg.Agent.ContextMemory.MemoryMaxRatio != 0.20 ||
 				cfg.Agent.ContextMemory.SummaryMaxRatio != 0.05 ||
 				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
@@ -38,6 +41,10 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				cfg.Agent.ContextMemory.HardThresholdRatio != 0.85 ||
 				cfg.Agent.ContextMemory.ToolGrowthReserveTokens != 8192 {
 				t.Fatalf("%q context-memory shadow preflight = %+v", path, cfg.Agent.ContextMemory)
+			}
+			if cfg.RabbitMQ.MemoryCompactionQueue != "mesguard.conversation.memory.compact" ||
+				cfg.RabbitMQ.MemoryCompactionRoutingKey != "conversation.memory.compact" {
+				t.Fatalf("%q memory compaction topology = %+v", path, cfg.RabbitMQ)
 			}
 			if cfg.Models.Judge.Enabled {
 				t.Fatalf("%q enables the offline Judge by default", path)
