@@ -7,7 +7,9 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
@@ -16,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type conversationRunnerModelState struct {
@@ -26,6 +29,8 @@ type conversationRunnerModelState struct {
 	omitKnowledgeCitation      bool
 	finalContent               string
 	schemas                    [][]string
+	inputs                     [][]string
+	firstDeadlineRemaining     time.Duration
 }
 
 type conversationRunnerTestModel struct {
@@ -33,11 +38,25 @@ type conversationRunnerTestModel struct {
 	tools []*schema.ToolInfo
 }
 
+type failingConversationTokenBudgetPlanner struct {
+	waitForCancellation bool
+}
+
+func (p failingConversationTokenBudgetPlanner) Plan(
+	ctx context.Context,
+	_ contextgovernance.TokenBudgetRequest,
+) (contextgovernance.TokenBudgetPlan, error) {
+	if p.waitForCancellation {
+		<-ctx.Done()
+	}
+	return contextgovernance.TokenBudgetPlan{}, errors.New("fixture token estimate failed")
+}
+
 func (m *conversationRunnerTestModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return &conversationRunnerTestModel{state: m.state, tools: append([]*schema.ToolInfo(nil), tools...)}, nil
 }
 
-func (m *conversationRunnerTestModel) Generate(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	common := model.GetCommonOptions(nil, opts...)
 	toolInfos := common.Tools
 	if len(toolInfos) == 0 {
@@ -48,7 +67,17 @@ func (m *conversationRunnerTestModel) Generate(_ context.Context, input []*schem
 		names = append(names, info.Name)
 	}
 	m.state.mu.Lock()
+	if len(m.state.inputs) == 0 {
+		if deadline, ok := ctx.Deadline(); ok {
+			m.state.firstDeadlineRemaining = time.Until(deadline)
+		}
+	}
 	m.state.schemas = append(m.state.schemas, names)
+	inputSnapshot := make([]string, 0, len(input))
+	for _, message := range input {
+		inputSnapshot = append(inputSnapshot, string(message.Role)+"\x00"+message.ToolName+"\x00"+message.Content)
+	}
+	m.state.inputs = append(m.state.inputs, inputSnapshot)
 	m.state.mu.Unlock()
 
 	hasCreateResult := false
@@ -88,6 +117,125 @@ func (m *conversationRunnerTestModel) Generate(_ context.Context, input []*schem
 		return withRunnerTestUsage(schema.AssistantMessage(m.state.finalContent, nil)), nil
 	}
 	return withRunnerTestUsage(schema.AssistantMessage("已处理当前会话请求。", nil)), nil
+}
+
+func TestConversationRunnerShadowPreflightRecordsManifestWithoutChangingModelInput(t *testing.T) {
+	baselineState := &conversationRunnerModelState{}
+	baseline := newConversationRunnerTest(t, baselineState, &diagnosisToolCreatorStub{})
+	request, baselineCtx := conversationRunnerRequest(nil)
+	baselineResponse, err := baseline.Respond(baselineCtx, request)
+	if err != nil {
+		t.Fatalf("baseline Respond(): %v", err)
+	}
+
+	estimator, err := contextgovernance.NewLocalTokenEstimator(
+		contextgovernance.EstimationMethodLocalCalibrated, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner, err := contextgovernance.NewTokenBudgetPlanner(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadowState := &conversationRunnerModelState{}
+	shadow := newConversationRunnerTestWithPreflight(t, shadowState, &diagnosisToolCreatorStub{},
+		ConversationContextPreflightConfig{
+			Enabled: true,
+			Planner: planner,
+			ModelProfile: contextgovernance.ModelProfile{
+				Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+				ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+			},
+			SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+			ToolGrowthReserveTokens: 256,
+		},
+	)
+	shadowRequest, shadowCtx := conversationRunnerRequest(nil)
+	shadowRequest.Conversation.ID = request.Conversation.ID
+	shadowRequest.Conversation.UserID = request.Conversation.UserID
+	shadowRequest.UserMessage = request.UserMessage
+	shadowRequest.History = request.History
+	shadowCtx = conversation.WithCommandContext(shadowCtx, conversation.CommandContext{
+		ConversationID: request.Conversation.ID,
+		UserMessageID:  request.UserMessage.ID,
+		Actor:          conversation.Actor{UserID: request.Conversation.UserID},
+	})
+	shadowResponse, err := shadow.Respond(shadowCtx, shadowRequest)
+	if err != nil {
+		t.Fatalf("shadow Respond(): %v", err)
+	}
+	manifest := shadowResponse.RunObservation.PromptManifest
+	if manifest == nil || manifest.Validate() != nil || manifest.ActualPromptTokens != 10 ||
+		manifest.CompletionTokens != 2 || manifest.TailFromSeq != 1 || manifest.TailThroughSeq != 1 ||
+		manifest.EstimatedPromptTokens < 1 || manifest.ToolGrowthReserveTokens != 256 ||
+		manifest.PromptEpochID == "" {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if baselineResponse.Content != shadowResponse.Content ||
+		!slices.Equal(baselineState.schemas[0], shadowState.schemas[0]) ||
+		!slices.Equal(baselineState.inputs[0], shadowState.inputs[0]) {
+		t.Fatalf("shadow changed model input: baseline schemas/input=%v/%v shadow=%v/%v",
+			baselineState.schemas, baselineState.inputs, shadowState.schemas, shadowState.inputs)
+	}
+}
+
+func TestConversationRunnerShadowPreflightFailureIsBoundedObservableAndDoesNotCancelModel(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		ConversationContextPreflightConfig{
+			Enabled: true,
+			Planner: failingConversationTokenBudgetPlanner{waitForCancellation: true},
+			ModelProfile: contextgovernance.ModelProfile{
+				Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+				ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+			},
+			SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+			ToolGrowthReserveTokens: 256,
+			PreflightTimeout:        10 * time.Millisecond,
+		},
+	)
+	core, logs := observer.New(zap.WarnLevel)
+	runner.log = zap.New(core)
+	runner.timeout = time.Second
+	request, ctx := conversationRunnerRequest(nil)
+
+	startedAt := time.Now()
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= runner.timeout {
+		t.Fatalf("shadow preflight consumed model timeout: elapsed=%s timeout=%s", elapsed, runner.timeout)
+	}
+	state.mu.Lock()
+	modelDeadlineRemaining := state.firstDeadlineRemaining
+	state.mu.Unlock()
+	if modelDeadlineRemaining < 900*time.Millisecond {
+		t.Fatalf("model timeout was not reset after preflight: remaining=%s", modelDeadlineRemaining)
+	}
+	manifest := response.RunObservation.PromptManifest
+	if manifest == nil || manifest.Validate() != nil || !manifest.ContextDegraded ||
+		manifest.PreflightStatus != contextgovernance.PreflightStatusFailed ||
+		!manifest.PromptIdentityAvailable || manifest.EstimateAvailable ||
+		!slices.Contains(manifest.DegradedReasons, "preflight_failed") ||
+		!slices.Contains(manifest.DegradedReasons, "token_estimation_failed") {
+		t.Fatalf("failure manifest = %+v", manifest)
+	}
+	entries := logs.FilterMessage("conversation shadow prompt preflight failed").All()
+	if len(entries) != 1 {
+		t.Fatalf("preflight failure logs = %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	for key, want := range map[string]any{
+		"user_id": request.Conversation.UserID.String(), "conversation_id": request.Conversation.ID.String(),
+		"message_id": request.UserMessage.ID.String(), "model_profile": "fixture-main",
+		"service_role": "conversation_agent",
+	} {
+		if fields[key] != want {
+			t.Fatalf("log field %s = %v, want %v; fields=%v", key, fields[key], want, fields)
+		}
+	}
 }
 
 type conversationCitationRepairerStub struct {
@@ -392,17 +540,21 @@ func TestConversationModelMessagesBoundsHistoryAndDropsInternalRoles(t *testing.
 		ID: uuid.New(), ConversationID: conversationID, Seq: 5,
 		Role: conversation.MessageRoleUser, Content: "当前问题",
 	}
-	messages := conversationModelMessages([]conversation.Message{
+	projection := buildConversationPromptProjection([]conversation.Message{
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "这是一条应被预算舍弃的很长旧消息"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: conversation.MessageRoleSystem, Content: "不可信系统消息"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleTool, Content: "原始工具结果"},
 		current,
 	}, current, 8)
+	messages := projection.messages
 
 	if len(messages) != 2 || messages[0].Role != schema.Assistant || messages[0].Content != "上轮回答" ||
 		messages[1].Role != schema.User || messages[1].Content != "当前问题" {
 		t.Fatalf("model messages = %+v", messages)
+	}
+	if projection.tailContinuous {
+		t.Fatal("Rune compatibility projection hid its non-continuous tail")
 	}
 }
 
@@ -410,6 +562,15 @@ func newConversationRunnerTest(
 	t *testing.T,
 	state *conversationRunnerModelState,
 	creator DiagnosisTaskCreator,
+) *ConversationRunner {
+	return newConversationRunnerTestWithPreflight(t, state, creator, ConversationContextPreflightConfig{})
+}
+
+func newConversationRunnerTestWithPreflight(
+	t *testing.T,
+	state *conversationRunnerModelState,
+	creator DiagnosisTaskCreator,
+	preflight ConversationContextPreflightConfig,
 ) *ConversationRunner {
 	t.Helper()
 	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
@@ -429,6 +590,7 @@ func newConversationRunnerTest(
 		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase},
 		Logger:                zap.NewNop(),
 		MaxContextRunes:       conversation.MaxContentRunes,
+		ContextPreflight:      preflight,
 	})
 	if err != nil {
 		t.Fatalf("NewConversationRunner(): %v", err)

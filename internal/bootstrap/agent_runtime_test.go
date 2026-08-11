@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
@@ -59,6 +60,52 @@ func TestBuildAgentRuntimeDegradesWhenChatModelIsUnavailable(t *testing.T) {
 	}
 	if runtime.runner != nil || !errors.Is(runtime.unavailable, want) {
 		t.Fatalf("unexpected degraded runtime: %+v", runtime)
+	}
+}
+
+func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
+	cfg := testAgentConfig()
+	profile := cfg.Models.Chat.Profiles["test"]
+	profile.ContextWindowTokens = 4096
+	profile.MaxOutputTokens = 512
+	profile.PromptSafetyMarginTokens = 256
+	profile.PromptSafetyMarginRatio = 0.05
+	profile.TokenizerStrategy = config.TokenizerStrategyLocalCalibrated
+	cfg.Models.Chat.Profiles["test"] = profile
+	cfg.Agent.ContextMemory = config.ContextMemoryConfig{
+		ShadowPreflightEnabled: true,
+		PreflightTimeoutMillis: 250,
+		SoftThresholdRatio:     0.70, HardThresholdRatio: 0.85,
+		ToolGrowthReserveTokens: 256,
+	}
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime(): %v", err)
+	}
+	userID, conversationID, messageID := uuid.New(), uuid.New(), uuid.New()
+	message := conversation.Message{
+		ID: messageID, ConversationID: conversationID, Seq: 1,
+		Role: conversation.MessageRoleUser, Content: "检查上下文预算",
+	}
+	ctx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+		ConversationID: conversationID, UserMessageID: messageID,
+		Actor: conversation.Actor{UserID: userID},
+	})
+	response, err := runtime.conversation.Respond(ctx, conversation.AgentRequest{
+		Conversation: conversation.Conversation{ID: conversationID, UserID: userID, Status: conversation.StatusActive},
+		UserMessage:  message, History: []conversation.Message{message},
+	})
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	if response.RunObservation == nil || response.RunObservation.PromptManifest == nil {
+		t.Fatalf("shadow manifest was not wired: %+v", response.RunObservation)
 	}
 }
 

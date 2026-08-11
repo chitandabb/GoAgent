@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/repository"
@@ -226,6 +227,7 @@ type AgentRunObservation struct {
 	Usage            AgentRunUsage
 	DurationMillis   int64
 	SourcesTruncated bool
+	PromptManifest   *contextgovernance.PromptManifest
 }
 
 // AgentRunFailureRecord is the bounded, persistence-safe projection carried
@@ -310,6 +312,16 @@ func (o AgentRunObservation) Validate() error {
 			return ErrAgentResponseInvalid
 		}
 		seenChannels[channel] = struct{}{}
+	}
+	if o.PromptManifest != nil {
+		manifest := o.PromptManifest
+		if manifest.Validate() != nil || manifest.RunDurationMillis != o.DurationMillis ||
+			(manifest.ActualUsageAvailable &&
+				(manifest.ActualPromptTokens > o.Usage.PromptTokens ||
+					manifest.CacheHitTokens > o.Usage.CachedTokens ||
+					manifest.CompletionTokens > o.Usage.CompletionTokens)) {
+			return ErrAgentResponseInvalid
+		}
 	}
 	return nil
 }
@@ -959,6 +971,11 @@ func prepareAgentResponse(response AgentResponse) (AgentResponse, error) {
 		observation := *response.RunObservation
 		observation.RetrievedSources = append([]AgentRunSource(nil), observation.RetrievedSources...)
 		observation.DegradedChannels = append([]string(nil), observation.DegradedChannels...)
+		if observation.PromptManifest != nil {
+			manifest := *observation.PromptManifest
+			manifest.DegradedReasons = append([]string(nil), manifest.DegradedReasons...)
+			observation.PromptManifest = &manifest
+		}
 		response.RunObservation = &observation
 	}
 	return response, nil

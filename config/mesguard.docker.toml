@@ -31,6 +31,13 @@ maxEvidenceItems = 16
 maxTotalTokens = 16000
 timeoutMillis = 90000
 
+[agent.contextMemory]
+shadowPreflightEnabled = true
+preflightTimeoutMillis = 250
+softThresholdRatio = 0.70
+hardThresholdRatio = 0.85
+toolGrowthReserveTokens = 8192
+
 [models.chat]
 enabled = true
 activeProfile = "stepfun-main"

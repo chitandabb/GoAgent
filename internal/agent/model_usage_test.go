@@ -28,6 +28,13 @@ func TestModelUsageHandlerAggregatesNonStreamingAndStreamingUsage(t *testing.T) 
 	}) {
 		t.Fatalf("usage = %+v", got)
 	}
+	trace.appendUsage(ModelUsage{ModelCalls: 1, PromptTokens: 6, CompletionTokens: 2, TotalTokens: 8})
+	if initial, available := trace.initialSnapshot(); !available || initial != (ModelUsage{
+		ModelCalls: 1, PromptTokens: 10, CompletionTokens: 2,
+		TotalTokens: 12, CachedTokens: 3, ReasoningTokens: 1,
+	}) {
+		t.Fatalf("initial provider usage = %+v, available=%v", initial, available)
+	}
 }
 
 func usageCallbackOutput(prompt, completion, total, cached, reasoning int) *model.CallbackOutput {
