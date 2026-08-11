@@ -267,7 +267,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	}
 	chatModel := r.chatModel
 	var contextObservation *diagnosisContextObservationRecorder
-	if r.contextPreflight.Enabled {
+	if r.contextPreflight.Enabled && scope.taskType == TaskTypeDiagnosis {
 		if strings.TrimSpace(request.CaseSnapshot) == "" {
 			return result, errors.New("diagnosis case snapshot is required for context preflight")
 		}

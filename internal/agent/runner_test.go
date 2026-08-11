@@ -480,6 +480,30 @@ func TestRunnerBlocksGrowingDiagnosisPromptBeforeSecondProviderCall(t *testing.T
 	}
 }
 
+func TestRunnerDoesNotApplyDiagnosisPreflightToKnowledgeTask(t *testing.T) {
+	runner := newRunnerTest(t, &runnerModelState{})
+	inner := &diagnosisGuardModel{}
+	runner.chatModel = inner
+	planner := &diagnosisGuardPlanner{plans: []contextgovernance.TokenBudgetPlan{{
+		AvailableInputTokens: 176, EstimatedUpperBoundTokens: 190, ReservedTokens: 16,
+		ExceedsHardWindow: true, EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
+	}}}
+	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
+	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	scope.taskType = TaskTypeKnowledge
+
+	result, err := runner.Invoke(
+		WithTaskScope(context.Background(), scope),
+		RunRequest{UserQuery: "解释事务超时"},
+	)
+	if err != nil {
+		t.Fatalf("Invoke knowledge task: %v", err)
+	}
+	if result.Answer != "ok" || inner.callCount() != 1 || len(planner.requestSnapshot()) != 0 {
+		t.Fatalf("result=%+v modelCalls=%d preflights=%d", result, inner.callCount(), len(planner.requestSnapshot()))
+	}
+}
+
 func TestRunnerCreatesIsolatedAgentForConcurrentRuns(t *testing.T) {
 	runner := newRunnerTest(t, &runnerModelState{})
 	scope := runnerTestScope(t, ToolDependencyExternalCase)
