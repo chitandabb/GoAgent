@@ -145,6 +145,37 @@ func (r *ConversationMemoryRepository) Active(
 	return &snapshot, nil
 }
 
+// ActiveIdentity is the lightweight authority check used before reading an
+// immutable Snapshot payload from Redis. It deliberately excludes the JSONB
+// payload while preserving PostgreSQL as the Active publication source.
+func (r *ConversationMemoryRepository) ActiveIdentity(
+	ctx context.Context,
+	conversationID uuid.UUID,
+) (conversationmemory.ActiveSnapshotIdentity, error) {
+	if r == nil || r.db == nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, errors.New("conversation memory repository is unavailable")
+	}
+	if conversationID == uuid.Nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, conversationmemory.ErrInvalidSnapshot
+	}
+	var identity conversationmemory.ActiveSnapshotIdentity
+	loaded := ResolveDB(ctx, r.db).Raw(`
+SELECT conversation_id, id AS snapshot_id, snapshot_version AS version, payload_sha256
+FROM conversation_memory_snapshots
+WHERE conversation_id = ? AND status = 'active'
+LIMIT 1`, conversationID).Scan(&identity)
+	if loaded.Error != nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, TranslateError(loaded.Error)
+	}
+	if loaded.RowsAffected == 0 {
+		return conversationmemory.ActiveSnapshotIdentity{}, conversationmemory.ErrSnapshotNotFound
+	}
+	if err := identity.Validate(); err != nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, err
+	}
+	return identity, nil
+}
+
 func (r *ConversationMemoryRepository) Activate(
 	ctx context.Context,
 	request conversationmemory.ActivationRequest,

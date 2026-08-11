@@ -51,7 +51,7 @@ Summary 保留目标、用户事实、决策、修正、证据引用、未决问
 错误，绝不发送超窗 Prompt，也不用低质量确定性摘要静默丢失历史。
 
 PostgreSQL 保存原始消息、不可变 Snapshot、压缩 Job 和 Prompt Manifest，是唯一
-事实源。Redis 仅缓存 Active Snapshot 和最近 Tail 投影，不承担发布权和分布式
+事实源。Redis 首版仅缓存 Active Snapshot，不承担发布权和分布式
 锁责任。Snapshot 激活通过 Lease、Fencing 和 CAS 确保过期 Worker 不能覆盖更新
 结果。用户需要摘要中的细节时，模型可以通过受限的原文恢复 Tool，根据
 Active Snapshot 已声明的条目和源消息序号读取当前 Conversation 原文。
@@ -168,7 +168,7 @@ Summary。它对 CaseSnapshot、Evidence、Tool Result 和报告输出分配预�
 - 需要持久化不可变 Snapshot、压缩 Job 和 Prompt Manifest 元数据。Snapshot 使用关系列表达范围、版本、状态和引用，使用 JSON 载荷保存结构化条目。
 - 软阈值压缩通过 Memory Job + Outbox 交给 Worker；硬阈值路径调用同一 MemoryCompactor Implementation，避免异步和同步路径产生两套摘要语义。
 - Active Snapshot 只能通过 CAS 激活：压缩时使用的 Base Snapshot 仍是当前 Active、新覆盖序号更大，且 Worker Lease/Fencing 仍有效。过期 Worker 产生的 Snapshot 可保留审计，但不能激活。
-- Redis 只是 Active Snapshot、Prompt Manifest 和最近 Tail 投影的可降级 Cache Adapter。默认 TTL 为两小时并加 10% jitter；缓存 Key 包含 Conversation 和 Snapshot ID；失败时读 PostgreSQL。
+- Redis 首版只是 Active Snapshot 的可降级 Cache Adapter。默认 TTL 为两小时并加 10% jitter；缓存 Key 包含 Conversation 和 Snapshot ID；读取前以 PostgreSQL Active Identity 校验 Snapshot 版本和 Payload 哈希，失败时读 PostgreSQL。Prompt Manifest 和 Tail Projection 缓存只有在独立基准证明收益后再增加；当前 Tail 在 durable History 已读取后选择，直接缓存不能减少事实库 I/O。
 - 删除 Conversation 时 PostgreSQL 级联删除 Memory 派生事实，Redis 执行尽力清理，清理失败依靠 TTL 最终过期。
 - Prompt Manifest 只记录 Epoch ID、各稳定段 Fingerprint、Summary Snapshot ID、Tail 序号范围、估算/实际/Cache Token、误差、延迟和降级状态等元数据。
 - Diagnosis 首版只实现调用前 Preflight、有界 Tool Result、Evidence 句柄和上下文高水位观测，不建立 Diagnosis 多轮记忆。
@@ -182,7 +182,7 @@ Summary。它对 CaseSnapshot、Evidence、Tool Result 和报告输出分配预�
 - 主测试 Seam 是现有 Conversation Turn 执行 Interface。测试通过 Conversation Runner/AgentResponder 执行完整回合，注入可控 Model、TokenEstimator、Clock 和必要 Adapter，验证预算、Summary + Tail、连续序号、软/硬触发、可重试错误、原文恢复授权、引用与硬窗口保护。
 - 主 Seam 应覆盖短会话不压缩、软阈值只排队、硬阈值同步压缩、使用旧 Snapshot、压缩重试成功、重试耗尽、大消息不跳过、当前消息保留、Tool Schema 改变换 Epoch 和 Provider 切换换 Epoch。
 - 第二个必要 Seam 是 PostgreSQL Memory Repository/Worker Interface，使用真实 PostgreSQL 验证事务语义，不用内存 Fake 伪装数据库并发。覆盖 Job Claim、Lease 续期、Fencing、幂等重投、Snapshot 不可变写入、CAS 激活、过期 Worker 不能覆盖、Conversation 删除级联和 Active Snapshot 唯一性。
-- Redis 作为可降级 Cache Adapter 做合同测试：命中与 PostgreSQL 返回相同 Snapshot；超时、异常、旧 Snapshot 和删除失败都不破坏事实正确性；TTL 和 jitter 保持在配置边界内。
+- Redis 作为可降级 Cache Adapter 做合同测试：命中与 PostgreSQL 返回相同 Snapshot；超时、异常、旧 Snapshot 和删除失败都不破坏事实正确性；TTL 和 jitter 保持在配置边界内。真实 Redis 测试补充验证 Pipeline、TTL、索引删除和污染成员保护。
 - TokenEstimator Adapter 做合同测试，用各 Model Profile 的固定 Prompt Fixture 验证规范化分段、Tool Schema 序列化、Upper Bound 和 Usage 校准。不要只测纯文本，必须包含 Tool Schema、中英混合文本、长 ID、JSON 和 Tool Result。
 - Provider Adapter 做窄合同测试，验证语义 Prompt 分段到 Wire 请求的映射、Usage/Cache Token 回填、Tool Schema 顺序和 Capability Flag。Provider 私有特性不泄露到 ConversationMemory Interface。
 - Snapshot Validator 的确定性规则使用表驱动边界测试，覆盖非法 Schema、越界序号、未知引用、自循环 supersede、多个 Active Entry、非法 Todo 状态、超大 Payload 和模型推测误入事实字段的可检测格式。
@@ -210,6 +210,7 @@ Summary。它对 CaseSnapshot、Evidence、Tool Result 和报告输出分配预�
 - 将原始 Prompt、原始 Chain-of-Thought、完整 Tool Payload、凭证或 MinIO 内部坐标持久化。
 - 用确定性文本抽取在摘要模型失败后生成低质量替代 Summary。
 - 把 Redis 作为 Snapshot 事实源、发布仲裁者或分布式锁。
+- 在没有历史加载基准和稳定失效 seam 时缓存每轮变化的 Tail Projection。
 - 本阶段的前端交互改造、压缩管理页和普通用户可见的技术元数据。
 - 为现有所有 Conversation 做上线前全量 Snapshot 回填；旧会话采用阈值触发的懒生成。
 - 在没有固定集实测的情况下把 60%+ 写成已完成事实。
