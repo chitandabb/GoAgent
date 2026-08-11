@@ -50,7 +50,18 @@ TaskScope 最小 Tool 集合，不是 Skill 选择后的动态 Tool 注册。
   Active Snapshot 已通过实际内容 Fingerprint 进入 Prompt Epoch；
 - `maxTotalTokens` 只根据调用结束后的 Usage 结算，不能阻止单次请求超过窗口；
 - 已在独立 Feature Flag 下启用硬阈值同步压缩和 `Active Summary + Continuous Tail`；
-  尚无软阈值异步摘要任务、Memory Worker 和 Redis 热记忆；
+- 软阈值异步摘要任务、Memory Worker 和 Outbox 已实现：Turn 完成事务仅在
+  `SoftThresholdReached && !HardCompactionTriggered` 时幂等创建 Job；Job 与首条 Outbox
+  共用 PostgreSQL 事务，Worker 复用同一候选生成/校验服务；
+- Memory Job 使用 `pending/running/retry_wait/succeeded/failed` 状态、Lease Renewal、递增
+  Fencing Token、指数退避 + 可配置 jitter；候选 Snapshot 先保存，只有持有有效 Lease/Fencing
+  的 Complete 事务才能 CAS 激活，过期 Worker 的候选可保留审计但不能发布；
+- 异步 Worker 每个持久化 Job Attempt 只进行一次模型压缩，默认三个 Job Attempt 即总计最多
+  三次模型调用，避免与 Service 内部重试相乘成九次；同步硬阈值路径仍在当前请求内进行最多
+  三次带修复码的候选生成；
+- 已通过真实 PostgreSQL 验证 Job 调度、并发 Claim 单赢家、Lease reclaim、过期 Worker 拒绝、
+  重叠 Job 的 CAS Winner 收敛和 Retry Outbox；RabbitMQ Publisher/Consumer 路由及独立
+  `mesguard-memory-worker` Compose 进程已启动验证。Redis 热记忆仍未实现；
 - 没有固定长会话 Baseline/Experiment 评测集。
 
 ## 3. 目标与非目标
@@ -605,8 +616,9 @@ First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装�
 2. 在独立 Feature Flag 下启用 Continuous Tail 和逐次 Provider 硬窗口保护，保留 Rune 回滚（已完成）；
 3. 生成 Shadow Snapshot，但不用于回答（已完成）；
 4. 在独立 Feature Flag 下启用硬阈值同步 CAS 激活和 Summary + Tail（已完成，待 Pilot）；
-5. Pilot 与 Acceptance 通过后全量启用；
-6. 发生质量问题关闭 Summary，回退 Continuous Tail；再关闭 Continuous Tail 可回退 Rune 路径，
+5. 启用软阈值 Memory Outbox/Worker，异步生成候选并在有效 Lease/Fencing 下 CAS 发布（已完成，待 Pilot）；
+6. Pilot 与 Acceptance 通过后全量启用；
+7. 发生质量问题关闭 Summary，回退 Continuous Tail；再关闭 Continuous Tail 可回退 Rune 路径，
    原始消息和 Snapshot 均无需回滚。
 
 ## 17. 有序实现切片
@@ -616,12 +628,13 @@ First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装�
 3. Snapshot/Manifest 领域模型、迁移、Repository 和 CAS（已完成）；
 4. Structured MemoryCompactor、Validator 和重试语义（已完成）；
 5. ConversationMemoryAssembler 接入硬阈值 Summary + Tail（已完成）；
-6. Outbox/Worker、Lease/Fencing 和 Redis 热缓存；
-7. `read_conversation_memory_sources` Tool；
-8. Diagnosis Context Preflight 与有界 Tool Result；
-9. Provider 原生 Compaction/Tool Exposure 接口预留；
-9. Pilot、Acceptance、指标核验和简历最终口径；
-10. 后端闭环后统一设计前端压缩状态和管理员观测页。
+6. Memory Outbox/Worker、Lease/Fencing（已完成）；
+7. Redis 热记忆缓存与 PostgreSQL 回源（待完成）；
+8. `read_conversation_memory_sources` Tool；
+9. Diagnosis Context Preflight 与有界 Tool Result；
+10. Provider 原生 Compaction/Tool Exposure 接口预留；
+11. Pilot、Acceptance、指标核验和简历最终口径；
+12. 后端闭环后统一设计前端压缩状态和管理员观测页。
 
 ## 18. 后续增强点
 

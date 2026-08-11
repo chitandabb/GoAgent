@@ -12,7 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const maxOutboxErrorRunes = 1000
+const (
+	maxOutboxErrorRunes = 1000
+
+	EventTypeConversationMemoryCompact = "conversation.memory.compact"
+	AggregateTypeConversationMemoryJob = "conversation_memory_job"
+)
 
 type OutboxEvent struct {
 	ID                   uuid.UUID

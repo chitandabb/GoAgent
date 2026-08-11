@@ -75,3 +75,19 @@ func TestFailedPromptManifestKeepsActualUsageWithoutInventingEstimateOrIdentity(
 		t.Fatalf("failed manifest invented identity or estimate: %+v", manifest)
 	}
 }
+
+func TestPromptManifestRequestsAsyncCompactionOnlyForSoftThresholdWithoutHardCompaction(t *testing.T) {
+	soft := &PromptManifest{
+		PreflightStatus: PreflightStatusSucceeded, SoftThresholdReached: true,
+	}
+	if !soft.RequestsAsyncCompaction() {
+		t.Fatal("soft-threshold manifest did not request async compaction")
+	}
+	soft.HardCompactionTriggered = true
+	if soft.RequestsAsyncCompaction() {
+		t.Fatal("hard-compacted manifest requested redundant async compaction")
+	}
+	if (*PromptManifest)(nil).RequestsAsyncCompaction() {
+		t.Fatal("nil manifest requested async compaction")
+	}
+}

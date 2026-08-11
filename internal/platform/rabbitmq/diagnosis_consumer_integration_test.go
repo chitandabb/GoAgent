@@ -30,6 +30,8 @@ func TestDiagnosisConsumerPublishesConfirmedRetryAndDeadCopies(t *testing.T) {
 		DiagnosisRoutingKey:          "diagnosis.execute",
 		ConversationQueue:            "mesguard.worker.test.conversation." + suffix,
 		ConversationRoutingKey:       "conversation.turn.execute",
+		MemoryCompactionQueue:        "mesguard.worker.test.memory." + suffix,
+		MemoryCompactionRoutingKey:   "conversation.memory.compact",
 		KnowledgeIngestionQueue:      "mesguard.worker.test.knowledge." + suffix,
 		KnowledgeIngestionRoutingKey: "knowledge.ingest",
 		RelayBatchSize:               1, RelayPollIntervalMillis: 100, RelayLeaseMillis: 10000,

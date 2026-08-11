@@ -320,6 +320,74 @@ func TestConversationMemoryDoesNotActivateCandidateRejectedByMainPromptBudget(t 
 	}
 }
 
+func TestConversationMemoryPreparesCandidateWithoutActivatingIt(t *testing.T) {
+	conversationID := uuid.New()
+	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)
+	repository := &activationMemoryRepositoryStub{
+		memoryRepositoryStub: &memoryRepositoryStub{latest: &active},
+		active:               &active,
+	}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		if input.PreviousSnapshot == nil || input.PreviousSnapshot.ID != active.ID ||
+			len(input.NewMessages) != 2 || input.NewMessages[0].Seq != 4 {
+			t.Fatalf("candidate compaction input = %+v", input)
+		}
+		payload := validPayload()
+		payload.Decisions = append(payload.Decisions, conversationmemory.Entry{
+			EntryID: "decision_async_memory", Content: "达到软阈值后异步压缩",
+			SourceMessageSeqs: []int64{4, 5}, Status: conversationmemory.EntryStatusActive,
+		})
+		return conversationmemory.CompactionOutput{
+			Payload: payload,
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 1)
+	messages := append(initialMessages(conversationID),
+		conversation.Message{ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleUser, Content: "软阈值异步压缩"},
+		conversation.Message{ID: uuid.New(), ConversationID: conversationID, Seq: 5, Role: conversation.MessageRoleAssistant, Content: "已记录"},
+	)
+
+	prepared, err := service.PrepareActivationCandidate(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: messages,
+		ActivationGate: acceptConversationMemoryActivation,
+	})
+	if err != nil {
+		t.Fatalf("PrepareActivationCandidate() error = %v", err)
+	}
+	if prepared.CandidateSnapshot == nil || prepared.CurrentSnapshot != nil ||
+		prepared.ExpectedActiveSnapshotID == nil || *prepared.ExpectedActiveSnapshotID != active.ID ||
+		prepared.CandidateSnapshot.Status != conversationmemory.SnapshotStatusCandidate ||
+		prepared.CandidateSnapshot.ThroughSeq != 5 || repository.active == nil || repository.active.ID != active.ID {
+		t.Fatalf("prepared/active = %+v / %+v", prepared, repository.active)
+	}
+}
+
+func TestConversationMemoryCandidatePreparationReturnsCoveringActiveSnapshot(t *testing.T) {
+	conversationID := uuid.New()
+	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)
+	repository := &activationMemoryRepositoryStub{
+		memoryRepositoryStub: &memoryRepositoryStub{latest: &active},
+		active:               &active,
+	}
+	compactorCalls := 0
+	service := newMemoryService(t, repository, compactorFunc(func(context.Context, conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		compactorCalls++
+		return conversationmemory.CompactionOutput{}, nil
+	}), time.Now().UTC(), 1)
+
+	prepared, err := service.PrepareActivationCandidate(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+		ActivationGate: acceptConversationMemoryActivation,
+	})
+	if err != nil {
+		t.Fatalf("PrepareActivationCandidate() error = %v", err)
+	}
+	if prepared.CurrentSnapshot == nil || prepared.CurrentSnapshot.ID != active.ID ||
+		prepared.CandidateSnapshot != nil || prepared.ExpectedActiveSnapshotID != nil || compactorCalls != 0 {
+		t.Fatalf("prepared/compactor calls = %+v / %d", prepared, compactorCalls)
+	}
+}
+
 func TestConversationMemoryGeneratesAnInitialShadowSnapshot(t *testing.T) {
 	conversationID := uuid.New()
 	repository := &memoryRepositoryStub{}

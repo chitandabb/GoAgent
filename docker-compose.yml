@@ -289,6 +289,29 @@ services:
     volumes:
       - ./config:/app/config:ro
 
+  memory-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: mesguard-memory-worker
+    restart: unless-stopped
+    command: ["./mesguard-memory-worker"]
+    environment:
+      TZ: Asia/Shanghai
+      MESGUARD_CONFIG_FILE: /app/config/mesguard.docker.toml
+      MESGUARD_POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
+      MESGUARD_RABBITMQ_URL: "amqp://${MESGUARD_RABBITMQ_USER:-mesguard}:${MESGUARD_RABBITMQ_PASSWORD:-mesguard_dev_password}@rabbitmq:5672/"
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+
 volumes:
   mesguard_postgres-data:
   mesguard_sqlserver-data:

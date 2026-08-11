@@ -11,6 +11,8 @@ import (
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
+	"github.com/chitandabb/GoAgent/internal/conversationmemoryworker"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/google/uuid"
@@ -20,7 +22,14 @@ import (
 // ConversationRepository persists conversation facts and their structured references.
 // A conversation is scoped by user_id; task lifecycle remains owned by diagnosis_tasks.
 type ConversationRepository struct {
-	db *gorm.DB
+	db                   *gorm.DB
+	asyncMemoryJobs      bool
+	memoryJobMaxAttempts int
+}
+
+type ConversationRepositoryConfig struct {
+	AsyncMemoryJobsEnabled bool
+	MemoryJobMaxAttempts   int
 }
 
 var _ conversation.Repository = (*ConversationRepository)(nil)
@@ -28,6 +37,19 @@ var _ conversation.AsyncRepository = (*ConversationRepository)(nil)
 
 func NewConversationRepository(db *gorm.DB) *ConversationRepository {
 	return &ConversationRepository{db: db}
+}
+
+func NewConversationRepositoryWithConfig(
+	db *gorm.DB,
+	config ConversationRepositoryConfig,
+) (*ConversationRepository, error) {
+	if config.AsyncMemoryJobsEnabled && (config.MemoryJobMaxAttempts < 1 || config.MemoryJobMaxAttempts > 10) {
+		return nil, errors.New("conversation memory job max attempts must be between 1 and 10")
+	}
+	return &ConversationRepository{
+		db: db, asyncMemoryJobs: config.AsyncMemoryJobsEnabled,
+		memoryJobMaxAttempts: config.MemoryJobMaxAttempts,
+	}, nil
 }
 
 func (r *ConversationRepository) Create(
@@ -872,6 +894,14 @@ WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expire
 		}, completedAt); err != nil {
 			return err
 		}
+		if r.shouldScheduleAsyncMemory(response.RunObservation.PromptManifest) {
+			if err := scheduleConversationMemoryJob(
+				tx, turnID, turn.ConversationID, assistantMessage.Seq,
+				r.memoryJobMaxAttempts, completedAt,
+			); err != nil {
+				return err
+			}
+		}
 		result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
 		return nil
 	})
@@ -879,6 +909,58 @@ WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expire
 		return conversation.ConversationTurn{}, TranslateError(err)
 	}
 	return result, nil
+}
+
+func (r *ConversationRepository) shouldScheduleAsyncMemory(manifest *contextgovernance.PromptManifest) bool {
+	return r != nil && r.asyncMemoryJobs && manifest.RequestsAsyncCompaction()
+}
+
+func scheduleConversationMemoryJob(
+	tx *gorm.DB,
+	sourceTurnID, conversationID uuid.UUID,
+	requestedThroughSeq int64,
+	maxAttempts int,
+	createdAt time.Time,
+) error {
+	if tx == nil || sourceTurnID == uuid.Nil || conversationID == uuid.Nil || requestedThroughSeq < 1 ||
+		maxAttempts < 1 || maxAttempts > 10 || createdAt.IsZero() {
+		return conversation.ErrInvalidMessage
+	}
+	jobID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate conversation memory job id: %w", err)
+	}
+	outboxID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate conversation memory outbox id: %w", err)
+	}
+	createdAt = createdAt.UTC()
+	var inserted struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	query := tx.Raw(`
+INSERT INTO conversation_memory_jobs (
+    id, conversation_id, source_turn_id, requested_through_seq, base_snapshot_id,
+    status, attempt_count, max_attempts, fencing_token, available_at, created_at, updated_at
+)
+VALUES (
+    ?, ?, ?, ?,
+    (SELECT id FROM conversation_memory_snapshots WHERE conversation_id = ? AND status = ? LIMIT 1),
+    ?, 0, ?, 0, ?, ?, ?
+)
+ON CONFLICT (conversation_id, requested_through_seq) DO NOTHING
+RETURNING id`, jobID, conversationID, sourceTurnID, requestedThroughSeq,
+		conversationID, conversationmemory.SnapshotStatusActive, conversationmemoryworker.JobPending,
+		maxAttempts, createdAt, createdAt, createdAt).Scan(&inserted)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return nil
+	}
+	return insertConversationMemoryOutbox(
+		tx, outboxID, inserted.ID, conversationID, sourceTurnID, createdAt, createdAt,
+	)
 }
 
 func (r *ConversationRepository) FailTurnExecution(

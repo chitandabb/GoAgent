@@ -87,6 +87,14 @@ func (m *PromptManifest) FinalizeUsage(usage PromptActualUsage, runDurationMilli
 	}
 }
 
+// RequestsAsyncCompaction reports the durable scheduling fact produced by a
+// successful preflight. Hard compaction already refreshed the Active Snapshot
+// synchronously and therefore must not enqueue redundant async work.
+func (m *PromptManifest) RequestsAsyncCompaction() bool {
+	return m != nil && m.PreflightStatus == PreflightStatusSucceeded &&
+		m.SoftThresholdReached && !m.HardCompactionTriggered
+}
+
 func (m PromptManifest) Validate() error {
 	if m.SchemaVersion != 1 || !m.PreflightStatus.Valid() ||
 		!validMachineLabel(m.ModelProfile, 128) ||

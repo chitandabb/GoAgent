@@ -269,6 +269,29 @@ func integrationPromptManifest(summarySnapshotID uuid.UUID) *contextgovernance.P
 	return manifest
 }
 
+func integrationSoftPromptManifest() *contextgovernance.PromptManifest {
+	manifest := &contextgovernance.PromptManifest{
+		SchemaVersion: 1, PreflightStatus: contextgovernance.PreflightStatusSucceeded,
+		PromptIdentityAvailable: true, EstimateAvailable: true,
+		PromptEpochID:           contextgovernance.SHA256Hex("soft-epoch"),
+		StablePrefixFingerprint: contextgovernance.SHA256Hex("soft-prefix"),
+		ModelProfile:            "fixture-main", ModelProfileFingerprint: contextgovernance.SHA256Hex("soft-profile"),
+		SystemPromptVersion: "conversation-test-v1", SystemPromptFingerprint: contextgovernance.SHA256Hex("soft-system"),
+		ToolSchemaFingerprint:  contextgovernance.SHA256Hex("soft-tools"),
+		SkillPromptFingerprint: contextgovernance.SHA256Hex("soft-skill"),
+		SummaryFingerprint:     contextgovernance.SHA256Hex(""),
+		TailFromSeq:            1, TailThroughSeq: 1,
+		AvailableInputTokens: 100, EstimatedPromptTokens: 71, EstimatedUpperBoundTokens: 75,
+		ToolGrowthReserveTokens: 4, EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
+		SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+		SoftThresholdReached: true, PreflightDurationMicros: 50,
+	}
+	manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
+		Available: true, PromptTokens: 70, CachedTokens: 10, CompletionTokens: 5,
+	}, 50)
+	return manifest
+}
+
 func integrationFailedPromptManifest() *contextgovernance.PromptManifest {
 	manifest := &contextgovernance.PromptManifest{
 		SchemaVersion: 1, PreflightStatus: contextgovernance.PreflightStatusFailed,
@@ -315,7 +338,12 @@ VALUES (?, ?, 'Async Conversation Owner', 'integration-hash', 'admin', 'active',
 		userID, "async_conversation_owner_"+uuid.NewString()[:8]).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
-	repository := NewConversationRepository(tx)
+	repository, err := NewConversationRepositoryWithConfig(tx, ConversationRepositoryConfig{
+		AsyncMemoryJobsEnabled: true, MemoryJobMaxAttempts: 3,
+	})
+	if err != nil {
+		t.Fatalf("NewConversationRepositoryWithConfig(): %v", err)
+	}
 	current, err := repository.Create(ctx, userID, conversation.CreateInput{Title: "异步回合"}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("Create(): %v", err)
@@ -405,9 +433,9 @@ VALUES (?, ?, 'Async Conversation Owner', 'integration-hash', 'admin', 'active',
 				ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
 				Outcome: conversation.AgentRunAnswered,
 				Usage: conversation.AgentRunUsage{
-					ModelCalls: 1, PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25,
+					ModelCalls: 1, PromptTokens: 70, CompletionTokens: 5, TotalTokens: 75, CachedTokens: 10,
 				},
-				DurationMillis: 50,
+				DurationMillis: 50, PromptManifest: integrationSoftPromptManifest(),
 			},
 		}, reclaimAt.Add(2*time.Second),
 	)
@@ -424,6 +452,27 @@ VALUES (?, ?, 'Async Conversation Owner', 'integration-hash', 'admin', 'active',
 	}
 	if asyncObservationCount != 1 {
 		t.Fatalf("async observation count = %d, want 1", asyncObservationCount)
+	}
+	var memoryFacts struct {
+		JobID               uuid.UUID `gorm:"column:job_id"`
+		RequestedThroughSeq int64     `gorm:"column:requested_through_seq"`
+		Status              string    `gorm:"column:status"`
+		MaxAttempts         int       `gorm:"column:max_attempts"`
+		OutboxCount         int64     `gorm:"column:outbox_count"`
+		EventType           string    `gorm:"column:event_type"`
+	}
+	if err := tx.Raw(`
+SELECT job.id AS job_id, job.requested_through_seq, job.status, job.max_attempts,
+       (SELECT COUNT(*) FROM outbox_events outbox WHERE outbox.aggregate_id = job.id) AS outbox_count,
+       (SELECT event_type FROM outbox_events outbox WHERE outbox.aggregate_id = job.id LIMIT 1) AS event_type
+FROM conversation_memory_jobs job
+WHERE job.source_turn_id = ?`, accepted.TurnID).Scan(&memoryFacts).Error; err != nil {
+		t.Fatalf("load memory job facts: %v", err)
+	}
+	if memoryFacts.JobID == uuid.Nil || memoryFacts.RequestedThroughSeq != completed.AssistantMessage.Seq ||
+		memoryFacts.Status != "pending" || memoryFacts.MaxAttempts != 3 || memoryFacts.OutboxCount != 1 ||
+		memoryFacts.EventType != "conversation.memory.compact" {
+		t.Fatalf("memory job facts = %+v", memoryFacts)
 	}
 	completedReplay, err := repository.AcceptTurn(ctx, userID, input)
 	if err != nil {
