@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -47,5 +48,30 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				t.Fatalf("configured models.judge in %q is invalid: %v", path, err)
 			}
 		})
+	}
+}
+
+func TestConfigRejectsConversationMemoryOutputThatExceedsActiveSummaryBudget(t *testing.T) {
+	var cfg Config
+	path := filepath.Join("..", "..", "..", "config", "mesguard.toml")
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		t.Fatalf("DecodeFile(%q): %v", path, err)
+	}
+	profiles := make(map[string]ChatModelProfileConfig, len(cfg.Models.Chat.Profiles))
+	for name, profile := range cfg.Models.Chat.Profiles {
+		profiles[name] = profile
+	}
+	cfg.Models.Chat.Profiles = profiles
+	active := cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName]
+	active.ContextWindowTokens = 8192
+	active.MaxOutputTokens = 512
+	active.PromptSafetyMarginTokens = 256
+	active.PromptSafetyMarginRatio = 0
+	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = active
+	cfg.Agent.ContextMemory.ToolGrowthReserveTokens = 128
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "active profile Summary budget") {
+		t.Fatalf("Validate() error = %v, want active profile Summary budget rejection", err)
 	}
 }

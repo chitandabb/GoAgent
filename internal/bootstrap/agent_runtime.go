@@ -47,6 +47,13 @@ type agentRuntime struct {
 	webResearch               *webresearch.Service
 }
 
+type agentRuntimeRole uint8
+
+const (
+	agentRuntimeRoleConversation agentRuntimeRole = iota + 1
+	agentRuntimeRoleDiagnosis
+)
+
 type agentRuntimeBuilders struct {
 	conversationCreator    mesagent.DiagnosisTaskCreator
 	conversationTaskStatus mesagent.DiagnosisTaskStatusReader
@@ -108,6 +115,21 @@ func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
 
 func buildAgentRuntime(
 	ctx context.Context,
+	cfg config.Config,
+	externalCases mesagent.ExternalCaseGetter,
+	sqlServer *sql.DB,
+	postgresDB *gorm.DB,
+	log *zap.Logger,
+	builders agentRuntimeBuilders,
+) (*agentRuntime, error) {
+	return buildAgentRuntimeForRole(
+		ctx, agentRuntimeRoleConversation, cfg, externalCases, sqlServer, postgresDB, log, builders,
+	)
+}
+
+func buildAgentRuntimeForRole(
+	ctx context.Context,
+	role agentRuntimeRole,
 	cfg config.Config,
 	externalCases mesagent.ExternalCaseGetter,
 	sqlServer *sql.DB,
@@ -316,8 +338,9 @@ func buildAgentRuntime(
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
 		}
+		summaryTailEnabled := role == agentRuntimeRoleConversation && cfg.Agent.ContextMemory.SummaryTailEnabled
 		var conversationMemory mesagent.ConversationMemory
-		if cfg.Agent.ContextMemory.SummaryTailEnabled {
+		if summaryTailEnabled {
 			if builders.conversationMemory == nil {
 				_ = runtime.close()
 				return nil, errors.New("conversation memory builder is unavailable")
@@ -335,7 +358,7 @@ func buildAgentRuntime(
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
 			Enabled: true, Planner: planner, TailSelector: tailSelector,
 			ContinuousTailEnabled: cfg.Agent.ContextMemory.ContinuousTailEnabled,
-			SummaryTailEnabled:    cfg.Agent.ContextMemory.SummaryTailEnabled,
+			SummaryTailEnabled:    summaryTailEnabled,
 			Memory:                conversationMemory,
 			MemoryMaxRatio:        cfg.Agent.ContextMemory.MemoryMaxRatio,
 			SummaryMaxRatio:       cfg.Agent.ContextMemory.SummaryMaxRatio,

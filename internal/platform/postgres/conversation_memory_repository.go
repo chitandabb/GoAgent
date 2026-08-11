@@ -20,7 +20,7 @@ type ConversationMemoryRepository struct {
 	db *gorm.DB
 }
 
-var _ conversationmemory.Repository = (*ConversationMemoryRepository)(nil)
+var _ conversationmemory.ActivationRepository = (*ConversationMemoryRepository)(nil)
 
 func NewConversationMemoryRepository(db *gorm.DB) *ConversationMemoryRepository {
 	return &ConversationMemoryRepository{db: db}

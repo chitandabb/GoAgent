@@ -616,7 +616,7 @@ FROM generate_series(1, 101) AS sequence`, longConversation.ID, reclaimAt.Add(4*
 			}},
 			DurationMillis: 321,
 		},
-		ErrorType: "agent_timeout",
+		ErrorType: conversation.AgentRunErrorTypeContextPreparationFailed,
 	}
 	failedAt := retryAt.Add(time.Second)
 	if err := repository.FailTurnExecution(
@@ -629,7 +629,7 @@ FROM generate_series(1, 101) AS sequence`, longConversation.ID, reclaimAt.Add(4*
 		t.Fatalf("GetRecordedAgentRun(failed): %v", err)
 	}
 	if failedRun.AssistantMessageID != nil || failedRun.Answer != "" || len(failedRun.Citations) != 0 ||
-		failedRun.CompletedAt != nil || failedRun.ErrorType != "agent_timeout" ||
+		failedRun.CompletedAt != nil || failedRun.ErrorType != conversation.AgentRunErrorTypeContextPreparationFailed ||
 		failedRun.Observation.Outcome != conversation.AgentRunFailed ||
 		failedRun.Observation.Usage.ModelCalls != 0 || len(failedRun.Observation.RetrievedSources) != 1 ||
 		failedRun.Observation.RetrievedSources[0].SourceRef != failureSourceRef ||
@@ -649,8 +649,18 @@ JOIN conversation_turn_run_observations observation ON observation.turn_id = tur
 WHERE turn.id = ?`, firstRetry.TurnID).Scan(&failureFacts).Error; err != nil {
 		t.Fatalf("load failed run facts: %v", err)
 	}
-	if failureFacts.FailureCode != "agent_timeout" || failureFacts.ErrorType != "agent_timeout" || failureFacts.SourceCount != 1 {
+	if failureFacts.FailureCode != conversation.AgentRunErrorTypeContextPreparationFailed ||
+		failureFacts.ErrorType != conversation.AgentRunErrorTypeContextPreparationFailed || failureFacts.SourceCount != 1 {
 		t.Fatalf("failure facts = %+v", failureFacts)
+	}
+	failedEvents, err := repository.ListTurnEvents(ctx, userID, retryConversation.ID, firstRetry.TurnID, 0, 20)
+	if err != nil {
+		t.Fatalf("ListTurnEvents(context preparation failure): %v", err)
+	}
+	terminal := failedEvents.Items[len(failedEvents.Items)-1]
+	if terminal.EventType != conversation.TurnEventFailed || terminal.Payload["retryable"] != true ||
+		terminal.Payload["failureCode"] != conversation.AgentRunErrorTypeContextPreparationFailed {
+		t.Fatalf("context preparation terminal event = %+v", terminal)
 	}
 	retryInput.StartedAt = failedAt.Add(time.Second)
 	retryInput.CorrelationID = uuid.New()

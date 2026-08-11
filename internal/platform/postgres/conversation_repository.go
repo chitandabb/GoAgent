@@ -933,7 +933,7 @@ WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expire
 		}
 		return appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventFailed, map[string]any{
 			"failureCode": failureCode,
-			"retryable":   false,
+			"retryable":   conversation.AgentRunFailureRetryable(failureCode),
 		}, failedAt)
 	})
 	if err != nil {

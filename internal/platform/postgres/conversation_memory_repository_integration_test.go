@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -162,6 +163,179 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 	}
 	if _, err := repository.Get(ctx, second.ID); !errors.Is(err, conversationmemory.ErrSnapshotNotFound) {
 		t.Fatalf("Get(after conversation delete) error = %v, want ErrSnapshotNotFound", err)
+	}
+}
+
+func TestConversationMemoryRepositoryConcurrentCASAgainstPostgres(t *testing.T) {
+	dsn := os.Getenv("MESGUARD_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("MESGUARD_TEST_POSTGRES_DSN is not configured")
+	}
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("open test postgres: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get test postgres sql db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	userID := uuid.New()
+	if err := db.WithContext(ctx).Exec(`
+INSERT INTO users (id, username, display_name, password_hash, role, status, must_change_password)
+VALUES (?, ?, 'Memory Race Owner', 'integration-hash', 'analyst', 'active', false)`,
+		userID, "memory_race_"+uuid.NewString()[:8]).Error; err != nil {
+		t.Fatalf("insert concurrent CAS user: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_ = db.WithContext(cleanupCtx).Exec(`DELETE FROM users WHERE id = ?`, userID).Error
+	})
+	conversationRepository := NewConversationRepository(db)
+	current, err := conversationRepository.Create(
+		ctx, userID, conversation.CreateInput{Title: "并发 CAS"}, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("create concurrent CAS conversation: %v", err)
+	}
+	repository := NewConversationMemoryRepository(db)
+
+	roots := concurrentSaveMemoryCandidates(t, ctx, repository, []conversationmemory.CandidateSnapshot{
+		integrationMemoryCandidate(t, current.ID, nil, 1, 3),
+		integrationMemoryCandidate(t, current.ID, nil, 1, 4),
+	})
+	versions := []int64{roots[0].Version, roots[1].Version}
+	slices.Sort(versions)
+	if !slices.Equal(versions, []int64{1, 2}) {
+		t.Fatalf("concurrent root versions = %v, want [1 2]", versions)
+	}
+	rootErrors := concurrentActivateMemoryCandidates(ctx, repository, current.ID, nil, roots)
+	assertOneMemoryActivationWinner(t, rootErrors)
+	rootActive, err := repository.Active(ctx, current.ID)
+	if err != nil {
+		t.Fatalf("Active() after concurrent root activation: %v", err)
+	}
+	assertSingleActiveMemorySnapshot(t, db, current.ID, rootActive.ID)
+
+	successors := concurrentSaveMemoryCandidates(t, ctx, repository, []conversationmemory.CandidateSnapshot{
+		integrationMemoryCandidate(t, current.ID, &rootActive.ID, 1, rootActive.ThroughSeq+1),
+		integrationMemoryCandidate(t, current.ID, &rootActive.ID, 1, rootActive.ThroughSeq+2),
+	})
+	versions = []int64{successors[0].Version, successors[1].Version}
+	slices.Sort(versions)
+	if !slices.Equal(versions, []int64{3, 4}) {
+		t.Fatalf("concurrent successor versions = %v, want [3 4]", versions)
+	}
+	successorErrors := concurrentActivateMemoryCandidates(ctx, repository, current.ID, &rootActive.ID, successors)
+	assertOneMemoryActivationWinner(t, successorErrors)
+	successorActive, err := repository.Active(ctx, current.ID)
+	if err != nil {
+		t.Fatalf("Active() after concurrent successor activation: %v", err)
+	}
+	if successorActive.ID == rootActive.ID || successorActive.SupersedesSnapshotID == nil ||
+		*successorActive.SupersedesSnapshotID != rootActive.ID {
+		t.Fatalf("concurrent successor Active = %+v", successorActive)
+	}
+	assertSingleActiveMemorySnapshot(t, db, current.ID, successorActive.ID)
+}
+
+type concurrentMemorySaveResult struct {
+	snapshot conversationmemory.Snapshot
+	err      error
+}
+
+func concurrentSaveMemoryCandidates(
+	t *testing.T,
+	ctx context.Context,
+	repository *ConversationMemoryRepository,
+	candidates []conversationmemory.CandidateSnapshot,
+) []conversationmemory.Snapshot {
+	t.Helper()
+	start := make(chan struct{})
+	results := make(chan concurrentMemorySaveResult, len(candidates))
+	for _, candidate := range candidates {
+		candidate := candidate
+		go func() {
+			<-start
+			snapshot, err := repository.Save(ctx, candidate)
+			results <- concurrentMemorySaveResult{snapshot: snapshot, err: err}
+		}()
+	}
+	close(start)
+	snapshots := make([]conversationmemory.Snapshot, 0, len(candidates))
+	for range candidates {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("concurrent conversation memory Save failed: %v", result.err)
+		}
+		snapshots = append(snapshots, result.snapshot)
+	}
+	return snapshots
+}
+
+func concurrentActivateMemoryCandidates(
+	ctx context.Context,
+	repository *ConversationMemoryRepository,
+	conversationID uuid.UUID,
+	expectedActive *uuid.UUID,
+	candidates []conversationmemory.Snapshot,
+) []error {
+	start := make(chan struct{})
+	results := make(chan error, len(candidates))
+	for _, candidate := range candidates {
+		candidate := candidate
+		go func() {
+			<-start
+			_, err := repository.Activate(ctx, conversationmemory.ActivationRequest{
+				ConversationID: conversationID, CandidateSnapshotID: candidate.ID,
+				ExpectedActiveSnapshotID: expectedActive, ActivatedAt: time.Now().UTC(),
+			})
+			results <- err
+		}()
+	}
+	close(start)
+	errors := make([]error, 0, len(candidates))
+	for range candidates {
+		errors = append(errors, <-results)
+	}
+	return errors
+}
+
+func assertOneMemoryActivationWinner(t *testing.T, activationErrors []error) {
+	t.Helper()
+	winners, conflicts := 0, 0
+	for _, err := range activationErrors {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, conversationmemory.ErrSnapshotActivationConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent activation error = %v", err)
+		}
+	}
+	if winners != 1 || conflicts != len(activationErrors)-1 {
+		t.Fatalf("concurrent activation winners/conflicts = %d/%d", winners, conflicts)
+	}
+}
+
+func assertSingleActiveMemorySnapshot(t *testing.T, db *gorm.DB, conversationID, activeID uuid.UUID) {
+	t.Helper()
+	var facts struct {
+		Count int64 `gorm:"column:count"`
+	}
+	if err := db.Raw(`
+SELECT COUNT(*) AS count
+FROM conversation_memory_snapshots
+WHERE conversation_id = ? AND status = 'active'`, conversationID).Scan(&facts).Error; err != nil {
+		t.Fatalf("query Active snapshot count: %v", err)
+	}
+	if facts.Count != 1 {
+		t.Fatalf("Active snapshot facts = %+v, want count=1 id=%s", facts, activeID)
 	}
 }
 

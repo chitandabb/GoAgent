@@ -45,11 +45,23 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 		return pressure, pressureManifest, err
 	}
 	hardTriggered := pressureManifest.HardThresholdReached
+	if active == nil && !hardTriggered {
+		return pressure, pressureManifest, nil
+	}
+	refreshNeeded := hardTriggered
+	if active != nil && !hardTriggered {
+		coverageComplete, coverageErr := r.summaryTailCoverageComplete(ctx, request, *active)
+		if coverageErr != nil {
+			return pressure, pressureManifest, coverageErr
+		}
+		refreshNeeded = !coverageComplete
+	}
 	refreshFailed := false
-	if hardTriggered {
+	if refreshNeeded {
 		prepared, prepareErr := r.contextPreflight.Memory.PrepareActive(ctx, conversationmemory.PrepareActiveRequest{
 			ConversationID:    request.Conversation.ID,
 			CompletedMessages: completedConversationMessages(request.History, request.UserMessage),
+			ActivationGate:    conversationSummaryActivationGate{runner: r},
 		})
 		if prepareErr != nil {
 			if active == nil {
@@ -103,11 +115,16 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 			final.degradedReasons = append(final.degradedReasons, "summary_refresh_failed")
 		}
 		if summaryContent != "" {
-			final.messages = append([]*schema.Message{schema.SystemMessage(summaryContent)}, final.messages...)
+			final.messages = append([]*schema.Message{conversationSummaryPromptMessage(summaryContent)}, final.messages...)
 		}
 		manifest, err = r.buildConversationPromptManifest(ctx, tools, final)
 		if err != nil {
 			return final, manifest, err
+		}
+		if active != nil && final.tailFromSeq > active.ThroughSeq+1 {
+			final.degradedReasons = append(final.degradedReasons, "summary_tail_coverage_gap")
+			manifest, _ = r.buildConversationPromptManifest(ctx, tools, final)
+			return final, manifest, ErrConversationContextPreparationFailed
 		}
 		if !manifest.ExceedsHardWindow {
 			return final, manifest, nil
@@ -129,6 +146,48 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 		return final, manifest, ErrConversationContextPreparationFailed
 	}
 	return final, manifest, nil
+}
+
+func (r *ConversationRunner) summaryTailCoverageComplete(
+	ctx context.Context,
+	request conversation.AgentRequest,
+	active conversationmemory.Snapshot,
+) (bool, error) {
+	summaryContent, _, _, err := conversationSummaryProjection(&active)
+	if err != nil {
+		return false, err
+	}
+	tailBudget, err := r.summaryTailTokenBudget(ctx, summaryContent)
+	if err != nil {
+		return false, err
+	}
+	projection, err := r.buildConversationPromptProjectionWithTailBudget(
+		ctx, request.History, request.UserMessage, tailBudget,
+	)
+	if err != nil {
+		return false, err
+	}
+	return projection.tailFromSeq <= active.ThroughSeq+1, nil
+}
+
+type conversationSummaryActivationGate struct {
+	runner *ConversationRunner
+}
+
+func (g conversationSummaryActivationGate) ValidateForActivation(
+	ctx context.Context,
+	snapshot conversationmemory.Snapshot,
+) error {
+	if g.runner == nil || (snapshot.Status != conversationmemory.SnapshotStatusCandidate &&
+		snapshot.Status != conversationmemory.SnapshotStatusActive) {
+		return ErrConversationContextPreparationFailed
+	}
+	content, _, _, err := renderConversationSummary(&snapshot)
+	if err != nil {
+		return err
+	}
+	_, err = g.runner.summaryTailTokenBudget(ctx, content)
+	return err
 }
 
 func (r *ConversationRunner) summaryTailTokenBudget(ctx context.Context, summaryContent string) (int, error) {
@@ -191,7 +250,7 @@ func applyConversationSummary(projection *conversationPromptProjection, snapshot
 	projection.summaryFingerprint = fingerprint
 	projection.summarySnapshotID = snapshotID
 	if content != "" {
-		projection.messages = append([]*schema.Message{schema.SystemMessage(content)}, projection.messages...)
+		projection.messages = append([]*schema.Message{conversationSummaryPromptMessage(content)}, projection.messages...)
 	}
 	return nil
 }
@@ -203,6 +262,13 @@ func conversationSummaryProjection(snapshot *conversationmemory.Snapshot) (strin
 	if snapshot.Status != conversationmemory.SnapshotStatusActive || snapshot.Validate() != nil {
 		return "", "", "", ErrConversationContextPreparationFailed
 	}
+	return renderConversationSummary(snapshot)
+}
+
+func renderConversationSummary(snapshot *conversationmemory.Snapshot) (string, string, string, error) {
+	if snapshot == nil || snapshot.Validate() != nil {
+		return "", "", "", ErrConversationContextPreparationFailed
+	}
 	payload, err := json.Marshal(snapshot.Payload)
 	if err != nil {
 		return "", "", "", fmt.Errorf("encode active conversation Summary: %w", err)
@@ -211,7 +277,14 @@ func conversationSummaryProjection(snapshot *conversationmemory.Snapshot) (strin
 		"<conversation_memory snapshot_id=%q version=%q through_seq=%q>\n%s\n</conversation_memory>",
 		snapshot.ID.String(), fmt.Sprint(snapshot.Version), fmt.Sprint(snapshot.ThroughSeq), payload,
 	)
-	return content, contextgovernance.SHA256Hex(content), snapshot.ID.String(), nil
+	return content, contextgovernance.SHA256Hex(string(schema.User) + "\x00" + content), snapshot.ID.String(), nil
+}
+
+// conversationSummaryPromptMessage deliberately keeps model-generated memory
+// at the same trust level as conversation input. The stable System instruction
+// remains the only authority-bearing prompt segment.
+func conversationSummaryPromptMessage(content string) *schema.Message {
+	return schema.UserMessage(content)
 }
 
 func conversationMessagesAfter(messages []conversation.Message, throughSeq int64) []conversation.Message {

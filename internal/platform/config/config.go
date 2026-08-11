@@ -1526,6 +1526,18 @@ func (c Config) Validate() error {
 		if memoryProfile.MaxOutputTokens*20 > memoryProfile.ContextWindowTokens {
 			return errors.New("conversation memory profile maxOutputTokens must not exceed 5 percent of its context window")
 		}
+		if c.Agent.ContextMemory.SummaryTailEnabled {
+			activeProfile, err := c.Models.Chat.ActiveProfile()
+			if err != nil {
+				return err
+			}
+			maxSummaryTokens := int(math.Floor(
+				float64(activeProfile.ContextWindowTokens) * c.Agent.ContextMemory.SummaryMaxRatio,
+			))
+			if memoryProfile.MaxOutputTokens > maxSummaryTokens {
+				return errors.New("conversation memory profile maxOutputTokens exceeds active profile Summary budget")
+			}
+		}
 	}
 	if c.Agent.ContextMemory.ShadowPreflightEnabled && c.Models.Chat.Enabled {
 		profile, err := c.Models.Chat.ActiveProfile()
