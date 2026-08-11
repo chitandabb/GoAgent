@@ -84,7 +84,7 @@ func TestSourceRecoveryReadsOnlyTheActiveEntrySourcesForTheCurrentActor(t *testi
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	if len(result.Messages) != 1 || result.Messages[0].MessageID != messages[2].ID ||
+	if len(result.Messages) != 1 || result.Messages[0].MessageRef != "conversation_message:"+messages[2].ID.String() ||
 		result.Messages[0].Seq != 3 || result.Messages[0].Role != conversation.MessageRoleUser ||
 		result.Messages[0].Content != messages[2].Content || !result.Messages[0].ContentComplete ||
 		result.Messages[0].ContentOffsetRunes != 0 || result.HasMore || result.ContinuationCursor != "" {

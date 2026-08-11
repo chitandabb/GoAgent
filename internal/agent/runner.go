@@ -636,11 +636,13 @@ func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int
 		data = encoded
 	}
 	type envelope struct {
-		EvidenceRef string             `json:"evidenceRef"`
-		SourceType  EvidenceSourceType `json:"sourceType"`
-		CollectedAt time.Time          `json:"collectedAt"`
-		Truncated   bool               `json:"truncated"`
-		Data        json.RawMessage    `json:"data"`
+		EvidenceRef  string                     `json:"evidenceRef"`
+		SourceType   EvidenceSourceType         `json:"sourceType"`
+		CollectedAt  time.Time                  `json:"collectedAt"`
+		Truncated    bool                       `json:"truncated"`
+		Data         json.RawMessage            `json:"data,omitempty"`
+		Preview      string                     `json:"preview,omitempty"`
+		Continuation map[string]json.RawMessage `json:"continuation,omitempty"`
 	}
 	value := envelope{
 		EvidenceRef: item.SourceRef, SourceType: item.SourceType,
@@ -651,7 +653,20 @@ func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int
 		return string(encoded), false
 	}
 	value.Truncated = true
-	value.Data = json.RawMessage(`"[evidence snapshot omitted by result budget]"`)
+	value.Data = nil
+	value.Continuation = extractEvidenceContinuation(snapshot, maxBytes/3)
+	value.Preview = snapshot
+	for len(value.Preview) > 0 {
+		encoded, err = json.Marshal(value)
+		if err == nil && len(encoded) <= maxBytes {
+			return string(encoded), true
+		}
+		nextLength := len(value.Preview) * 3 / 4
+		if nextLength >= len(value.Preview) {
+			nextLength = len(value.Preview) - 1
+		}
+		value.Preview = strings.ToValidUTF8(value.Preview[:max(nextLength, 0)], "?")
+	}
 	encoded, err = json.Marshal(value)
 	if err == nil && len(encoded) <= maxBytes {
 		return string(encoded), true
@@ -659,6 +674,39 @@ func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int
 	// The configured minimum is large enough for this fallback. Keep a final
 	// deterministic string in case a caller supplies an unusually small limit.
 	return fmt.Sprintf(`{"evidenceRef":%q,"sourceType":%q,"truncated":true}`, item.SourceRef, item.SourceType), true
+}
+
+func extractEvidenceContinuation(snapshot string, maxBytes int) map[string]json.RawMessage {
+	if maxBytes < 1 {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal([]byte(snapshot), &payload) != nil {
+		return nil
+	}
+	allowed := []string{
+		"continuation", "continuationCursor", "continuationToken", "cursor", "hasMore",
+		"nextCursor", "nextOffset", "offset", "contentOffsetRunes", "contentEndRunes",
+		"contentComplete", "windowComplete", "truncated",
+	}
+	result := make(map[string]json.RawMessage)
+	used := 0
+	for _, key := range allowed {
+		value, ok := payload[key]
+		if !ok || !json.Valid(value) || len(value) > 2048 {
+			continue
+		}
+		cost := len(key) + len(value) + 6
+		if used+cost > maxBytes {
+			continue
+		}
+		result[key] = append(json.RawMessage(nil), value...)
+		used += cost
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func toolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {

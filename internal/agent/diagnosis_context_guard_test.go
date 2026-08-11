@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -201,6 +202,39 @@ func TestDiagnosisContextGuardBudgetsCaseToolsEvidenceAndReportOutput(t *testing
 		!slices.Contains(secondKinds, contextgovernance.PromptSegmentToolResult) ||
 		!slices.Contains(secondKinds, contextgovernance.PromptSegmentEvidenceIndex) {
 		t.Fatalf("second prompt kinds = %v", secondKinds)
+	}
+}
+
+func TestDiagnosisContextGuardPrefersActualRuntimeSystemInstruction(t *testing.T) {
+	planner := &diagnosisGuardPlanner{plans: []contextgovernance.TokenBudgetPlan{{
+		AvailableInputTokens: 176, EstimatedUpperBoundTokens: 80, ReservedTokens: 16,
+		EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
+	}}}
+	guarded, _ := newDiagnosisContextGuardModel(
+		&diagnosisGuardModel{}, diagnosisContextPreflightForTest(planner),
+		diagnosisPromptSeed{SystemInstruction: "stale seed", PreloadedSkill: "stale skill", CaseSnapshot: `{}`},
+	)
+	if _, err := guarded.Generate(context.Background(), []*schema.Message{
+		schema.SystemMessage("runtime system with middleware additions"), schema.UserMessage("diagnose"),
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	requests := planner.requestSnapshot()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d", len(requests))
+	}
+	var systemContent string
+	for _, segment := range requests[0].Prompt.Segments {
+		if segment.Kind == contextgovernance.PromptSegmentSystem {
+			systemContent = segment.Content
+		}
+		if segment.Kind == contextgovernance.PromptSegmentPreloadedSkill {
+			t.Fatalf("runtime system was double-counted with seed Skill: %+v", requests[0].Prompt.Segments)
+		}
+	}
+	if !strings.Contains(systemContent, "runtime system with middleware additions") ||
+		strings.Contains(systemContent, "stale seed") {
+		t.Fatalf("system segment = %q", systemContent)
 	}
 }
 

@@ -309,7 +309,7 @@ func TestToolTraceMiddlewareCapturesEvidenceReferenceAndHash(t *testing.T) {
 func TestToolTraceMiddlewarePersistsCompleteEvidenceAndBoundsModelResult(t *testing.T) {
 	trace := &executionTrace{}
 	ctx := withExecutionTrace(context.Background(), trace)
-	raw := fmt.Sprintf(`{"returnedRows":1,"truncated":false,"rows":[[%q]]}`, strings.Repeat("x", 2048))
+	raw := fmt.Sprintf(`{"returnedRows":1,"truncated":false,"hasMore":true,"nextCursor":"cursor-2","rows":[[%q]]}`, strings.Repeat("x", 2048))
 	output, err := newToolTraceMiddleware(1024).Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		return &compose.ToolOutput{Result: raw}, nil
 	})(ctx, &compose.ToolInput{Name: ToolExecuteReadonlyQuery, Arguments: `{}`})
@@ -325,7 +325,10 @@ func TestToolTraceMiddlewarePersistsCompleteEvidenceAndBoundsModelResult(t *test
 		t.Fatalf("Tool execution = %+v", entries)
 	}
 	if len(output.Result) > 1024 || !strings.Contains(output.Result, `"evidenceRef"`) ||
-		!strings.Contains(output.Result, `"truncated":true`) {
+		!strings.Contains(output.Result, `"truncated":true`) ||
+		!strings.Contains(output.Result, `"preview"`) ||
+		!strings.Contains(output.Result, `"nextCursor":"cursor-2"`) ||
+		!strings.Contains(output.Result, `"hasMore":true`) {
 		t.Fatalf("model-visible result = %s", output.Result)
 	}
 	if got := trace.toolResultTruncatedSnapshot(); got != 1 {

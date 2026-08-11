@@ -77,21 +77,7 @@ func (c DiagnosisContextPreflightConfig) plan(
 	})
 }
 
-// DiagnosisContextObservation is the bounded, report-safe runtime view of
-// preflight decisions. HighWaterTokens is the largest conservative upper bound.
-type DiagnosisContextObservation struct {
-	PreflightCalls                int                                `json:"preflightCalls"`
-	PreflightFailureCount         int                                `json:"preflightFailureCount"`
-	HighWaterTokens               int                                `json:"highWaterTokens"`
-	AvailableInputTokens          int                                `json:"availableInputTokens"`
-	HighWaterRatio                float64                            `json:"highWaterRatio"`
-	ToolResultTruncatedCount      int                                `json:"toolResultTruncatedCount"`
-	HardWindowBlockedCount        int                                `json:"hardWindowBlockedCount"`
-	LastEstimatedUpperBoundTokens int                                `json:"lastEstimatedUpperBoundTokens"`
-	ReportOutputReserveTokens     int                                `json:"reportOutputReserveTokens"`
-	ToolGrowthReserveTokens       int                                `json:"toolGrowthReserveTokens"`
-	EstimationMethod              contextgovernance.EstimationMethod `json:"estimationMethod,omitempty"`
-}
+type DiagnosisContextObservation = contextgovernance.DiagnosisContextObservation
 
 type diagnosisContextObservationRecorder struct {
 	mu    sync.Mutex
@@ -236,14 +222,18 @@ func (m *diagnosisContextGuardModel) guard(
 		m.observation.recordFailure()
 		return fmt.Errorf("%w: encode Tool contract: %v", ErrDiagnosisContextPreparationFailed, err)
 	}
-	history, toolResults, err := encodeDiagnosisRuntimeMessages(input)
+	runtimeSystem, history, toolResults, err := encodeDiagnosisRuntimeMessages(input)
 	if err != nil {
 		m.observation.recordFailure()
 		return fmt.Errorf("%w: encode runtime prompt: %v", ErrDiagnosisContextPreparationFailed, err)
 	}
 	segments := make([]contextgovernance.PromptSegment, 0, 8)
-	appendDiagnosisPromptSegment(&segments, contextgovernance.PromptSegmentSystem, m.seed.SystemInstruction)
-	appendDiagnosisPromptSegment(&segments, contextgovernance.PromptSegmentPreloadedSkill, m.seed.PreloadedSkill)
+	if runtimeSystem != "" {
+		appendDiagnosisPromptSegment(&segments, contextgovernance.PromptSegmentSystem, runtimeSystem)
+	} else {
+		appendDiagnosisPromptSegment(&segments, contextgovernance.PromptSegmentSystem, m.seed.SystemInstruction)
+		appendDiagnosisPromptSegment(&segments, contextgovernance.PromptSegmentPreloadedSkill, m.seed.PreloadedSkill)
+	}
 	segments = append(segments, contextgovernance.PromptSegment{
 		Kind: contextgovernance.PromptSegmentToolSchema, Content: tools,
 	})
@@ -286,38 +276,48 @@ func appendDiagnosisPromptSegment(
 	*segments = append(*segments, contextgovernance.PromptSegment{Kind: kind, Content: content})
 }
 
-func encodeDiagnosisRuntimeMessages(input []*schema.Message) (history, toolResults string, err error) {
+func encodeDiagnosisRuntimeMessages(input []*schema.Message) (
+	system, history, toolResults string,
+	err error,
+) {
 	if len(input) == 0 {
-		return "", "", errors.New("runtime prompt is empty")
+		return "", "", "", errors.New("runtime prompt is empty")
 	}
+	systemMessages := make([]*schema.Message, 0, 1)
 	historyMessages := make([]*schema.Message, 0, len(input))
 	toolMessages := make([]*schema.Message, 0, len(input))
 	for _, message := range input {
 		if message == nil {
-			return "", "", errors.New("runtime prompt contains a nil message")
+			return "", "", "", errors.New("runtime prompt contains a nil message")
 		}
 		switch message.Role {
 		case schema.System:
-			// The exact Runner instruction is budgeted as a stable seed.
+			systemMessages = append(systemMessages, message)
 		case schema.Tool:
 			toolMessages = append(toolMessages, message)
 		default:
 			historyMessages = append(historyMessages, message)
 		}
 	}
+	if len(systemMessages) > 0 {
+		system, err = encodeConversationRuntimePrompt(systemMessages)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
 	if len(historyMessages) > 0 {
 		history, err = encodeConversationRuntimePrompt(historyMessages)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
 	if len(toolMessages) > 0 {
 		toolResults, err = encodeConversationRuntimePrompt(toolMessages)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
-	return history, toolResults, nil
+	return system, history, toolResults, nil
 }
 
 func (t *executionTrace) evidenceIndexPrompt() string {

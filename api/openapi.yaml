@@ -1956,6 +1956,24 @@ components:
         totalTokens: {type: integer, minimum: 0}
         cachedTokens: {type: integer, minimum: 0}
         reasoningTokens: {type: integer, minimum: 0}
+    DiagnosisContextObservation:
+      type: object
+      additionalProperties: false
+      required: [preflightCalls, preflightFailureCount, highWaterTokens, availableInputTokens, highWaterRatio, toolResultTruncatedCount, hardWindowBlockedCount, lastEstimatedUpperBoundTokens, reportOutputReserveTokens, toolGrowthReserveTokens]
+      properties:
+        preflightCalls: {type: integer, minimum: 0}
+        preflightFailureCount: {type: integer, minimum: 0}
+        highWaterTokens: {type: integer, minimum: 0}
+        availableInputTokens: {type: integer, minimum: 0}
+        highWaterRatio: {type: number, minimum: 0}
+        toolResultTruncatedCount: {type: integer, minimum: 0}
+        hardWindowBlockedCount: {type: integer, minimum: 0}
+        lastEstimatedUpperBoundTokens: {type: integer, minimum: 0}
+        reportOutputReserveTokens: {type: integer, minimum: 0}
+        toolGrowthReserveTokens: {type: integer, minimum: 0}
+        estimationMethod:
+          type: string
+          enum: [local_exact, local_calibrated, conservative_heuristic]
     DiagnosisReportEvidence:
       type: object
       additionalProperties: false
@@ -1985,7 +2003,7 @@ components:
     DiagnosisReport:
       type: object
       additionalProperties: false
-      required: [reportId, taskId, conclusionStatus, riskLevel, conclusion, businessSummary, technicalSummary, confidence, limitations, partial, missingEvidence, usage, agentRuns, selectedSkill, executedSkills, agenticRetrievalAttempted, agenticRetrievalAddedEvidence, agenticRetrievalStopReason, reportSchemaVersion, modelProvider, modelId, promptVersion, evidence, generatedAt, createdAt, updatedAt]
+      required: [reportId, taskId, conclusionStatus, riskLevel, conclusion, businessSummary, technicalSummary, confidence, limitations, partial, missingEvidence, usage, contextObservation, agentRuns, selectedSkill, executedSkills, agenticRetrievalAttempted, agenticRetrievalAddedEvidence, agenticRetrievalStopReason, reportSchemaVersion, modelProvider, modelId, promptVersion, evidence, generatedAt, createdAt, updatedAt]
       properties:
         reportId: {type: string, format: uuid}
         taskId: {type: string, format: uuid}
@@ -2010,6 +2028,8 @@ components:
           items: {type: string}
         usage:
           $ref: "#/components/schemas/DiagnosisReportUsage"
+        contextObservation:
+          $ref: "#/components/schemas/DiagnosisContextObservation"
         agentRuns: {type: integer, minimum: 0}
         selectedSkill: {type: string}
         executedSkills:
