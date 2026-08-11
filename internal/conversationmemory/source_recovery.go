@@ -80,7 +80,6 @@ const (
 )
 
 type SourceMessage struct {
-	MessageID          uuid.UUID                `json:"messageId"`
 	MessageRef         string                   `json:"messageRef"`
 	Seq                int64                    `json:"seq"`
 	Role               conversation.MessageRole `json:"role"`
@@ -619,8 +618,8 @@ func sourceWindowProjection(
 ) SourceMessage {
 	totalRunes := len([]rune(message.Content))
 	return SourceMessage{
-		MessageID: message.ID, MessageRef: "conversation_message:" + message.ID.String(),
-		Seq: message.Seq, Role: message.Role, Content: string(content),
+		MessageRef: "conversation_message:" + message.ID.String(),
+		Seq:        message.Seq, Role: message.Role, Content: string(content),
 		ContentOffsetRunes: offset, ContentEndRunes: offset + len(content),
 		MessageTotalRunes: totalRunes,
 		ContentComplete:   windowComplete && window.StartRunes == 0 && window.EndRunes == totalRunes,
@@ -835,8 +834,8 @@ func sourceMessageProjection(
 	complete bool,
 ) SourceMessage {
 	return SourceMessage{
-		MessageID: message.ID, MessageRef: "conversation_message:" + message.ID.String(),
-		Seq: message.Seq, Role: message.Role, Content: string(content),
+		MessageRef: "conversation_message:" + message.ID.String(),
+		Seq:        message.Seq, Role: message.Role, Content: string(content),
 		ContentOffsetRunes: offset, ContentEndRunes: offset + len(content),
 		MessageTotalRunes: len([]rune(message.Content)), ContentComplete: complete,
 		WindowComplete: complete,

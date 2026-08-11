@@ -68,20 +68,6 @@ type diagnosisReportUsageResponse struct {
 	ReasoningTokens  int `json:"reasoningTokens"`
 }
 
-type diagnosisContextObservationResponse struct {
-	PreflightCalls                int     `json:"preflightCalls"`
-	PreflightFailureCount         int     `json:"preflightFailureCount"`
-	HighWaterTokens               int     `json:"highWaterTokens"`
-	AvailableInputTokens          int     `json:"availableInputTokens"`
-	HighWaterRatio                float64 `json:"highWaterRatio"`
-	ToolResultTruncatedCount      int     `json:"toolResultTruncatedCount"`
-	HardWindowBlockedCount        int     `json:"hardWindowBlockedCount"`
-	LastEstimatedUpperBoundTokens int     `json:"lastEstimatedUpperBoundTokens"`
-	ReportOutputReserveTokens     int     `json:"reportOutputReserveTokens"`
-	ToolGrowthReserveTokens       int     `json:"toolGrowthReserveTokens"`
-	EstimationMethod              string  `json:"estimationMethod,omitempty"`
-}
-
 type diagnosisReportEvidenceResponse struct {
 	EvidenceID      string `json:"evidenceId"`
 	ClaimKey        string `json:"claimKey"`
@@ -99,34 +85,34 @@ type diagnosisReportEvidenceResponse struct {
 }
 
 type diagnosisReportResponse struct {
-	ReportID                      string                              `json:"reportId"`
-	TaskID                        string                              `json:"taskId"`
-	ConclusionStatus              string                              `json:"conclusionStatus"`
-	RiskLevel                     string                              `json:"riskLevel"`
-	Conclusion                    string                              `json:"conclusion"`
-	BusinessSummary               string                              `json:"businessSummary"`
-	TechnicalSummary              string                              `json:"technicalSummary"`
-	Confidence                    string                              `json:"confidence"`
-	Limitations                   []string                            `json:"limitations"`
-	Partial                       bool                                `json:"partial"`
-	MissingEvidence               []string                            `json:"missingEvidence"`
-	Usage                         diagnosisReportUsageResponse        `json:"usage"`
-	ContextObservation            diagnosisContextObservationResponse `json:"contextObservation"`
-	AgentRuns                     int                                 `json:"agentRuns"`
-	SelectedSkill                 string                              `json:"selectedSkill"`
-	ExecutedSkills                []string                            `json:"executedSkills"`
-	StopReason                    string                              `json:"stopReason,omitempty"`
-	AgenticRetrievalAttempted     bool                                `json:"agenticRetrievalAttempted"`
-	AgenticRetrievalAddedEvidence bool                                `json:"agenticRetrievalAddedEvidence"`
-	AgenticRetrievalStopReason    string                              `json:"agenticRetrievalStopReason"`
-	ReportSchemaVersion           int                                 `json:"reportSchemaVersion"`
-	ModelProvider                 string                              `json:"modelProvider"`
-	ModelID                       string                              `json:"modelId"`
-	PromptVersion                 string                              `json:"promptVersion"`
-	Evidence                      []diagnosisReportEvidenceResponse   `json:"evidence"`
-	GeneratedAt                   string                              `json:"generatedAt"`
-	CreatedAt                     string                              `json:"createdAt"`
-	UpdatedAt                     string                              `json:"updatedAt"`
+	ReportID                      string                             `json:"reportId"`
+	TaskID                        string                             `json:"taskId"`
+	ConclusionStatus              string                             `json:"conclusionStatus"`
+	RiskLevel                     string                             `json:"riskLevel"`
+	Conclusion                    string                             `json:"conclusion"`
+	BusinessSummary               string                             `json:"businessSummary"`
+	TechnicalSummary              string                             `json:"technicalSummary"`
+	Confidence                    string                             `json:"confidence"`
+	Limitations                   []string                           `json:"limitations"`
+	Partial                       bool                               `json:"partial"`
+	MissingEvidence               []string                           `json:"missingEvidence"`
+	Usage                         diagnosisReportUsageResponse       `json:"usage"`
+	ContextObservation            diagnosis.ReportContextObservation `json:"contextObservation"`
+	AgentRuns                     int                                `json:"agentRuns"`
+	SelectedSkill                 string                             `json:"selectedSkill"`
+	ExecutedSkills                []string                           `json:"executedSkills"`
+	StopReason                    string                             `json:"stopReason,omitempty"`
+	AgenticRetrievalAttempted     bool                               `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                               `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string                             `json:"agenticRetrievalStopReason"`
+	ReportSchemaVersion           int                                `json:"reportSchemaVersion"`
+	ModelProvider                 string                             `json:"modelProvider"`
+	ModelID                       string                             `json:"modelId"`
+	PromptVersion                 string                             `json:"promptVersion"`
+	Evidence                      []diagnosisReportEvidenceResponse  `json:"evidence"`
+	GeneratedAt                   string                             `json:"generatedAt"`
+	CreatedAt                     string                             `json:"createdAt"`
+	UpdatedAt                     string                             `json:"updatedAt"`
 }
 
 func diagnosisReportResponseFrom(report diagnosis.DiagnosisReport) diagnosisReportResponse {
@@ -153,20 +139,8 @@ func diagnosisReportResponseFrom(report diagnosis.DiagnosisReport) diagnosisRepo
 			CompletionTokens: report.Usage.CompletionTokens, TotalTokens: report.Usage.TotalTokens,
 			CachedTokens: report.Usage.CachedTokens, ReasoningTokens: report.Usage.ReasoningTokens,
 		},
-		ContextObservation: diagnosisContextObservationResponse{
-			PreflightCalls:                report.ContextObservation.PreflightCalls,
-			PreflightFailureCount:         report.ContextObservation.PreflightFailureCount,
-			HighWaterTokens:               report.ContextObservation.HighWaterTokens,
-			AvailableInputTokens:          report.ContextObservation.AvailableInputTokens,
-			HighWaterRatio:                report.ContextObservation.HighWaterRatio,
-			ToolResultTruncatedCount:      report.ContextObservation.ToolResultTruncatedCount,
-			HardWindowBlockedCount:        report.ContextObservation.HardWindowBlockedCount,
-			LastEstimatedUpperBoundTokens: report.ContextObservation.LastEstimatedUpperBoundTokens,
-			ReportOutputReserveTokens:     report.ContextObservation.ReportOutputReserveTokens,
-			ToolGrowthReserveTokens:       report.ContextObservation.ToolGrowthReserveTokens,
-			EstimationMethod:              report.ContextObservation.EstimationMethod,
-		},
-		AgentRuns: report.AgentRuns, SelectedSkill: report.SelectedSkill,
+		ContextObservation: report.ContextObservation,
+		AgentRuns:          report.AgentRuns, SelectedSkill: report.SelectedSkill,
 		ExecutedSkills: report.ExecutedSkills, StopReason: report.StopReason,
 		AgenticRetrievalAttempted:     report.AgenticRetrievalAttempted,
 		AgenticRetrievalAddedEvidence: report.AgenticRetrievalAddedEvidence,

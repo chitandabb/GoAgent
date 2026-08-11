@@ -74,8 +74,8 @@ func TestConversationMemorySourceToolInjectsCurrentConversationScope(t *testing.
 	userID, conversationID, messageID := uuid.New(), uuid.New(), uuid.New()
 	reader := &sourceRecoveryReaderStub{result: conversationmemory.SourceReadResult{
 		Messages: []conversationmemory.SourceMessage{{
-			MessageID: uuid.New(), MessageRef: "conversation_message:" + uuid.NewString(),
-			Seq: 4, Role: conversation.MessageRoleUser, Content: "原始错误日志",
+			MessageRef: "conversation_message:" + uuid.NewString(),
+			Seq:        4, Role: conversation.MessageRoleUser, Content: "原始错误日志",
 			ContentComplete: true,
 		}},
 	}}
@@ -103,6 +103,9 @@ func TestConversationMemorySourceToolInjectsCurrentConversationScope(t *testing.
 	}
 	if len(result.Messages) != 1 || result.Messages[0].Content != "原始错误日志" {
 		t.Fatalf("Tool result = %+v", result)
+	}
+	if strings.Contains(raw, `"messageId"`) {
+		t.Fatalf("Tool result exposed database message id: %s", raw)
 	}
 	info, err := current.Info(ctx)
 	if err != nil {
@@ -351,8 +354,8 @@ func TestConversationRunnerEnablesMemoryCapabilityAndLimitsSourceRecoveryCalls(t
 
 	reader := &sourceRecoveryReaderStub{result: conversationmemory.SourceReadResult{
 		Messages: []conversationmemory.SourceMessage{{
-			MessageID: uuid.New(), MessageRef: "conversation_message:" + uuid.NewString(),
-			Seq: 1, Role: conversation.MessageRoleUser, Content: "source", ContentComplete: true,
+			MessageRef: "conversation_message:" + uuid.NewString(),
+			Seq:        1, Role: conversation.MessageRoleUser, Content: "source", ContentComplete: true,
 		}},
 		HasMore: true, ContinuationAvailable: true, ContinuationCursor: "next-page",
 	}}
