@@ -21,6 +21,13 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ConversationCitationRepairPromptFile = "config/prompts/conversation-citation-repair.md"
 	configured.ConversationCitationRepairTimeoutMillis = 30000
 	configured.ConversationCitationRepairMaxOutputTokens = 768
+	configured.ContextMemory = ContextMemoryConfig{
+		ShadowPreflightEnabled:  true,
+		PreflightTimeoutMillis:  250,
+		SoftThresholdRatio:      0.70,
+		HardThresholdRatio:      0.85,
+		ToolGrowthReserveTokens: 8192,
+	}
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured budgets: %v", err)
 	}
@@ -46,6 +53,21 @@ func TestAgentConfigValidate(t *testing.T) {
 	missingPromptPath.ReportContractFile = ""
 	if err := missingPromptPath.Validate(); err == nil {
 		t.Fatal("Validate accepted empty reportContractFile")
+	}
+	invalidThresholds := configured
+	invalidThresholds.ContextMemory.HardThresholdRatio = 0.60
+	if err := invalidThresholds.Validate(); err == nil {
+		t.Fatal("Validate accepted hard threshold below soft threshold")
+	}
+	missingGrowthReserve := configured
+	missingGrowthReserve.ContextMemory.ToolGrowthReserveTokens = 0
+	if err := missingGrowthReserve.Validate(); err == nil {
+		t.Fatal("Validate accepted enabled shadow preflight without Tool growth reserve")
+	}
+	invalidPreflightTimeout := configured
+	invalidPreflightTimeout.ContextMemory.PreflightTimeoutMillis = 0
+	if err := invalidPreflightTimeout.Validate(); err == nil {
+		t.Fatal("Validate accepted enabled shadow preflight without a bounded timeout")
 	}
 }
 

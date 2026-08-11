@@ -343,26 +343,57 @@ func (c JudgeModelConfig) APIKey() (string, error) {
 
 // AgentConfig 声明 Skill/Prompt 文件位置、Prompt 发布标签和一次诊断的外层 Evidence Gate 总预算。
 type AgentConfig struct {
-	SkillsDirectory                           string `toml:"skillsDirectory"`
-	PromptVersion                             string `toml:"promptVersion"`
-	SystemPromptFile                          string `toml:"systemPromptFile"`
-	BaselinePromptFile                        string `toml:"baselinePromptFile"`
-	ReportContractFile                        string `toml:"reportContractFile"`
-	ConversationPromptVersion                 string `toml:"conversationPromptVersion"`
-	ConversationPromptFile                    string `toml:"conversationPromptFile"`
-	ConversationCitationRepairEnabled         bool   `toml:"conversationCitationRepairEnabled"`
-	ConversationCitationRepairPromptVersion   string `toml:"conversationCitationRepairPromptVersion"`
-	ConversationCitationRepairPromptFile      string `toml:"conversationCitationRepairPromptFile"`
-	ConversationCitationRepairTimeoutMillis   int    `toml:"conversationCitationRepairTimeoutMillis"`
-	ConversationCitationRepairMaxOutputTokens int    `toml:"conversationCitationRepairMaxOutputTokens"`
-	ConversationMaxIterations                 int    `toml:"conversationMaxIterations"`
-	ConversationMaxContextRunes               int    `toml:"conversationMaxContextRunes"`
-	ConversationTimeoutMillis                 int    `toml:"conversationTimeoutMillis"`
-	MaxAgentRuns                              int    `toml:"maxAgentRuns"`
-	MaxToolCalls                              int    `toml:"maxToolCalls"`
-	MaxEvidenceItems                          int    `toml:"maxEvidenceItems"`
-	MaxTotalTokens                            int    `toml:"maxTotalTokens"`
-	TimeoutMillis                             int    `toml:"timeoutMillis"`
+	SkillsDirectory                           string              `toml:"skillsDirectory"`
+	PromptVersion                             string              `toml:"promptVersion"`
+	SystemPromptFile                          string              `toml:"systemPromptFile"`
+	BaselinePromptFile                        string              `toml:"baselinePromptFile"`
+	ReportContractFile                        string              `toml:"reportContractFile"`
+	ConversationPromptVersion                 string              `toml:"conversationPromptVersion"`
+	ConversationPromptFile                    string              `toml:"conversationPromptFile"`
+	ConversationCitationRepairEnabled         bool                `toml:"conversationCitationRepairEnabled"`
+	ConversationCitationRepairPromptVersion   string              `toml:"conversationCitationRepairPromptVersion"`
+	ConversationCitationRepairPromptFile      string              `toml:"conversationCitationRepairPromptFile"`
+	ConversationCitationRepairTimeoutMillis   int                 `toml:"conversationCitationRepairTimeoutMillis"`
+	ConversationCitationRepairMaxOutputTokens int                 `toml:"conversationCitationRepairMaxOutputTokens"`
+	ConversationMaxIterations                 int                 `toml:"conversationMaxIterations"`
+	ConversationMaxContextRunes               int                 `toml:"conversationMaxContextRunes"`
+	ConversationTimeoutMillis                 int                 `toml:"conversationTimeoutMillis"`
+	MaxAgentRuns                              int                 `toml:"maxAgentRuns"`
+	MaxToolCalls                              int                 `toml:"maxToolCalls"`
+	MaxEvidenceItems                          int                 `toml:"maxEvidenceItems"`
+	MaxTotalTokens                            int                 `toml:"maxTotalTokens"`
+	TimeoutMillis                             int                 `toml:"timeoutMillis"`
+	ContextMemory                             ContextMemoryConfig `toml:"contextMemory"`
+}
+
+// ContextMemoryConfig starts with a shadow-only preflight switch. Later M3
+// tickets add Summary/Tail activation without changing this observation
+// contract or the existing Rune rollback path.
+type ContextMemoryConfig struct {
+	ShadowPreflightEnabled  bool    `toml:"shadowPreflightEnabled"`
+	PreflightTimeoutMillis  int     `toml:"preflightTimeoutMillis"`
+	SoftThresholdRatio      float64 `toml:"softThresholdRatio"`
+	HardThresholdRatio      float64 `toml:"hardThresholdRatio"`
+	ToolGrowthReserveTokens int     `toml:"toolGrowthReserveTokens"`
+}
+
+func (c ContextMemoryConfig) Validate() error {
+	if !c.ShadowPreflightEnabled {
+		return nil
+	}
+	if c.PreflightTimeoutMillis < 5 || c.PreflightTimeoutMillis > 5_000 {
+		return errors.New("agent contextMemory preflightTimeoutMillis must be between 5 and 5000")
+	}
+	if math.IsNaN(c.SoftThresholdRatio) || math.IsInf(c.SoftThresholdRatio, 0) ||
+		math.IsNaN(c.HardThresholdRatio) || math.IsInf(c.HardThresholdRatio, 0) ||
+		c.SoftThresholdRatio <= 0 || c.HardThresholdRatio <= c.SoftThresholdRatio ||
+		c.HardThresholdRatio >= 1 {
+		return errors.New("agent contextMemory thresholds must satisfy 0 < soft < hard < 1")
+	}
+	if c.ToolGrowthReserveTokens < 1 || c.ToolGrowthReserveTokens > 262_144 {
+		return errors.New("agent contextMemory toolGrowthReserveTokens must be between 1 and 262144")
+	}
+	return nil
 }
 
 func (c AgentConfig) Validate() error {
@@ -435,6 +466,9 @@ func (c AgentConfig) Validate() error {
 	if c.ConversationTimeoutMillis != 0 &&
 		(c.ConversationTimeoutMillis < 1000 || c.ConversationTimeoutMillis > 300_000) {
 		return errors.New("agent conversationTimeoutMillis must be between 1000 and 300000 when configured")
+	}
+	if err := c.ContextMemory.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1415,6 +1449,16 @@ func (c Config) Validate() error {
 	}
 	if err := c.Models.Chat.Validate(); err != nil {
 		return err
+	}
+	if c.Agent.ContextMemory.ShadowPreflightEnabled && c.Models.Chat.Enabled {
+		profile, err := c.Models.Chat.ActiveProfile()
+		if err != nil {
+			return err
+		}
+		available := profile.ContextWindowTokens - profile.MaxOutputTokens - profile.EffectivePromptSafetyMarginTokens()
+		if c.Agent.ContextMemory.ToolGrowthReserveTokens >= available {
+			return errors.New("agent contextMemory toolGrowthReserveTokens must leave active profile input capacity")
+		}
 	}
 	if err := c.Models.Judge.Validate(); err != nil {
 		return err

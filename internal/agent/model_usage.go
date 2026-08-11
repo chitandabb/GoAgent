@@ -34,9 +34,11 @@ func (u *ModelUsage) Add(other ModelUsage) {
 }
 
 type modelUsageTrace struct {
-	mu      sync.Mutex
-	usage   ModelUsage
-	onUsage func(ModelUsage)
+	mu         sync.Mutex
+	usage      ModelUsage
+	initial    ModelUsage
+	hasInitial bool
+	onUsage    func(ModelUsage)
 }
 
 func (t *modelUsageTrace) append(output callbacks.CallbackOutput) {
@@ -79,20 +81,37 @@ func (t *modelUsageTrace) appendValues(prompt, completion, total, cached, reason
 		ModelCalls: 1, PromptTokens: prompt, CompletionTokens: completion,
 		TotalTokens: total, CachedTokens: cached, ReasoningTokens: reasoning,
 	}
-	t.appendUsage(delta)
+	t.addUsage(delta, true)
 }
 
 func (t *modelUsageTrace) appendUsage(delta ModelUsage) {
+	t.addUsage(delta, false)
+}
+
+func (t *modelUsageTrace) addUsage(delta ModelUsage, initialUsageCandidate bool) {
 	if t == nil || delta.ModelCalls == 0 && delta.TotalTokens == 0 {
 		return
 	}
 	t.mu.Lock()
 	t.usage.Add(delta)
+	if initialUsageCandidate && !t.hasInitial {
+		t.initial = delta
+		t.hasInitial = true
+	}
 	onUsage := t.onUsage
 	t.mu.Unlock()
 	if onUsage != nil {
 		onUsage(delta)
 	}
+}
+
+func (t *modelUsageTrace) initialSnapshot() (ModelUsage, bool) {
+	if t == nil {
+		return ModelUsage{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.initial, t.hasInitial
 }
 
 func (t *modelUsageTrace) snapshot() ModelUsage {

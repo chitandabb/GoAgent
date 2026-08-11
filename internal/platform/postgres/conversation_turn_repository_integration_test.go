@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	repositorydomain "github.com/chitandabb/GoAgent/internal/repository"
 
@@ -101,9 +102,10 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 				SourceRef:  knowledgeSourceRef, ContentSHA256: strings.Repeat("d", 64),
 			}},
 			Usage: conversation.AgentRunUsage{
-				ModelCalls: 2, PromptTokens: 30, CompletionTokens: 10, TotalTokens: 40,
+				ModelCalls: 2, PromptTokens: 30, CompletionTokens: 10, TotalTokens: 40, CachedTokens: 5,
 			},
 			DurationMillis: 123,
+			PromptManifest: integrationPromptManifest(),
 		},
 	}, startedAt.Add(3*time.Second))
 	if err != nil {
@@ -122,7 +124,7 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 		len(replayed.AssistantMessage.Citations) != 1 || replayed.AssistantMessage.Citations[0].SourceRef != knowledgeSourceRef {
 		t.Fatalf("replayed turn = %+v", replayed)
 	}
-	var observationCount, retrievedSourceCount int64
+	var observationCount, retrievedSourceCount, promptManifestCount int64
 	if err := tx.Raw(`SELECT COUNT(*) FROM conversation_turn_run_observations WHERE turn_id = ?`, first.TurnID).
 		Scan(&observationCount).Error; err != nil {
 		t.Fatalf("count run observations: %v", err)
@@ -131,8 +133,13 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 		Scan(&retrievedSourceCount).Error; err != nil {
 		t.Fatalf("count retrieved sources: %v", err)
 	}
-	if observationCount != 1 || retrievedSourceCount != 1 {
-		t.Fatalf("observation/source counts = %d/%d, want 1/1", observationCount, retrievedSourceCount)
+	if err := tx.Raw(`SELECT COUNT(*) FROM conversation_prompt_manifests WHERE turn_id = ?`, first.TurnID).
+		Scan(&promptManifestCount).Error; err != nil {
+		t.Fatalf("count prompt manifests: %v", err)
+	}
+	if observationCount != 1 || retrievedSourceCount != 1 || promptManifestCount != 1 {
+		t.Fatalf("observation/source/manifest counts = %d/%d/%d, want 1/1/1",
+			observationCount, retrievedSourceCount, promptManifestCount)
 	}
 	recordedRun, err := repository.GetRecordedAgentRun(ctx, first.TurnID)
 	if err != nil {
@@ -142,6 +149,8 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 		recordedRun.Observation.ModelProvider != "fixture" || recordedRun.Observation.Usage.TotalTokens != 40 ||
 		len(recordedRun.Observation.RetrievedSources) != 1 ||
 		recordedRun.Observation.RetrievedSources[0].SourceRef != knowledgeSourceRef ||
+		recordedRun.Observation.PromptManifest == nil ||
+		recordedRun.Observation.PromptManifest.ActualPromptTokens != 20 ||
 		len(recordedRun.Citations) != 1 || recordedRun.Citations[0].SourceRef != knowledgeSourceRef {
 		t.Fatalf("recorded run = %+v", recordedRun)
 	}
@@ -175,8 +184,28 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 	}, startedAt.Add(7*time.Second)); !errors.Is(err, conversation.ErrTurnInProgress) {
 		t.Fatalf("AppendMessage during active turn error = %v, want ErrTurnInProgress", err)
 	}
-	if err := repository.FailTurn(ctx, userID, second.TurnID, startedAt.Add(8*time.Second)); err != nil {
-		t.Fatalf("fail second turn: %v", err)
+	if _, err := repository.CompleteTurn(ctx, userID, second.TurnID, conversation.AgentResponse{
+		Content: "影子预检降级不影响回答。",
+		RunObservation: &conversation.AgentRunObservation{
+			ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
+			Outcome: conversation.AgentRunAnswered,
+			Usage: conversation.AgentRunUsage{
+				ModelCalls: 1, PromptTokens: 12, CompletionTokens: 3, TotalTokens: 15, CachedTokens: 2,
+			},
+			DurationMillis: 30, PromptManifest: integrationFailedPromptManifest(),
+		},
+	}, startedAt.Add(8*time.Second)); err != nil {
+		t.Fatalf("complete second turn with failed preflight manifest: %v", err)
+	}
+	failedPreflightRun, err := repository.GetRecordedAgentRun(ctx, second.TurnID)
+	if err != nil {
+		t.Fatalf("GetRecordedAgentRun(failed preflight): %v", err)
+	}
+	failedManifest := failedPreflightRun.Observation.PromptManifest
+	if failedManifest == nil || failedManifest.PreflightStatus != contextgovernance.PreflightStatusFailed ||
+		failedManifest.PromptIdentityAvailable || failedManifest.EstimateAvailable ||
+		failedManifest.PromptEpochID != "" || failedManifest.ActualPromptTokens != 12 {
+		t.Fatalf("persisted failed preflight manifest = %+v", failedManifest)
 	}
 
 	var turnCount, messageCount int64
@@ -186,9 +215,57 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 	if err := tx.Raw("SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?", current.ID).Scan(&messageCount).Error; err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if turnCount != 2 || messageCount != 3 {
-		t.Fatalf("turn/message counts = %d/%d, want 2/3", turnCount, messageCount)
+	if turnCount != 2 || messageCount != 4 {
+		t.Fatalf("turn/message counts = %d/%d, want 2/4", turnCount, messageCount)
 	}
+}
+
+func integrationPromptManifest() *contextgovernance.PromptManifest {
+	manifest := &contextgovernance.PromptManifest{
+		SchemaVersion:             1,
+		PreflightStatus:           contextgovernance.PreflightStatusSucceeded,
+		PromptIdentityAvailable:   true,
+		EstimateAvailable:         true,
+		PromptEpochID:             contextgovernance.SHA256Hex("integration-epoch"),
+		StablePrefixFingerprint:   contextgovernance.SHA256Hex("integration-prefix"),
+		ModelProfile:              "fixture-main",
+		ModelProfileFingerprint:   contextgovernance.SHA256Hex("integration-profile"),
+		SystemPromptVersion:       "conversation-test-v1",
+		SystemPromptFingerprint:   contextgovernance.SHA256Hex("integration-system"),
+		ToolSchemaFingerprint:     contextgovernance.SHA256Hex("integration-tools"),
+		SkillPromptFingerprint:    contextgovernance.SHA256Hex("integration-skill"),
+		SummaryFingerprint:        contextgovernance.SHA256Hex("integration-summary"),
+		TailFromSeq:               1,
+		TailThroughSeq:            1,
+		AvailableInputTokens:      3000,
+		EstimatedPromptTokens:     18,
+		EstimatedUpperBoundTokens: 24,
+		ToolGrowthReserveTokens:   4,
+		EstimationMethod:          contextgovernance.EstimationMethodLocalCalibrated,
+		SoftThresholdRatio:        0.70,
+		HardThresholdRatio:        0.85,
+		PreflightDurationMicros:   50,
+	}
+	manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
+		Available: true, PromptTokens: 20, CachedTokens: 5, CompletionTokens: 5,
+	}, 123)
+	return manifest
+}
+
+func integrationFailedPromptManifest() *contextgovernance.PromptManifest {
+	manifest := &contextgovernance.PromptManifest{
+		SchemaVersion: 1, PreflightStatus: contextgovernance.PreflightStatusFailed,
+		FailureStage: "tool_schema_failed", ModelProfile: "fixture-main",
+		SystemPromptVersion: "conversation-test-v1", TailFromSeq: 1, TailThroughSeq: 1,
+		AvailableInputTokens: 3000, ToolGrowthReserveTokens: 4,
+		SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+		PreflightDurationMicros: 50, ContextDegraded: true,
+		DegradedReasons: []string{"preflight_failed", "tool_schema_failed"},
+	}
+	manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
+		Available: true, PromptTokens: 12, CachedTokens: 2, CompletionTokens: 3,
+	}, 30)
+	return manifest
 }
 
 func TestAsyncConversationTurnRepositoryAgainstPostgres(t *testing.T) {

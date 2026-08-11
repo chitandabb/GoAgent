@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 
 	"github.com/cloudwego/eino/adk"
@@ -41,6 +42,7 @@ type ConversationRunnerConfig struct {
 	MaxContextRunes       int
 	Timeout               time.Duration
 	MaxToolResultBytes    int
+	ContextPreflight      ConversationContextPreflightConfig
 }
 
 // ConversationRunner executes one lightweight workbench turn. It is separate
@@ -62,6 +64,7 @@ type ConversationRunner struct {
 	maxContextRunes       int
 	timeout               time.Duration
 	maxToolResultBytes    int
+	contextPreflight      ConversationContextPreflightConfig
 }
 
 func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, error) {
@@ -126,6 +129,9 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 	if hasDuplicate(dependencies) {
 		return nil, errors.New("conversation runner dependencies contain duplicates")
 	}
+	if err := cfg.ContextPreflight.validate(cfg.ModelProvider, cfg.ModelID); err != nil {
+		return nil, err
+	}
 	return &ConversationRunner{
 		chatModel: cfg.ChatModel, citationRepairer: cfg.CitationRepairer, toolCatalog: cfg.ToolCatalog,
 		systemInstruction: cfg.SystemInstruction, modelProvider: cfg.ModelProvider,
@@ -133,6 +139,7 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
+		contextPreflight: cfg.ContextPreflight,
 	}, nil
 }
 
@@ -143,11 +150,14 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	startedAt := time.Now()
 	var citationTrace *conversationCitationTrace
 	var usageTrace *modelUsageTrace
+	var promptManifest *contextgovernance.PromptManifest
 	observeFailure := false
 	defer func() {
 		if err != nil && observeFailure {
 			if _, alreadyWrapped := conversation.AgentRunFailureRecordFrom(err); !alreadyWrapped {
-				observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, conversation.AgentRunFailed)
+				observation := r.buildRunObservation(
+					startedAt, citationTrace, usageTrace, promptManifest, conversation.AgentRunFailed,
+				)
 				record := conversation.AgentRunFailureRecord{
 					Observation: observation,
 					ErrorType:   conversationAgentErrorType(err),
@@ -179,8 +189,12 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, err
 	}
-	runCtx, cancel := context.WithTimeout(WithTaskScope(ctx, scope), r.timeout)
-	defer cancel()
+	runCtx := WithTaskScope(ctx, scope)
+	if !r.contextPreflight.Enabled {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
+		defer cancel()
+	}
 	budget := newExecutionBudget(r.maxToolCalls, r.maxTotalTokens)
 	runCtx = withExecutionBudget(runCtx, budget)
 	runCtx = withAgentToolRunPolicy(runCtx, newAgentToolRunPolicy(nil, map[string]int{
@@ -196,9 +210,27 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tools: %w", err)
 	}
-	messages := conversationModelMessages(request.History, request.UserMessage, r.maxContextRunes)
+	projection := buildConversationPromptProjection(request.History, request.UserMessage, r.maxContextRunes)
+	messages := projection.messages
 	if len(messages) == 0 {
 		return conversation.AgentResponse{}, conversation.ErrInvalidMessage
+	}
+	promptManifest, err = r.shadowPromptManifest(runCtx, tools, projection)
+	if err != nil {
+		// Shadow observation must never make a previously valid model request fail.
+		r.log.Warn("conversation shadow prompt preflight failed",
+			zap.String("service_role", "conversation_agent"),
+			zap.String("user_id", commandContext.Actor.UserID.String()),
+			zap.String("conversation_id", request.Conversation.ID.String()),
+			zap.String("message_id", request.UserMessage.ID.String()),
+			zap.String("model_profile", r.contextPreflight.ModelProfile.Name),
+			zap.Error(err),
+		)
+	}
+	if r.contextPreflight.Enabled {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
+		defer cancel()
 	}
 	agentInstance, err := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
 		Name:        "mesguard-conversation",
@@ -278,7 +310,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	} else if sourceToolAttempted && len(citations) == 0 {
 		outcome = conversation.AgentRunInsufficientEvidence
 	}
-	observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, outcome)
+	observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, promptManifest, outcome)
 	if observation.Validate() != nil {
 		return conversation.AgentResponse{}, conversation.ErrAgentResponseInvalid
 	}
@@ -289,6 +321,7 @@ func (r *ConversationRunner) buildRunObservation(
 	startedAt time.Time,
 	citationTrace *conversationCitationTrace,
 	usageTrace *modelUsageTrace,
+	promptManifest *contextgovernance.PromptManifest,
 	outcome conversation.AgentRunOutcome,
 ) conversation.AgentRunObservation {
 	var retrievedSources []conversation.AgentRunSource
@@ -309,6 +342,15 @@ func (r *ConversationRunner) buildRunObservation(
 	if durationMillis > maxDurationMillis {
 		durationMillis = maxDurationMillis
 	}
+	if promptManifest != nil {
+		manifest := *promptManifest
+		initialUsage, available := usageTrace.initialSnapshot()
+		manifest.FinalizeUsage(contextgovernance.PromptActualUsage{
+			Available: available, PromptTokens: initialUsage.PromptTokens,
+			CachedTokens: initialUsage.CachedTokens, CompletionTokens: initialUsage.CompletionTokens,
+		}, durationMillis)
+		promptManifest = &manifest
+	}
 	return conversation.AgentRunObservation{
 		ModelProvider: r.modelProvider, ModelID: r.modelID, PromptVersion: r.promptVersion,
 		Outcome: outcome, RetrievedSources: retrievedSources, DegradedChannels: degradedChannels,
@@ -318,6 +360,7 @@ func (r *ConversationRunner) buildRunObservation(
 			CachedTokens: usage.CachedTokens, ReasoningTokens: usage.ReasoningTokens,
 		},
 		DurationMillis: durationMillis, SourcesTruncated: sourcesTruncated,
+		PromptManifest: promptManifest,
 	}
 }
 
@@ -367,16 +410,26 @@ func (r *ConversationRunner) conversationScope(actor conversation.Actor, message
 	})
 }
 
-func conversationModelMessages(
+type conversationPromptProjection struct {
+	messages         []*schema.Message
+	selected         []conversation.Message
+	currentMessageID uuid.UUID
+	tailFromSeq      int64
+	tailThroughSeq   int64
+	tailContinuous   bool
+}
+
+func buildConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
 	maxRunes int,
-) []*schema.Message {
+) conversationPromptProjection {
 	ordered := append([]conversation.Message(nil), history...)
 	if len(ordered) == 0 || ordered[len(ordered)-1].ID != current.ID {
 		ordered = append(ordered, current)
 	}
 	selected := make([]*schema.Message, 0, len(ordered))
+	selectedDomain := make([]conversation.Message, 0, len(ordered))
 	usedRunes := 0
 	for index := len(ordered) - 1; index >= 0; index-- {
 		item := ordered[index]
@@ -398,10 +451,26 @@ func conversationModelMessages(
 			continue
 		}
 		selected = append(selected, message)
+		selectedDomain = append(selectedDomain, item)
 		usedRunes += contentRunes
 	}
 	slices.Reverse(selected)
-	return selected
+	slices.Reverse(selectedDomain)
+	projection := conversationPromptProjection{
+		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
+		tailContinuous: true,
+	}
+	if len(selectedDomain) > 0 {
+		projection.tailFromSeq = selectedDomain[0].Seq
+		projection.tailThroughSeq = selectedDomain[len(selectedDomain)-1].Seq
+		for index := 1; index < len(selectedDomain); index++ {
+			if selectedDomain[index].Seq != selectedDomain[index-1].Seq+1 {
+				projection.tailContinuous = false
+				break
+			}
+		}
+	}
+	return projection
 }
 
 func conversationMessagePrompt(message conversation.Message) string {
@@ -409,8 +478,16 @@ func conversationMessagePrompt(message conversation.Message) string {
 	if content == "" {
 		return ""
 	}
-	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 && len(message.Attachments) == 0 {
+	references := conversationMessageReferencePrompt(message)
+	if references == "" {
 		return content
+	}
+	return references + content
+}
+
+func conversationMessageReferencePrompt(message conversation.Message) string {
+	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 && len(message.Attachments) == 0 {
+		return ""
 	}
 	var contextBlock strings.Builder
 	contextBlock.WriteString("<message_references>\n")
@@ -429,7 +506,6 @@ func conversationMessagePrompt(message conversation.Message) string {
 		)
 	}
 	contextBlock.WriteString("</message_references>\n")
-	contextBlock.WriteString(content)
 	return contextBlock.String()
 }
 

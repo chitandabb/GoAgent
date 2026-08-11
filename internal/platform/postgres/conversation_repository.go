@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
@@ -1514,6 +1515,61 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 			return TranslateError(query.Error)
 		}
 	}
+	if observation.PromptManifest != nil {
+		if err := insertConversationPromptManifest(tx, turnID, *observation.PromptManifest, createdAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertConversationPromptManifest(
+	tx *gorm.DB,
+	turnID uuid.UUID,
+	manifest contextgovernance.PromptManifest,
+	createdAt time.Time,
+) error {
+	if turnID == uuid.Nil || manifest.Validate() != nil || createdAt.IsZero() {
+		return conversation.ErrInvalidMessage
+	}
+	reasons := manifest.DegradedReasons
+	if reasons == nil {
+		reasons = []string{}
+	}
+	encodedReasons, err := json.Marshal(reasons)
+	if err != nil {
+		return fmt.Errorf("encode prompt manifest degraded reasons: %w", err)
+	}
+	query := tx.Exec(`
+INSERT INTO conversation_prompt_manifests
+    (turn_id, schema_version, preflight_status, failure_stage,
+     prompt_identity_available, estimate_available, prompt_epoch_id, stable_prefix_fingerprint,
+     model_profile, model_profile_fingerprint, system_prompt_version, system_prompt_fingerprint,
+     tool_schema_fingerprint, skill_prompt_fingerprint, summary_fingerprint,
+     tail_from_seq, tail_through_seq, available_input_tokens,
+     estimated_prompt_tokens, estimated_upper_bound_tokens, tool_growth_reserve_tokens, estimation_method,
+     soft_threshold_ratio, hard_threshold_ratio, soft_threshold_reached, hard_threshold_reached,
+     exceeds_hard_window, actual_usage_available, actual_prompt_tokens, cache_hit_tokens,
+     cache_miss_tokens, completion_tokens, estimation_error_ratio, preflight_duration_micros,
+     run_duration_millis, context_degraded, degraded_reasons, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?)`,
+		turnID, manifest.SchemaVersion, manifest.PreflightStatus, manifest.FailureStage,
+		manifest.PromptIdentityAvailable, manifest.EstimateAvailable,
+		manifest.PromptEpochID, manifest.StablePrefixFingerprint,
+		manifest.ModelProfile, manifest.ModelProfileFingerprint, manifest.SystemPromptVersion,
+		manifest.SystemPromptFingerprint, manifest.ToolSchemaFingerprint, manifest.SkillPromptFingerprint,
+		manifest.SummaryFingerprint, manifest.TailFromSeq, manifest.TailThroughSeq,
+		manifest.AvailableInputTokens, manifest.EstimatedPromptTokens, manifest.EstimatedUpperBoundTokens,
+		manifest.ToolGrowthReserveTokens, manifest.EstimationMethod,
+		manifest.SoftThresholdRatio, manifest.HardThresholdRatio,
+		manifest.SoftThresholdReached, manifest.HardThresholdReached, manifest.ExceedsHardWindow,
+		manifest.ActualUsageAvailable, manifest.ActualPromptTokens, manifest.CacheHitTokens,
+		manifest.CacheMissTokens, manifest.CompletionTokens, manifest.EstimationErrorRatio,
+		manifest.PreflightDurationMicros, manifest.RunDurationMillis, manifest.ContextDegraded,
+		string(encodedReasons), createdAt.UTC())
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
 	return nil
 }
 
@@ -1711,6 +1767,45 @@ type conversationRetrievedSourceRecord struct {
 	ContentSHA256 string                          `gorm:"column:content_sha256"`
 }
 
+type conversationPromptManifestRecord struct {
+	SchemaVersion             int                                `gorm:"column:schema_version"`
+	PreflightStatus           contextgovernance.PreflightStatus  `gorm:"column:preflight_status"`
+	FailureStage              string                             `gorm:"column:failure_stage"`
+	PromptIdentityAvailable   bool                               `gorm:"column:prompt_identity_available"`
+	EstimateAvailable         bool                               `gorm:"column:estimate_available"`
+	PromptEpochID             string                             `gorm:"column:prompt_epoch_id"`
+	StablePrefixFingerprint   string                             `gorm:"column:stable_prefix_fingerprint"`
+	ModelProfile              string                             `gorm:"column:model_profile"`
+	ModelProfileFingerprint   string                             `gorm:"column:model_profile_fingerprint"`
+	SystemPromptVersion       string                             `gorm:"column:system_prompt_version"`
+	SystemPromptFingerprint   string                             `gorm:"column:system_prompt_fingerprint"`
+	ToolSchemaFingerprint     string                             `gorm:"column:tool_schema_fingerprint"`
+	SkillPromptFingerprint    string                             `gorm:"column:skill_prompt_fingerprint"`
+	SummaryFingerprint        string                             `gorm:"column:summary_fingerprint"`
+	TailFromSeq               int64                              `gorm:"column:tail_from_seq"`
+	TailThroughSeq            int64                              `gorm:"column:tail_through_seq"`
+	AvailableInputTokens      int                                `gorm:"column:available_input_tokens"`
+	EstimatedPromptTokens     int                                `gorm:"column:estimated_prompt_tokens"`
+	EstimatedUpperBoundTokens int                                `gorm:"column:estimated_upper_bound_tokens"`
+	ToolGrowthReserveTokens   int                                `gorm:"column:tool_growth_reserve_tokens"`
+	EstimationMethod          contextgovernance.EstimationMethod `gorm:"column:estimation_method"`
+	SoftThresholdRatio        float64                            `gorm:"column:soft_threshold_ratio"`
+	HardThresholdRatio        float64                            `gorm:"column:hard_threshold_ratio"`
+	SoftThresholdReached      bool                               `gorm:"column:soft_threshold_reached"`
+	HardThresholdReached      bool                               `gorm:"column:hard_threshold_reached"`
+	ExceedsHardWindow         bool                               `gorm:"column:exceeds_hard_window"`
+	ActualUsageAvailable      bool                               `gorm:"column:actual_usage_available"`
+	ActualPromptTokens        int                                `gorm:"column:actual_prompt_tokens"`
+	CacheHitTokens            int                                `gorm:"column:cache_hit_tokens"`
+	CacheMissTokens           int                                `gorm:"column:cache_miss_tokens"`
+	CompletionTokens          int                                `gorm:"column:completion_tokens"`
+	EstimationErrorRatio      float64                            `gorm:"column:estimation_error_ratio"`
+	PreflightDurationMicros   int64                              `gorm:"column:preflight_duration_micros"`
+	RunDurationMillis         int64                              `gorm:"column:run_duration_millis"`
+	ContextDegraded           bool                               `gorm:"column:context_degraded"`
+	DegradedReasons           []byte                             `gorm:"column:degraded_reasons"`
+}
+
 // GetRecordedAgentRun is intentionally not part of the HTTP-facing domain
 // Repository interface. It supports local/offline evaluation export by turn ID.
 func (r *ConversationRepository) GetRecordedAgentRun(
@@ -1775,6 +1870,11 @@ ORDER BY position`, turnID).Scan(&sources)
 			SourceType: source.SourceType, SourceRef: source.SourceRef, ContentSHA256: source.ContentSHA256,
 		})
 	}
+	promptManifest, err := loadConversationPromptManifest(db, turnID)
+	if err != nil {
+		return conversation.RecordedAgentRun{}, err
+	}
+	observation.PromptManifest = promptManifest
 	if observation.Validate() != nil {
 		return conversation.RecordedAgentRun{}, errors.New("conversation run observation is invalid")
 	}
@@ -1812,6 +1912,62 @@ ORDER BY position`, turnID).Scan(&sources)
 		Observation: observation, ErrorType: errorType, CompletedAt: record.CompletedAt,
 		ObservedAt: record.ObservedAt.UTC(),
 	}, nil
+}
+
+func loadConversationPromptManifest(
+	db *gorm.DB,
+	turnID uuid.UUID,
+) (*contextgovernance.PromptManifest, error) {
+	var record conversationPromptManifestRecord
+	query := db.Raw(`
+SELECT schema_version, preflight_status, failure_stage, prompt_identity_available, estimate_available,
+       prompt_epoch_id, stable_prefix_fingerprint,
+       model_profile, model_profile_fingerprint, system_prompt_version, system_prompt_fingerprint,
+       tool_schema_fingerprint, skill_prompt_fingerprint, summary_fingerprint,
+       tail_from_seq, tail_through_seq, available_input_tokens,
+       estimated_prompt_tokens, estimated_upper_bound_tokens, tool_growth_reserve_tokens, estimation_method,
+       soft_threshold_ratio, hard_threshold_ratio, soft_threshold_reached, hard_threshold_reached,
+       exceeds_hard_window, actual_usage_available, actual_prompt_tokens, cache_hit_tokens,
+       cache_miss_tokens, completion_tokens, estimation_error_ratio, preflight_duration_micros,
+       run_duration_millis, context_degraded, degraded_reasons
+FROM conversation_prompt_manifests
+WHERE turn_id = ?`, turnID).Scan(&record)
+	if query.Error != nil {
+		return nil, TranslateError(query.Error)
+	}
+	if query.RowsAffected == 0 {
+		return nil, nil
+	}
+	var degradedReasons []string
+	if err := json.Unmarshal(record.DegradedReasons, &degradedReasons); err != nil {
+		return nil, errors.New("conversation prompt manifest degraded reasons are invalid")
+	}
+	manifest := &contextgovernance.PromptManifest{
+		SchemaVersion: record.SchemaVersion, PreflightStatus: record.PreflightStatus,
+		FailureStage: record.FailureStage, PromptIdentityAvailable: record.PromptIdentityAvailable,
+		EstimateAvailable: record.EstimateAvailable, PromptEpochID: record.PromptEpochID,
+		StablePrefixFingerprint: record.StablePrefixFingerprint, ModelProfile: record.ModelProfile,
+		ModelProfileFingerprint: record.ModelProfileFingerprint,
+		SystemPromptVersion:     record.SystemPromptVersion, SystemPromptFingerprint: record.SystemPromptFingerprint,
+		ToolSchemaFingerprint: record.ToolSchemaFingerprint, SkillPromptFingerprint: record.SkillPromptFingerprint,
+		SummaryFingerprint: record.SummaryFingerprint, TailFromSeq: record.TailFromSeq,
+		TailThroughSeq: record.TailThroughSeq, AvailableInputTokens: record.AvailableInputTokens,
+		EstimatedPromptTokens:     record.EstimatedPromptTokens,
+		EstimatedUpperBoundTokens: record.EstimatedUpperBoundTokens,
+		ToolGrowthReserveTokens:   record.ToolGrowthReserveTokens, EstimationMethod: record.EstimationMethod,
+		SoftThresholdRatio: record.SoftThresholdRatio, HardThresholdRatio: record.HardThresholdRatio,
+		SoftThresholdReached: record.SoftThresholdReached, HardThresholdReached: record.HardThresholdReached,
+		ExceedsHardWindow: record.ExceedsHardWindow, ActualUsageAvailable: record.ActualUsageAvailable,
+		ActualPromptTokens: record.ActualPromptTokens, CacheHitTokens: record.CacheHitTokens,
+		CacheMissTokens: record.CacheMissTokens, CompletionTokens: record.CompletionTokens,
+		EstimationErrorRatio:    record.EstimationErrorRatio,
+		PreflightDurationMicros: record.PreflightDurationMicros, RunDurationMillis: record.RunDurationMillis,
+		ContextDegraded: record.ContextDegraded, DegradedReasons: degradedReasons,
+	}
+	if err := manifest.Validate(); err != nil {
+		return nil, errors.New("conversation prompt manifest is invalid")
+	}
+	return manifest, nil
 }
 
 func (r *ConversationRepository) GetTurn(

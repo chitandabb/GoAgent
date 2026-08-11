@@ -10,6 +10,7 @@ import (
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/attachment"
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
@@ -287,6 +288,41 @@ func buildAgentRuntime(
 			return nil, fmt.Errorf("build conversation citation repairer: %w", err)
 		}
 	}
+	var contextPreflight mesagent.ConversationContextPreflightConfig
+	if cfg.Agent.ContextMemory.ShadowPreflightEnabled {
+		profile, profileErr := cfg.Models.Chat.ActiveProfile()
+		if profileErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("resolve conversation context profile: %w", profileErr)
+		}
+		estimator, estimatorErr := contextgovernance.NewLocalTokenEstimator(
+			contextgovernance.EstimationMethod(profile.TokenizerStrategy), nil,
+		)
+		if estimatorErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation TokenEstimator: %w", estimatorErr)
+		}
+		planner, plannerErr := contextgovernance.NewTokenBudgetPlanner(estimator)
+		if plannerErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation TokenBudgetPlanner: %w", plannerErr)
+		}
+		contextPreflight = mesagent.ConversationContextPreflightConfig{
+			Enabled: true, Planner: planner,
+			PreflightTimeout: time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
+			ModelProfile: contextgovernance.ModelProfile{
+				Name:                strings.TrimSpace(cfg.Models.Chat.ActiveProfileName),
+				Provider:            strings.ToLower(strings.TrimSpace(profile.Provider)),
+				ModelID:             strings.TrimSpace(profile.Model),
+				ContextWindowTokens: profile.ContextWindowTokens,
+				MaxOutputTokens:     profile.MaxOutputTokens,
+				SafetyMarginTokens:  profile.EffectivePromptSafetyMarginTokens(),
+			},
+			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
+			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
+			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
+		}
+	}
 	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
 		ChatModel: chatModel, CitationRepairer: citationRepairer, ToolCatalog: conversationCatalog,
 		SystemInstruction:     prompts.ConversationInstruction,
@@ -300,6 +336,7 @@ func buildAgentRuntime(
 		MaxTotalTokens:        cfg.Agent.MaxTotalTokens,
 		MaxContextRunes:       cfg.Agent.ConversationMaxContextRunes,
 		Timeout:               time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond,
+		ContextPreflight:      contextPreflight,
 	})
 	if err != nil {
 		_ = runtime.close()
