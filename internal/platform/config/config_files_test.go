@@ -27,6 +27,8 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				t.Fatalf("%q conversation memory Tool exposure is not static_frozen", path)
 			}
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
+				!cfg.Agent.ContextMemory.ContinuousTailEnabled ||
+				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
 				cfg.Agent.ContextMemory.PreflightTimeoutMillis != 250 ||
 				cfg.Agent.ContextMemory.SoftThresholdRatio != 0.70 ||
 				cfg.Agent.ContextMemory.HardThresholdRatio != 0.85 ||

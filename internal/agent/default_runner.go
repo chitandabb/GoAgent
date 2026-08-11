@@ -90,17 +90,24 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	if dependencies.ExternalCases == nil {
 		return nil, errors.New("default tool catalog external cases are required")
 	}
+	conversationToolResultRegistration, err := NewConversationToolResultRegistration()
+	if err != nil {
+		return nil, fmt.Errorf("build conversation Tool result reader: %w", err)
+	}
 	readExternalCase, err := NewReadExternalCaseTool(dependencies.ExternalCases)
 	if err != nil {
 		return nil, fmt.Errorf("build external case tool: %w", err)
 	}
 	roles := []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}
-	registrations := []ToolRegistration{{
-		Tool: readExternalCase, AllowedRoles: roles,
-		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
-		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
-		RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
-	}}
+	registrations := []ToolRegistration{
+		conversationToolResultRegistration,
+		{
+			Tool: readExternalCase, AllowedRoles: roles,
+			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
+			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
+			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+		},
+	}
 	if dependencies.SkillReference != nil {
 		registrations = append(registrations, ToolRegistration{
 			Tool: dependencies.SkillReference, AllowedRoles: roles,

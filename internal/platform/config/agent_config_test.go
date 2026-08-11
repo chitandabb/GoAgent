@@ -23,6 +23,8 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ConversationCitationRepairMaxOutputTokens = 768
 	configured.ContextMemory = ContextMemoryConfig{
 		ShadowPreflightEnabled:  true,
+		ContinuousTailEnabled:   true,
+		TailMaxRatio:            0.15,
 		PreflightTimeoutMillis:  250,
 		SoftThresholdRatio:      0.70,
 		HardThresholdRatio:      0.85,
@@ -68,6 +70,16 @@ func TestAgentConfigValidate(t *testing.T) {
 	invalidPreflightTimeout.ContextMemory.PreflightTimeoutMillis = 0
 	if err := invalidPreflightTimeout.Validate(); err == nil {
 		t.Fatal("Validate accepted enabled shadow preflight without a bounded timeout")
+	}
+	continuousWithoutPreflight := configured
+	continuousWithoutPreflight.ContextMemory.ShadowPreflightEnabled = false
+	if err := continuousWithoutPreflight.Validate(); err == nil {
+		t.Fatal("Validate accepted continuous Tail without shadow preflight")
+	}
+	invalidTailRatio := configured
+	invalidTailRatio.ContextMemory.TailMaxRatio = 0.21
+	if err := invalidTailRatio.Validate(); err == nil {
+		t.Fatal("Validate accepted Tail ratio above the 20 percent memory budget")
 	}
 }
 

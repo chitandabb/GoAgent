@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -40,6 +42,19 @@ type conversationRunnerTestModel struct {
 
 type failingConversationTokenBudgetPlanner struct {
 	waitForCancellation bool
+}
+
+type conversationExactRuneCounter struct{}
+
+func (conversationExactRuneCounter) CountTokens(
+	_ context.Context,
+	input contextgovernance.PromptInput,
+) (int, error) {
+	total := 0
+	for _, segment := range input.Segments {
+		total += len([]rune(segment.Content))
+	}
+	return total, nil
 }
 
 func (p failingConversationTokenBudgetPlanner) Plan(
@@ -122,7 +137,10 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 func TestConversationRunnerShadowPreflightRecordsManifestWithoutChangingModelInput(t *testing.T) {
 	baselineState := &conversationRunnerModelState{}
 	baseline := newConversationRunnerTest(t, baselineState, &diagnosisToolCreatorStub{})
-	request, baselineCtx := conversationRunnerRequest(nil)
+	references := []conversation.CaseReference{{
+		ExternalCaseID: runnerTestCaseID, Kind: conversation.ReferenceKindSelected,
+	}}
+	request, baselineCtx := conversationRunnerRequest(references)
 	baselineResponse, err := baseline.Respond(baselineCtx, request)
 	if err != nil {
 		t.Fatalf("baseline Respond(): %v", err)
@@ -138,11 +156,15 @@ func TestConversationRunnerShadowPreflightRecordsManifestWithoutChangingModelInp
 	if err != nil {
 		t.Fatal(err)
 	}
+	selector, err := contextgovernance.NewContinuousTailSelector(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
 	shadowState := &conversationRunnerModelState{}
 	shadow := newConversationRunnerTestWithPreflight(t, shadowState, &diagnosisToolCreatorStub{},
 		ConversationContextPreflightConfig{
-			Enabled: true,
-			Planner: planner,
+			Enabled: true, Planner: planner, TailSelector: selector,
+			ContinuousTailEnabled: true, TailMaxRatio: 0.15,
 			ModelProfile: contextgovernance.ModelProfile{
 				Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
 				ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
@@ -151,7 +173,7 @@ func TestConversationRunnerShadowPreflightRecordsManifestWithoutChangingModelInp
 			ToolGrowthReserveTokens: 256,
 		},
 	)
-	shadowRequest, shadowCtx := conversationRunnerRequest(nil)
+	shadowRequest, shadowCtx := conversationRunnerRequest(references)
 	shadowRequest.Conversation.ID = request.Conversation.ID
 	shadowRequest.Conversation.UserID = request.Conversation.UserID
 	shadowRequest.UserMessage = request.UserMessage
@@ -177,6 +199,179 @@ func TestConversationRunnerShadowPreflightRecordsManifestWithoutChangingModelInp
 		!slices.Equal(baselineState.inputs[0], shadowState.inputs[0]) {
 		t.Fatalf("shadow changed model input: baseline schemas/input=%v/%v shadow=%v/%v",
 			baselineState.schemas, baselineState.inputs, shadowState.schemas, shadowState.inputs)
+	}
+}
+
+func TestConversationRunnerContinuousTokenTailStopsAtFirstOversizedMessage(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		newConversationContinuousPreflightForTest(t, contextgovernance.ModelProfile{
+			Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+			ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+		}, 0.012, 256),
+	)
+	request, ctx := conversationRunnerRequest(nil)
+	conversationID := request.Conversation.ID
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "older"},
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: strings.Repeat("中", 80)},
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "recent"},
+	}
+	request.UserMessage.Seq = 4
+	request.UserMessage.Content = "now"
+	request.History = append(request.History, request.UserMessage)
+
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	state.mu.Lock()
+	inputs := append([][]string(nil), state.inputs...)
+	state.mu.Unlock()
+	want := []string{
+		string(schema.System) + "\x00\x00conversation test instruction",
+		string(schema.Assistant) + "\x00\x00recent",
+		string(schema.User) + "\x00\x00now",
+	}
+	if len(inputs) != 1 || !slices.Equal(inputs[0], want) {
+		t.Fatalf("model inputs = %v, want %v", inputs, want)
+	}
+	manifest := response.RunObservation.PromptManifest
+	if manifest == nil || manifest.TailFromSeq != 3 || manifest.TailThroughSeq != 4 ||
+		slices.Contains(manifest.DegradedReasons, "non_continuous_tail") {
+		t.Fatalf("continuous-tail manifest = %+v", manifest)
+	}
+}
+
+func TestConversationRunnerContinuousTailCountsBoundedAttachmentReferencesAndKeepsCurrentMessage(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		newConversationContinuousPreflightForTest(t, contextgovernance.ModelProfile{
+			Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+			ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+		}, 0.01, 256),
+	)
+	request, ctx := conversationRunnerRequest(nil)
+	conversationID := request.Conversation.ID
+	request.History = []conversation.Message{{
+		ID: uuid.New(), ConversationID: conversationID, Seq: 1,
+		Role: conversation.MessageRoleAssistant, Content: "previous",
+	}}
+	request.UserMessage.Seq = 2
+	request.UserMessage.Content = "inspect"
+	attachmentID := uuid.New()
+	caseID := uuid.New()
+	taskID := uuid.New()
+	request.UserMessage.CaseReferences = []conversation.CaseReference{{
+		ExternalCaseID: caseID, Kind: conversation.ReferenceKindSelected,
+	}}
+	request.UserMessage.TaskReferences = []conversation.TaskReference{{
+		TaskID: taskID, Kind: conversation.ReferenceKindCreated,
+	}}
+	request.UserMessage.Attachments = []conversation.MessageAttachment{{
+		AttachmentID: attachmentID, Position: 0, Purpose: "diagnosis-context",
+		OriginalName: strings.Repeat("a", 80) + ".pdf", MediaType: "application/pdf",
+		SizeBytes: 1024, ContentSHA256: strings.Repeat("a", 64), Status: "uploaded",
+	}}
+	request.History = append(request.History, request.UserMessage)
+
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	state.mu.Lock()
+	inputs := append([][]string(nil), state.inputs...)
+	state.mu.Unlock()
+	if len(inputs) != 1 || len(inputs[0]) != 2 || strings.Contains(inputs[0][1], "previous") ||
+		!strings.Contains(inputs[0][1], "attachment id="+attachmentID.String()) ||
+		!strings.Contains(inputs[0][1], "case id="+caseID.String()) ||
+		!strings.Contains(inputs[0][1], "task id="+taskID.String()) ||
+		!strings.Contains(inputs[0][1], "inspect") {
+		t.Fatalf("attachment-aware model input = %v", inputs)
+	}
+	manifest := response.RunObservation.PromptManifest
+	if manifest == nil || manifest.TailFromSeq != 2 || manifest.TailThroughSeq != 2 {
+		t.Fatalf("attachment-aware manifest = %+v", manifest)
+	}
+}
+
+func TestConversationRunnerContinuousTailFlagOffUsesRuneCompatibilityPath(t *testing.T) {
+	estimator, err := contextgovernance.NewLocalTokenEstimator(
+		contextgovernance.EstimationMethodLocalExact, conversationExactRuneCounter{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner, err := contextgovernance.NewTokenBudgetPlanner(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		ConversationContextPreflightConfig{
+			Enabled: true, Planner: planner,
+			ModelProfile: contextgovernance.ModelProfile{
+				Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+				ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+			},
+			SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+			ToolGrowthReserveTokens: 256, PreflightTimeout: 100 * time.Millisecond,
+		},
+	)
+	runner.maxContextRunes = 20
+	request, ctx := conversationRunnerRequest(nil)
+	conversationID := request.Conversation.ID
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "older"},
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: strings.Repeat("中", 30)},
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "recent"},
+	}
+	request.UserMessage.Seq = 4
+	request.UserMessage.Content = "now"
+	request.History = append(request.History, request.UserMessage)
+
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	state.mu.Lock()
+	inputs := append([][]string(nil), state.inputs...)
+	state.mu.Unlock()
+	if len(inputs) != 1 || len(inputs[0]) != 4 || !strings.Contains(inputs[0][1], "older") ||
+		!strings.Contains(inputs[0][2], "recent") || !strings.Contains(inputs[0][3], "now") {
+		t.Fatalf("Rune compatibility input = %v", inputs)
+	}
+	manifest := response.RunObservation.PromptManifest
+	if manifest == nil || !slices.Contains(manifest.DegradedReasons, "non_continuous_tail") {
+		t.Fatalf("Rune compatibility manifest = %+v", manifest)
+	}
+}
+
+func TestConversationRunnerContinuousTailBlocksPromptAboveHardWindowBeforeProvider(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		newConversationContinuousPreflightForTest(t, contextgovernance.ModelProfile{
+			Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+			ContextWindowTokens: 90, MaxOutputTokens: 20, SafetyMarginTokens: 10,
+		}, 0.15, 32),
+	)
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrConversationPromptWindowExceeded) {
+		t.Fatalf("Respond() error = %v, want hard-window rejection", err)
+	}
+	state.mu.Lock()
+	providerCalls := len(state.inputs)
+	state.mu.Unlock()
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
+	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || response.RunObservation == nil || failure.ErrorType != "prompt_window_exceeded" ||
+		failure.Observation.PromptManifest == nil ||
+		!failure.Observation.PromptManifest.ExceedsHardWindow ||
+		failure.Observation.PromptManifest.ActualUsageAvailable {
+		t.Fatalf("hard-window failure response=%+v record=%+v present=%v", response, failure, ok)
 	}
 }
 
@@ -222,7 +417,7 @@ func TestConversationRunnerShadowPreflightFailureIsBoundedObservableAndDoesNotCa
 		!slices.Contains(manifest.DegradedReasons, "token_estimation_failed") {
 		t.Fatalf("failure manifest = %+v", manifest)
 	}
-	entries := logs.FilterMessage("conversation shadow prompt preflight failed").All()
+	entries := logs.FilterMessage("conversation prompt preflight failed").All()
 	if len(entries) != 1 {
 		t.Fatalf("preflight failure logs = %d, want 1", len(entries))
 	}
@@ -235,6 +430,142 @@ func TestConversationRunnerShadowPreflightFailureIsBoundedObservableAndDoesNotCa
 		if fields[key] != want {
 			t.Fatalf("log field %s = %v, want %v; fields=%v", key, fields[key], want, fields)
 		}
+	}
+}
+
+func TestConversationRunnerContinuousTailFailsClosedWhenPreflightIsUnavailable(t *testing.T) {
+	estimator, err := contextgovernance.NewLocalTokenEstimator(
+		contextgovernance.EstimationMethodLocalExact, conversationExactRuneCounter{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector, err := contextgovernance.NewContinuousTailSelector(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &conversationRunnerModelState{}
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
+		ConversationContextPreflightConfig{
+			Enabled: true, Planner: failingConversationTokenBudgetPlanner{}, TailSelector: selector,
+			ContinuousTailEnabled: true, TailMaxRatio: 0.15,
+			ModelProfile: contextgovernance.ModelProfile{
+				Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+				ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 256,
+			},
+			SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+			ToolGrowthReserveTokens: 256, PreflightTimeout: 100 * time.Millisecond,
+		},
+	)
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrConversationContextPreparationFailed) {
+		t.Fatalf("Respond() error = %v, want context preparation failure", err)
+	}
+	state.mu.Lock()
+	providerCalls := len(state.inputs)
+	state.mu.Unlock()
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
+	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || failure.ErrorType != "context_preparation_failed" ||
+		response.RunObservation == nil || response.RunObservation.PromptManifest == nil ||
+		response.RunObservation.PromptManifest.PreflightStatus != contextgovernance.PreflightStatusFailed {
+		t.Fatalf("preflight failure response=%+v record=%+v present=%v", response, failure, ok)
+	}
+}
+
+func TestConversationRunnerGuardsEveryReActModelCallAfterToolGrowth(t *testing.T) {
+	content := strings.Repeat("数据库连接池诊断证据。", 400)
+	queryPlan, err := knowledge.OriginalQueryPlan("连接池超时")
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeTool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{result: knowledge.HybridSearch{
+		Results: []knowledge.SearchResult{{
+			DocumentID: uuid.New(), DocumentVersionID: uuid.New(), ChunkID: uuid.New(),
+			Title: "大型运行手册", Scope: knowledge.ScopeGlobal, ElementType: knowledge.ElementText,
+			ContentText: content, ContentSHA256: knowledge.SHA256Hex(content), Score: 0.91,
+		}},
+		QueryPlan: queryPlan, QueryRewriteStatus: knowledge.QueryRewriteDisabled, Sources: []string{"fts"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight := newConversationContinuousPreflightForTest(t, contextgovernance.ModelProfile{
+		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+		ContextWindowTokens: 3000, MaxOutputTokens: 128, SafetyMarginTokens: 128,
+	}, 0.15, 64)
+	state := &conversationRunnerModelState{searchKnowledgeIfAvailable: true}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
+		SystemInstruction: "conversation runtime window guard test",
+		ModelProvider:     "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
+		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes, ContextPreflight: preflight,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrConversationPromptWindowExceeded) {
+		t.Fatalf("Respond() error = %v, want ReAct hard-window rejection", err)
+	}
+	state.mu.Lock()
+	providerCalls := len(state.inputs)
+	state.mu.Unlock()
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want only the pre-Tool call", providerCalls)
+	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || failure.ErrorType != "prompt_window_exceeded" || response.RunObservation == nil ||
+		response.RunObservation.PromptManifest == nil ||
+		!response.RunObservation.PromptManifest.ExceedsHardWindow ||
+		response.RunObservation.PromptManifest.ActualUsageAvailable ||
+		!slices.Contains(response.RunObservation.PromptManifest.DegradedReasons, "react_prompt_blocked") {
+		t.Fatalf("runtime guard response=%+v record=%+v present=%v", response, failure, ok)
+	}
+}
+
+func TestConversationToolResultTruncationIncludesStableHashHandle(t *testing.T) {
+	original := strings.Repeat("x", 2048)
+	store := newConversationToolResultStore(8, 1024)
+	ctx := withConversationToolResultStore(context.Background(), store)
+	endpoint := newConversationToolTraceMiddleware(1024).Invokable(
+		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			return &compose.ToolOutput{Result: original}, nil
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "fixture_tool", Arguments: `{}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRef := "ref=sha256:" + knowledge.SHA256Hex(original)
+	if len(output.Result) > 1024 || !strings.Contains(output.Result, wantRef) ||
+		!strings.Contains(output.Result, "original_bytes=2048") ||
+		!strings.Contains(output.Result, ToolReadConversationToolResult) {
+		t.Fatalf("bounded Tool result = %q", output.Result)
+	}
+	reader, err := NewReadConversationToolResultTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawChunk, err := reader.InvokableRun(ctx, `{"ref":"sha256:`+knowledge.SHA256Hex(original)+`","maxBytes":64}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chunk conversationToolResultChunk
+	if json.Unmarshal([]byte(rawChunk), &chunk) != nil || chunk.Ref != "sha256:"+knowledge.SHA256Hex(original) ||
+		chunk.Content != strings.Repeat("x", 64) || chunk.NextOffsetBytes != 64 || !chunk.Truncated {
+		t.Fatalf("resolved Tool result chunk = %s", rawChunk)
 	}
 }
 
@@ -303,6 +634,9 @@ func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) 
 			defer state.mu.Unlock()
 			if len(state.schemas) == 0 {
 				t.Fatal("model received no Tool schema snapshot")
+			}
+			if !slices.Contains(state.schemas[0], ToolReadConversationToolResult) {
+				t.Fatalf("bounded Tool result reader is absent from the frozen conversation schema: %v", state.schemas[0])
 			}
 			for _, name := range []string{ToolReadExternalCase, ToolCreateDiagnosisTask} {
 				if got := slices.Contains(state.schemas[0], name); got != test.wantCase {
@@ -540,7 +874,7 @@ func TestConversationModelMessagesBoundsHistoryAndDropsInternalRoles(t *testing.
 		ID: uuid.New(), ConversationID: conversationID, Seq: 5,
 		Role: conversation.MessageRoleUser, Content: "当前问题",
 	}
-	projection := buildConversationPromptProjection([]conversation.Message{
+	projection := buildRuneConversationPromptProjection([]conversation.Message{
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "这是一条应被预算舍弃的很长旧消息"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: conversation.MessageRoleSystem, Content: "不可信系统消息"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
@@ -596,6 +930,35 @@ func newConversationRunnerTestWithPreflight(
 		t.Fatalf("NewConversationRunner(): %v", err)
 	}
 	return runner
+}
+
+func newConversationContinuousPreflightForTest(
+	t *testing.T,
+	profile contextgovernance.ModelProfile,
+	tailMaxRatio float64,
+	toolGrowthReserveTokens int,
+) ConversationContextPreflightConfig {
+	t.Helper()
+	estimator, err := contextgovernance.NewLocalTokenEstimator(
+		contextgovernance.EstimationMethodLocalExact, conversationExactRuneCounter{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner, err := contextgovernance.NewTokenBudgetPlanner(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector, err := contextgovernance.NewContinuousTailSelector(estimator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ConversationContextPreflightConfig{
+		Enabled: true, Planner: planner, TailSelector: selector,
+		ContinuousTailEnabled: true, TailMaxRatio: tailMaxRatio,
+		ModelProfile: profile, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+		ToolGrowthReserveTokens: toolGrowthReserveTokens, PreflightTimeout: 100 * time.Millisecond,
+	}
 }
 
 func conversationRunnerRequest(references []conversation.CaseReference) (conversation.AgentRequest, context.Context) {
