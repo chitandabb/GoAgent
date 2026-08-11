@@ -106,6 +106,22 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 		t.Fatalf("Save(cross-conversation predecessor) error = %v, want ErrInvalidSnapshot", err)
 	}
 
+	activatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if err := tx.Exec(`
+UPDATE conversation_memory_snapshots
+SET status = 'active', activated_at = ?
+WHERE id = ?`, activatedAt, second.ID).Error; err != nil {
+		t.Fatalf("activate second snapshot fixture: %v", err)
+	}
+	active, err := repository.Get(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("Get(active second): %v", err)
+	}
+	if active.Status != conversationmemory.SnapshotStatusActive || active.ActivatedAt == nil ||
+		!active.ActivatedAt.Equal(activatedAt) {
+		t.Fatalf("active snapshot lifecycle = status %q, activatedAt %v", active.Status, active.ActivatedAt)
+	}
+
 	if err := tx.Exec(`DELETE FROM conversations WHERE id = ?`, current.ID).Error; err != nil {
 		t.Fatalf("delete conversation: %v", err)
 	}

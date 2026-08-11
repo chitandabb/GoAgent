@@ -16,6 +16,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 )
 
 var (
@@ -58,7 +59,7 @@ func New(config Config) (*ModelCompactor, error) {
 }
 
 func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
-	if c == nil || c.generator == nil || input.ConversationID.String() == "00000000-0000-0000-0000-000000000000" ||
+	if c == nil || c.generator == nil || input.ConversationID == uuid.Nil ||
 		input.FromSeq < 1 || input.ThroughSeq < input.FromSeq || input.Attempt < 1 || len(input.NewMessages) == 0 {
 		return conversationmemory.CompactionOutput{}, ErrInvalidInput
 	}

@@ -24,6 +24,40 @@ type memoryRepositoryStub struct {
 	saved  []conversationmemory.CandidateSnapshot
 }
 
+func TestSnapshotValidateAcceptsPersistedLifecycleStatuses(t *testing.T) {
+	createdAt := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	candidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
+		ID: uuid.New(), ConversationID: uuid.New(), FromSeq: 1, ThroughSeq: 3,
+		SchemaVersion: conversationmemory.CurrentSchemaVersion,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "dashscope",
+			ModelID: "qwen3.6-flash", PromptVersion: "conversation-memory-v1",
+		},
+		Payload: validPayload(),
+		Usage: conversationmemory.SummaryUsage{
+			PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedTokens: 10,
+		},
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("NewCandidateSnapshot() error = %v", err)
+	}
+	activatedAt := createdAt.Add(time.Minute)
+	for _, status := range []conversationmemory.SnapshotStatus{
+		conversationmemory.SnapshotStatusActive,
+		conversationmemory.SnapshotStatusSuperseded,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			persisted := conversationmemory.Snapshot{CandidateSnapshot: candidate, Version: 1}
+			persisted.Status = status
+			persisted.ActivatedAt = &activatedAt
+			if err := persisted.Validate(); err != nil {
+				t.Fatalf("Snapshot.Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func (r *memoryRepositoryStub) Latest(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
 	if r.latest == nil {
 		return nil, conversationmemory.ErrSnapshotNotFound
