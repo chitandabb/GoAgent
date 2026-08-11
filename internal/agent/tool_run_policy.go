@@ -70,6 +70,22 @@ func (p *agentToolRunPolicy) reserve(name string) error {
 	return nil
 }
 
+func (p *agentToolRunPolicy) remaining(name string) (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, blocked := p.blocked[name]; blocked {
+		return 0, true
+	}
+	limit, limited := p.limits[name]
+	if !limited {
+		return 0, false
+	}
+	return max(0, limit-p.used[name]), true
+}
+
 func filterAgentToolsForRun(ctx context.Context, tools []tool.BaseTool) ([]tool.BaseTool, error) {
 	policy := agentToolRunPolicyFromContext(ctx)
 	if policy == nil || len(policy.blocked) == 0 {

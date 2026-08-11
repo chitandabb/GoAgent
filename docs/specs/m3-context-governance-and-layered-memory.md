@@ -1,6 +1,6 @@
 # M3 动态上下文治理与分层记忆规格
 
-> 状态：Ready for implementation
+> 状态：Implementation in progress（Tickets 01-07 已完成，Ticket 08 审查中）
 >
 > 本规格是 MESGuard 简历第四点的实施与验收契约。其中“长会话平均 Token
 > 消耗降低 60%+”仍是待固定集验证的目标，不是当前已实现事实。
@@ -55,6 +55,15 @@ PostgreSQL 保存原始消息、不可变 Snapshot、压缩 Job 和 Prompt Manif
 锁责任。Snapshot 激活通过 Lease、Fencing 和 CAS 确保过期 Worker 不能覆盖更新
 结果。用户需要摘要中的细节时，模型可以通过受限的原文恢复 Tool，根据
 Active Snapshot 已声明的条目和源消息序号读取当前 Conversation 原文。
+
+Ticket 08 已落地为稳定 Conversation Tool：Actor/Conversation 由 `CommandContext` 注入，
+`TaskScope memory` capability 在 Epoch 开始时授权；Entry、直接源序号与 Run 级 Continuation
+Cursor 三选一。实现具备 20 条、8K Token、每 Turn 两次硬上限；`query` 在 Active Snapshot
+授权的原始消息内定位相关窗口，单条明确源序号可使用 Rune 偏移兜底。系统拒绝
+superseded/未知 Entry、未声明序号、跨用户、跨 Conversation、跨 Run 和 Active Snapshot
+已替换的 Cursor。Token 门禁使用当前 Chat Profile 的保守上界，PostgreSQL 在同一查询中校验
+Conversation 所有权。第二次调用后仍有内容时明确标记受单轮预算截断且不返回不可用 Cursor；
+该 Tool 不承诺完整回放任意超长消息，大日志与文档全文通过附件解析链路处理。
 
 Prompt 使用 Epoch 治理稳定前缀。当前默认策略是：TaskScope 在 Agent Run / Prompt
 Epoch 开始时冻结授权 Tool，Skill 只提供 SOP 和使用建议，不在运行中扩大
@@ -154,7 +163,7 @@ Summary。它对 CaseSnapshot、Evidence、Tool Result 和报告输出分配预�
 - 摘要模型使用独立的 Conversation Memory Profile，默认快速小模型，Provider、Model、Context Window、Output Token、Prompt Version 和重试均可配置。
 - 软压缩失败默认有界重试三次，使用指数退避和 jitter，且不影响本轮已完成回答。硬压缩在请求截止时间内重试，重试耗尽返回 context preparation failed 类型的可重试错误。
 - 首版不实现确定性摘要降级。失败时保留上一份已验证 Snapshot；如果旧 Snapshot + Tail 仍无法安全调用，就向用户返回可重试错误，不静默丢历史。
-- 原文恢复 Tool 是稳定高层 Interface，只允许读取当前 Active Snapshot 声明的 Entry 或源消息序号。默认每次最多 20 条消息、8K Token，每轮最多调用两次，超限使用 Continuation Cursor。
+- 原文恢复 Tool 是稳定高层 Interface，只允许读取当前 Active Snapshot 声明的 Entry 或源消息序号。默认每次最多 20 条消息、8K Token，每轮最多调用两次；优先按 Query 返回相关窗口，单条来源可按 Rune 偏移读取。第一次超限可使用 Run 级 Continuation Cursor，第二次后仍有内容则返回不可继续的单轮预算截断标记。
 - 原文恢复必须经过当前 Conversation 所有权校验、Snapshot 来源校验、条数/Token/调用次数限制和 Tool Trace 记录。
 - Prompt 使用 Provider 无关的语义顺序：Stable System、Canonical Tool Schema、Preloaded Entry Skill、Active Summary、Continuous Tail、Dynamic References、Current User Message、Current Run Tool Call/Result。Provider Adapter 决定具体 Wire 映射。
 - 普通回合只在末尾追加新消息和本轮 Tool Call/Result。System Prompt、Model Profile、Canonical Tool Schema、Preloaded Skill 或 Active Summary 变化时开启新 Prompt Epoch，不把新 Summary 继续追加在旧 Summary 后造成冲突记忆。
@@ -186,7 +195,7 @@ Summary。它对 CaseSnapshot、Evidence、Tool Result 和报告输出分配预�
 - TokenEstimator Adapter 做合同测试，用各 Model Profile 的固定 Prompt Fixture 验证规范化分段、Tool Schema 序列化、Upper Bound 和 Usage 校准。不要只测纯文本，必须包含 Tool Schema、中英混合文本、长 ID、JSON 和 Tool Result。
 - Provider Adapter 做窄合同测试，验证语义 Prompt 分段到 Wire 请求的映射、Usage/Cache Token 回填、Tool Schema 顺序和 Capability Flag。Provider 私有特性不泄露到 ConversationMemory Interface。
 - Snapshot Validator 的确定性规则使用表驱动边界测试，覆盖非法 Schema、越界序号、未知引用、自循环 supersede、多个 Active Entry、非法 Todo 状态、超大 Payload 和模型推测误入事实字段的可检测格式。
-- 原文恢复 Tool 通过 Tool Interface 测试当前 Conversation 授权、Entry 来源、消息范围、20 条/8K Token 上限、两次每轮限制、Continuation Cursor、Trace 和跨会话拒绝。
+- 原文恢复 Tool 通过 Tool Interface 测试当前 Conversation 授权、Entry 来源、消息范围、相关窗口、显式 Rune 偏移、20 条/8K Token 上限、两次每轮限制、Run 级 Continuation Cursor、单轮预算截断、Trace 和跨作用域拒绝。
 - Diagnosis 通过现有诊断执行高 Seam 测试共享 Planner、有界 Tool Result、Evidence 句柄、报告输出预留和硬窗口拦截，不把内部每个 Tool 的截断辅助函数当作主测试面。
 - 先行只观测阶段必须对比新估算与现有实际 Usage，但不改变发送给模型的 Prompt。该阶段验收估算数据完整性、P95 低估误差和零行为泄漏。
 - Pilot 固定集使用 4 个会话剧本，每个 3 个检查点；Acceptance 使用 12 个会话剧本，每个 3 个检查点。历史消息直接预置，仅在检查点调用 Summary、主模型和可选 Judge。

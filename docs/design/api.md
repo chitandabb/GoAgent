@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文定义 MESGuard M0 和 M1 的 HTTP API、认证、权限、幂等、错误码、分页与 SSE 契约。
-- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及独立会话创建/列表/详情、消息游标查询、用户消息持久化、异步 `/turns` 受理、回合状态查询和回合事件 JSON/SSE。已实现接口契约见 `api/openapi.yaml`，目标扩展契约见 `design/openapi.json`。
+- 当前仓库已实现 `/healthz`、本地认证、数据源发现、外部工单列表/详情、诊断任务创建/安全摘要查询、TaskEvent JSON/SSE、任务取消、RabbitMQ Diagnosis Worker 异步执行与报告落库、正式报告查询、管理员失败任务恢复、报告反馈查询/追加、管理员知识文档入库任务控制，以及独立会话创建/列表/详情、消息游标查询、用户消息持久化、异步 `/turns` 受理、回合状态查询和回合事件 JSON/SSE。唯一机器可读实现契约为 `api/openapi.yaml`，未实现能力只记录在设计和 Roadmap 中。
 - 会话通过结构化工单/任务引用连接业务上下文；受控 `create_diagnosis_task` 命令服务及其窄 Tool Schema 由独立 Conversation Worker 中的 Agent 调用并复用既有诊断任务应用服务。带任务引用的回合可按需调用内部 `get_diagnosis_task_status`，读取前会再次校验最新消息引用和 owner/admin 权限。`conversation_turns` 已实现请求指纹、客户端 UUID 幂等、queued/running 单活跃约束、Worker 租约 fencing、自动重试和完成回放；`conversation_turn_events` 支持 `afterSeq`/`Last-Event-ID` 断线续传。HTTP 首次受理返回 `202 + turnId + queued`，完成幂等回放返回 `200`。
 - 本文是 Handler、Use Case、Repository、React 前端和后续 OpenAPI 文件的共同设计输入。
 
@@ -762,6 +762,8 @@ SSE 建立后不能再改用 JSON 统一错误信封。连接前的认证、权�
 - `businessSummary`；
 - `technicalSummary`；
 - `partial`、`missingEvidence`、Token 用量和 Agent 运行摘要；
+- `contextObservation`：诊断逐次 Preflight 调用/失败数、上下文高水位、模型可见 Tool Result
+  截断数、硬窗口拦截数、报告输出与 Tool 增长预留；不包含 Prompt 或证据正文；
 - 报告 schema、`modelProvider + modelId` 和 `promptVersion`；
 - 按 claim 组织的 Evidence 身份、来源定位、支持类型、哈希、截断与有效性元数据。
 

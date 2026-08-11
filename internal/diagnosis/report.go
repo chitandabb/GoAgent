@@ -20,6 +20,22 @@ type ReportModelUsage struct {
 	ReasoningTokens  int `json:"reasoningTokens"`
 }
 
+// ReportContextObservation is the persisted provider-neutral Diagnosis prompt
+// budget observation. It contains no prompt or evidence content.
+type ReportContextObservation struct {
+	PreflightCalls                int     `json:"preflightCalls"`
+	PreflightFailureCount         int     `json:"preflightFailureCount"`
+	HighWaterTokens               int     `json:"highWaterTokens"`
+	AvailableInputTokens          int     `json:"availableInputTokens"`
+	HighWaterRatio                float64 `json:"highWaterRatio"`
+	ToolResultTruncatedCount      int     `json:"toolResultTruncatedCount"`
+	HardWindowBlockedCount        int     `json:"hardWindowBlockedCount"`
+	LastEstimatedUpperBoundTokens int     `json:"lastEstimatedUpperBoundTokens"`
+	ReportOutputReserveTokens     int     `json:"reportOutputReserveTokens"`
+	ToolGrowthReserveTokens       int     `json:"toolGrowthReserveTokens"`
+	EstimationMethod              string  `json:"estimationMethod,omitempty"`
+}
+
 // ReportEvidenceClaim 只暴露报告引用和证据定位元数据，不包含完整证据内容。
 type ReportEvidenceClaim struct {
 	EvidenceID      uuid.UUID
@@ -51,6 +67,7 @@ type DiagnosisReport struct {
 	Partial                       bool
 	MissingEvidence               []string
 	Usage                         ReportModelUsage
+	ContextObservation            ReportContextObservation
 	AgentRuns                     int
 	SelectedSkill                 string
 	ExecutedSkills                []string

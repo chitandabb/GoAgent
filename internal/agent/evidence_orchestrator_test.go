@@ -224,6 +224,34 @@ func TestEvidenceOrchestratorStopsBeforeSecondRunAtTokenLimit(t *testing.T) {
 	}
 }
 
+func TestEvidenceOrchestratorReturnsPartialWhenContextWindowIsBlocked(t *testing.T) {
+	observation := DiagnosisContextObservation{
+		PreflightCalls: 1, HighWaterTokens: 190, AvailableInputTokens: 176,
+		HighWaterRatio: 190.0 / 176.0, HardWindowBlockedCount: 1,
+		LastEstimatedUpperBoundTokens: 190, ReportOutputReserveTokens: 64,
+		ToolGrowthReserveTokens: 16,
+	}
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{{
+		result: RunResult{ContextObservation: observation},
+		err:    ErrDiagnosisPromptWindowExceeded,
+	}}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{})
+
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if !result.Partial || result.AgentRuns != 1 || result.StopReason != "context_window_exceeded" ||
+		len(invoker.snapshotRequests()) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.ContextObservation.HardWindowBlockedCount != 1 ||
+		result.ContextObservation.HighWaterTokens != 190 ||
+		!containsText(result.MissingEvidence, "超过模型硬窗口") {
+		t.Fatalf("context result = %+v", result)
+	}
+}
+
 func TestToolMiddlewareEnforcesBudgetAndCancellationBeforeExecution(t *testing.T) {
 	executions := 0
 	next := func(_ context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {

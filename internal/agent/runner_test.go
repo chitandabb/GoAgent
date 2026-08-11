@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/cloudwego/eino/adk"
@@ -264,7 +265,7 @@ func TestToolTraceMiddlewareTruncatesResultAndKeepsStableError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke middleware: %v", err)
 	}
-	if len(output.Result) >= 2048 || !strings.Contains(output.Result, "truncated by MESGuard") {
+	if len(output.Result) > 1024 || !strings.Contains(output.Result, "truncated by MESGuard") {
 		t.Fatalf("tool output was not truncated: %d bytes", len(output.Result))
 	}
 	entries := trace.snapshot()
@@ -302,6 +303,33 @@ func TestToolTraceMiddlewareCapturesEvidenceReferenceAndHash(t *testing.T) {
 	}
 	if envelope.EvidenceRef != item.SourceRef || !json.Valid(envelope.Data) {
 		t.Fatalf("wrapped evidence reference = %+v, item=%+v", envelope, item)
+	}
+}
+
+func TestToolTraceMiddlewarePersistsCompleteEvidenceAndBoundsModelResult(t *testing.T) {
+	trace := &executionTrace{}
+	ctx := withExecutionTrace(context.Background(), trace)
+	raw := fmt.Sprintf(`{"returnedRows":1,"truncated":false,"rows":[[%q]]}`, strings.Repeat("x", 2048))
+	output, err := newToolTraceMiddleware(1024).Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: raw}, nil
+	})(ctx, &compose.ToolInput{Name: ToolExecuteReadonlyQuery, Arguments: `{}`})
+	if err != nil {
+		t.Fatalf("invoke middleware: %v", err)
+	}
+	items := trace.evidenceSnapshot()
+	entries := trace.snapshot()
+	if len(items) != 1 || items[0].Snapshot != raw || items[0].Truncated {
+		t.Fatalf("persisted evidence = %+v", items)
+	}
+	if len(entries) != 1 || !entries[0].Degraded {
+		t.Fatalf("Tool execution = %+v", entries)
+	}
+	if len(output.Result) > 1024 || !strings.Contains(output.Result, `"evidenceRef"`) ||
+		!strings.Contains(output.Result, `"truncated":true`) {
+		t.Fatalf("model-visible result = %s", output.Result)
+	}
+	if got := trace.toolResultTruncatedSnapshot(); got != 1 {
+		t.Fatalf("Tool result truncation count = %d, want 1", got)
 	}
 }
 
@@ -409,6 +437,43 @@ func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 	_, err := loopRunner.Invoke(WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{UserQuery: "循环"})
 	if !errors.Is(err, adk.ErrExceedMaxIterations) {
 		t.Fatalf("max iterations error = %v", err)
+	}
+}
+
+func TestRunnerBlocksGrowingDiagnosisPromptBeforeSecondProviderCall(t *testing.T) {
+	state := &runnerModelState{}
+	runner := newRunnerTest(t, state)
+	planner := &diagnosisGuardPlanner{plans: []contextgovernance.TokenBudgetPlan{
+		{
+			AvailableInputTokens: 176, EstimatedUpperBoundTokens: 100, ReservedTokens: 16,
+			EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
+		},
+		{
+			AvailableInputTokens: 176, EstimatedUpperBoundTokens: 190, ReservedTokens: 16,
+			ExceedsHardWindow: true, EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
+		},
+	}}
+	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
+	result, err := runner.Invoke(
+		WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)),
+		RunRequest{
+			UserQuery: "诊断工单", ExternalCaseID: runnerTestCaseID.String(),
+			CaseSnapshot: `{"id":"11111111-1111-1111-1111-111111111111","title":"报工状态未更新"}`,
+		},
+	)
+	if !errors.Is(err, ErrDiagnosisPromptWindowExceeded) {
+		t.Fatalf("Invoke error = %v", err)
+	}
+	state.mu.Lock()
+	calls := state.calls
+	state.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls)
+	}
+	if result.ContextObservation.PreflightCalls != 2 ||
+		result.ContextObservation.HardWindowBlockedCount != 1 ||
+		result.ContextObservation.HighWaterTokens != 190 {
+		t.Fatalf("context observation = %+v", result.ContextObservation)
 	}
 }
 

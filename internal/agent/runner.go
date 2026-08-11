@@ -54,6 +54,7 @@ type RunRequest struct {
 	UserQuery      string  `json:"userQuery"`
 	ExternalCaseID string  `json:"externalCaseId,omitempty"`
 	RequestedSkill SkillID `json:"requestedSkill,omitempty"`
+	CaseSnapshot   string  `json:"-"`
 }
 
 func (r RunRequest) Validate() error {
@@ -76,14 +77,15 @@ type ToolExecution struct {
 }
 
 type RunResult struct {
-	SkillID        SkillID         `json:"skillId"`
-	RouteReason    string          `json:"routeReason"`
-	Answer         string          `json:"answer"`
-	AllowedTools   []string        `json:"allowedTools"`
-	ToolExecutions []ToolExecution `json:"toolExecutions"`
-	EvidenceItems  []EvidenceItem  `json:"evidenceItems"`
-	Usage          ModelUsage      `json:"usage"`
-	ExecutedSkills []SkillID       `json:"executedSkills"`
+	SkillID            SkillID                     `json:"skillId"`
+	RouteReason        string                      `json:"routeReason"`
+	Answer             string                      `json:"answer"`
+	AllowedTools       []string                    `json:"allowedTools"`
+	ToolExecutions     []ToolExecution             `json:"toolExecutions"`
+	EvidenceItems      []EvidenceItem              `json:"evidenceItems"`
+	Usage              ModelUsage                  `json:"usage"`
+	ExecutedSkills     []SkillID                   `json:"executedSkills"`
+	ContextObservation DiagnosisContextObservation `json:"contextObservation"`
 }
 
 type RunnerConfig struct {
@@ -98,6 +100,7 @@ type RunnerConfig struct {
 	MaxIterations         int
 	Timeout               time.Duration
 	MaxToolResultBytes    int
+	ContextPreflight      DiagnosisContextPreflightConfig
 }
 
 // Runner 只保存可安全共享的只读依赖；ChatModelAgent 必须在每次 Invoke 时单独创建。
@@ -116,6 +119,7 @@ type Runner struct {
 	maxIterations         int
 	timeout               time.Duration
 	maxToolResultBytes    int
+	contextPreflight      DiagnosisContextPreflightConfig
 }
 
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
@@ -157,6 +161,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if cfg.MaxToolResultBytes < 1024 || cfg.MaxToolResultBytes > 1024*1024 {
 		return nil, errors.New("runner max tool result bytes must be between 1024 and 1048576")
 	}
+	if err := cfg.ContextPreflight.validate(); err != nil {
+		return nil, err
+	}
 	return &Runner{
 		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
 		toolProvider: toolProvider, mode: cfg.Mode,
@@ -167,6 +174,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		githubArgumentRewrite: cfg.GitHubArgumentRewrite, log: cfg.Logger,
 		maxIterations: cfg.MaxIterations, timeout: cfg.Timeout,
 		maxToolResultBytes: cfg.MaxToolResultBytes,
+		contextPreflight:   cfg.ContextPreflight,
 	}, nil
 }
 
@@ -257,11 +265,38 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction, scope)
 		handlers = append(handlers, r.skillRuntime.Middleware)
 	}
+	chatModel := r.chatModel
+	var contextObservation *diagnosisContextObservationRecorder
+	if r.contextPreflight.Enabled {
+		if strings.TrimSpace(request.CaseSnapshot) == "" {
+			return result, errors.New("diagnosis case snapshot is required for context preflight")
+		}
+		preflightSystemInstruction := instruction
+		preloadedSkill := ""
+		if r.mode == RunnerModeExperiment {
+			preflightSystemInstruction = buildAgentInstruction(
+				r.systemInstruction, result.SkillID, "", scope,
+			)
+			preloadedSkill = entryInstruction
+		}
+		chatModel, contextObservation = newDiagnosisContextGuardModel(
+			r.chatModel,
+			r.contextPreflight,
+			diagnosisPromptSeed{
+				SystemInstruction: preflightSystemInstruction,
+				PreloadedSkill:    preloadedSkill,
+				CaseSnapshot:      request.CaseSnapshot,
+			},
+		)
+		defer func() {
+			result.ContextObservation = contextObservation.snapshot(trace.toolResultTruncatedSnapshot())
+		}()
+	}
 	agentInstance, buildErr := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
 		Name:        "mesguard-diagnosis",
 		Description: "使用受控只读工具辅助分析工业软件工单",
 		Instruction: instruction,
-		Model:       r.chatModel,
+		Model:       chatModel,
 		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			ExecuteSequentially:  true,
 			UnknownToolsHandler:  rejectUnknownTool,
@@ -430,6 +465,7 @@ type executionTrace struct {
 	evidence               []EvidenceItem
 	loadedSkills           []SkillID
 	codeSearchIndexPending bool
+	toolResultTruncated    int
 }
 
 type traceContextKey struct{}
@@ -504,6 +540,24 @@ func (t *executionTrace) codeSearchIndexPendingSnapshot() bool {
 	return t.codeSearchIndexPending
 }
 
+func (t *executionTrace) markToolResultTruncated() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.toolResultTruncated++
+	t.mu.Unlock()
+}
+
+func (t *executionTrace) toolResultTruncatedSnapshot() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.toolResultTruncated
+}
+
 func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 	return compose.ToolMiddleware{Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
@@ -523,22 +577,24 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 			if codeSearchIndexPending {
 				traceFromContext(ctx).markCodeSearchIndexPending()
 			}
-			outputTruncated := false
-			if output != nil && len(output.Result) > maxResultBytes {
-				outputTruncated = true
-				output.Result = strings.ToValidUTF8(output.Result[:maxResultBytes], "?") +
-					"\n[tool result truncated by MESGuard]"
-			}
+			modelResultTruncated := false
 			var evidence *EvidenceItem
 			if err == nil && output != nil {
-				if item, ok := newToolEvidenceItem(input.Name, output.Result, outputTruncated); ok {
+				rawResult := output.Result
+				if item, ok := newToolEvidenceItem(input.Name, rawResult, false); ok {
 					evidence = &item
-					output.Result = wrapToolResultWithEvidence(item, output.Result, maxResultBytes)
+					output.Result, modelResultTruncated = wrapToolResultWithEvidence(item, rawResult, maxResultBytes)
+				} else if len(rawResult) > maxResultBytes {
+					modelResultTruncated = true
+					output.Result = truncateModelToolResult(rawResult, maxResultBytes)
 				}
+			}
+			if modelResultTruncated {
+				traceFromContext(ctx).markToolResultTruncated()
 			}
 			entry := ToolExecution{
 				Name: input.Name, DurationMS: time.Since(startedAt).Milliseconds(),
-				Succeeded: err == nil, Degraded: codeSearchIndexPending,
+				Succeeded: err == nil, Degraded: codeSearchIndexPending || modelResultTruncated,
 			}
 			if err != nil {
 				entry.Error = "tool execution failed"
@@ -558,10 +614,22 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 	}}
 }
 
+func truncateModelToolResult(value string, maxBytes int) string {
+	const marker = "\n[tool result truncated by MESGuard]"
+	if len(value) <= maxBytes {
+		return value
+	}
+	contentLimit := maxBytes - len(marker)
+	if contentLimit < 0 {
+		contentLimit = 0
+	}
+	return strings.ToValidUTF8(value[:contentLimit], "?") + marker
+}
+
 // wrapToolResultWithEvidence 给模型一个可原样引用的 sourceRef，同时保留工具原始
 // JSON 作为 data。若证据引用包装本身超过工具结果预算，则保留引用和截断标记，
 // 不让包装层突破 Runner 的最大结果字节限制。
-func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int) string {
+func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int) (string, bool) {
 	data := json.RawMessage(snapshot)
 	if !json.Valid(data) {
 		encoded, _ := json.Marshal(snapshot)
@@ -580,16 +648,17 @@ func wrapToolResultWithEvidence(item EvidenceItem, snapshot string, maxBytes int
 	}
 	encoded, err := json.Marshal(value)
 	if err == nil && len(encoded) <= maxBytes {
-		return string(encoded)
+		return string(encoded), false
 	}
+	value.Truncated = true
 	value.Data = json.RawMessage(`"[evidence snapshot omitted by result budget]"`)
 	encoded, err = json.Marshal(value)
 	if err == nil && len(encoded) <= maxBytes {
-		return string(encoded)
+		return string(encoded), true
 	}
 	// The configured minimum is large enough for this fallback. Keep a final
 	// deterministic string in case a caller supplies an unusually small limit.
-	return fmt.Sprintf(`{"evidenceRef":%q,"sourceType":%q,"truncated":true}`, item.SourceRef, item.SourceType)
+	return fmt.Sprintf(`{"evidenceRef":%q,"sourceType":%q,"truncated":true}`, item.SourceRef, item.SourceType), true
 }
 
 func toolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {

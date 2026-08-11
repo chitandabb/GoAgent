@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -127,18 +128,19 @@ type reportBusinessSummaryPayload struct {
 }
 
 type reportTechnicalSummaryPayload struct {
-	Summary                       string                     `json:"summary"`
-	Limitations                   []string                   `json:"limitations"`
-	Partial                       bool                       `json:"partial"`
-	MissingEvidence               []string                   `json:"missingEvidence"`
-	Usage                         diagnosis.ReportModelUsage `json:"usage"`
-	AgentRuns                     int                        `json:"agentRuns"`
-	SelectedSkill                 string                     `json:"selectedSkill"`
-	ExecutedSkills                []string                   `json:"executedSkills"`
-	StopReason                    string                     `json:"stopReason"`
-	AgenticRetrievalAttempted     bool                       `json:"agenticRetrievalAttempted"`
-	AgenticRetrievalAddedEvidence bool                       `json:"agenticRetrievalAddedEvidence"`
-	AgenticRetrievalStopReason    string                     `json:"agenticRetrievalStopReason"`
+	Summary                       string                             `json:"summary"`
+	Limitations                   []string                           `json:"limitations"`
+	Partial                       bool                               `json:"partial"`
+	MissingEvidence               []string                           `json:"missingEvidence"`
+	Usage                         diagnosis.ReportModelUsage         `json:"usage"`
+	AgentRuns                     int                                `json:"agentRuns"`
+	SelectedSkill                 string                             `json:"selectedSkill"`
+	ExecutedSkills                []string                           `json:"executedSkills"`
+	StopReason                    string                             `json:"stopReason"`
+	AgenticRetrievalAttempted     bool                               `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                               `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string                             `json:"agenticRetrievalStopReason"`
+	ContextObservation            diagnosis.ReportContextObservation `json:"contextObservation"`
 }
 
 func (r diagnosisReportRecord) toDomain() (diagnosis.DiagnosisReport, error) {
@@ -158,6 +160,9 @@ func (r diagnosisReportRecord) toDomain() (diagnosis.DiagnosisReport, error) {
 		strings.TrimSpace(r.ModelProvider) == "" || strings.TrimSpace(r.ModelID) == "" ||
 		strings.TrimSpace(r.PromptVersion) == "" || technical.AgentRuns < 0 || !validReportUsage(technical.Usage) {
 		return diagnosis.DiagnosisReport{}, errors.New("diagnosis report payload is invalid")
+	}
+	if !validReportContextObservation(technical.ContextObservation) {
+		return diagnosis.DiagnosisReport{}, errors.New("diagnosis report context observation is invalid")
 	}
 	if technical.Limitations == nil {
 		technical.Limitations = []string{}
@@ -180,10 +185,39 @@ func (r diagnosisReportRecord) toDomain() (diagnosis.DiagnosisReport, error) {
 		AgenticRetrievalAttempted:     technical.AgenticRetrievalAttempted,
 		AgenticRetrievalAddedEvidence: technical.AgenticRetrievalAddedEvidence,
 		AgenticRetrievalStopReason:    technical.AgenticRetrievalStopReason,
+		ContextObservation:            technical.ContextObservation,
 		ModelProvider:                 r.ModelProvider, ModelID: r.ModelID, PromptVersion: r.PromptVersion,
 		Evidence:    []diagnosis.ReportEvidenceClaim{},
 		GeneratedAt: r.GeneratedAt.UTC(), CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC(),
 	}, nil
+}
+
+func validReportContextObservation(value diagnosis.ReportContextObservation) bool {
+	if value.PreflightCalls < 0 || value.PreflightFailureCount < 0 ||
+		value.HighWaterTokens < 0 || value.AvailableInputTokens < 0 ||
+		math.IsNaN(value.HighWaterRatio) || math.IsInf(value.HighWaterRatio, 0) ||
+		value.HighWaterRatio < 0 || value.ToolResultTruncatedCount < 0 ||
+		value.HardWindowBlockedCount < 0 || value.LastEstimatedUpperBoundTokens < 0 ||
+		value.ReportOutputReserveTokens < 0 || value.ToolGrowthReserveTokens < 0 ||
+		value.PreflightFailureCount > value.PreflightCalls {
+		return false
+	}
+	successfulCalls := value.PreflightCalls - value.PreflightFailureCount
+	if value.HardWindowBlockedCount > successfulCalls {
+		return false
+	}
+	if successfulCalls == 0 {
+		return value.EstimationMethod == ""
+	}
+	if value.AvailableInputTokens < 1 || value.ToolGrowthReserveTokens < 1 {
+		return false
+	}
+	switch value.EstimationMethod {
+	case "local_exact", "local_calibrated", "conservative_heuristic":
+		return true
+	default:
+		return false
+	}
 }
 
 type diagnosisReportEvidenceRecord struct {

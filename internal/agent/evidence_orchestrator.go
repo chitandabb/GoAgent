@@ -71,21 +71,22 @@ type InvestigationStep struct {
 }
 
 type OrchestrationResult struct {
-	Report                        StructuredReport    `json:"report"`
-	Partial                       bool                `json:"partial"`
-	MissingEvidence               []string            `json:"missingEvidence"`
-	AgentRuns                     int                 `json:"agentRuns"`
-	ToolExecutions                []ToolExecution     `json:"toolExecutions"`
-	EvidenceItems                 []EvidenceItem      `json:"evidenceItems"`
-	Usage                         ModelUsage          `json:"usage"`
-	AllowedTools                  []string            `json:"allowedTools"`
-	SelectedSkill                 SkillID             `json:"selectedSkill"`
-	StopReason                    string              `json:"stopReason,omitempty"`
-	ExecutedSkills                []SkillID           `json:"executedSkills"`
-	Investigation                 []InvestigationStep `json:"investigation"`
-	AgenticRetrievalAttempted     bool                `json:"agenticRetrievalAttempted"`
-	AgenticRetrievalAddedEvidence bool                `json:"agenticRetrievalAddedEvidence"`
-	AgenticRetrievalStopReason    string              `json:"agenticRetrievalStopReason"`
+	Report                        StructuredReport            `json:"report"`
+	Partial                       bool                        `json:"partial"`
+	MissingEvidence               []string                    `json:"missingEvidence"`
+	AgentRuns                     int                         `json:"agentRuns"`
+	ToolExecutions                []ToolExecution             `json:"toolExecutions"`
+	EvidenceItems                 []EvidenceItem              `json:"evidenceItems"`
+	Usage                         ModelUsage                  `json:"usage"`
+	AllowedTools                  []string                    `json:"allowedTools"`
+	SelectedSkill                 SkillID                     `json:"selectedSkill"`
+	StopReason                    string                      `json:"stopReason,omitempty"`
+	ExecutedSkills                []SkillID                   `json:"executedSkills"`
+	Investigation                 []InvestigationStep         `json:"investigation"`
+	AgenticRetrievalAttempted     bool                        `json:"agenticRetrievalAttempted"`
+	AgenticRetrievalAddedEvidence bool                        `json:"agenticRetrievalAddedEvidence"`
+	AgenticRetrievalStopReason    string                      `json:"agenticRetrievalStopReason"`
+	ContextObservation            DiagnosisContextObservation `json:"contextObservation"`
 }
 
 type EvidenceOrchestrator struct {
@@ -126,6 +127,8 @@ type evidenceState struct {
 	agenticRetrievalStopReason    string
 	maxEvidenceItems              int
 	reportContractInstruction     string
+	contextObservation            DiagnosisContextObservation
+	contextPreparationStopped     bool
 }
 
 func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig) (*EvidenceOrchestrator, error) {
@@ -271,6 +274,9 @@ func (o *EvidenceOrchestrator) Invoke(ctx context.Context, request RunRequest) (
 		zap.Int("agent_runs", result.AgentRuns),
 		zap.Int("tool_calls", len(result.ToolExecutions)),
 		zap.Int("total_tokens", result.Usage.TotalTokens),
+		zap.Int("context_high_water_tokens", result.ContextObservation.HighWaterTokens),
+		zap.Int("tool_result_truncated_count", result.ContextObservation.ToolResultTruncatedCount),
+		zap.Int("hard_window_blocked_count", result.ContextObservation.HardWindowBlockedCount),
 		zap.Duration("duration", time.Since(startedAt)),
 	)
 	return result, nil
@@ -326,12 +332,31 @@ func (o *EvidenceOrchestrator) runAgent(ctx context.Context, state *evidenceStat
 			state.gaps = append(state.gaps, state.lastAgentFailure)
 			return state, nil
 		}
+		if errors.Is(err, ErrDiagnosisPromptWindowExceeded) ||
+			errors.Is(err, ErrDiagnosisContextPreparationFailed) {
+			state.contextPreparationStopped = true
+			if errors.Is(err, ErrDiagnosisPromptWindowExceeded) {
+				state.stopReason = "context_window_exceeded"
+				state.lastAgentFailure = "诊断上下文保守上界超过模型硬窗口，已在调用模型前停止"
+			} else {
+				state.stopReason = "context_preflight_failed"
+				state.lastAgentFailure = "诊断上下文预算检查失败，已在调用模型前停止"
+			}
+			state.gaps = append(state.gaps, state.lastAgentFailure)
+			return state, nil
+		}
 		return state, fmt.Errorf("run evidence Agent: %w", err)
 	}
 	return state, nil
 }
 
 func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceState) (*evidenceState, error) {
+	if state.contextPreparationStopped {
+		state.nextNode = evidenceNodePartialReport
+		state.gaps = uniqueStrings(state.gaps)
+		state.appendStep(InvestigationGate, "上下文预算门禁", strings.Join(state.gaps, "；"), "partial", "", 0)
+		return state, nil
+	}
 	gaps := make([]string, 0, 8)
 	if state.parseError != nil {
 		gaps = append(gaps, "模型输出不是可校验的结构化报告")
@@ -518,6 +543,9 @@ func (s *evidenceState) mergeRunResult(result RunResult) {
 		s.evidenceItems = append(s.evidenceItems, item)
 	}
 	s.usage.Add(result.Usage)
+	s.contextObservation = mergeDiagnosisContextObservation(
+		s.contextObservation, result.ContextObservation,
+	)
 	s.allowedTools = uniqueStrings(append(s.allowedTools, result.AllowedTools...))
 	for _, skillID := range result.ExecutedSkills {
 		if skillID != "" && !slices.Contains(s.executedSkills, skillID) {
@@ -666,7 +694,30 @@ func (s *evidenceState) result() OrchestrationResult {
 		AgenticRetrievalAttempted:     s.agenticRetrievalAttempted,
 		AgenticRetrievalAddedEvidence: s.agenticRetrievalAddedEvidence,
 		AgenticRetrievalStopReason:    s.agenticRetrievalResultStopReason(),
+		ContextObservation:            s.contextObservation,
 	}
+}
+
+func mergeDiagnosisContextObservation(
+	base DiagnosisContextObservation,
+	extra DiagnosisContextObservation,
+) DiagnosisContextObservation {
+	base.PreflightCalls += extra.PreflightCalls
+	base.PreflightFailureCount += extra.PreflightFailureCount
+	base.ToolResultTruncatedCount += extra.ToolResultTruncatedCount
+	base.HardWindowBlockedCount += extra.HardWindowBlockedCount
+	if extra.HighWaterTokens >= base.HighWaterTokens {
+		base.HighWaterTokens = extra.HighWaterTokens
+		base.AvailableInputTokens = extra.AvailableInputTokens
+		base.HighWaterRatio = extra.HighWaterRatio
+	}
+	if extra.PreflightCalls > 0 {
+		base.LastEstimatedUpperBoundTokens = extra.LastEstimatedUpperBoundTokens
+		base.EstimationMethod = extra.EstimationMethod
+		base.ReportOutputReserveTokens = extra.ReportOutputReserveTokens
+		base.ToolGrowthReserveTokens = extra.ToolGrowthReserveTokens
+	}
+	return base
 }
 
 func (s *evidenceState) agenticRetrievalResultStopReason() string {

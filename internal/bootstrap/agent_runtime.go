@@ -11,6 +11,7 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
@@ -262,6 +263,73 @@ func buildAgentRuntimeForRole(
 		}
 	}
 
+	summaryTailEnabled := role == agentRuntimeRoleConversation &&
+		cfg.Agent.ContextMemory.SummaryTailEnabled
+	sourceRecoveryEnabled := role == agentRuntimeRoleConversation &&
+		cfg.Agent.ContextMemory.SourceRecoveryEnabled
+	var tokenBudget conversationTokenBudgetRuntime
+	if cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
+		cfg.Agent.ContextMemory.DiagnosisPreflightEnabled || sourceRecoveryEnabled {
+		tokenBudget, err = buildConversationTokenBudgetRuntime(cfg)
+		if err != nil {
+			_ = runtime.close()
+			return nil, err
+		}
+	}
+	var conversationMemory mesagent.ConversationMemory
+	if summaryTailEnabled || sourceRecoveryEnabled {
+		if builders.conversationMemory == nil {
+			_ = runtime.close()
+			return nil, errors.New("conversation memory builder is unavailable")
+		}
+		conversationMemory, err = builders.conversationMemory(ctx, postgresDB, cfg)
+		if err != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build active conversation memory: %w", err)
+		}
+		if conversationMemory == nil {
+			_ = runtime.close()
+			return nil, errors.New("active conversation memory is unavailable")
+		}
+	}
+	var conversationMemorySources mesagent.ConversationMemorySourceReader
+	if sourceRecoveryEnabled {
+		if postgresDB == nil {
+			_ = runtime.close()
+			return nil, errors.New("conversation memory source recovery requires PostgreSQL")
+		}
+		tokenCounter, counterErr := conversationmemory.NewSourceTokenCounter(
+			tokenBudget.estimator, tokenBudget.profile.Name,
+		)
+		if counterErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation memory source token counter: %w", counterErr)
+		}
+		conversationMemorySources, err = conversationmemory.NewSourceRecovery(conversationmemory.SourceRecoveryConfig{
+			ActiveSnapshots: conversationMemory,
+			Messages:        platformpostgres.NewConversationRepository(postgresDB),
+			TokenCounter:    tokenCounter,
+			MaxMessages:     cfg.Agent.ContextMemory.SourceRecoveryMaxMessages,
+			MaxTokens:       cfg.Agent.ContextMemory.SourceRecoveryMaxTokens,
+		})
+		if err != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("build conversation memory source recovery: %w", err)
+		}
+	}
+
+	var diagnosisPreflight mesagent.DiagnosisContextPreflightConfig
+	if cfg.Agent.ContextMemory.DiagnosisPreflightEnabled {
+		diagnosisPreflight = mesagent.DiagnosisContextPreflightConfig{
+			Enabled: true, Planner: tokenBudget.planner, ModelProfile: tokenBudget.profile,
+			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
+			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
+			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
+			PreflightTimeout: time.Duration(
+				cfg.Agent.ContextMemory.PreflightTimeoutMillis,
+			) * time.Millisecond,
+		}
+	}
 	runtime.runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
 		ChatModel:             chatModel,
 		ExternalCases:         externalCases,
@@ -278,6 +346,7 @@ func buildAgentRuntimeForRole(
 		FetchPublicPage:       fetchPublicPage,
 		CreateDiagnosisTask:   builders.conversationCreator,
 		AttachmentReader:      builders.attachmentReader,
+		ContextPreflight:      diagnosisPreflight,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
@@ -287,9 +356,10 @@ func buildAgentRuntimeForRole(
 	conversationCatalog, err := mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
-		CreateDiagnosisTask: builders.conversationCreator,
-		DiagnosisTaskStatus: builders.conversationTaskStatus,
-		AttachmentReader:    builders.attachmentReader,
+		CreateDiagnosisTask:       builders.conversationCreator,
+		DiagnosisTaskStatus:       builders.conversationTaskStatus,
+		AttachmentReader:          builders.attachmentReader,
+		ConversationMemorySources: conversationMemorySources,
 	})
 	if err != nil {
 		_ = runtime.close()
@@ -316,32 +386,10 @@ func buildAgentRuntimeForRole(
 	}
 	var contextPreflight mesagent.ConversationContextPreflightConfig
 	if cfg.Agent.ContextMemory.ShadowPreflightEnabled {
-		tokenBudget, tokenBudgetErr := buildConversationTokenBudgetRuntime(cfg)
-		if tokenBudgetErr != nil {
-			_ = runtime.close()
-			return nil, tokenBudgetErr
-		}
 		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(tokenBudget.estimator)
 		if tailSelectorErr != nil {
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
-		}
-		summaryTailEnabled := role == agentRuntimeRoleConversation && cfg.Agent.ContextMemory.SummaryTailEnabled
-		var conversationMemory mesagent.ConversationMemory
-		if summaryTailEnabled {
-			if builders.conversationMemory == nil {
-				_ = runtime.close()
-				return nil, errors.New("conversation memory builder is unavailable")
-			}
-			conversationMemory, err = builders.conversationMemory(ctx, postgresDB, cfg)
-			if err != nil {
-				_ = runtime.close()
-				return nil, fmt.Errorf("build active conversation memory: %w", err)
-			}
-			if conversationMemory == nil {
-				_ = runtime.close()
-				return nil, errors.New("active conversation memory is unavailable")
-			}
 		}
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
 			Enabled: true, Planner: tokenBudget.planner, TailSelector: tailSelector,
@@ -360,18 +408,20 @@ func buildAgentRuntimeForRole(
 	}
 	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
 		ChatModel: chatModel, CitationRepairer: citationRepairer, ToolCatalog: conversationCatalog,
-		SystemInstruction:     prompts.ConversationInstruction,
-		ModelProvider:         runtime.modelProvider,
-		ModelID:               runtime.modelID,
-		PromptVersion:         runtime.conversationPromptVersion,
-		AvailableDependencies: runtime.availableDependencies,
-		Logger:                log.Named("conversation_runner"),
-		MaxIterations:         cfg.Agent.ConversationMaxIterations,
-		MaxToolCalls:          cfg.Agent.MaxToolCalls,
-		MaxTotalTokens:        cfg.Agent.MaxTotalTokens,
-		MaxContextRunes:       cfg.Agent.ConversationMaxContextRunes,
-		Timeout:               time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond,
-		ContextPreflight:      contextPreflight,
+		SystemInstruction:            prompts.ConversationInstruction,
+		ModelProvider:                runtime.modelProvider,
+		ModelID:                      runtime.modelID,
+		PromptVersion:                runtime.conversationPromptVersion,
+		AvailableDependencies:        runtime.availableDependencies,
+		Logger:                       log.Named("conversation_runner"),
+		MaxIterations:                cfg.Agent.ConversationMaxIterations,
+		MaxToolCalls:                 cfg.Agent.MaxToolCalls,
+		MaxTotalTokens:               cfg.Agent.MaxTotalTokens,
+		MaxContextRunes:              cfg.Agent.ConversationMaxContextRunes,
+		Timeout:                      time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond,
+		MemorySourceRecoveryEnabled:  sourceRecoveryEnabled,
+		MemorySourceRecoveryMaxCalls: cfg.Agent.ContextMemory.SourceRecoveryMaxCalls,
+		ContextPreflight:             contextPreflight,
 	})
 	if err != nil {
 		_ = runtime.close()

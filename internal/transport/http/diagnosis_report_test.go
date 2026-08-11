@@ -26,6 +26,12 @@ func TestDiagnosisReportRoutesReturnsFormalReportWithoutRawEvidence(t *testing.T
 		TechnicalSummary: "快照显示处理链路延迟", Confidence: "medium",
 		Limitations: []string{"缺少服务日志"}, MissingEvidence: []string{},
 		Usage: diagnosis.ReportModelUsage{ModelCalls: 2, TotalTokens: 1200}, AgentRuns: 1,
+		ContextObservation: diagnosis.ReportContextObservation{
+			PreflightCalls: 2, HighWaterTokens: 1200, AvailableInputTokens: 124928,
+			HighWaterRatio: 0.0096, ToolResultTruncatedCount: 1,
+			ReportOutputReserveTokens: 4096, ToolGrowthReserveTokens: 8192,
+			EstimationMethod: "local_calibrated",
+		},
 		SelectedSkill: "ticket-diagnosis", ExecutedSkills: []string{"ticket-diagnosis"},
 		AgenticRetrievalAttempted: true, AgenticRetrievalAddedEvidence: true,
 		AgenticRetrievalStopReason: "new_evidence_added",
@@ -62,7 +68,8 @@ func TestDiagnosisReportRoutesReturnsFormalReportWithoutRawEvidence(t *testing.T
 	body := string(data)
 	for _, expected := range []string{reportID.String(), evidenceID.String(), `"sourceRef":"evidence:case-1"`,
 		`"modelProvider":"stepfun"`, `"agenticRetrievalAttempted":true`,
-		`"agenticRetrievalAddedEvidence":true`, `"agenticRetrievalStopReason":"new_evidence_added"`} {
+		`"agenticRetrievalAddedEvidence":true`, `"agenticRetrievalStopReason":"new_evidence_added"`,
+		`"contextObservation":{`, `"preflightCalls":2`, `"toolResultTruncatedCount":1`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("response missing %q: %s", expected, body)
 		}

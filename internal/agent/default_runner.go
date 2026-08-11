@@ -15,38 +15,41 @@ import (
 )
 
 type DefaultRunnerDependencies struct {
-	ChatModel             model.ToolCallingChatModel
-	ExternalCases         ExternalCaseGetter
-	SkillRoot             string
-	SystemInstruction     string
-	BaselineInstruction   string
-	Mode                  RunnerMode
-	GitHubTools           []tool.BaseTool
-	GitHubArgumentRewrite ArgumentRewriter
-	SQLObjectDefinitions  tool.BaseTool
-	SchemaCatalog         tool.BaseTool
-	ReadonlyQuery         tool.BaseTool
-	KnowledgeSearch       tool.BaseTool
-	WebSearch             tool.BaseTool
-	FetchPublicPage       tool.BaseTool
-	CreateDiagnosisTask   DiagnosisTaskCreator
-	AttachmentReader      attachment.Reader
-	Logger                *zap.Logger
+	ChatModel                 model.ToolCallingChatModel
+	ExternalCases             ExternalCaseGetter
+	SkillRoot                 string
+	SystemInstruction         string
+	BaselineInstruction       string
+	Mode                      RunnerMode
+	GitHubTools               []tool.BaseTool
+	GitHubArgumentRewrite     ArgumentRewriter
+	SQLObjectDefinitions      tool.BaseTool
+	SchemaCatalog             tool.BaseTool
+	ReadonlyQuery             tool.BaseTool
+	KnowledgeSearch           tool.BaseTool
+	WebSearch                 tool.BaseTool
+	FetchPublicPage           tool.BaseTool
+	CreateDiagnosisTask       DiagnosisTaskCreator
+	AttachmentReader          attachment.Reader
+	ConversationMemorySources ConversationMemorySourceReader
+	ContextPreflight          DiagnosisContextPreflightConfig
+	Logger                    *zap.Logger
 }
 
 type DefaultToolCatalogDependencies struct {
-	ExternalCases        ExternalCaseGetter
-	SkillReference       tool.BaseTool
-	GitHubTools          []tool.BaseTool
-	SQLObjectDefinitions tool.BaseTool
-	SchemaCatalog        tool.BaseTool
-	ReadonlyQuery        tool.BaseTool
-	KnowledgeSearch      tool.BaseTool
-	WebSearch            tool.BaseTool
-	FetchPublicPage      tool.BaseTool
-	CreateDiagnosisTask  DiagnosisTaskCreator
-	DiagnosisTaskStatus  DiagnosisTaskStatusReader
-	AttachmentReader     attachment.Reader
+	ExternalCases             ExternalCaseGetter
+	SkillReference            tool.BaseTool
+	GitHubTools               []tool.BaseTool
+	SQLObjectDefinitions      tool.BaseTool
+	SchemaCatalog             tool.BaseTool
+	ReadonlyQuery             tool.BaseTool
+	KnowledgeSearch           tool.BaseTool
+	WebSearch                 tool.BaseTool
+	FetchPublicPage           tool.BaseTool
+	CreateDiagnosisTask       DiagnosisTaskCreator
+	DiagnosisTaskStatus       DiagnosisTaskStatusReader
+	AttachmentReader          attachment.Reader
+	ConversationMemorySources ConversationMemorySourceReader
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -68,7 +71,8 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
 		KnowledgeSearch: dependencies.KnowledgeSearch, WebSearch: dependencies.WebSearch,
 		FetchPublicPage: dependencies.FetchPublicPage, CreateDiagnosisTask: dependencies.CreateDiagnosisTask,
-		AttachmentReader: dependencies.AttachmentReader,
+		AttachmentReader:          dependencies.AttachmentReader,
+		ConversationMemorySources: dependencies.ConversationMemorySources,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -80,6 +84,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		BaselineInstruction:   dependencies.BaselineInstruction,
 		Mode:                  dependencies.Mode,
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
+		ContextPreflight:      dependencies.ContextPreflight,
 		Logger:                dependencies.Logger,
 	})
 }
@@ -167,6 +172,13 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			RequiredCapabilities: []ToolCapability{ToolCapabilityAttachment},
 			RequiredDependencies: []ToolDependency{ToolDependencyAttachment},
 		})
+	}
+	if dependencies.ConversationMemorySources != nil {
+		registration, err := NewConversationMemorySourceToolRegistration(dependencies.ConversationMemorySources)
+		if err != nil {
+			return nil, fmt.Errorf("build conversation memory source Tool registration: %w", err)
+		}
+		registrations = append(registrations, registration)
 	}
 	for _, sqlTool := range []tool.BaseTool{
 		dependencies.SQLObjectDefinitions, dependencies.SchemaCatalog, dependencies.ReadonlyQuery,

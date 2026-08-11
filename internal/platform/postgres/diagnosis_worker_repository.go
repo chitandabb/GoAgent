@@ -522,6 +522,7 @@ func marshalReportSummaries(result agent.OrchestrationResult) ([]byte, []byte, e
 		"agenticRetrievalAttempted":     result.AgenticRetrievalAttempted,
 		"agenticRetrievalAddedEvidence": result.AgenticRetrievalAddedEvidence,
 		"agenticRetrievalStopReason":    result.AgenticRetrievalStopReason,
+		"contextObservation":            result.ContextObservation,
 	})
 	if err != nil {
 		return nil, nil, err

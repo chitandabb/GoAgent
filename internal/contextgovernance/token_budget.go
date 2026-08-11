@@ -41,6 +41,9 @@ const (
 	PromptSegmentHistory           PromptSegmentKind = "history"
 	PromptSegmentDynamicReferences PromptSegmentKind = "dynamic_references"
 	PromptSegmentCurrentUser       PromptSegmentKind = "current_user_message"
+	PromptSegmentCaseSnapshot      PromptSegmentKind = "case_snapshot"
+	PromptSegmentEvidenceIndex     PromptSegmentKind = "evidence_index"
+	PromptSegmentToolResult        PromptSegmentKind = "tool_result"
 	PromptSegmentToolGrowthReserve PromptSegmentKind = "tool_growth_reserve"
 )
 
@@ -48,7 +51,8 @@ func (k PromptSegmentKind) Valid() bool {
 	switch k {
 	case PromptSegmentSystem, PromptSegmentToolSchema, PromptSegmentPreloadedSkill,
 		PromptSegmentSummary, PromptSegmentHistory, PromptSegmentDynamicReferences,
-		PromptSegmentCurrentUser, PromptSegmentToolGrowthReserve:
+		PromptSegmentCurrentUser, PromptSegmentCaseSnapshot, PromptSegmentEvidenceIndex,
+		PromptSegmentToolResult, PromptSegmentToolGrowthReserve:
 		return true
 	default:
 		return false

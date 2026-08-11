@@ -12,6 +12,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -33,44 +34,48 @@ var (
 )
 
 type ConversationRunnerConfig struct {
-	ChatModel             model.ToolCallingChatModel
-	CitationRepairer      ConversationCitationRepairer
-	ToolCatalog           *ToolCatalog
-	SystemInstruction     string
-	ModelProvider         string
-	ModelID               string
-	PromptVersion         string
-	AvailableDependencies []ToolDependency
-	Logger                *zap.Logger
-	MaxIterations         int
-	MaxToolCalls          int
-	MaxTotalTokens        int
-	MaxContextRunes       int
-	Timeout               time.Duration
-	MaxToolResultBytes    int
-	ContextPreflight      ConversationContextPreflightConfig
+	ChatModel                    model.ToolCallingChatModel
+	CitationRepairer             ConversationCitationRepairer
+	ToolCatalog                  *ToolCatalog
+	SystemInstruction            string
+	ModelProvider                string
+	ModelID                      string
+	PromptVersion                string
+	AvailableDependencies        []ToolDependency
+	Logger                       *zap.Logger
+	MaxIterations                int
+	MaxToolCalls                 int
+	MaxTotalTokens               int
+	MaxContextRunes              int
+	Timeout                      time.Duration
+	MaxToolResultBytes           int
+	MemorySourceRecoveryEnabled  bool
+	MemorySourceRecoveryMaxCalls int
+	ContextPreflight             ConversationContextPreflightConfig
 }
 
 // ConversationRunner executes one lightweight workbench turn. It is separate
 // from the diagnosis Runner so chat responses are not forced through the report
 // schema or Evidence Gate and cannot synchronously perform a full diagnosis.
 type ConversationRunner struct {
-	chatModel             model.ToolCallingChatModel
-	citationRepairer      ConversationCitationRepairer
-	toolCatalog           *ToolCatalog
-	systemInstruction     string
-	modelProvider         string
-	modelID               string
-	promptVersion         string
-	availableDependencies []ToolDependency
-	log                   *zap.Logger
-	maxIterations         int
-	maxToolCalls          int
-	maxTotalTokens        int
-	maxContextRunes       int
-	timeout               time.Duration
-	maxToolResultBytes    int
-	contextPreflight      ConversationContextPreflightConfig
+	chatModel                    model.ToolCallingChatModel
+	citationRepairer             ConversationCitationRepairer
+	toolCatalog                  *ToolCatalog
+	systemInstruction            string
+	modelProvider                string
+	modelID                      string
+	promptVersion                string
+	availableDependencies        []ToolDependency
+	log                          *zap.Logger
+	maxIterations                int
+	maxToolCalls                 int
+	maxTotalTokens               int
+	maxContextRunes              int
+	timeout                      time.Duration
+	maxToolResultBytes           int
+	memorySourceRecoveryEnabled  bool
+	memorySourceRecoveryMaxCalls int
+	contextPreflight             ConversationContextPreflightConfig
 }
 
 func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, error) {
@@ -108,6 +113,9 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 	if cfg.MaxToolResultBytes == 0 {
 		cfg.MaxToolResultBytes = defaultMaxToolResultBytes
 	}
+	if cfg.MemorySourceRecoveryEnabled && cfg.MemorySourceRecoveryMaxCalls == 0 {
+		cfg.MemorySourceRecoveryMaxCalls = 2
+	}
 	if cfg.MaxIterations < 1 || cfg.MaxIterations > 16 {
 		return nil, errors.New("conversation runner max iterations must be between 1 and 16")
 	}
@@ -125,6 +133,10 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 	}
 	if cfg.MaxToolResultBytes < 1024 || cfg.MaxToolResultBytes > 1024*1024 {
 		return nil, errors.New("conversation runner max tool result bytes must be between 1024 and 1048576")
+	}
+	if cfg.MemorySourceRecoveryEnabled &&
+		(cfg.MemorySourceRecoveryMaxCalls < 1 || cfg.MemorySourceRecoveryMaxCalls > 2) {
+		return nil, errors.New("conversation memory source recovery max calls must be between 1 and 2")
 	}
 	dependencies := append([]ToolDependency(nil), cfg.AvailableDependencies...)
 	for _, dependency := range dependencies {
@@ -145,7 +157,9 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
-		contextPreflight: cfg.ContextPreflight,
+		memorySourceRecoveryEnabled:  cfg.MemorySourceRecoveryEnabled,
+		memorySourceRecoveryMaxCalls: cfg.MemorySourceRecoveryMaxCalls,
+		contextPreflight:             cfg.ContextPreflight,
 	}, nil
 }
 
@@ -197,6 +211,9 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, err
 	}
 	runCtx := WithTaskScope(ctx, scope)
+	if r.memorySourceRecoveryEnabled {
+		runCtx = conversationmemory.WithSourceRecoveryRun(runCtx)
+	}
 	if !r.contextPreflight.Enabled || r.contextPreflight.SummaryTailEnabled {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
@@ -208,7 +225,8 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		runCtx, newConversationToolResultStore(r.maxToolCalls, r.maxToolResultBytes),
 	)
 	runCtx = withAgentToolRunPolicy(runCtx, newAgentToolRunPolicy(nil, map[string]int{
-		ToolCreateDiagnosisTask: 1,
+		ToolCreateDiagnosisTask:           1,
+		ToolReadConversationMemorySources: r.memorySourceRecoveryMaxCalls,
 	}))
 	trace := &executionTrace{}
 	runCtx = withExecutionTrace(runCtx, trace)
@@ -428,6 +446,9 @@ func (r *ConversationRunner) conversationScope(actor conversation.Actor, message
 		role = auth.RoleAdmin
 	}
 	capabilities := []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityWebSearch}
+	if r.memorySourceRecoveryEnabled {
+		capabilities = append(capabilities, ToolCapabilityMemory)
+	}
 	selected := 0
 	for _, reference := range message.CaseReferences {
 		if reference.Kind == conversation.ReferenceKindSelected {

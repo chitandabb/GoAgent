@@ -33,6 +33,7 @@ timeoutMillis = 90000
 
 [agent.contextMemory]
 shadowPreflightEnabled = true
+diagnosisPreflightEnabled = true
 continuousTailEnabled = true
 summaryTailEnabled = true
 asyncCompactionEnabled = true
@@ -42,6 +43,10 @@ memoryCacheEnabled = true
 memoryCacheTTL = "2h"
 memoryCacheJitterRatio = 0.10
 memoryCacheTimeoutMillis = 50
+sourceRecoveryEnabled = true
+sourceRecoveryMaxMessages = 20
+sourceRecoveryMaxTokens = 8192
+sourceRecoveryMaxCalls = 2
 memoryMaxRatio = 0.20
 summaryMaxRatio = 0.05
 tailMaxRatio = 0.15
