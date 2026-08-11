@@ -34,6 +34,7 @@ timeoutMillis = 90000
 [models.chat]
 enabled = true
 activeProfile = "stepfun-main"
+conversationMemoryProfile = "qwen-conversation-memory"
 
 [models.chat.profiles.stepfun-main]
 provider = "stepfun"
@@ -42,7 +43,13 @@ apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
 model = "step-3.7-flash"
 reasoningEffort = "medium"
 timeoutMillis = 120000
+contextWindowTokens = 131072
 maxOutputTokens = 4096
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
 
 [models.chat.profiles.qwen-rewrite]
 provider = "dashscope"
@@ -52,7 +59,29 @@ model = "qwen3.6-flash"
 thinkingMode = "disabled"
 temperature = 0.0
 timeoutMillis = 3000
+contextWindowTokens = 131072
 maxOutputTokens = 256
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
+
+[models.chat.profiles.qwen-conversation-memory]
+provider = "dashscope"
+baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+apiKeyEnv = "DASHSCOPE_API_KEY"
+model = "qwen3.6-flash"
+thinkingMode = "disabled"
+temperature = 0.0
+timeoutMillis = 30000
+contextWindowTokens = 131072
+maxOutputTokens = 4096
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
 
 [models.chat.profiles.qwen-qa-eval]
 provider = "dashscope"
@@ -62,7 +91,13 @@ model = "qwen3.6-flash"
 thinkingMode = "disabled"
 temperature = 0.0
 timeoutMillis = 30000
+contextWindowTokens = 131072
 maxOutputTokens = 1024
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
 
 [models.chat.profiles.qwen-qa-strong-eval]
 provider = "dashscope"
@@ -72,7 +107,13 @@ model = "qwen3-max"
 thinkingMode = "disabled"
 temperature = 0.0
 timeoutMillis = 60000
+contextWindowTokens = 131072
 maxOutputTokens = 1024
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
 
 [models.judge]
 enabled = false

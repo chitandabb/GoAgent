@@ -110,7 +110,7 @@ func TestNewActiveReadsOnlySelectedProfileKey(t *testing.T) {
 	t.Setenv("INACTIVE_CHAT_KEY", "")
 
 	instance, err := NewActive(context.Background(), config.ChatModelConfig{
-		Enabled: true, ActiveProfileName: "main",
+		Enabled: true, ActiveProfileName: "main", ConversationMemoryProfileName: "rewrite",
 		Profiles: map[string]config.ChatModelProfileConfig{"main": active, "rewrite": inactive},
 	})
 	if err != nil {
@@ -143,6 +143,9 @@ func profileForTest(provider, model, reasoningEffort, thinkingMode string) confi
 	return config.ChatModelProfileConfig{
 		Provider: provider, BaseURL: "https://example.com/v1", APIKeyEnv: "MESGUARD_TEST_CHAT_KEY",
 		Model: model, ReasoningEffort: reasoningEffort, ThinkingMode: thinkingMode,
-		Temperature: &temperature, TimeoutMillis: 5000, MaxOutputTokens: 128,
+		Temperature: &temperature, TimeoutMillis: 5000,
+		ContextWindowTokens: 8192, MaxOutputTokens: 128,
+		PromptSafetyMarginTokens: 256, PromptSafetyMarginRatio: 0.05,
+		TokenizerStrategy: config.TokenizerStrategyLocalCalibrated,
 	}
 }

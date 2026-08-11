@@ -6,14 +6,26 @@ func validChatModelProfileConfig() ChatModelProfileConfig {
 	return ChatModelProfileConfig{
 		Provider: "stepfun", BaseURL: "https://api.stepfun.com/step_plan/v1",
 		APIKeyEnv: "MESGUARD_STEPFUN_API_KEY", Model: "step-3.7-flash",
-		ReasoningEffort: "medium", TimeoutMillis: 120_000, MaxOutputTokens: 4096,
+		ReasoningEffort: "medium", TimeoutMillis: 120_000,
+		ContextWindowTokens: 131_072, MaxOutputTokens: 4096,
+		PromptSafetyMarginTokens: 2048, PromptSafetyMarginRatio: 0.05,
+		TokenizerStrategy: TokenizerStrategyLocalCalibrated,
 	}
 }
 
 func validChatModelConfig() ChatModelConfig {
+	memory := validChatModelProfileConfig()
+	memory.Provider = "dashscope"
+	memory.BaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	memory.APIKeyEnv = "DASHSCOPE_API_KEY"
+	memory.Model = "qwen3.6-flash"
+	memory.ReasoningEffort = ""
+	memory.ThinkingMode = "disabled"
 	return ChatModelConfig{
-		Enabled: true, ActiveProfileName: "stepfun-main",
-		Profiles: map[string]ChatModelProfileConfig{"stepfun-main": validChatModelProfileConfig()},
+		Enabled: true, ActiveProfileName: "stepfun-main", ConversationMemoryProfileName: "conversation-memory",
+		Profiles: map[string]ChatModelProfileConfig{
+			"stepfun-main": validChatModelProfileConfig(), "conversation-memory": memory,
+		},
 	}
 }
 
@@ -26,6 +38,22 @@ func TestChatModelConfigValidate(t *testing.T) {
 		{name: "valid StepFun", valid: true},
 		{name: "disabled accepts empty", mutate: func(c *ChatModelConfig) { *c = ChatModelConfig{} }, valid: true},
 		{name: "missing active profile", mutate: func(c *ChatModelConfig) { c.ActiveProfileName = "missing" }},
+		{name: "missing memory profile selection", mutate: func(c *ChatModelConfig) {
+			c.ConversationMemoryProfileName = ""
+		}},
+		{name: "missing memory profile", mutate: func(c *ChatModelConfig) {
+			c.ConversationMemoryProfileName = "missing"
+		}},
+		{name: "configured profile missing context contract", mutate: func(c *ChatModelConfig) {
+			profile := c.Profiles["stepfun-main"]
+			profile.ContextWindowTokens = 0
+			profile.PromptSafetyMarginTokens = 0
+			profile.PromptSafetyMarginRatio = 0
+			profile.TokenizerStrategy = ""
+			profile.ToolExposureStrategy = ""
+			profile.ProviderNativeCompactionEnabled = false
+			c.Profiles["stepfun-main"] = profile
+		}},
 		{name: "invalid profile name", mutate: func(c *ChatModelConfig) {
 			c.Profiles["bad profile"] = validChatModelProfileConfig()
 		}},
@@ -70,6 +98,30 @@ func TestChatModelProfileConfigValidate(t *testing.T) {
 		{name: "invalid thinking mode", mutate: func(c *ChatModelProfileConfig) { c.ThinkingMode = "auto" }},
 		{name: "invalid timeout", mutate: func(c *ChatModelProfileConfig) { c.TimeoutMillis = 0 }},
 		{name: "invalid output limit", mutate: func(c *ChatModelProfileConfig) { c.MaxOutputTokens = 0 }},
+		{name: "missing context window", mutate: func(c *ChatModelProfileConfig) { c.ContextWindowTokens = 0 }},
+		{name: "output consumes context window", mutate: func(c *ChatModelProfileConfig) {
+			c.ContextWindowTokens = c.MaxOutputTokens
+		}},
+		{name: "negative safety margin tokens", mutate: func(c *ChatModelProfileConfig) {
+			c.PromptSafetyMarginTokens = -1
+		}},
+		{name: "invalid safety margin ratio", mutate: func(c *ChatModelProfileConfig) {
+			c.PromptSafetyMarginRatio = 0.51
+		}},
+		{name: "safety margin consumes input", mutate: func(c *ChatModelProfileConfig) {
+			c.ContextWindowTokens = 8192
+			c.MaxOutputTokens = 4096
+			c.PromptSafetyMarginTokens = 4096
+		}},
+		{name: "unknown tokenizer strategy", mutate: func(c *ChatModelProfileConfig) {
+			c.TokenizerStrategy = "remote_only"
+		}},
+		{name: "unknown tool exposure strategy", mutate: func(c *ChatModelProfileConfig) {
+			c.ToolExposureStrategy = "dynamic_any"
+		}},
+		{name: "provider native compaction is optional", mutate: func(c *ChatModelProfileConfig) {
+			c.ProviderNativeCompactionEnabled = true
+		}, valid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,5 +133,31 @@ func TestChatModelProfileConfigValidate(t *testing.T) {
 				t.Fatalf("Validate error = %v, valid = %v", err, tt.valid)
 			}
 		})
+	}
+}
+
+func TestChatModelProfileConfigEffectiveContextContract(t *testing.T) {
+	cfg := validChatModelProfileConfig()
+	if got := cfg.EffectivePromptSafetyMarginTokens(); got != 6554 {
+		t.Fatalf("EffectivePromptSafetyMarginTokens() = %d, want 6554", got)
+	}
+	if got := cfg.EffectiveToolExposureStrategy(); got != ToolExposureStrategyStaticFrozen {
+		t.Fatalf("EffectiveToolExposureStrategy() = %q, want %q", got, ToolExposureStrategyStaticFrozen)
+	}
+
+	cfg.ToolExposureStrategy = ToolExposureStrategyEpochRebind
+	if got := cfg.EffectiveToolExposureStrategy(); got != ToolExposureStrategyEpochRebind {
+		t.Fatalf("configured EffectiveToolExposureStrategy() = %q, want %q", got, ToolExposureStrategyEpochRebind)
+	}
+}
+
+func TestChatModelConfigConversationMemoryProfile(t *testing.T) {
+	cfg := validChatModelConfig()
+	profile, err := cfg.ConversationMemoryProfile()
+	if err != nil {
+		t.Fatalf("ConversationMemoryProfile() error = %v", err)
+	}
+	if profile.Model != "qwen3.6-flash" {
+		t.Fatalf("ConversationMemoryProfile().Model = %q, want qwen3.6-flash", profile.Model)
 	}
 }
