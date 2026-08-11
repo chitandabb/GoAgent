@@ -373,18 +373,57 @@ type AgentConfig struct {
 // preflight so every activated prompt still produces the same bounded manifest;
 // the Rune selector remains an explicit rollback path.
 type ContextMemoryConfig struct {
-	ShadowPreflightEnabled  bool    `toml:"shadowPreflightEnabled"`
-	ContinuousTailEnabled   bool    `toml:"continuousTailEnabled"`
-	TailMaxRatio            float64 `toml:"tailMaxRatio"`
-	PreflightTimeoutMillis  int     `toml:"preflightTimeoutMillis"`
-	SoftThresholdRatio      float64 `toml:"softThresholdRatio"`
-	HardThresholdRatio      float64 `toml:"hardThresholdRatio"`
-	ToolGrowthReserveTokens int     `toml:"toolGrowthReserveTokens"`
+	ShadowPreflightEnabled  bool                            `toml:"shadowPreflightEnabled"`
+	ContinuousTailEnabled   bool                            `toml:"continuousTailEnabled"`
+	TailMaxRatio            float64                         `toml:"tailMaxRatio"`
+	PreflightTimeoutMillis  int                             `toml:"preflightTimeoutMillis"`
+	SoftThresholdRatio      float64                         `toml:"softThresholdRatio"`
+	HardThresholdRatio      float64                         `toml:"hardThresholdRatio"`
+	ToolGrowthReserveTokens int                             `toml:"toolGrowthReserveTokens"`
+	Summary                 ConversationMemorySummaryConfig `toml:"summary"`
+}
+
+// ConversationMemorySummaryConfig controls the independently callable Shadow
+// compactor. It does not activate Snapshots or mutate the main Conversation
+// prompt; those rollout stages are configured separately in later milestones.
+type ConversationMemorySummaryConfig struct {
+	Enabled              bool   `toml:"enabled"`
+	PromptFile           string `toml:"promptFile"`
+	PromptVersion        string `toml:"promptVersion"`
+	MaxPayloadBytes      int    `toml:"maxPayloadBytes"`
+	MaxAttempts          int    `toml:"maxAttempts"`
+	RetryBaseDelayMillis int    `toml:"retryBaseDelayMillis"`
+}
+
+func (c ConversationMemorySummaryConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	path := strings.TrimSpace(c.PromptFile)
+	if path == "" || len(path) > 512 {
+		return errors.New("agent contextMemory summary promptFile is required and must not exceed 512 characters")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
+		return errors.New("agent contextMemory summary promptVersion is invalid")
+	}
+	if c.MaxPayloadBytes < 1024 || c.MaxPayloadBytes > 1024*1024 {
+		return errors.New("agent contextMemory summary maxPayloadBytes must be between 1024 and 1048576")
+	}
+	if c.MaxAttempts < 1 || c.MaxAttempts > 5 {
+		return errors.New("agent contextMemory summary maxAttempts must be between 1 and 5")
+	}
+	if c.RetryBaseDelayMillis < 0 || c.RetryBaseDelayMillis > 60_000 {
+		return errors.New("agent contextMemory summary retryBaseDelayMillis must be between 0 and 60000")
+	}
+	return nil
 }
 
 func (c ContextMemoryConfig) Validate() error {
 	if c.ContinuousTailEnabled && !c.ShadowPreflightEnabled {
 		return errors.New("agent contextMemory continuous Tail requires shadow preflight")
+	}
+	if err := c.Summary.Validate(); err != nil {
+		return err
 	}
 	if !c.ShadowPreflightEnabled {
 		return nil
@@ -1460,6 +1499,18 @@ func (c Config) Validate() error {
 	}
 	if err := c.Models.Chat.Validate(); err != nil {
 		return err
+	}
+	if c.Agent.ContextMemory.Summary.Enabled {
+		if !c.Models.Chat.Enabled {
+			return errors.New("agent contextMemory summary requires chat models")
+		}
+		memoryProfile, err := c.Models.Chat.ConversationMemoryProfile()
+		if err != nil {
+			return err
+		}
+		if memoryProfile.MaxOutputTokens*20 > memoryProfile.ContextWindowTokens {
+			return errors.New("conversation memory profile maxOutputTokens must not exceed 5 percent of its context window")
+		}
 	}
 	if c.Agent.ContextMemory.ShadowPreflightEnabled && c.Models.Chat.Enabled {
 		profile, err := c.Models.Chat.ActiveProfile()

@@ -81,6 +81,24 @@ func TestAgentConfigValidate(t *testing.T) {
 	if err := invalidTailRatio.Validate(); err == nil {
 		t.Fatal("Validate accepted Tail ratio above the 20 percent memory budget")
 	}
+	configured.ContextMemory.Summary = ConversationMemorySummaryConfig{
+		Enabled: true, PromptFile: "config/prompts/conversation-memory-summary.md",
+		PromptVersion: "conversation-memory-v1", MaxPayloadBytes: 65536,
+		MaxAttempts: 3, RetryBaseDelayMillis: 250,
+	}
+	if err := configured.Validate(); err != nil {
+		t.Fatalf("Validate configured structured Summary: %v", err)
+	}
+	invalidSummary := configured
+	invalidSummary.ContextMemory.Summary.PromptVersion = ""
+	if err := invalidSummary.Validate(); err == nil {
+		t.Fatal("Validate accepted enabled Summary without a prompt version")
+	}
+	invalidSummary = configured
+	invalidSummary.ContextMemory.Summary.MaxAttempts = 6
+	if err := invalidSummary.Validate(); err == nil {
+		t.Fatal("Validate accepted Summary retry count above the bounded limit")
+	}
 }
 
 func validAgentConfigForTest() AgentConfig {

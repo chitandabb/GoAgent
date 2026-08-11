@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -51,6 +52,13 @@ func (c AgentConfig) LoadPrompts() (AgentPrompts, error) {
 		ConversationInstruction:               conversationInstruction,
 		ConversationCitationRepairInstruction: citationRepairInstruction,
 	}, nil
+}
+
+func (c ConversationMemorySummaryConfig) LoadPrompt() (string, error) {
+	if !c.Enabled {
+		return "", errors.New("conversation memory Summary is disabled")
+	}
+	return loadPromptFile("conversation memory", "summary prompt", c.PromptFile, maxAgentPromptBytes)
 }
 
 func loadPromptFile(owner, name, path string, maxBytes int) (string, error) {
