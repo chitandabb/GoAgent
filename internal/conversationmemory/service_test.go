@@ -75,8 +75,8 @@ func TestConversationMemoryGeneratesAnInitialShadowSnapshot(t *testing.T) {
 	if snapshot.ConversationID != conversationID || snapshot.Version != 1 || snapshot.FromSeq != 1 ||
 		snapshot.ThroughSeq != 3 || snapshot.SupersedesSnapshotID != nil ||
 		snapshot.SchemaVersion != conversationmemory.CurrentSchemaVersion || snapshot.Status != conversationmemory.SnapshotStatusCandidate ||
-		snapshot.SummaryModelProfile != "conversation-memory" || snapshot.SummaryModelProvider != "dashscope" ||
-		snapshot.SummaryModelID != "qwen3.6-flash" || snapshot.PromptVersion != "conversation-memory-v1" ||
+		snapshot.Provenance.ModelProfile != "conversation-memory" || snapshot.Provenance.ModelProvider != "dashscope" ||
+		snapshot.Provenance.ModelID != "qwen3.6-flash" || snapshot.Provenance.PromptVersion != "conversation-memory-v1" ||
 		snapshot.PayloadSHA256 == "" || snapshot.Usage.TotalTokens != 160 || !snapshot.CreatedAt.Equal(createdAt) {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
@@ -118,9 +118,12 @@ func TestConversationMemoryIncrementallyMergesThePreviousSnapshot(t *testing.T) 
 	conversationID := uuid.New()
 	previousCandidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
 		ID: uuid.New(), ConversationID: conversationID, FromSeq: 1, ThroughSeq: 3,
-		SchemaVersion:       conversationmemory.CurrentSchemaVersion,
-		SummaryModelProfile: "conversation-memory", SummaryModelProvider: "dashscope", SummaryModelID: "qwen3.6-flash",
-		PromptVersion: "conversation-memory-v1", Payload: validPayload(),
+		SchemaVersion: conversationmemory.CurrentSchemaVersion,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "dashscope",
+			ModelID: "qwen3.6-flash", PromptVersion: "conversation-memory-v1",
+		},
+		Payload:   validPayload(),
 		Usage:     conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 30, TotalTokens: 130},
 		CreatedAt: time.Now().Add(-time.Minute).UTC(),
 	})
@@ -148,7 +151,14 @@ func TestConversationMemoryIncrementallyMergesThePreviousSnapshot(t *testing.T) 
 	snapshot, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
 		ConversationID: conversationID,
 		CompletedMessages: []conversation.Message{
-			{ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleUser, Content: "Tail 就按 15%"},
+			{
+				ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleUser, Content: "Tail 就按 15%",
+				Citations: []conversation.MessageCitation{{
+					Position: 0, SourceType: conversation.CitationSourceKnowledgeChunk,
+					SourceRef:     "knowledge:8c4c15e7-1d72-453d-b1a0-c64f70a03dc8/2cd3198e-0bff-4ab2-bc4c-e6838043039f",
+					ContentSHA256: strings.Repeat("a", 64),
+				}},
+			},
 			{ID: uuid.New(), ConversationID: conversationID, Seq: 5, Role: conversation.MessageRoleAssistant, Content: "已确认"},
 		},
 	})
@@ -189,9 +199,12 @@ func newMemoryService(
 	service, err := conversationmemory.NewService(conversationmemory.ServiceConfig{
 		Repository: repository, Compactor: compactor,
 		SchemaVersion: conversationmemory.CurrentSchemaVersion, MaxPayloadBytes: 64 * 1024,
-		SummaryModelProfile: "conversation-memory", SummaryModelProvider: "dashscope", SummaryModelID: "qwen3.6-flash",
-		PromptVersion: "conversation-memory-v1", MaxAttempts: maxAttempts,
-		Clock: func() time.Time { return now },
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "dashscope",
+			ModelID: "qwen3.6-flash", PromptVersion: "conversation-memory-v1",
+		},
+		MaxAttempts: maxAttempts,
+		Clock:       func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)

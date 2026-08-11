@@ -91,7 +91,8 @@ INSERT INTO conversation_memory_snapshots (
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			candidate.ID, candidate.ConversationID, version, candidate.SupersedesSnapshotID,
 			candidate.FromSeq, candidate.ThroughSeq, candidate.SchemaVersion,
-			candidate.SummaryModelProfile, candidate.SummaryModelProvider, candidate.SummaryModelID, candidate.PromptVersion,
+			candidate.Provenance.ModelProfile, candidate.Provenance.ModelProvider,
+			candidate.Provenance.ModelID, candidate.Provenance.PromptVersion,
 			string(payload), candidate.PayloadSHA256,
 			candidate.Usage.PromptTokens, candidate.Usage.CompletionTokens, candidate.Usage.TotalTokens, candidate.Usage.CachedTokens,
 			candidate.Status, candidate.CreatedAt,
@@ -118,25 +119,7 @@ func (r *ConversationMemoryRepository) Latest(
 	if conversationID == uuid.Nil {
 		return nil, conversationmemory.ErrInvalidSnapshot
 	}
-	var record conversationMemorySnapshotRecord
-	loaded := ResolveDB(ctx, r.db).Raw(`
-SELECT id, conversation_id, snapshot_version, supersedes_snapshot_id,
-       from_seq, through_seq, schema_version,
-       summary_model_profile, summary_model_provider, summary_model_id, prompt_version,
-       payload::text AS payload, payload_sha256,
-       prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-       status, created_at, activated_at
-FROM conversation_memory_snapshots
-WHERE conversation_id = ?
-ORDER BY snapshot_version DESC
-LIMIT 1`, conversationID).Scan(&record)
-	if loaded.Error != nil {
-		return nil, TranslateError(loaded.Error)
-	}
-	if loaded.RowsAffected == 0 {
-		return nil, conversationmemory.ErrSnapshotNotFound
-	}
-	snapshot, err := snapshotFromRecord(record)
+	snapshot, err := r.loadSnapshot(ctx, conversationMemoryLatestSnapshotQuery, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -153,16 +136,33 @@ func (r *ConversationMemoryRepository) Get(
 	if snapshotID == uuid.Nil {
 		return conversationmemory.Snapshot{}, conversationmemory.ErrInvalidSnapshot
 	}
-	var record conversationMemorySnapshotRecord
-	loaded := ResolveDB(ctx, r.db).Raw(`
+	return r.loadSnapshot(ctx, conversationMemorySnapshotByIDQuery, snapshotID)
+}
+
+const conversationMemorySnapshotProjection = `
 SELECT id, conversation_id, snapshot_version, supersedes_snapshot_id,
        from_seq, through_seq, schema_version,
        summary_model_profile, summary_model_provider, summary_model_id, prompt_version,
        payload::text AS payload, payload_sha256,
        prompt_tokens, completion_tokens, total_tokens, cached_tokens,
        status, created_at, activated_at
-FROM conversation_memory_snapshots
-WHERE id = ?`, snapshotID).Scan(&record)
+FROM conversation_memory_snapshots`
+
+const conversationMemoryLatestSnapshotQuery = conversationMemorySnapshotProjection + `
+WHERE conversation_id = ?
+ORDER BY snapshot_version DESC
+LIMIT 1`
+
+const conversationMemorySnapshotByIDQuery = conversationMemorySnapshotProjection + `
+WHERE id = ?`
+
+func (r *ConversationMemoryRepository) loadSnapshot(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (conversationmemory.Snapshot, error) {
+	var record conversationMemorySnapshotRecord
+	loaded := ResolveDB(ctx, r.db).Raw(query, args...).Scan(&record)
 	if loaded.Error != nil {
 		return conversationmemory.Snapshot{}, TranslateError(loaded.Error)
 	}
@@ -204,8 +204,10 @@ func snapshotFromRecord(record conversationMemorySnapshotRecord) (conversationme
 		ID: record.ID, ConversationID: record.ConversationID,
 		SupersedesSnapshotID: record.SupersedesSnapshotID,
 		FromSeq:              record.FromSeq, ThroughSeq: record.ThroughSeq, SchemaVersion: record.SchemaVersion,
-		SummaryModelProfile: record.SummaryModelProfile, SummaryModelProvider: record.SummaryModelProvider,
-		SummaryModelID: record.SummaryModelID, PromptVersion: record.PromptVersion,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: record.SummaryModelProfile, ModelProvider: record.SummaryModelProvider,
+			ModelID: record.SummaryModelID, PromptVersion: record.PromptVersion,
+		},
 		Payload: payload, PayloadSHA256: record.PayloadSHA256,
 		Usage: conversationmemory.SummaryUsage{
 			PromptTokens: record.PromptTokens, CompletionTokens: record.CompletionTokens,

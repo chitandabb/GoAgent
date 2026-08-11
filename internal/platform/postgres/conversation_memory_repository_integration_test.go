@@ -134,8 +134,11 @@ func integrationMemoryCandidate(
 	candidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
 		ID: uuid.New(), ConversationID: conversationID, SupersedesSnapshotID: predecessor,
 		FromSeq: fromSeq, ThroughSeq: throughSeq, SchemaVersion: conversationmemory.CurrentSchemaVersion,
-		SummaryModelProfile: "conversation-memory", SummaryModelProvider: "dashscope", SummaryModelID: "qwen3.6-flash",
-		PromptVersion: "conversation-memory-v1", Payload: payload,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "dashscope",
+			ModelID: "qwen3.6-flash", PromptVersion: "conversation-memory-v1",
+		},
+		Payload:   payload,
 		Usage:     conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, CachedTokens: 10},
 		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
 	})

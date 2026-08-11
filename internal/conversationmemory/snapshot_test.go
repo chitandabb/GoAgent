@@ -84,7 +84,7 @@ func TestSnapshotPayloadRejectsUnsafeMemory(t *testing.T) {
 		{
 			name: "task reference is attributed to an unrelated message",
 			mutate: func(payload *conversationmemory.Payload, _ *conversationmemory.ValidationContext) {
-				payload.TaskReferences[0].SourceMessageSeqs = []int64{2}
+				payload.TaskReferences[0].SourceMessageSeqs = []int64{2, 3}
 			},
 			want: conversationmemory.ErrUnknownStableReference,
 		},
@@ -163,6 +163,23 @@ func TestIncrementalPayloadCannotDropPreviouslyValidatedEntries(t *testing.T) {
 func TestSummaryUsageRequiresProviderAccounting(t *testing.T) {
 	if err := (conversationmemory.SummaryUsage{}).Validate(); !errors.Is(err, conversationmemory.ErrInvalidSnapshot) {
 		t.Fatalf("SummaryUsage.Validate() error = %v, want ErrInvalidSnapshot", err)
+	}
+}
+
+func TestTodoLineageRejectsContradictoryCurrentStates(t *testing.T) {
+	payload := validPayload()
+	payload.Todos = append(payload.Todos,
+		conversationmemory.Entry{
+			EntryID: "todo_eval_completed", Content: "固定集评测已完成", SourceMessageSeqs: []int64{3},
+			Status: conversationmemory.EntryStatusCompleted, SupersedesEntryID: "todo_eval",
+		},
+		conversationmemory.Entry{
+			EntryID: "todo_eval_cancelled", Content: "固定集评测已取消", SourceMessageSeqs: []int64{3},
+			Status: conversationmemory.EntryStatusCancelled, SupersedesEntryID: "todo_eval",
+		},
+	)
+	if err := conversationmemory.ValidatePayload(payload, validValidationContext()); !errors.Is(err, conversationmemory.ErrMultipleActiveEntries) {
+		t.Fatalf("ValidatePayload() Todo branch error = %v, want ErrMultipleActiveEntries", err)
 	}
 }
 

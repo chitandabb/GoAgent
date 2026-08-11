@@ -77,8 +77,10 @@ func buildConversationMemoryService(
 	return conversationmemory.NewService(conversationmemory.ServiceConfig{
 		Repository: platformpostgres.NewConversationMemoryRepository(db), Compactor: compactor,
 		SchemaVersion: conversationmemory.CurrentSchemaVersion, MaxPayloadBytes: summaryConfig.MaxPayloadBytes,
-		SummaryModelProfile: profileName, SummaryModelProvider: instance.Identity.Provider,
-		SummaryModelID: instance.Identity.ModelID, PromptVersion: summaryConfig.PromptVersion,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: profileName, ModelProvider: instance.Identity.Provider,
+			ModelID: instance.Identity.ModelID, PromptVersion: summaryConfig.PromptVersion,
+		},
 		MaxAttempts:    summaryConfig.MaxAttempts,
 		RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
 	})
