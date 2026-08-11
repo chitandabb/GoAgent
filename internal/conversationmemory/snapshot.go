@@ -72,10 +72,20 @@ type Entry struct {
 // storage coordinates, or a copied evidence body.
 type ReferenceEntry struct {
 	Entry
-	ReferenceType string `json:"referenceType"`
-	ReferenceID   string `json:"referenceId"`
-	ContentSHA256 string `json:"contentSha256,omitempty"`
+	ReferenceType ReferenceType `json:"referenceType"`
+	ReferenceID   string        `json:"referenceId"`
+	ContentSHA256 string        `json:"contentSha256,omitempty"`
 }
+
+type ReferenceType string
+
+const (
+	ReferenceTypeKnowledgeChunk  ReferenceType = "knowledge_chunk"
+	ReferenceTypeAttachment      ReferenceType = "attachment"
+	ReferenceTypeWeb             ReferenceType = "web"
+	ReferenceTypeDiagnosisTask   ReferenceType = "diagnosis_task"
+	ReferenceTypeDiagnosisReport ReferenceType = "diagnosis_report"
+)
 
 // Payload is intentionally a fixed schema. Empty sections are encoded as [] so
 // omissions and nulls from a model response can be rejected deterministically.
@@ -105,7 +115,7 @@ type ValidationContext struct {
 }
 
 type EvidenceReferenceIdentity struct {
-	ReferenceType     string
+	ReferenceType     ReferenceType
 	ContentSHA256     string
 	SourceMessageSeqs []int64
 }
@@ -381,7 +391,7 @@ func validateEntry(entry *Entry, section entrySection, context ValidationContext
 type payloadEntryRecord struct {
 	section       entrySection
 	entry         Entry
-	referenceType string
+	referenceType ReferenceType
 	referenceID   string
 	contentSHA256 string
 }
@@ -467,38 +477,38 @@ func validateStableReferences(payload Payload, context ValidationContext) error 
 	for _, current := range payload.EvidenceReferences {
 		identity, exists := context.KnownEvidenceReferences[current.ReferenceID]
 		if !exists || current.ReferenceType != identity.ReferenceType || current.ContentSHA256 != identity.ContentSHA256 ||
-			!validSHA256(current.ContentSHA256) || !sourcesIntersect(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+			!validSHA256(current.ContentSHA256) || !sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
 			return ErrUnknownStableReference
 		}
 	}
 	for _, current := range payload.TaskReferences {
 		identity, exists := context.KnownTaskReferences[current.ReferenceID]
-		if current.ReferenceType != "diagnosis_task" || !exists || current.ContentSHA256 != "" ||
-			!sourcesIntersect(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+		if current.ReferenceType != ReferenceTypeDiagnosisTask || !exists || current.ContentSHA256 != "" ||
+			!sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
 			return ErrUnknownStableReference
 		}
 	}
 	for _, current := range payload.ReportReferences {
 		identity, exists := context.KnownReportReferences[current.ReferenceID]
-		if current.ReferenceType != "diagnosis_report" || !exists || current.ContentSHA256 != "" ||
-			!sourcesIntersect(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+		if current.ReferenceType != ReferenceTypeDiagnosisReport || !exists || current.ContentSHA256 != "" ||
+			!sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
 			return ErrUnknownStableReference
 		}
 	}
 	return nil
 }
 
-func sourcesIntersect(entrySources, trustedSources []int64) bool {
+func sourcesAllowed(entrySources, trustedSources []int64) bool {
 	trusted := make(map[int64]struct{}, len(trustedSources))
 	for _, seq := range trustedSources {
 		trusted[seq] = struct{}{}
 	}
 	for _, seq := range entrySources {
-		if _, exists := trusted[seq]; exists {
-			return true
+		if _, exists := trusted[seq]; !exists {
+			return false
 		}
 	}
-	return false
+	return len(entrySources) > 0
 }
 
 func validSHA256(value string) bool {
@@ -523,6 +533,9 @@ func validateSupersedeGraph(entries map[string]indexedEntry) error {
 		}
 		if current.section == sectionCorrection &&
 			(target.section == sectionTodo || target.section == sectionEvidence || target.section == sectionTask || target.section == sectionReport) {
+			return ErrUnknownEntryReference
+		}
+		if (current.section == sectionTodo) != (target.section == sectionTodo) {
 			return ErrUnknownEntryReference
 		}
 	}
@@ -552,8 +565,13 @@ func validateSupersedeGraph(entries map[string]indexedEntry) error {
 	}
 
 	neighbors := make(map[string][]string, len(entries))
+	replacedByCount := make(map[string]int, len(entries))
 	for id, current := range entries {
 		if next := current.entry.SupersedesEntryID; next != "" {
+			replacedByCount[next]++
+			if replacedByCount[next] > 1 {
+				return ErrMultipleActiveEntries
+			}
 			neighbors[id] = append(neighbors[id], next)
 			neighbors[next] = append(neighbors[next], id)
 		}
@@ -563,14 +581,24 @@ func validateSupersedeGraph(entries map[string]indexedEntry) error {
 		if _, ok := seen[id]; ok {
 			continue
 		}
-		active := 0
+		currentEntries := 0
+		componentIsTodo := entries[id].section == sectionTodo
 		queue := []string{id}
 		seen[id] = struct{}{}
 		for len(queue) > 0 {
 			currentID := queue[0]
 			queue = queue[1:]
-			if entries[currentID].entry.Status == EntryStatusActive {
-				active++
+			current := entries[currentID]
+			if (current.section == sectionTodo) != componentIsTodo {
+				return ErrUnknownEntryReference
+			}
+			if replacedByCount[currentID] == 0 {
+				currentEntries++
+				if !componentIsTodo && current.entry.Status != EntryStatusActive {
+					return ErrInvalidEntryStatus
+				}
+			} else if !componentIsTodo && current.entry.Status != EntryStatusSuperseded {
+				return ErrMultipleActiveEntries
 			}
 			for _, next := range neighbors[currentID] {
 				if _, ok := seen[next]; !ok {
@@ -579,7 +607,7 @@ func validateSupersedeGraph(entries map[string]indexedEntry) error {
 				}
 			}
 		}
-		if active > 1 {
+		if currentEntries != 1 {
 			return ErrMultipleActiveEntries
 		}
 	}

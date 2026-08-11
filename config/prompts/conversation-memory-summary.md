@@ -6,7 +6,7 @@
 - `coverage`：本次候选 Snapshot 的 `fromSeq` 与 `throughSeq`；
 - `previousSnapshot`：首次压缩为 `null`，增量压缩时包含上一份已验证 Payload；
 - `newMessages`：首次压缩时为全部已完成历史，增量压缩时只包含上一覆盖范围之后的新消息；
-- `knownReportReferences`：允许写入报告引用的稳定 ID；
+- `knownReportReferences`：允许写入报告引用的稳定 ID 与对应来源消息序号；
 - `attempt` 与 `repairCode`：重试序号和上一轮确定性校验失败代码。
 
 必须输出以下九个顶层字段，字段不能缺失，数组为空时必须输出 `[]`：
@@ -66,6 +66,6 @@ Reference Entry 在普通 Entry 字段之外还包含：
 
 - `evidenceReferences` 的 `referenceType` 使用输入 Citation 的类型，`referenceId` 和 `contentSha256` 必须逐字复用输入值。
 - `taskReferences` 的 `referenceType` 固定为 `diagnosis_task`，`referenceId` 必须来自输入任务引用，不输出 `contentSha256`。
-- `reportReferences` 的 `referenceType` 固定为 `diagnosis_report`，`referenceId` 必须来自 `knownReportReferences`，不输出 `contentSha256`。
+- `reportReferences` 的 `referenceType` 固定为 `diagnosis_report`，`referenceId` 和 `sourceMessageSeqs` 必须来自同一个 `knownReportReferences` 条目，不输出 `contentSha256`。
 
 如果 `repairCode` 非空，修复对应结构问题，但仍只根据可信输入生成内容。不要为了通过校验而捏造来源、ID、事实或引用。

@@ -42,15 +42,21 @@ func TestModelCompactorReturnsStrictStructuredPayloadAndUsage(t *testing.T) {
 				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"newMessages"`
-			Attempt    int    `json:"attempt"`
-			RepairCode string `json:"repairCode"`
+			Attempt               int    `json:"attempt"`
+			RepairCode            string `json:"repairCode"`
+			KnownReportReferences []struct {
+				ReferenceID       string  `json:"referenceId"`
+				SourceMessageSeqs []int64 `json:"sourceMessageSeqs"`
+			} `json:"knownReportReferences"`
 		}
 		if err := json.Unmarshal([]byte(messages[1].Content), &input); err != nil {
 			t.Fatalf("decode model input: %v", err)
 		}
 		if input.Mode != "initial" || input.ConversationID != conversationID.String() || input.Coverage.FromSeq != 1 ||
 			input.Coverage.ThroughSeq != 1 || len(input.Messages) != 1 || input.Messages[0].Role != "user" ||
-			input.Attempt != 1 || input.RepairCode != "" {
+			input.Attempt != 1 || input.RepairCode != "" || len(input.KnownReportReferences) != 1 ||
+			input.KnownReportReferences[0].ReferenceID != "report-1" ||
+			len(input.KnownReportReferences[0].SourceMessageSeqs) != 1 || input.KnownReportReferences[0].SourceMessageSeqs[0] != 1 {
 			t.Fatalf("model input = %+v", input)
 		}
 		return &schema.Message{
@@ -71,6 +77,7 @@ func TestModelCompactorReturnsStrictStructuredPayloadAndUsage(t *testing.T) {
 
 	output, err := compactor.Compact(context.Background(), conversationmemory.CompactionInput{
 		ConversationID: conversationID, FromSeq: 1, ThroughSeq: 1, Attempt: 1,
+		KnownReportReferences: map[string][]int64{"report-1": {1}},
 		NewMessages: []conversation.Message{
 			{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "记住这个目标"},
 		},

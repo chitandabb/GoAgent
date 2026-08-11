@@ -43,6 +43,30 @@ type SummaryUsage struct {
 	CachedTokens     int `json:"cachedTokens"`
 }
 
+type SummaryProvenance struct {
+	ModelProfile  string
+	ModelProvider string
+	ModelID       string
+	PromptVersion string
+}
+
+func (p SummaryProvenance) normalized() SummaryProvenance {
+	return SummaryProvenance{
+		ModelProfile:  strings.TrimSpace(p.ModelProfile),
+		ModelProvider: strings.ToLower(strings.TrimSpace(p.ModelProvider)),
+		ModelID:       strings.TrimSpace(p.ModelID), PromptVersion: strings.TrimSpace(p.PromptVersion),
+	}
+}
+
+func (p SummaryProvenance) Validate() error {
+	p = p.normalized()
+	if !snapshotLabelPattern.MatchString(p.ModelProfile) || !snapshotLabelPattern.MatchString(p.ModelProvider) ||
+		!validSnapshotText(p.ModelID, 256) || !snapshotLabelPattern.MatchString(p.PromptVersion) {
+		return ErrInvalidSnapshot
+	}
+	return nil
+}
+
 func (u SummaryUsage) Validate() error {
 	if u.PromptTokens < 1 || u.CompletionTokens < 0 || u.TotalTokens < 1 || u.CachedTokens < 0 ||
 		u.CachedTokens > u.PromptTokens || u.TotalTokens < u.PromptTokens+u.CompletionTokens {
@@ -60,10 +84,7 @@ type CandidateSnapshot struct {
 	FromSeq              int64
 	ThroughSeq           int64
 	SchemaVersion        int
-	SummaryModelProfile  string
-	SummaryModelProvider string
-	SummaryModelID       string
-	PromptVersion        string
+	Provenance           SummaryProvenance
 	Payload              Payload
 	PayloadSHA256        string
 	Usage                SummaryUsage
@@ -91,10 +112,7 @@ type NewCandidateSnapshotInput struct {
 	FromSeq              int64
 	ThroughSeq           int64
 	SchemaVersion        int
-	SummaryModelProfile  string
-	SummaryModelProvider string
-	SummaryModelID       string
-	PromptVersion        string
+	Provenance           SummaryProvenance
 	Payload              Payload
 	Usage                SummaryUsage
 	CreatedAt            time.Time
@@ -115,10 +133,8 @@ func NewCandidateSnapshot(input NewCandidateSnapshotInput) (CandidateSnapshot, e
 	result := CandidateSnapshot{
 		ID: input.ID, ConversationID: input.ConversationID, SupersedesSnapshotID: cloneUUIDPointer(input.SupersedesSnapshotID),
 		FromSeq: input.FromSeq, ThroughSeq: input.ThroughSeq, SchemaVersion: input.SchemaVersion,
-		SummaryModelProfile:  strings.TrimSpace(input.SummaryModelProfile),
-		SummaryModelProvider: strings.ToLower(strings.TrimSpace(input.SummaryModelProvider)),
-		SummaryModelID:       strings.TrimSpace(input.SummaryModelID), PromptVersion: strings.TrimSpace(input.PromptVersion),
-		Payload: clonedPayload, PayloadSHA256: hex.EncodeToString(digest[:]), Usage: input.Usage,
+		Provenance: input.Provenance.normalized(),
+		Payload:    clonedPayload, PayloadSHA256: hex.EncodeToString(digest[:]), Usage: input.Usage,
 		Status: SnapshotStatusCandidate, CreatedAt: input.CreatedAt.UTC(),
 	}
 	if err := result.Validate(); err != nil {
@@ -129,9 +145,7 @@ func NewCandidateSnapshot(input NewCandidateSnapshotInput) (CandidateSnapshot, e
 
 func (s CandidateSnapshot) Validate() error {
 	if s.ID == uuid.Nil || s.ConversationID == uuid.Nil || s.FromSeq < 1 || s.ThroughSeq < s.FromSeq ||
-		s.SchemaVersion != CurrentSchemaVersion || !snapshotLabelPattern.MatchString(s.SummaryModelProfile) ||
-		!snapshotLabelPattern.MatchString(s.SummaryModelProvider) || !validSnapshotText(s.SummaryModelID, 256) ||
-		!snapshotLabelPattern.MatchString(s.PromptVersion) || !validSHA256(s.PayloadSHA256) ||
+		s.SchemaVersion != CurrentSchemaVersion || s.Provenance.Validate() != nil || !validSHA256(s.PayloadSHA256) ||
 		s.Status != SnapshotStatusCandidate || s.CreatedAt.IsZero() || s.ActivatedAt != nil || s.Usage.Validate() != nil {
 		return ErrInvalidSnapshot
 	}
@@ -189,40 +203,31 @@ type Repository interface {
 }
 
 type ServiceConfig struct {
-	Repository           Repository
-	Compactor            Compactor
-	SchemaVersion        int
-	MaxPayloadBytes      int
-	SummaryModelProfile  string
-	SummaryModelProvider string
-	SummaryModelID       string
-	PromptVersion        string
-	MaxAttempts          int
-	RetryBaseDelay       time.Duration
-	Clock                func() time.Time
+	Repository      Repository
+	Compactor       Compactor
+	SchemaVersion   int
+	MaxPayloadBytes int
+	Provenance      SummaryProvenance
+	MaxAttempts     int
+	RetryBaseDelay  time.Duration
+	Clock           func() time.Time
 }
 
 type Service struct {
-	repository           Repository
-	compactor            Compactor
-	schemaVersion        int
-	maxPayloadBytes      int
-	summaryModelProfile  string
-	summaryModelProvider string
-	summaryModelID       string
-	promptVersion        string
-	maxAttempts          int
-	retryBaseDelay       time.Duration
-	clock                func() time.Time
+	repository      Repository
+	compactor       Compactor
+	schemaVersion   int
+	maxPayloadBytes int
+	provenance      SummaryProvenance
+	maxAttempts     int
+	retryBaseDelay  time.Duration
+	clock           func() time.Time
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
 	if config.Repository == nil || config.Compactor == nil || config.SchemaVersion != CurrentSchemaVersion ||
 		config.MaxPayloadBytes < 1024 || config.MaxPayloadBytes > 1024*1024 ||
-		!snapshotLabelPattern.MatchString(strings.TrimSpace(config.SummaryModelProfile)) ||
-		!snapshotLabelPattern.MatchString(strings.ToLower(strings.TrimSpace(config.SummaryModelProvider))) ||
-		!validSnapshotText(config.SummaryModelID, 256) ||
-		!snapshotLabelPattern.MatchString(strings.TrimSpace(config.PromptVersion)) ||
+		config.Provenance.Validate() != nil ||
 		config.MaxAttempts < 1 || config.MaxAttempts > 5 || config.RetryBaseDelay < 0 || config.RetryBaseDelay > time.Minute {
 		return nil, ErrInvalidSnapshot
 	}
@@ -232,11 +237,9 @@ func NewService(config ServiceConfig) (*Service, error) {
 	}
 	return &Service{
 		repository: config.Repository, compactor: config.Compactor, schemaVersion: config.SchemaVersion,
-		maxPayloadBytes:      config.MaxPayloadBytes,
-		summaryModelProfile:  strings.TrimSpace(config.SummaryModelProfile),
-		summaryModelProvider: strings.ToLower(strings.TrimSpace(config.SummaryModelProvider)),
-		summaryModelID:       strings.TrimSpace(config.SummaryModelID), promptVersion: strings.TrimSpace(config.PromptVersion),
-		maxAttempts: config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay, clock: clock,
+		maxPayloadBytes: config.MaxPayloadBytes,
+		provenance:      config.Provenance.normalized(),
+		maxAttempts:     config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay, clock: clock,
 	}, nil
 }
 
@@ -303,9 +306,8 @@ func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Sn
 		candidate, candidateErr := NewCandidateSnapshot(NewCandidateSnapshotInput{
 			ID: id, ConversationID: request.ConversationID, SupersedesSnapshotID: predecessor,
 			FromSeq: fromSeq, ThroughSeq: throughSeq, SchemaVersion: s.schemaVersion,
-			SummaryModelProfile: s.summaryModelProfile, SummaryModelProvider: s.summaryModelProvider,
-			SummaryModelID: s.summaryModelID, PromptVersion: s.promptVersion,
-			Payload: output.Payload, Usage: output.Usage, CreatedAt: s.clock().UTC(),
+			Provenance: s.provenance,
+			Payload:    output.Payload, Usage: output.Usage, CreatedAt: s.clock().UTC(),
 		})
 		if candidateErr != nil {
 			lastErr = candidateErr
@@ -395,9 +397,14 @@ func buildValidationContext(
 	for _, message := range messages {
 		result.MessageRoles[message.Seq] = message.Role
 		for _, citation := range message.Citations {
-			result.KnownEvidenceReferences[citation.SourceRef] = EvidenceReferenceIdentity{
-				ReferenceType: string(citation.SourceType), ContentSHA256: citation.ContentSHA256,
-				SourceMessageSeqs: []int64{message.Seq},
+			identity, exists := result.KnownEvidenceReferences[citation.SourceRef]
+			if !exists {
+				identity.ReferenceType = ReferenceType(citation.SourceType)
+				identity.ContentSHA256 = citation.ContentSHA256
+			}
+			if identity.ReferenceType == ReferenceType(citation.SourceType) && identity.ContentSHA256 == citation.ContentSHA256 {
+				identity.SourceMessageSeqs = appendUniqueSequence(identity.SourceMessageSeqs, message.Seq)
+				result.KnownEvidenceReferences[citation.SourceRef] = identity
 			}
 		}
 		for _, reference := range message.TaskReferences {
@@ -408,6 +415,15 @@ func buildValidationContext(
 		}
 	}
 	return result
+}
+
+func appendUniqueSequence(sequences []int64, value int64) []int64 {
+	for _, current := range sequences {
+		if current == value {
+			return sequences
+		}
+	}
+	return append(sequences, value)
 }
 
 func validationRepairCode(err error) string {

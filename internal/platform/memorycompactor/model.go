@@ -143,9 +143,14 @@ type modelRequest struct {
 	Coverage              requestCoverage             `json:"coverage"`
 	PreviousSnapshot      *previousSnapshotProjection `json:"previousSnapshot"`
 	NewMessages           []messageProjection         `json:"newMessages"`
-	KnownReportReferences []string                    `json:"knownReportReferences"`
+	KnownReportReferences []reportReferenceProjection `json:"knownReportReferences"`
 	Attempt               int                         `json:"attempt"`
 	RepairCode            string                      `json:"repairCode"`
+}
+
+type reportReferenceProjection struct {
+	ReferenceID       string  `json:"referenceId"`
+	SourceMessageSeqs []int64 `json:"sourceMessageSeqs"`
 }
 
 func compactionRequest(input conversationmemory.CompactionInput, promptVersion string) modelRequest {
@@ -153,7 +158,7 @@ func compactionRequest(input conversationmemory.CompactionInput, promptVersion s
 		Mode: "initial", PromptVersion: promptVersion, ConversationID: input.ConversationID.String(),
 		Coverage:              requestCoverage{FromSeq: input.FromSeq, ThroughSeq: input.ThroughSeq},
 		NewMessages:           make([]messageProjection, 0, len(input.NewMessages)),
-		KnownReportReferences: make([]string, 0, len(input.KnownReportReferences)),
+		KnownReportReferences: make([]reportReferenceProjection, 0, len(input.KnownReportReferences)),
 		Attempt:               input.Attempt, RepairCode: input.RepairCode,
 	}
 	if input.PreviousSnapshot != nil {
@@ -191,10 +196,16 @@ func compactionRequest(input conversationmemory.CompactionInput, promptVersion s
 		}
 		request.NewMessages = append(request.NewMessages, projection)
 	}
-	for reference := range input.KnownReportReferences {
-		request.KnownReportReferences = append(request.KnownReportReferences, reference)
+	for reference, sourceSequences := range input.KnownReportReferences {
+		sequences := append([]int64(nil), sourceSequences...)
+		sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+		request.KnownReportReferences = append(request.KnownReportReferences, reportReferenceProjection{
+			ReferenceID: reference, SourceMessageSeqs: sequences,
+		})
 	}
-	sort.Strings(request.KnownReportReferences)
+	sort.Slice(request.KnownReportReferences, func(i, j int) bool {
+		return request.KnownReportReferences[i].ReferenceID < request.KnownReportReferences[j].ReferenceID
+	})
 	return request
 }
 
