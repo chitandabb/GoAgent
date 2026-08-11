@@ -215,12 +215,9 @@ func snapshotFromRecord(record conversationMemorySnapshotRecord) (conversationme
 		},
 		Status: record.Status, CreatedAt: record.CreatedAt.UTC(), ActivatedAt: record.ActivatedAt,
 	}
-	if err := candidate.Validate(); err != nil {
-		return conversationmemory.Snapshot{}, fmt.Errorf("validate persisted conversation memory snapshot: %w", err)
-	}
 	snapshot := conversationmemory.Snapshot{CandidateSnapshot: candidate, Version: record.Version}
 	if err := snapshot.Validate(); err != nil {
-		return conversationmemory.Snapshot{}, err
+		return conversationmemory.Snapshot{}, fmt.Errorf("validate persisted conversation memory snapshot: %w", err)
 	}
 	return snapshot, nil
 }

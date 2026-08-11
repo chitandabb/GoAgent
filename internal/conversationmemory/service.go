@@ -99,10 +99,19 @@ type Snapshot struct {
 }
 
 func (s Snapshot) Validate() error {
-	if s.Version < 1 {
+	if s.Version < 1 || s.CandidateSnapshot.validateImmutableContent() != nil || !s.Status.Valid() {
 		return ErrInvalidSnapshot
 	}
-	return s.CandidateSnapshot.Validate()
+	if s.Status == SnapshotStatusCandidate {
+		if s.ActivatedAt != nil {
+			return ErrInvalidSnapshot
+		}
+		return nil
+	}
+	if s.ActivatedAt == nil || s.ActivatedAt.Before(s.CreatedAt) {
+		return ErrInvalidSnapshot
+	}
+	return nil
 }
 
 type NewCandidateSnapshotInput struct {
@@ -144,9 +153,16 @@ func NewCandidateSnapshot(input NewCandidateSnapshotInput) (CandidateSnapshot, e
 }
 
 func (s CandidateSnapshot) Validate() error {
+	if s.validateImmutableContent() != nil || s.Status != SnapshotStatusCandidate || s.ActivatedAt != nil {
+		return ErrInvalidSnapshot
+	}
+	return nil
+}
+
+func (s CandidateSnapshot) validateImmutableContent() error {
 	if s.ID == uuid.Nil || s.ConversationID == uuid.Nil || s.FromSeq < 1 || s.ThroughSeq < s.FromSeq ||
 		s.SchemaVersion != CurrentSchemaVersion || s.Provenance.Validate() != nil || !validSHA256(s.PayloadSHA256) ||
-		s.Status != SnapshotStatusCandidate || s.CreatedAt.IsZero() || s.ActivatedAt != nil || s.Usage.Validate() != nil {
+		s.CreatedAt.IsZero() || s.Usage.Validate() != nil {
 		return ErrInvalidSnapshot
 	}
 	if s.SupersedesSnapshotID != nil && (*s.SupersedesSnapshotID == uuid.Nil || *s.SupersedesSnapshotID == s.ID) {
