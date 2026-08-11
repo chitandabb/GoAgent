@@ -414,7 +414,7 @@ func conversationAgentErrorType(err error) string {
 	case errors.Is(err, ErrConversationPromptWindowExceeded):
 		return "prompt_window_exceeded"
 	case errors.Is(err, ErrConversationContextPreparationFailed):
-		return "context_preparation_failed"
+		return conversation.AgentRunErrorTypeContextPreparationFailed
 	case errors.Is(err, conversation.ErrAgentResponseInvalid):
 		return "agent_response_invalid"
 	default:

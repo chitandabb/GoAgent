@@ -238,6 +238,14 @@ type AgentRunFailureRecord struct {
 	ErrorType   string
 }
 
+const AgentRunErrorTypeContextPreparationFailed = "context_preparation_failed"
+
+// AgentRunFailureRetryable is the single policy source for terminal failure
+// events that may be safely submitted again by the user.
+func AgentRunFailureRetryable(errorType string) bool {
+	return strings.TrimSpace(errorType) == AgentRunErrorTypeContextPreparationFailed
+}
+
 func (r AgentRunFailureRecord) Validate() error {
 	if r.Observation.Outcome != AgentRunFailed || r.Observation.Validate() != nil ||
 		!validAgentRunMachineLabel(r.ErrorType, 64) {

@@ -131,6 +131,44 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 	}
 }
 
+func TestBuildDiagnosisAgentRuntimeDoesNotRequireConversationMemory(t *testing.T) {
+	cfg := testAgentConfig()
+	profile := cfg.Models.Chat.Profiles["test"]
+	profile.ContextWindowTokens = 4096
+	profile.MaxOutputTokens = 512
+	profile.PromptSafetyMarginTokens = 256
+	profile.PromptSafetyMarginRatio = 0.05
+	profile.TokenizerStrategy = config.TokenizerStrategyLocalCalibrated
+	cfg.Models.Chat.Profiles["test"] = profile
+	cfg.Agent.ContextMemory = config.ContextMemoryConfig{
+		ShadowPreflightEnabled: true, ContinuousTailEnabled: true, SummaryTailEnabled: true,
+		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
+		PreflightTimeoutMillis: 250, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
+		ToolGrowthReserveTokens: 256,
+	}
+	memoryBuilt := false
+
+	runtime, err := buildAgentRuntimeForRole(
+		context.Background(), agentRuntimeRoleDiagnosis, cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(),
+		agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+			conversationMemory: func(context.Context, *gorm.DB, config.Config) (agent.ConversationMemory, error) {
+				memoryBuilt = true
+				return nil, errors.New("conversation-memory credential is unavailable")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntimeForRole(diagnosis): %v", err)
+	}
+	defer runtime.close()
+	if memoryBuilt || runtime.orchestrator == nil {
+		t.Fatalf("diagnosis runtime memory/orchestrator = %t/%+v", memoryBuilt, runtime.orchestrator)
+	}
+}
+
 func TestBuildAgentRuntimeRejectsInvalidSkillPackage(t *testing.T) {
 	cfg := testAgentConfig()
 	cfg.Agent.SkillsDirectory = filepath.Join(t.TempDir(), "missing")

@@ -55,8 +55,8 @@ func NewDiagnosisWorkerApp(
 	}
 	runtimeBuilders := defaultAgentRuntimeBuilders()
 	runtimeBuilders.attachmentReader = attachmentService
-	runtime, err := buildAgentRuntime(
-		ctx, cfg, snapshotExternalCaseGetter{}, deps.sqlServer, deps.db,
+	runtime, err := buildAgentRuntimeForRole(
+		ctx, agentRuntimeRoleDiagnosis, cfg, snapshotExternalCaseGetter{}, deps.sqlServer, deps.db,
 		log.Named("agent"), runtimeBuilders,
 	)
 	if err != nil {

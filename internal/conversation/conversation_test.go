@@ -22,6 +22,25 @@ func TestMessageQueryNormalize(t *testing.T) {
 	}
 }
 
+func TestAgentRunFailureRetryable(t *testing.T) {
+	tests := []struct {
+		errorType string
+		want      bool
+	}{
+		{errorType: AgentRunErrorTypeContextPreparationFailed, want: true},
+		{errorType: " context_preparation_failed ", want: true},
+		{errorType: "agent_timeout", want: false},
+		{errorType: "agent_execution_failed", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.errorType, func(t *testing.T) {
+			if got := AgentRunFailureRetryable(tt.errorType); got != tt.want {
+				t.Fatalf("AgentRunFailureRetryable(%q) = %t, want %t", tt.errorType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTurnRequestFingerprintCanonicalizesReferenceOrder(t *testing.T) {
 	conversationID, firstCaseID, secondCaseID := uuid.New(), uuid.New(), uuid.New()
 	firstTaskID, secondTaskID := uuid.New(), uuid.New()

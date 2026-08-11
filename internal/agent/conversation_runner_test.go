@@ -48,9 +48,10 @@ type failingConversationTokenBudgetPlanner struct {
 type conversationExactRuneCounter struct{}
 
 type conversationMemoryStub struct {
-	active     *conversationmemory.Snapshot
-	prepared   conversationmemory.Snapshot
-	prepareErr error
+	active          *conversationmemory.Snapshot
+	prepared        conversationmemory.Snapshot
+	prepareErr      error
+	prepareRequests []conversationmemory.PrepareActiveRequest
 }
 
 func (s *conversationMemoryStub) Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
@@ -62,13 +63,22 @@ func (s *conversationMemoryStub) Active(context.Context, uuid.UUID) (*conversati
 }
 
 func (s *conversationMemoryStub) PrepareActive(
-	_ context.Context,
-	_ conversationmemory.PrepareActiveRequest,
+	ctx context.Context,
+	request conversationmemory.PrepareActiveRequest,
 ) (conversationmemory.Snapshot, error) {
+	s.prepareRequests = append(s.prepareRequests, request)
 	if s.prepareErr != nil {
 		return conversationmemory.Snapshot{}, s.prepareErr
 	}
 	prepared := s.prepared
+	if request.ActivationGate != nil {
+		candidate := prepared
+		candidate.Status = conversationmemory.SnapshotStatusCandidate
+		candidate.ActivatedAt = nil
+		if err := request.ActivationGate.ValidateForActivation(ctx, candidate); err != nil {
+			return conversationmemory.Snapshot{}, err
+		}
+	}
 	s.active = &prepared
 	return prepared, nil
 }
@@ -259,6 +269,7 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 	inputs := append([][]string(nil), state.inputs...)
 	state.mu.Unlock()
 	if len(inputs) != 1 || len(inputs[0]) < 3 || !strings.Contains(inputs[0][1], "conversation_memory") ||
+		!strings.HasPrefix(inputs[0][1], string(schema.User)+"\x00\x00") ||
 		!strings.Contains(inputs[0][1], "保留用户已经确认的目标") ||
 		strings.Contains(strings.Join(inputs[0], "\n"), strings.Repeat("旧", 100)) ||
 		!strings.Contains(inputs[0][len(inputs[0])-1], "现在给出结论") {
@@ -270,9 +281,88 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 		manifest.TailFromSeq != 2 || manifest.TailThroughSeq != 3 || manifest.ExceedsHardWindow {
 		t.Fatalf("summary-tail manifest = %+v", manifest)
 	}
+	if len(memory.prepareRequests) != 1 || len(memory.prepareRequests[0].CompletedMessages) != 2 ||
+		memory.prepareRequests[0].CompletedMessages[1].Seq != 2 {
+		t.Fatalf("hard-compaction completed messages = %+v", memory.prepareRequests)
+	}
+	for _, message := range memory.prepareRequests[0].CompletedMessages {
+		if message.ID == request.UserMessage.ID || message.Seq >= request.UserMessage.Seq {
+			t.Fatalf("current message leaked into hard compaction input: %+v", message)
+		}
+	}
 }
 
-func TestConversationRunnerHardCompactionFailureUsesPreviousActiveSummary(t *testing.T) {
+func TestConversationRunnerKeepsFullContinuousHistoryBeforeFirstHardCompaction(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	profile := contextgovernance.ModelProfile{
+		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+		ContextWindowTokens: 8192, MaxOutputTokens: 512, SafetyMarginTokens: 512,
+	}
+	preflight := newConversationContinuousPreflightForTest(t, profile, 0.15, 128)
+	request, ctx := conversationRunnerRequest(nil)
+	request.UserMessage.Seq = 3
+	oldBody := "first-uncompressed-message-" + strings.Repeat("旧", 2000)
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 1, Role: conversation.MessageRoleUser, Content: oldBody},
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: "recent history"},
+		request.UserMessage,
+	}
+	memory := &conversationMemoryStub{}
+	preflight.SummaryTailEnabled = true
+	preflight.Memory = memory
+	preflight.MemoryMaxRatio = 0.20
+	preflight.SummaryMaxRatio = 0.05
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{}, preflight)
+
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond() before first hard compaction error = %v", err)
+	}
+	state.mu.Lock()
+	modelInput := strings.Join(state.inputs[0], "\n")
+	state.mu.Unlock()
+	manifest := response.RunObservation.PromptManifest
+	if !strings.Contains(modelInput, oldBody) || len(memory.prepareRequests) != 0 || manifest == nil ||
+		manifest.TailFromSeq != 1 || manifest.SummarySnapshotID != "" || manifest.HardCompactionTriggered {
+		t.Fatalf("pre-hard input/requests/manifest = %t/%d/%+v", strings.Contains(modelInput, oldBody), len(memory.prepareRequests), manifest)
+	}
+}
+
+func TestConversationRunnerRefreshesActiveSummaryBeforeTailWouldCreateCoverageGap(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	profile := contextgovernance.ModelProfile{
+		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+		ContextWindowTokens: 8192, MaxOutputTokens: 512, SafetyMarginTokens: 512,
+	}
+	preflight := newConversationContinuousPreflightForTest(t, profile, 0.15, 128)
+	request, ctx := conversationRunnerRequest(nil)
+	request.UserMessage.Seq = 3
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 1, Role: conversation.MessageRoleUser, Content: "covered"},
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: strings.Repeat("增量", 900)},
+		request.UserMessage,
+	}
+	active := conversationActiveSummaryFixture(t, request.Conversation.ID, 1)
+	prepared := conversationActiveSummaryFixture(t, request.Conversation.ID, 2)
+	memory := &conversationMemoryStub{active: &active, prepared: prepared}
+	preflight.SummaryTailEnabled = true
+	preflight.Memory = memory
+	preflight.MemoryMaxRatio = 0.20
+	preflight.SummaryMaxRatio = 0.05
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{}, preflight)
+
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond() coverage refresh error = %v", err)
+	}
+	manifest := response.RunObservation.PromptManifest
+	if len(memory.prepareRequests) != 1 || manifest == nil || manifest.SummarySnapshotID != prepared.ID.String() ||
+		manifest.HardCompactionTriggered || manifest.TailFromSeq > prepared.ThroughSeq+1 {
+		t.Fatalf("coverage refresh requests/manifest = %d/%+v", len(memory.prepareRequests), manifest)
+	}
+}
+
+func TestConversationRunnerFailsClosedWhenPreviousActiveCannotCoverTailGapAfterRefreshFailure(t *testing.T) {
 	state := &conversationRunnerModelState{}
 	profile := contextgovernance.ModelProfile{
 		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
@@ -296,21 +386,21 @@ func TestConversationRunnerHardCompactionFailureUsesPreviousActiveSummary(t *tes
 	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{}, preflight)
 
 	response, err := runner.Respond(ctx, request)
-	if err != nil {
-		t.Fatalf("Respond() with old active Summary error = %v", err)
+	if !errors.Is(err, ErrConversationContextPreparationFailed) {
+		t.Fatalf("Respond() with uncovered old Active error = %v, want context preparation failure", err)
 	}
 	manifest := response.RunObservation.PromptManifest
 	if manifest == nil || manifest.SummarySnapshotID != active.ID.String() ||
 		!manifest.HardCompactionTriggered || !manifest.ContextDegraded ||
-		!slices.Contains(manifest.DegradedReasons, "summary_refresh_failed") || manifest.ExceedsHardWindow {
-		t.Fatalf("old-Summary fallback manifest = %+v", manifest)
+		!slices.Contains(manifest.DegradedReasons, "summary_refresh_failed") ||
+		!slices.Contains(manifest.DegradedReasons, "summary_tail_coverage_gap") {
+		t.Fatalf("uncovered old-Active manifest = %+v", manifest)
 	}
 	state.mu.Lock()
-	modelInput := strings.Join(state.inputs[0], "\n")
+	providerCalls := len(state.inputs)
 	state.mu.Unlock()
-	if !strings.Contains(modelInput, "保留用户已经确认的目标") ||
-		strings.Contains(modelInput, strings.Repeat("新", 100)) || !strings.Contains(modelInput, "继续回答") {
-		t.Fatalf("old-Summary fallback model input = %s", modelInput)
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
 	}
 }
 
@@ -350,6 +440,45 @@ func TestConversationRunnerHardCompactionFailureWithoutActiveSummaryIsRetryable(
 		!failure.Observation.PromptManifest.HardCompactionTriggered ||
 		!slices.Contains(failure.Observation.PromptManifest.DegradedReasons, "summary_compaction_failed") {
 		t.Fatalf("retryable hard-compaction failure response=%+v record=%+v present=%v", response, failure, ok)
+	}
+}
+
+func TestConversationRunnerDoesNotActivateGeneratedSummaryThatExceedsMainProfileBudget(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	profile := contextgovernance.ModelProfile{
+		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+		ContextWindowTokens: 4096, MaxOutputTokens: 512, SafetyMarginTokens: 512,
+	}
+	preflight := newConversationContinuousPreflightForTest(t, profile, 0.15, 128)
+	request, ctx := conversationRunnerRequest(nil)
+	request.UserMessage.Seq = 3
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 1, Role: conversation.MessageRoleUser, Content: strings.Repeat("旧", 7000)},
+		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: "历史回答"},
+		request.UserMessage,
+	}
+	prepared := conversationActiveSummaryFixture(t, request.Conversation.ID, 2)
+	prepared.Payload.Facts = append(prepared.Payload.Facts, conversationmemory.Entry{
+		EntryID: "fact_oversized", Content: strings.Repeat("摘要", 300),
+		SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive,
+	})
+	prepared = rebuildConversationActiveSummaryFixture(t, prepared)
+	memory := &conversationMemoryStub{prepared: prepared}
+	preflight.SummaryTailEnabled = true
+	preflight.Memory = memory
+	preflight.MemoryMaxRatio = 0.20
+	preflight.SummaryMaxRatio = 0.05
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{}, preflight)
+
+	_, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrConversationContextPreparationFailed) || memory.active != nil {
+		t.Fatalf("Respond() error/active = %v/%+v, want context failure/no activation", err, memory.active)
+	}
+	state.mu.Lock()
+	providerCalls := len(state.inputs)
+	state.mu.Unlock()
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
 	}
 }
 
@@ -428,6 +557,27 @@ func conversationActiveSummaryFixture(t *testing.T, conversationID uuid.UUID, th
 		t.Fatalf("active summary fixture error = %v", err)
 	}
 	return snapshot
+}
+
+func rebuildConversationActiveSummaryFixture(t *testing.T, source conversationmemory.Snapshot) conversationmemory.Snapshot {
+	t.Helper()
+	candidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
+		ID: source.ID, ConversationID: source.ConversationID,
+		SupersedesSnapshotID: source.SupersedesSnapshotID,
+		FromSeq:              source.FromSeq, ThroughSeq: source.ThroughSeq,
+		SchemaVersion: source.SchemaVersion, Provenance: source.Provenance,
+		Payload: source.Payload, Usage: source.Usage, CreatedAt: source.CreatedAt,
+	})
+	if err != nil {
+		t.Fatalf("rebuild active Summary candidate error = %v", err)
+	}
+	candidate.Status = conversationmemory.SnapshotStatusActive
+	candidate.ActivatedAt = source.ActivatedAt
+	result := conversationmemory.Snapshot{CandidateSnapshot: candidate, Version: source.Version}
+	if err := result.Validate(); err != nil {
+		t.Fatalf("rebuild active Summary error = %v", err)
+	}
+	return result
 }
 
 func TestConversationRunnerContinuousTokenTailStopsAtFirstOversizedMessage(t *testing.T) {

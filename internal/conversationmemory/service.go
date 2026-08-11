@@ -243,7 +243,7 @@ type ActivationRepository interface {
 }
 
 type ServiceConfig struct {
-	Repository      Repository
+	Repository      ActivationRepository
 	Compactor       Compactor
 	SchemaVersion   int
 	MaxPayloadBytes int
@@ -254,7 +254,7 @@ type ServiceConfig struct {
 }
 
 type Service struct {
-	repository      Repository
+	repository      ActivationRepository
 	compactor       Compactor
 	schemaVersion   int
 	maxPayloadBytes int
@@ -293,6 +293,14 @@ type PrepareActiveRequest struct {
 	ConversationID        uuid.UUID
 	CompletedMessages     []conversation.Message
 	KnownReportReferences map[string][]int64
+	ActivationGate        ActivationGate
+}
+
+// ActivationGate validates caller-specific runtime constraints after the
+// immutable candidate is saved but before it can replace the current Active
+// Snapshot. Structural and provenance validation remains owned by this module.
+type ActivationGate interface {
+	ValidateForActivation(context.Context, Snapshot) error
 }
 
 // GenerateShadow compacts and persists a validated candidate Snapshot without
@@ -315,25 +323,17 @@ func (s *Service) Active(ctx context.Context, conversationID uuid.UUID) (*Snapsh
 	if s == nil || conversationID == uuid.Nil {
 		return nil, ErrInvalidShadowInput
 	}
-	repository, ok := s.repository.(ActivationRepository)
-	if !ok {
-		return nil, errors.New("conversation memory activation repository is unavailable")
-	}
-	return repository.Active(ctx, conversationID)
+	return s.repository.Active(ctx, conversationID)
 }
 
 // PrepareActive synchronously generates and CAS-activates a validated Snapshot.
 // A competing activation may win; an equal-or-newer winner is returned so the
 // caller can safely continue without overwriting it.
 func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveRequest) (Snapshot, error) {
-	if s == nil || request.ConversationID == uuid.Nil {
+	if s == nil || request.ConversationID == uuid.Nil || request.ActivationGate == nil {
 		return Snapshot{}, ErrInvalidShadowInput
 	}
-	repository, ok := s.repository.(ActivationRepository)
-	if !ok {
-		return Snapshot{}, errors.New("conversation memory activation repository is unavailable")
-	}
-	previous, err := repository.Active(ctx, request.ConversationID)
+	previous, err := s.repository.Active(ctx, request.ConversationID)
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
 		return Snapshot{}, fmt.Errorf("load active conversation memory snapshot: %w", err)
 	}
@@ -347,7 +347,11 @@ func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveReques
 		return Snapshot{}, err
 	}
 	if previous != nil && noMessagesAfter(request.CompletedMessages, previous.ThroughSeq) {
-		return *cloneSnapshot(previous), nil
+		current := *cloneSnapshot(previous)
+		if err := request.ActivationGate.ValidateForActivation(ctx, current); err != nil {
+			return Snapshot{}, fmt.Errorf("validate active conversation memory snapshot: %w", err)
+		}
+		return current, nil
 	}
 	candidate, err := s.generateCandidate(ctx, ShadowRequest{
 		ConversationID: request.ConversationID, CompletedMessages: request.CompletedMessages,
@@ -356,6 +360,9 @@ func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveReques
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := request.ActivationGate.ValidateForActivation(ctx, candidate); err != nil {
+		return Snapshot{}, fmt.Errorf("validate conversation memory candidate for activation: %w", err)
+	}
 	activation := ActivationRequest{
 		ConversationID: request.ConversationID, CandidateSnapshotID: candidate.ID,
 		ActivatedAt: s.clock().UTC(),
@@ -363,15 +370,18 @@ func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveReques
 	if previous != nil {
 		activation.ExpectedActiveSnapshotID = &previous.ID
 	}
-	activated, err := repository.Activate(ctx, activation)
+	activated, err := s.repository.Activate(ctx, activation)
 	if err == nil {
 		return activated, nil
 	}
 	if !errors.Is(err, ErrSnapshotActivationConflict) {
 		return Snapshot{}, fmt.Errorf("activate conversation memory snapshot: %w", err)
 	}
-	winner, winnerErr := repository.Active(ctx, request.ConversationID)
+	winner, winnerErr := s.repository.Active(ctx, request.ConversationID)
 	if winnerErr == nil && winner.FromSeq == candidate.FromSeq && winner.ThroughSeq >= candidate.ThroughSeq {
+		if err := request.ActivationGate.ValidateForActivation(ctx, *winner); err != nil {
+			return Snapshot{}, fmt.Errorf("validate winning conversation memory snapshot: %w", err)
+		}
 		return *winner, nil
 	}
 	if winnerErr != nil && !errors.Is(winnerErr, ErrSnapshotNotFound) {

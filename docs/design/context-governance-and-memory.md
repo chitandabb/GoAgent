@@ -223,8 +223,10 @@ Snapshot 是不可变派生事实，不覆盖原始 Message。Payload 使用固�
 当前实现状态：`00027` 已建立 `conversation_memory_snapshots`，Service 支持首次全历史压缩、
 “上一 Active Snapshot + 新消息”增量合并和 CAS 激活。模型输出会校验固定字段、重复/未知字段、
 用户事实来源、覆盖序号、稳定 Evidence/Task/Report 引用、supersede 环与同一谱系 Active 唯一性；
-生成、Usage 或校验失败只做有界重试，不生成确定性低质量替代摘要。硬阈值路径使用新 Active
-Summary 替换旧 Summary，再与连续 Tail 组装；旧 Active 可在刷新失败时受控回退。
+生成、Usage 或校验失败只做有界重试，不生成确定性低质量替代摘要。候选 Snapshot 在 CAS
+激活前还必须通过主 Chat Profile 的实际 Summary Token 预算门禁；超预算候选只保留审计，
+不能替换 Active。硬阈值路径使用新 Active Summary 替换旧 Summary，再与连续 Tail 组装；
+旧 Active 只有在 `through_seq + 1` 与 Tail 起点连续且仍能安全入窗时才允许回退，否则失败关闭。
 
 ```text
 conversationGoal
@@ -259,6 +261,8 @@ supersedesEntryId（可选）
 - 默认 `maxSummaryOutputTokens=4096`，硬上限不超过模型窗口约 5%，配置化；
 - Snapshot 生成后先通过严格 JSON Schema、来源、范围、引用和 active Entry 校验；
 - 校验失败不激活，继续使用上一份有效 Snapshot。
+- Summary 作为带明确边界标签的 User-role 不可信上下文进入主模型，不提升为 System 指令；
+  Summary Fingerprint 同时包含消息角色，静态 System Prompt 始终保持最高指令优先级。
 
 运行时不增加 LLM Judge。离线评测使用独立、配置化的 Judge 检查 Faithfulness 和语义保留。
 
@@ -496,6 +500,8 @@ Summary + Tail。关闭 `summaryTailEnabled` 可回退 Continuous Tail；再关�
 当前 Turn 共享总截止时间，压缩或组装失败采用 fail-closed，不调用主模型。
 Manifest 通过 `preflight_status`、`prompt_identity_available` 和 `estimate_available` 区分
 成功、部分已知和失败观测；未知 Tool Contract 不生成伪 Epoch，估算失败不生成 0 Token 样本。
+Conversation 与 Diagnosis 使用显式 Runtime Role：只有 Conversation Runtime 构造并依赖
+`conversation-memory` Profile，Diagnosis Worker 不因 Summary + Tail 开启而要求摘要模型凭证。
 
 当前实现将模型可见 Prompt 估算与 Tool Growth Reserve 分开：前者用于和首个 Provider
 调用的实际 Prompt Usage 校准误差，后者只进入保守上界和阈值判断，避免默认预留制造

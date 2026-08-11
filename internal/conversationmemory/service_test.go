@@ -19,6 +19,16 @@ func (f compactorFunc) Compact(ctx context.Context, input conversationmemory.Com
 	return f(ctx, input)
 }
 
+type activationGateFunc func(context.Context, conversationmemory.Snapshot) error
+
+func (f activationGateFunc) ValidateForActivation(ctx context.Context, snapshot conversationmemory.Snapshot) error {
+	return f(ctx, snapshot)
+}
+
+var acceptConversationMemoryActivation = activationGateFunc(func(context.Context, conversationmemory.Snapshot) error {
+	return nil
+})
+
 type memoryRepositoryStub struct {
 	latest *conversationmemory.Snapshot
 	saved  []conversationmemory.CandidateSnapshot
@@ -91,6 +101,29 @@ func (r *memoryRepositoryStub) Save(_ context.Context, candidate conversationmem
 	return result, nil
 }
 
+func (r *memoryRepositoryStub) Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
+	if r.latest == nil || r.latest.Status != conversationmemory.SnapshotStatusActive {
+		return nil, conversationmemory.ErrSnapshotNotFound
+	}
+	copy := *r.latest
+	return &copy, nil
+}
+
+func (r *memoryRepositoryStub) Activate(
+	_ context.Context,
+	request conversationmemory.ActivationRequest,
+) (conversationmemory.Snapshot, error) {
+	if r.latest == nil || r.latest.ID != request.CandidateSnapshotID {
+		return conversationmemory.Snapshot{}, conversationmemory.ErrSnapshotNotFound
+	}
+	activated := *r.latest
+	activated.Status = conversationmemory.SnapshotStatusActive
+	activatedAt := request.ActivatedAt.UTC()
+	activated.ActivatedAt = &activatedAt
+	r.latest = &activated
+	return activated, nil
+}
+
 func (r *activationMemoryRepositoryStub) Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
 	if r.active == nil {
 		return nil, conversationmemory.ErrSnapshotNotFound
@@ -138,6 +171,7 @@ func TestConversationMemoryUsesEqualOrNewerCASWinner(t *testing.T) {
 
 	prepared, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
 		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+		ActivationGate: acceptConversationMemoryActivation,
 	})
 	if err != nil {
 		t.Fatalf("PrepareActive() CAS winner error = %v", err)
@@ -195,6 +229,7 @@ func TestConversationMemoryPreparesAndActivatesInitialSnapshot(t *testing.T) {
 
 	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
 		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+		ActivationGate: acceptConversationMemoryActivation,
 	})
 	if err != nil {
 		t.Fatalf("PrepareActive() error = %v", err)
@@ -225,6 +260,7 @@ func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.
 
 	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
 		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+		ActivationGate: acceptConversationMemoryActivation,
 	})
 	if err != nil {
 		t.Fatalf("PrepareActive() retry error = %v", err)
@@ -251,9 +287,36 @@ func TestConversationMemoryRejectsInvalidCompletedMessagesBeforeActiveFastPath(t
 
 	_, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
 		ConversationID: conversationID, CompletedMessages: invalid,
+		ActivationGate: acceptConversationMemoryActivation,
 	})
 	if !errors.Is(err, conversationmemory.ErrInvalidShadowInput) || compactorCalls != 0 {
 		t.Fatalf("PrepareActive() error/compactor calls = %v/%d, want invalid input/0", err, compactorCalls)
+	}
+}
+
+func TestConversationMemoryDoesNotActivateCandidateRejectedByMainPromptBudget(t *testing.T) {
+	conversationID := uuid.New()
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 1)
+	rejected := errors.New("summary exceeds main prompt budget")
+
+	_, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+		ActivationGate: activationGateFunc(func(_ context.Context, snapshot conversationmemory.Snapshot) error {
+			if snapshot.Status != conversationmemory.SnapshotStatusCandidate {
+				t.Fatalf("activation gate Snapshot status = %s, want candidate", snapshot.Status)
+			}
+			return rejected
+		}),
+	})
+	if !errors.Is(err, rejected) || repository.active != nil || len(repository.saved) != 1 ||
+		repository.saved[0].Status != conversationmemory.SnapshotStatusCandidate {
+		t.Fatalf("PrepareActive() error/active/saved = %v/%+v/%+v", err, repository.active, repository.saved)
 	}
 }
 
@@ -397,7 +460,7 @@ func TestConversationMemoryReturnsRetryableErrorAfterBoundedAttempts(t *testing.
 
 func newMemoryService(
 	t *testing.T,
-	repository conversationmemory.Repository,
+	repository conversationmemory.ActivationRepository,
 	compactor conversationmemory.Compactor,
 	now time.Time,
 	maxAttempts int,
