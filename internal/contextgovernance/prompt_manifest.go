@@ -42,6 +42,8 @@ type PromptManifest struct {
 	ToolSchemaFingerprint     string           `json:"toolSchemaFingerprint"`
 	SkillPromptFingerprint    string           `json:"skillPromptFingerprint"`
 	SummaryFingerprint        string           `json:"summaryFingerprint"`
+	SummarySnapshotID         string           `json:"summarySnapshotId,omitempty"`
+	HardCompactionTriggered   bool             `json:"hardCompactionTriggered"`
 	TailFromSeq               int64            `json:"tailFromSeq"`
 	TailThroughSeq            int64            `json:"tailThroughSeq"`
 	AvailableInputTokens      int              `json:"availableInputTokens"`
@@ -118,6 +120,12 @@ func (m PromptManifest) Validate() error {
 			}
 		} else if fingerprint != "" {
 			return errors.New("unavailable prompt identity must be empty")
+		}
+	}
+	if m.SummarySnapshotID != "" {
+		if !m.PromptIdentityAvailable || !IsUUID(m.SummarySnapshotID) ||
+			m.SummaryFingerprint == SHA256Hex("") {
+			return errors.New("prompt manifest Summary Snapshot identity is invalid")
 		}
 	}
 	if m.EstimateAvailable {

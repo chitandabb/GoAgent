@@ -197,7 +197,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, err
 	}
 	runCtx := WithTaskScope(ctx, scope)
-	if !r.contextPreflight.Enabled {
+	if !r.contextPreflight.Enabled || r.contextPreflight.SummaryTailEnabled {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
 		defer cancel()
@@ -220,15 +220,19 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tools: %w", err)
 	}
-	projection, err := r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage)
-	if err != nil {
-		return conversation.AgentResponse{}, err
+	var projection conversationPromptProjection
+	if r.contextPreflight.SummaryTailEnabled {
+		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request)
+	} else {
+		projection, err = r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage)
+		if err == nil {
+			promptManifest, err = r.buildConversationPromptManifest(runCtx, tools, projection)
+		}
 	}
 	messages := projection.messages
-	if len(messages) == 0 {
+	if err == nil && len(messages) == 0 {
 		return conversation.AgentResponse{}, conversation.ErrInvalidMessage
 	}
-	promptManifest, err = r.buildConversationPromptManifest(runCtx, tools, projection)
 	if err != nil {
 		// Observation-only rollout remains fail-open. Once Continuous Tail is
 		// active, the same preflight is a safety gate and must fail closed.
@@ -248,7 +252,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		promptManifest.EstimateAvailable && promptManifest.ExceedsHardWindow {
 		return conversation.AgentResponse{}, ErrConversationPromptWindowExceeded
 	}
-	if r.contextPreflight.Enabled {
+	if r.contextPreflight.Enabled && !r.contextPreflight.SummaryTailEnabled {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(runCtx, r.timeout)
 		defer cancel()
@@ -446,12 +450,17 @@ func (r *ConversationRunner) conversationScope(actor conversation.Actor, message
 }
 
 type conversationPromptProjection struct {
-	messages         []*schema.Message
-	selected         []conversation.Message
-	currentMessageID uuid.UUID
-	tailFromSeq      int64
-	tailThroughSeq   int64
-	tailContinuous   bool
+	messages                []*schema.Message
+	selected                []conversation.Message
+	currentMessageID        uuid.UUID
+	tailFromSeq             int64
+	tailThroughSeq          int64
+	tailContinuous          bool
+	summaryContent          string
+	summaryFingerprint      string
+	summarySnapshotID       string
+	hardCompactionTriggered bool
+	degradedReasons         []string
 }
 
 func (r *ConversationRunner) buildConversationPromptProjection(
@@ -462,22 +471,23 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 	if !r.contextPreflight.ContinuousTailEnabled {
 		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes), nil
 	}
-	ordered := conversationHistoryThroughCurrent(history, current)
-	candidates := make([]conversation.Message, 0, len(ordered))
-	nextSequence := current.Seq + 1
-	for index := len(ordered) - 1; index >= 0; index-- {
-		item := ordered[index]
-		if item.Seq != nextSequence-1 ||
-			(item.Role != conversation.MessageRoleUser && item.Role != conversation.MessageRoleAssistant) ||
-			conversationMessagePrompt(item) == "" {
-			break
-		}
-		candidates = append(candidates, item)
-		nextSequence = item.Seq
+	tailBudget := int(math.Floor(float64(r.contextPreflight.ModelProfile.ContextWindowTokens) *
+		r.contextPreflight.TailMaxRatio))
+	return r.buildConversationPromptProjectionWithTailBudget(ctx, history, current, tailBudget)
+}
+
+func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
+	ctx context.Context,
+	history []conversation.Message,
+	current conversation.Message,
+	tailBudget int,
+) (conversationPromptProjection, error) {
+	if tailBudget < 1 {
+		return conversationPromptProjection{}, ErrConversationContextPreparationFailed
 	}
-	slices.Reverse(candidates)
-	if len(candidates) == 0 || candidates[len(candidates)-1].ID != current.ID {
-		return conversationPromptProjection{}, conversation.ErrInvalidMessage
+	candidates, err := continuousConversationCandidates(history, current)
+	if err != nil {
+		return conversationPromptProjection{}, err
 	}
 	tailMessages := make([]contextgovernance.TailMessage, 0, len(candidates))
 	for _, item := range candidates {
@@ -485,8 +495,6 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 			Sequence: item.Seq, Content: conversationMessagePrompt(item), Current: item.ID == current.ID,
 		})
 	}
-	tailBudget := int(math.Floor(float64(r.contextPreflight.ModelProfile.ContextWindowTokens) *
-		r.contextPreflight.TailMaxRatio))
 	selectionCtx, cancel := context.WithTimeout(ctx, r.contextPreflight.effectiveTimeout())
 	defer cancel()
 	selection, err := r.contextPreflight.TailSelector.Select(selectionCtx, contextgovernance.ContinuousTailRequest{
@@ -510,6 +518,30 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 		tailFromSeq: selectedDomain[0].Seq, tailThroughSeq: selectedDomain[len(selectedDomain)-1].Seq,
 		tailContinuous: true,
 	}, nil
+}
+
+func continuousConversationCandidates(
+	history []conversation.Message,
+	current conversation.Message,
+) ([]conversation.Message, error) {
+	ordered := conversationHistoryThroughCurrent(history, current)
+	candidates := make([]conversation.Message, 0, len(ordered))
+	nextSequence := current.Seq + 1
+	for index := len(ordered) - 1; index >= 0; index-- {
+		item := ordered[index]
+		if item.Seq != nextSequence-1 ||
+			(item.Role != conversation.MessageRoleUser && item.Role != conversation.MessageRoleAssistant) ||
+			conversationMessagePrompt(item) == "" {
+			break
+		}
+		candidates = append(candidates, item)
+		nextSequence = item.Seq
+	}
+	slices.Reverse(candidates)
+	if len(candidates) == 0 || candidates[len(candidates)-1].ID != current.ID {
+		return nil, conversation.ErrInvalidMessage
+	}
+	return candidates, nil
 }
 
 func buildRuneConversationPromptProjection(

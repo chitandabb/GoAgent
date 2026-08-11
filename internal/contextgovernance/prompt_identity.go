@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const maxCanonicalToolContractBytes = 1024 * 1024
@@ -211,6 +213,11 @@ func SHA256Hex(value string) string {
 
 func IsSHA256Hex(value string) bool {
 	return sha256Pattern.MatchString(value)
+}
+
+func IsUUID(value string) bool {
+	_, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil
 }
 
 func validMachineLabel(value string, max int) bool {

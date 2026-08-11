@@ -24,6 +24,13 @@ type memoryRepositoryStub struct {
 	saved  []conversationmemory.CandidateSnapshot
 }
 
+type activationMemoryRepositoryStub struct {
+	*memoryRepositoryStub
+	active           *conversationmemory.Snapshot
+	activationErr    error
+	winnerOnConflict *conversationmemory.Snapshot
+}
+
 func TestSnapshotValidateAcceptsPersistedLifecycleStatuses(t *testing.T) {
 	createdAt := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	candidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
@@ -82,6 +89,172 @@ func (r *memoryRepositoryStub) Save(_ context.Context, candidate conversationmem
 	result := conversationmemory.Snapshot{CandidateSnapshot: candidate, Version: version}
 	r.latest = &result
 	return result, nil
+}
+
+func (r *activationMemoryRepositoryStub) Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
+	if r.active == nil {
+		return nil, conversationmemory.ErrSnapshotNotFound
+	}
+	copy := *r.active
+	return &copy, nil
+}
+
+func (r *activationMemoryRepositoryStub) Activate(
+	_ context.Context,
+	request conversationmemory.ActivationRequest,
+) (conversationmemory.Snapshot, error) {
+	if r.activationErr != nil {
+		if r.winnerOnConflict != nil {
+			winner := *r.winnerOnConflict
+			r.active = &winner
+		}
+		return conversationmemory.Snapshot{}, r.activationErr
+	}
+	if r.latest == nil || r.latest.ID != request.CandidateSnapshotID {
+		return conversationmemory.Snapshot{}, conversationmemory.ErrSnapshotNotFound
+	}
+	activated := *r.latest
+	activated.Status = conversationmemory.SnapshotStatusActive
+	activatedAt := request.ActivatedAt.UTC()
+	activated.ActivatedAt = &activatedAt
+	r.active = &activated
+	return activated, nil
+}
+
+func TestConversationMemoryUsesEqualOrNewerCASWinner(t *testing.T) {
+	conversationID := uuid.New()
+	winner := activeSnapshotFixture(t, conversationID, 1, 3, nil)
+	repository := &activationMemoryRepositoryStub{
+		memoryRepositoryStub: &memoryRepositoryStub{},
+		activationErr:        conversationmemory.ErrSnapshotActivationConflict,
+		winnerOnConflict:     &winner,
+	}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 1)
+
+	prepared, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() CAS winner error = %v", err)
+	}
+	if prepared.ID != winner.ID || prepared.Status != conversationmemory.SnapshotStatusActive {
+		t.Fatalf("CAS winner = %+v, want %s", prepared, winner.ID)
+	}
+}
+
+func activeSnapshotFixture(
+	t *testing.T,
+	conversationID uuid.UUID,
+	fromSeq, throughSeq int64,
+	predecessor *uuid.UUID,
+) conversationmemory.Snapshot {
+	t.Helper()
+	createdAt := time.Now().Add(-time.Minute).UTC()
+	candidate, err := conversationmemory.NewCandidateSnapshot(conversationmemory.NewCandidateSnapshotInput{
+		ID: uuid.New(), ConversationID: conversationID, SupersedesSnapshotID: predecessor,
+		FromSeq: fromSeq, ThroughSeq: throughSeq, SchemaVersion: conversationmemory.CurrentSchemaVersion,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "dashscope",
+			ModelID: "qwen3.6-flash", PromptVersion: "conversation-memory-v1",
+		},
+		Payload:   validPayload(),
+		Usage:     conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("NewCandidateSnapshot() fixture error = %v", err)
+	}
+	activatedAt := createdAt.Add(time.Second)
+	candidate.Status = conversationmemory.SnapshotStatusActive
+	candidate.ActivatedAt = &activatedAt
+	result := conversationmemory.Snapshot{CandidateSnapshot: candidate, Version: 1}
+	if err := result.Validate(); err != nil {
+		t.Fatalf("active Snapshot fixture error = %v", err)
+	}
+	return result
+}
+
+func TestConversationMemoryPreparesAndActivatesInitialSnapshot(t *testing.T) {
+	conversationID := uuid.New()
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	compactor := compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		if input.PreviousSnapshot != nil || input.ThroughSeq != 3 {
+			t.Fatalf("active compaction input = %+v", input)
+		}
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 120, CompletionTokens: 40, TotalTokens: 160},
+		}, nil
+	})
+	service := newMemoryService(t, repository, compactor, time.Now().UTC(), 2)
+
+	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() error = %v", err)
+	}
+	if snapshot.Status != conversationmemory.SnapshotStatusActive || snapshot.ActivatedAt == nil ||
+		snapshot.ThroughSeq != 3 || repository.active == nil || repository.active.ID != snapshot.ID {
+		t.Fatalf("active snapshot/repository = %+v / %+v", snapshot, repository.active)
+	}
+}
+
+func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.T) {
+	conversationID := uuid.New()
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	attempts := 0
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		attempts++
+		payload := validPayload()
+		if attempts == 1 {
+			payload.Facts[0].SourceMessageSeqs = []int64{2}
+		} else if input.RepairCode != "user_source_required" {
+			t.Fatalf("second hard-compaction repair code = %q", input.RepairCode)
+		}
+		return conversationmemory.CompactionOutput{
+			Payload: payload,
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 2)
+
+	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() retry error = %v", err)
+	}
+	if attempts != 2 || len(repository.saved) != 1 || snapshot.Status != conversationmemory.SnapshotStatusActive {
+		t.Fatalf("attempts/saves/snapshot = %d/%d/%+v", attempts, len(repository.saved), snapshot)
+	}
+}
+
+func TestConversationMemoryRejectsInvalidCompletedMessagesBeforeActiveFastPath(t *testing.T) {
+	conversationID := uuid.New()
+	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)
+	repository := &activationMemoryRepositoryStub{
+		memoryRepositoryStub: &memoryRepositoryStub{latest: &active},
+		active:               &active,
+	}
+	compactorCalls := 0
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		compactorCalls++
+		return conversationmemory.CompactionOutput{}, nil
+	}), time.Now().UTC(), 1)
+	invalid := initialMessages(conversationID)
+	invalid[0].ConversationID = uuid.New()
+
+	_, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: invalid,
+	})
+	if !errors.Is(err, conversationmemory.ErrInvalidShadowInput) || compactorCalls != 0 {
+		t.Fatalf("PrepareActive() error/compactor calls = %v/%d, want invalid input/0", err, compactorCalls)
+	}
 }
 
 func TestConversationMemoryGeneratesAnInitialShadowSnapshot(t *testing.T) {

@@ -53,13 +53,10 @@ func (r *ConversationMemoryRepository) Save(
 			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 		}
 		var latest struct {
-			ID         uuid.UUID `gorm:"column:id"`
-			Version    int64     `gorm:"column:snapshot_version"`
-			FromSeq    int64     `gorm:"column:from_seq"`
-			ThroughSeq int64     `gorm:"column:through_seq"`
+			Version int64 `gorm:"column:snapshot_version"`
 		}
 		loadedLatest := tx.Raw(`
-SELECT id, snapshot_version, from_seq, through_seq
+SELECT snapshot_version
 FROM conversation_memory_snapshots
 WHERE conversation_id = ?
 ORDER BY snapshot_version DESC
@@ -68,16 +65,38 @@ LIMIT 1`, candidate.ConversationID).Scan(&latest)
 			return TranslateError(loadedLatest.Error)
 		}
 		version := int64(1)
-		if loadedLatest.RowsAffected == 0 {
-			if candidate.SupersedesSnapshotID != nil {
+		if loadedLatest.RowsAffected > 0 {
+			version = latest.Version + 1
+		}
+		if candidate.SupersedesSnapshotID == nil {
+			var activeCount int64
+			if err := tx.Raw(`
+SELECT COUNT(*)
+FROM conversation_memory_snapshots
+WHERE conversation_id = ? AND status = ?`, candidate.ConversationID, conversationmemory.SnapshotStatusActive).
+				Scan(&activeCount).Error; err != nil {
+				return TranslateError(err)
+			}
+			if activeCount != 0 {
 				return conversationmemory.ErrInvalidSnapshot
 			}
 		} else {
-			if candidate.SupersedesSnapshotID == nil || *candidate.SupersedesSnapshotID != latest.ID ||
-				candidate.FromSeq != latest.FromSeq || candidate.ThroughSeq <= latest.ThroughSeq {
+			var predecessor struct {
+				ConversationID uuid.UUID `gorm:"column:conversation_id"`
+				FromSeq        int64     `gorm:"column:from_seq"`
+				ThroughSeq     int64     `gorm:"column:through_seq"`
+			}
+			loadedPredecessor := tx.Raw(`
+SELECT conversation_id, from_seq, through_seq
+FROM conversation_memory_snapshots
+WHERE id = ?`, *candidate.SupersedesSnapshotID).Scan(&predecessor)
+			if loadedPredecessor.Error != nil {
+				return TranslateError(loadedPredecessor.Error)
+			}
+			if loadedPredecessor.RowsAffected != 1 || predecessor.ConversationID != candidate.ConversationID ||
+				predecessor.FromSeq != candidate.FromSeq || predecessor.ThroughSeq >= candidate.ThroughSeq {
 				return conversationmemory.ErrInvalidSnapshot
 			}
-			version = latest.Version + 1
 		}
 		inserted := tx.Exec(`
 INSERT INTO conversation_memory_snapshots (
@@ -107,6 +126,119 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, 
 		return conversationmemory.Snapshot{}, err
 	}
 	return result, nil
+}
+
+func (r *ConversationMemoryRepository) Active(
+	ctx context.Context,
+	conversationID uuid.UUID,
+) (*conversationmemory.Snapshot, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("conversation memory repository is unavailable")
+	}
+	if conversationID == uuid.Nil {
+		return nil, conversationmemory.ErrInvalidSnapshot
+	}
+	snapshot, err := r.loadSnapshot(ctx, conversationMemoryActiveSnapshotQuery, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (r *ConversationMemoryRepository) Activate(
+	ctx context.Context,
+	request conversationmemory.ActivationRequest,
+) (conversationmemory.Snapshot, error) {
+	if r == nil || r.db == nil {
+		return conversationmemory.Snapshot{}, errors.New("conversation memory repository is unavailable")
+	}
+	if err := request.Validate(); err != nil {
+		return conversationmemory.Snapshot{}, err
+	}
+	request.ActivatedAt = request.ActivatedAt.UTC()
+	var activated conversationmemory.Snapshot
+	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var lockedConversation struct {
+			ID uuid.UUID `gorm:"column:id"`
+		}
+		loadedConversation := tx.Raw(`SELECT id FROM conversations WHERE id = ? FOR UPDATE`, request.ConversationID).
+			Scan(&lockedConversation)
+		if loadedConversation.Error != nil {
+			return TranslateError(loadedConversation.Error)
+		}
+		if loadedConversation.RowsAffected != 1 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+
+		candidate, err := loadConversationMemorySnapshotWithDB(
+			tx, conversationMemorySnapshotByIDForUpdateQuery, request.CandidateSnapshotID,
+		)
+		if err != nil {
+			return err
+		}
+		if candidate.ConversationID != request.ConversationID ||
+			candidate.Status != conversationmemory.SnapshotStatusCandidate ||
+			request.ActivatedAt.Before(candidate.CreatedAt) {
+			return conversationmemory.ErrInvalidSnapshot
+		}
+
+		var currentActive struct {
+			ID         uuid.UUID `gorm:"column:id"`
+			ThroughSeq int64     `gorm:"column:through_seq"`
+		}
+		loadedActive := tx.Raw(`
+SELECT id, through_seq
+FROM conversation_memory_snapshots
+WHERE conversation_id = ? AND status = ?
+FOR UPDATE`, request.ConversationID, conversationmemory.SnapshotStatusActive).Scan(&currentActive)
+		if loadedActive.Error != nil {
+			return TranslateError(loadedActive.Error)
+		}
+		if request.ExpectedActiveSnapshotID == nil {
+			if loadedActive.RowsAffected != 0 || candidate.SupersedesSnapshotID != nil {
+				return conversationmemory.ErrSnapshotActivationConflict
+			}
+		} else {
+			if loadedActive.RowsAffected != 1 || currentActive.ID != *request.ExpectedActiveSnapshotID ||
+				candidate.SupersedesSnapshotID == nil || *candidate.SupersedesSnapshotID != currentActive.ID ||
+				candidate.ThroughSeq <= currentActive.ThroughSeq {
+				return conversationmemory.ErrSnapshotActivationConflict
+			}
+			updatedPrevious := tx.Exec(`
+UPDATE conversation_memory_snapshots
+SET status = ?
+WHERE id = ? AND status = ?`, conversationmemory.SnapshotStatusSuperseded,
+				currentActive.ID, conversationmemory.SnapshotStatusActive)
+			if updatedPrevious.Error != nil {
+				return TranslateError(updatedPrevious.Error)
+			}
+			if updatedPrevious.RowsAffected != 1 {
+				return conversationmemory.ErrSnapshotActivationConflict
+			}
+		}
+		updatedCandidate := tx.Exec(`
+UPDATE conversation_memory_snapshots
+SET status = ?, activated_at = ?
+WHERE id = ? AND status = ?`, conversationmemory.SnapshotStatusActive, request.ActivatedAt,
+			candidate.ID, conversationmemory.SnapshotStatusCandidate)
+		if updatedCandidate.Error != nil {
+			return TranslateError(updatedCandidate.Error)
+		}
+		if updatedCandidate.RowsAffected != 1 {
+			return conversationmemory.ErrSnapshotActivationConflict
+		}
+		candidate.Status = conversationmemory.SnapshotStatusActive
+		candidate.ActivatedAt = &request.ActivatedAt
+		if err := candidate.Validate(); err != nil {
+			return err
+		}
+		activated = candidate
+		return nil
+	})
+	if err != nil {
+		return conversationmemory.Snapshot{}, err
+	}
+	return activated, nil
 }
 
 func (r *ConversationMemoryRepository) Latest(
@@ -156,13 +288,28 @@ LIMIT 1`
 const conversationMemorySnapshotByIDQuery = conversationMemorySnapshotProjection + `
 WHERE id = ?`
 
+const conversationMemorySnapshotByIDForUpdateQuery = conversationMemorySnapshotByIDQuery + `
+FOR UPDATE`
+
+const conversationMemoryActiveSnapshotQuery = conversationMemorySnapshotProjection + `
+WHERE conversation_id = ? AND status = 'active'
+LIMIT 1`
+
 func (r *ConversationMemoryRepository) loadSnapshot(
 	ctx context.Context,
 	query string,
 	args ...any,
 ) (conversationmemory.Snapshot, error) {
+	return loadConversationMemorySnapshotWithDB(ResolveDB(ctx, r.db), query, args...)
+}
+
+func loadConversationMemorySnapshotWithDB(
+	db *gorm.DB,
+	query string,
+	args ...any,
+) (conversationmemory.Snapshot, error) {
 	var record conversationMemorySnapshotRecord
-	loaded := ResolveDB(ctx, r.db).Raw(query, args...).Scan(&record)
+	loaded := db.Raw(query, args...).Scan(&record)
 	if loaded.Error != nil {
 		return conversationmemory.Snapshot{}, TranslateError(loaded.Error)
 	}

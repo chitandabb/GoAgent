@@ -58,6 +58,7 @@ type agentRuntimeBuilders struct {
 	readonlyQuery          func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error)
 	knowledgeSearch        func(context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger) (tool.BaseTool, error)
 	webResearch            func(context.Context, config.WebSearchConfig, *zap.Logger) (*webresearch.Service, error)
+	conversationMemory     func(context.Context, *gorm.DB, config.Config) (mesagent.ConversationMemory, error)
 }
 
 func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
@@ -99,6 +100,9 @@ func defaultAgentRuntimeBuilders() agentRuntimeBuilders {
 		},
 		knowledgeSearch: buildKnowledgeSearchTool,
 		webResearch:     buildWebResearchService,
+		conversationMemory: func(ctx context.Context, db *gorm.DB, cfg config.Config) (mesagent.ConversationMemory, error) {
+			return BuildConversationMemoryService(ctx, db, cfg)
+		},
 	}
 }
 
@@ -312,9 +316,29 @@ func buildAgentRuntime(
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
 		}
+		var conversationMemory mesagent.ConversationMemory
+		if cfg.Agent.ContextMemory.SummaryTailEnabled {
+			if builders.conversationMemory == nil {
+				_ = runtime.close()
+				return nil, errors.New("conversation memory builder is unavailable")
+			}
+			conversationMemory, err = builders.conversationMemory(ctx, postgresDB, cfg)
+			if err != nil {
+				_ = runtime.close()
+				return nil, fmt.Errorf("build active conversation memory: %w", err)
+			}
+			if conversationMemory == nil {
+				_ = runtime.close()
+				return nil, errors.New("active conversation memory is unavailable")
+			}
+		}
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
 			Enabled: true, Planner: planner, TailSelector: tailSelector,
 			ContinuousTailEnabled: cfg.Agent.ContextMemory.ContinuousTailEnabled,
+			SummaryTailEnabled:    cfg.Agent.ContextMemory.SummaryTailEnabled,
+			Memory:                conversationMemory,
+			MemoryMaxRatio:        cfg.Agent.ContextMemory.MemoryMaxRatio,
+			SummaryMaxRatio:       cfg.Agent.ContextMemory.SummaryMaxRatio,
 			TailMaxRatio:          cfg.Agent.ContextMemory.TailMaxRatio,
 			PreflightTimeout:      time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
 			ModelProfile: contextgovernance.ModelProfile{

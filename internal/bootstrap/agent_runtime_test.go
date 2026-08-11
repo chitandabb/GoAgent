@@ -11,6 +11,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
@@ -20,9 +21,23 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type stubAgentChatModel struct{}
+
+type stubConversationMemory struct{}
+
+func (stubConversationMemory) Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error) {
+	return nil, conversationmemory.ErrSnapshotNotFound
+}
+
+func (stubConversationMemory) PrepareActive(
+	context.Context,
+	conversationmemory.PrepareActiveRequest,
+) (conversationmemory.Snapshot, error) {
+	return conversationmemory.Snapshot{}, conversationmemory.ErrCompactionFailed
+}
 
 func (stubAgentChatModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
 	return schema.AssistantMessage("ok", nil), nil
@@ -74,15 +89,21 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 	cfg.Models.Chat.Profiles["test"] = profile
 	cfg.Agent.ContextMemory = config.ContextMemoryConfig{
 		ShadowPreflightEnabled: true,
-		ContinuousTailEnabled:  true, TailMaxRatio: 0.15,
+		ContinuousTailEnabled:  true, SummaryTailEnabled: true,
+		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
 		PreflightTimeoutMillis: 250,
 		SoftThresholdRatio:     0.70, HardThresholdRatio: 0.85,
 		ToolGrowthReserveTokens: 256,
 	}
+	memoryBuilt := false
 	runtime, err := buildAgentRuntime(
 		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
 			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
 				return stubAgentChatModel{}, nil
+			},
+			conversationMemory: func(context.Context, *gorm.DB, config.Config) (agent.ConversationMemory, error) {
+				memoryBuilt = true
+				return stubConversationMemory{}, nil
 			},
 		},
 	)
@@ -105,7 +126,7 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Respond(): %v", err)
 	}
-	if response.RunObservation == nil || response.RunObservation.PromptManifest == nil {
+	if !memoryBuilt || response.RunObservation == nil || response.RunObservation.PromptManifest == nil {
 		t.Fatalf("shadow manifest was not wired: %+v", response.RunObservation)
 	}
 }
