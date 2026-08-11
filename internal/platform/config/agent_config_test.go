@@ -92,8 +92,15 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ContextMemory.RetryJitterRatio = 0.10
 	configured.ContextMemory.MemoryMaxRatio = 0.20
 	configured.ContextMemory.SummaryMaxRatio = 0.05
+	configured.ContextMemory.MemoryCacheEnabled = true
+	configured.ContextMemory.MemoryCacheTTL = "2h"
+	configured.ContextMemory.MemoryCacheJitterRatio = 0.10
+	configured.ContextMemory.MemoryCacheTimeoutMillis = 50
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured Summary + Tail: %v", err)
+	}
+	if ttl, err := configured.ContextMemory.MemoryCacheDuration(); err != nil || ttl.String() != "2h0m0s" {
+		t.Fatalf("MemoryCacheDuration() = %s, %v", ttl, err)
 	}
 	invalidMemoryRatio := configured
 	invalidMemoryRatio.ContextMemory.MemoryMaxRatio = 0.19
@@ -129,6 +136,21 @@ func TestAgentConfigValidate(t *testing.T) {
 	invalidJitter.ContextMemory.RetryJitterRatio = 0.51
 	if err := invalidJitter.Validate(); err == nil {
 		t.Fatal("Validate accepted async compaction jitter above 50 percent")
+	}
+	invalidCacheTTL := configured
+	invalidCacheTTL.ContextMemory.MemoryCacheTTL = "30s"
+	if err := invalidCacheTTL.Validate(); err == nil {
+		t.Fatal("Validate accepted memory cache TTL below one minute")
+	}
+	invalidCacheJitter := configured
+	invalidCacheJitter.ContextMemory.MemoryCacheJitterRatio = 0.51
+	if err := invalidCacheJitter.Validate(); err == nil {
+		t.Fatal("Validate accepted memory cache jitter above 50 percent")
+	}
+	invalidCacheTimeout := configured
+	invalidCacheTimeout.ContextMemory.MemoryCacheTimeoutMillis = 1_001
+	if err := invalidCacheTimeout.Validate(); err == nil {
+		t.Fatal("Validate accepted memory cache timeout above one second")
 	}
 }
 

@@ -239,6 +239,7 @@ func (r ActivationRequest) Validate() error {
 type ActivationRepository interface {
 	Repository
 	Active(context.Context, uuid.UUID) (*Snapshot, error)
+	ActiveIdentity(context.Context, uuid.UUID) (ActiveSnapshotIdentity, error)
 	Activate(context.Context, ActivationRequest) (Snapshot, error)
 }
 
@@ -251,6 +252,9 @@ type ServiceConfig struct {
 	MaxAttempts     int
 	RetryBaseDelay  time.Duration
 	Clock           func() time.Time
+	Cache           SnapshotCache
+	CacheExpected   bool
+	CacheObserver   CacheObserver
 }
 
 type Service struct {
@@ -262,6 +266,9 @@ type Service struct {
 	maxAttempts     int
 	retryBaseDelay  time.Duration
 	clock           func() time.Time
+	cache           SnapshotCache
+	cacheExpected   bool
+	cacheObserver   CacheObserver
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
@@ -269,6 +276,9 @@ func NewService(config ServiceConfig) (*Service, error) {
 		config.MaxPayloadBytes < 1024 || config.MaxPayloadBytes > 1024*1024 ||
 		config.Provenance.Validate() != nil ||
 		config.MaxAttempts < 1 || config.MaxAttempts > 5 || config.RetryBaseDelay < 0 || config.RetryBaseDelay > time.Minute {
+		return nil, ErrInvalidSnapshot
+	}
+	if config.Cache != nil && !config.CacheExpected {
 		return nil, ErrInvalidSnapshot
 	}
 	clock := config.Clock
@@ -280,6 +290,7 @@ func NewService(config ServiceConfig) (*Service, error) {
 		maxPayloadBytes: config.MaxPayloadBytes,
 		provenance:      config.Provenance.normalized(),
 		maxAttempts:     config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay, clock: clock,
+		cache: config.Cache, cacheExpected: config.CacheExpected, cacheObserver: config.CacheObserver,
 	}, nil
 }
 
@@ -334,7 +345,109 @@ func (s *Service) Active(ctx context.Context, conversationID uuid.UUID) (*Snapsh
 	if s == nil || conversationID == uuid.Nil {
 		return nil, ErrInvalidShadowInput
 	}
-	return s.repository.Active(ctx, conversationID)
+	if !s.cacheExpected {
+		return s.repository.Active(ctx, conversationID)
+	}
+	if s.cache == nil {
+		active, err := s.repository.Active(ctx, conversationID)
+		if err == nil && active != nil {
+			s.observeCache(ctx, CacheObservation{
+				Operation: CacheOperationActiveLoad, Status: CacheStatusDegraded, Reason: CacheReasonUnavailable,
+				ConversationID: conversationID, SnapshotID: active.ID,
+			})
+		}
+		return active, err
+	}
+	identity, err := s.repository.ActiveIdentity(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if identity.Validate() != nil || identity.ConversationID != conversationID {
+		return nil, ErrInvalidSnapshot
+	}
+
+	started := time.Now()
+	cached, cacheErr := s.cache.Load(ctx, conversationID, identity.SnapshotID)
+	cacheDuration := time.Since(started)
+	if cacheErr == nil && activeSnapshotMatchesIdentity(cached, identity) {
+		s.observeCache(ctx, CacheObservation{
+			Operation: CacheOperationActiveLoad, Status: CacheStatusHit,
+			ConversationID: conversationID, SnapshotID: identity.SnapshotID, Duration: cacheDuration,
+		})
+		return cloneSnapshot(&cached), nil
+	}
+
+	status := CacheStatusMiss
+	reason := CacheReason("")
+	if cacheErr == nil {
+		status = CacheStatusDegraded
+		if cached.Validate() != nil || cached.ConversationID == uuid.Nil || cached.ID == uuid.Nil {
+			reason = CacheReasonInvalid
+		} else {
+			reason = CacheReasonStale
+		}
+	} else if !errors.Is(cacheErr, ErrSnapshotCacheMiss) {
+		status = CacheStatusDegraded
+		switch {
+		case errors.Is(cacheErr, context.DeadlineExceeded), errors.Is(cacheErr, context.Canceled):
+			reason = CacheReasonTimeout
+		case errors.Is(cacheErr, ErrSnapshotCacheInvalid):
+			reason = CacheReasonInvalid
+		default:
+			reason = CacheReasonReadFailed
+		}
+	}
+
+	active, err := s.repository.Active(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	storeStarted := time.Now()
+	storeErr := s.cache.Store(ctx, *active)
+	cacheDuration += time.Since(storeStarted)
+	if storeErr != nil && status != CacheStatusDegraded {
+		status = CacheStatusDegraded
+		reason = CacheReasonWriteFailed
+	}
+	s.observeCache(ctx, CacheObservation{
+		Operation: CacheOperationActiveLoad, Status: status, Reason: reason,
+		ConversationID: conversationID, SnapshotID: active.ID, Duration: cacheDuration,
+	})
+	return cloneSnapshot(active), nil
+}
+
+// DeleteConversationCache is deliberately best effort. PostgreSQL owns the
+// Conversation lifecycle; cache deletion failures are observable and expire by
+// TTL rather than failing the caller's durable delete transaction.
+func (s *Service) DeleteConversationCache(ctx context.Context, conversationID uuid.UUID) {
+	if s == nil || conversationID == uuid.Nil || !s.cacheExpected {
+		return
+	}
+	if s.cache == nil {
+		s.observeCache(ctx, CacheObservation{
+			Operation: CacheOperationDelete, Status: CacheStatusDegraded, Reason: CacheReasonUnavailable,
+			ConversationID: conversationID,
+		})
+		return
+	}
+	started := time.Now()
+	err := s.cache.DeleteConversation(ctx, conversationID)
+	observation := CacheObservation{
+		Operation: CacheOperationDelete, Status: CacheStatusSucceeded,
+		ConversationID: conversationID, Duration: time.Since(started),
+	}
+	if err != nil {
+		observation.Status = CacheStatusDegraded
+		observation.Reason = CacheReasonDeleteFailed
+	}
+	s.observeCache(ctx, observation)
+}
+
+func (s *Service) observeCache(ctx context.Context, observation CacheObservation) {
+	if s == nil || s.cacheObserver == nil || observation.Validate() != nil {
+		return
+	}
+	s.cacheObserver.Observe(ctx, observation)
 }
 
 // PrepareActivationCandidate generates and validates an immutable candidate

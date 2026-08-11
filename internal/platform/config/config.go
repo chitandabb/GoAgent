@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 
@@ -373,20 +374,24 @@ type AgentConfig struct {
 // preflight so every activated prompt still produces the same bounded manifest;
 // the Rune selector remains an explicit rollback path.
 type ContextMemoryConfig struct {
-	ShadowPreflightEnabled  bool                            `toml:"shadowPreflightEnabled"`
-	ContinuousTailEnabled   bool                            `toml:"continuousTailEnabled"`
-	SummaryTailEnabled      bool                            `toml:"summaryTailEnabled"`
-	AsyncCompactionEnabled  bool                            `toml:"asyncCompactionEnabled"`
-	AsyncMaxAttempts        int                             `toml:"asyncMaxAttempts"`
-	RetryJitterRatio        float64                         `toml:"retryJitterRatio"`
-	MemoryMaxRatio          float64                         `toml:"memoryMaxRatio"`
-	SummaryMaxRatio         float64                         `toml:"summaryMaxRatio"`
-	TailMaxRatio            float64                         `toml:"tailMaxRatio"`
-	PreflightTimeoutMillis  int                             `toml:"preflightTimeoutMillis"`
-	SoftThresholdRatio      float64                         `toml:"softThresholdRatio"`
-	HardThresholdRatio      float64                         `toml:"hardThresholdRatio"`
-	ToolGrowthReserveTokens int                             `toml:"toolGrowthReserveTokens"`
-	Summary                 ConversationMemorySummaryConfig `toml:"summary"`
+	ShadowPreflightEnabled   bool                            `toml:"shadowPreflightEnabled"`
+	ContinuousTailEnabled    bool                            `toml:"continuousTailEnabled"`
+	SummaryTailEnabled       bool                            `toml:"summaryTailEnabled"`
+	AsyncCompactionEnabled   bool                            `toml:"asyncCompactionEnabled"`
+	AsyncMaxAttempts         int                             `toml:"asyncMaxAttempts"`
+	RetryJitterRatio         float64                         `toml:"retryJitterRatio"`
+	MemoryCacheEnabled       bool                            `toml:"memoryCacheEnabled"`
+	MemoryCacheTTL           string                          `toml:"memoryCacheTTL"`
+	MemoryCacheJitterRatio   float64                         `toml:"memoryCacheJitterRatio"`
+	MemoryCacheTimeoutMillis int                             `toml:"memoryCacheTimeoutMillis"`
+	MemoryMaxRatio           float64                         `toml:"memoryMaxRatio"`
+	SummaryMaxRatio          float64                         `toml:"summaryMaxRatio"`
+	TailMaxRatio             float64                         `toml:"tailMaxRatio"`
+	PreflightTimeoutMillis   int                             `toml:"preflightTimeoutMillis"`
+	SoftThresholdRatio       float64                         `toml:"softThresholdRatio"`
+	HardThresholdRatio       float64                         `toml:"hardThresholdRatio"`
+	ToolGrowthReserveTokens  int                             `toml:"toolGrowthReserveTokens"`
+	Summary                  ConversationMemorySummaryConfig `toml:"summary"`
 }
 
 // ConversationMemorySummaryConfig controls the independently callable Summary
@@ -398,6 +403,15 @@ type ConversationMemorySummaryConfig struct {
 	MaxPayloadBytes      int    `toml:"maxPayloadBytes"`
 	MaxAttempts          int    `toml:"maxAttempts"`
 	RetryBaseDelayMillis int    `toml:"retryBaseDelayMillis"`
+}
+
+func (c ContextMemoryConfig) MemoryCacheDuration() (time.Duration, error) {
+	value := strings.TrimSpace(c.MemoryCacheTTL)
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < time.Minute || parsed > 7*24*time.Hour {
+		return 0, errors.New("agent contextMemory memoryCacheTTL must be a duration between 1m and 168h")
+	}
+	return parsed, nil
 }
 
 func (c ConversationMemorySummaryConfig) Validate() error {
@@ -446,6 +460,21 @@ func (c ContextMemoryConfig) Validate() error {
 		if math.IsNaN(c.RetryJitterRatio) || math.IsInf(c.RetryJitterRatio, 0) ||
 			c.RetryJitterRatio < 0 || c.RetryJitterRatio > 0.50 {
 			return errors.New("agent contextMemory retryJitterRatio must be between 0 and 0.50")
+		}
+	}
+	if c.MemoryCacheEnabled {
+		if !c.SummaryTailEnabled {
+			return errors.New("agent contextMemory memory cache requires Summary + Tail")
+		}
+		if _, err := c.MemoryCacheDuration(); err != nil {
+			return err
+		}
+		if math.IsNaN(c.MemoryCacheJitterRatio) || math.IsInf(c.MemoryCacheJitterRatio, 0) ||
+			c.MemoryCacheJitterRatio < 0 || c.MemoryCacheJitterRatio > 0.50 {
+			return errors.New("agent contextMemory memoryCacheJitterRatio must be between 0 and 0.50")
+		}
+		if c.MemoryCacheTimeoutMillis < 5 || c.MemoryCacheTimeoutMillis > 1_000 {
+			return errors.New("agent contextMemory memoryCacheTimeoutMillis must be between 5 and 1000")
 		}
 	}
 	if !c.ShadowPreflightEnabled {

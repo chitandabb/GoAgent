@@ -109,6 +109,17 @@ func (r *memoryRepositoryStub) Active(context.Context, uuid.UUID) (*conversation
 	return &copy, nil
 }
 
+func (r *memoryRepositoryStub) ActiveIdentity(ctx context.Context, conversationID uuid.UUID) (conversationmemory.ActiveSnapshotIdentity, error) {
+	active, err := r.Active(ctx, conversationID)
+	if err != nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, err
+	}
+	return conversationmemory.ActiveSnapshotIdentity{
+		ConversationID: active.ConversationID, SnapshotID: active.ID,
+		Version: active.Version, PayloadSHA256: active.PayloadSHA256,
+	}, nil
+}
+
 func (r *memoryRepositoryStub) Activate(
 	_ context.Context,
 	request conversationmemory.ActivationRequest,
@@ -130,6 +141,17 @@ func (r *activationMemoryRepositoryStub) Active(context.Context, uuid.UUID) (*co
 	}
 	copy := *r.active
 	return &copy, nil
+}
+
+func (r *activationMemoryRepositoryStub) ActiveIdentity(ctx context.Context, conversationID uuid.UUID) (conversationmemory.ActiveSnapshotIdentity, error) {
+	active, err := r.Active(ctx, conversationID)
+	if err != nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, err
+	}
+	return conversationmemory.ActiveSnapshotIdentity{
+		ConversationID: active.ConversationID, SnapshotID: active.ID,
+		Version: active.Version, PayloadSHA256: active.PayloadSHA256,
+	}, nil
 }
 
 func (r *activationMemoryRepositoryStub) Activate(

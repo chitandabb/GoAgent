@@ -61,7 +61,13 @@ TaskScope 最小 Tool 集合，不是 Skill 选择后的动态 Tool 注册。
   三次带修复码的候选生成；
 - 已通过真实 PostgreSQL 验证 Job 调度、并发 Claim 单赢家、Lease reclaim、过期 Worker 拒绝、
   重叠 Job 的 CAS Winner 收敛和 Retry Outbox；RabbitMQ Publisher/Consumer 路由及独立
-  `mesguard-memory-worker` Compose 进程已启动验证。Redis 热记忆仍未实现；
+  `mesguard-memory-worker` Compose 进程已启动验证；
+- Redis Active Snapshot 热缓存已实现：PostgreSQL 先返回不含 JSONB Payload 的权威 Active
+  Identity，Redis 再按 `Conversation ID + Snapshot ID` 读取不可变 Snapshot；命中必须同时匹配
+  Version 和 Payload SHA-256，miss、超时、非法载荷、陈旧身份和写失败均回 PostgreSQL；
+- Redis 默认 TTL 为两小时、10% jitter、单次命令 50ms 超时；命中/未命中使用 Debug 结构化
+  观测，降级使用 Warn 并记录原因和缓存耗时，不会被描述为记忆丢失；真实 Redis 测试已覆盖
+  TTL、索引删除和污染索引成员保护；
 - 没有固定长会话 Baseline/Experiment 评测集。
 
 ## 3. 目标与非目标
@@ -405,16 +411,26 @@ Worker Lease/Fencing 仍有效
 
 过期 Worker 的 Snapshot 可保留审计，但不能激活。
 
-Redis 只缓存 Active Snapshot、Prompt Manifest 和最近 Tail 投影：
+首版 Redis 只缓存 Active Snapshot：
 
 ```toml
+memoryCacheEnabled = true
 memoryCacheTTL = "2h"
 memoryCacheJitterRatio = 0.10
+memoryCacheTimeoutMillis = 50
 ```
 
-Redis Key 包含 Conversation + Snapshot ID；失败时回 PostgreSQL。Redis 不持有发布权，不作为
-分布式锁。删除 Conversation 时 PostgreSQL 级联删除 Memory 派生事实，并尽力清除 Redis；缓存
-清除失败依靠 TTL 最终过期。
+每次读取先由 PostgreSQL 轻量查询权威 `ActiveSnapshotIdentity(snapshot_id, version,
+payload_sha256)`，再读取包含 Conversation + Snapshot ID 的 Redis Key。缓存载荷必须通过完整
+Snapshot 校验并与权威身份一致，否则读取 PostgreSQL 完整 Active Snapshot 并尽力回填。该身份
+查询是 Active 读取的事实线性化点；Redis 不持有发布权，不作为分布式锁，也不进入 CAS、Lease
+或 Fencing。
+
+Cache Adapter 维护每个 Conversation 的 Snapshot Key 索引，提供尽力清理 hook；当前产品尚无
+Conversation 删除命令，未来接入删除事务后调用该 hook，清理失败依靠各 Snapshot Key 的 TTL
+最终过期。当前 durable History 在 Runner 之前已经从 PostgreSQL 读取，Tail Projection 随每轮
+`through_seq` 变化；缓存它不能减少事实库读取且几乎无法跨轮命中，因此改为基准驱动的后续增强，
+不在首版建立重复的 History 失效协议。Prompt Manifest 缓存同样不在本切片实现。
 
 ## 11. Diagnosis Token Budget
 
@@ -629,7 +645,7 @@ First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装�
 4. Structured MemoryCompactor、Validator 和重试语义（已完成）；
 5. ConversationMemoryAssembler 接入硬阈值 Summary + Tail（已完成）；
 6. Memory Outbox/Worker、Lease/Fencing（已完成）；
-7. Redis 热记忆缓存与 PostgreSQL 回源（待完成）；
+7. Redis Active Snapshot 热记忆缓存与 PostgreSQL 回源（已完成；Tail Projection 缓存改为基准驱动增强）；
 8. `read_conversation_memory_sources` Tool；
 9. Diagnosis Context Preflight 与有界 Tool Result；
 10. Provider 原生 Compaction/Tool Exposure 接口预留；

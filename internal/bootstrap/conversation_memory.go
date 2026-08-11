@@ -12,7 +12,11 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/platform/memorycompactor"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
+	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
 
+	"github.com/google/uuid"
+	rediscli "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -33,11 +37,58 @@ func BuildConversationMemoryService(
 	return buildConversationMemoryService(ctx, db, cfg, chatmodel.NewProfile)
 }
 
+// BuildCachedConversationMemoryService adds the degradable Redis read-through
+// adapter used by the Conversation Worker. A nil Redis client is valid when
+// cache is configured: reads fall back to PostgreSQL and emit degraded
+// observations instead of making Redis startup-critical.
+func BuildCachedConversationMemoryService(
+	ctx context.Context,
+	db *gorm.DB,
+	redisClient *rediscli.Client,
+	cfg config.Config,
+	log *zap.Logger,
+) (*conversationmemory.Service, error) {
+	cacheExpected := cfg.Agent.ContextMemory.MemoryCacheEnabled
+	var cache conversationmemory.SnapshotCache
+	if cacheExpected && redisClient != nil {
+		ttl, err := cfg.Agent.ContextMemory.MemoryCacheDuration()
+		if err != nil {
+			return nil, err
+		}
+		cache, err = platformredis.NewConversationMemoryCache(redisClient, platformredis.ConversationMemoryCacheConfig{
+			TTL: ttl, JitterRatio: cfg.Agent.ContextMemory.MemoryCacheJitterRatio,
+			OperationTimeout: time.Duration(cfg.Agent.ContextMemory.MemoryCacheTimeoutMillis) * time.Millisecond,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build conversation memory Redis cache: %w", err)
+		}
+	}
+	var observer conversationmemory.CacheObserver
+	if log != nil {
+		observer = conversationMemoryCacheLogger{log: log.Named("redis_cache")}
+	}
+	return buildConversationMemoryServiceWithCache(
+		ctx, db, cfg, chatmodel.NewProfile, cache, cacheExpected, observer,
+	)
+}
+
 func buildConversationMemoryService(
 	ctx context.Context,
 	db *gorm.DB,
 	cfg config.Config,
 	modelFactory conversationMemoryModelFactory,
+) (*conversationmemory.Service, error) {
+	return buildConversationMemoryServiceWithCache(ctx, db, cfg, modelFactory, nil, false, nil)
+}
+
+func buildConversationMemoryServiceWithCache(
+	ctx context.Context,
+	db *gorm.DB,
+	cfg config.Config,
+	modelFactory conversationMemoryModelFactory,
+	cache conversationmemory.SnapshotCache,
+	cacheExpected bool,
+	cacheObserver conversationmemory.CacheObserver,
 ) (*conversationmemory.Service, error) {
 	if db == nil || modelFactory == nil {
 		return nil, errors.New("conversation memory dependencies are unavailable")
@@ -83,5 +134,36 @@ func buildConversationMemoryService(
 		},
 		MaxAttempts:    summaryConfig.MaxAttempts,
 		RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
+		Cache:          cache, CacheExpected: cacheExpected, CacheObserver: cacheObserver,
 	})
+}
+
+type conversationMemoryCacheLogger struct {
+	log *zap.Logger
+}
+
+func (o conversationMemoryCacheLogger) Observe(
+	_ context.Context,
+	observation conversationmemory.CacheObservation,
+) {
+	if o.log == nil || observation.Validate() != nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("operation", string(observation.Operation)),
+		zap.String("status", string(observation.Status)),
+		zap.String("conversation_id", observation.ConversationID.String()),
+		zap.Int64("duration_micros", observation.Duration.Microseconds()),
+	}
+	if observation.SnapshotID != uuid.Nil {
+		fields = append(fields, zap.String("snapshot_id", observation.SnapshotID.String()))
+	}
+	if observation.Reason != "" {
+		fields = append(fields, zap.String("degraded_reason", string(observation.Reason)))
+	}
+	if observation.Status == conversationmemory.CacheStatusDegraded {
+		o.log.Warn("conversation memory cache degraded; PostgreSQL remains authoritative", fields...)
+		return
+	}
+	o.log.Debug("conversation memory cache observed", fields...)
 }

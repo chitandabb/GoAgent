@@ -103,6 +103,11 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 	if err != nil || currentActive.ID != first.ID {
 		t.Fatalf("Active() after root race = %+v, %v", currentActive, err)
 	}
+	identity, err := repository.ActiveIdentity(ctx, current.ID)
+	if err != nil || identity.ConversationID != current.ID || identity.SnapshotID != first.ID ||
+		identity.Version != first.Version || identity.PayloadSHA256 != first.PayloadSHA256 {
+		t.Fatalf("ActiveIdentity() = %+v, %v", identity, err)
+	}
 
 	secondCandidate := integrationMemoryCandidate(t, current.ID, &first.ID, 1, 5)
 	second, err := repository.Save(ctx, secondCandidate)
@@ -138,6 +143,11 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 	currentActive, err = repository.Active(ctx, current.ID)
 	if err != nil || currentActive.ID != second.ID {
 		t.Fatalf("Active() after stale race = %+v, %v", currentActive, err)
+	}
+	identity, err = repository.ActiveIdentity(ctx, current.ID)
+	if err != nil || identity.SnapshotID != second.ID || identity.Version != second.Version ||
+		identity.PayloadSHA256 != second.PayloadSHA256 {
+		t.Fatalf("ActiveIdentity() after replacement = %+v, %v", identity, err)
 	}
 
 	otherConversation, err := conversationRepository.Create(ctx, userID, conversation.CreateInput{Title: "其他会话"}, time.Now().UTC())

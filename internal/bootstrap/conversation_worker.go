@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationworker"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type ConversationWorkerApp struct {
@@ -94,6 +96,15 @@ func NewConversationWorkerApp(
 	runtimeBuilders := defaultAgentRuntimeBuilders()
 	runtimeBuilders.conversationCreator = conversationService
 	runtimeBuilders.attachmentReader = attachmentService
+	runtimeBuilders.conversationMemory = func(
+		buildCtx context.Context,
+		db *gorm.DB,
+		buildConfig config.Config,
+	) (mesagent.ConversationMemory, error) {
+		return BuildCachedConversationMemoryService(
+			buildCtx, db, deps.redis, buildConfig, log.Named("conversation_memory"),
+		)
+	}
 	if diagnosisTaskService != nil {
 		runtimeBuilders.conversationTaskStatus = conversationService
 	}

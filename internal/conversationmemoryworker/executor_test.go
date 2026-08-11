@@ -130,6 +130,17 @@ func (r *executorMemoryRepository) Active(context.Context, uuid.UUID) (*conversa
 	return &copy, nil
 }
 
+func (r *executorMemoryRepository) ActiveIdentity(ctx context.Context, conversationID uuid.UUID) (conversationmemory.ActiveSnapshotIdentity, error) {
+	active, err := r.Active(ctx, conversationID)
+	if err != nil {
+		return conversationmemory.ActiveSnapshotIdentity{}, err
+	}
+	return conversationmemory.ActiveSnapshotIdentity{
+		ConversationID: active.ConversationID, SnapshotID: active.ID,
+		Version: active.Version, PayloadSHA256: active.PayloadSHA256,
+	}, nil
+}
+
 func (r *executorMemoryRepository) Activate(context.Context, conversationmemory.ActivationRequest) (conversationmemory.Snapshot, error) {
 	panic("ServiceExecutor must not activate a candidate directly")
 }

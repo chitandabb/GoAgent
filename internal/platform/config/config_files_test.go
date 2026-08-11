@@ -33,6 +33,10 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				!cfg.Agent.ContextMemory.AsyncCompactionEnabled ||
 				cfg.Agent.ContextMemory.AsyncMaxAttempts != 3 ||
 				cfg.Agent.ContextMemory.RetryJitterRatio != 0.10 ||
+				!cfg.Agent.ContextMemory.MemoryCacheEnabled ||
+				cfg.Agent.ContextMemory.MemoryCacheTTL != "2h" ||
+				cfg.Agent.ContextMemory.MemoryCacheJitterRatio != 0.10 ||
+				cfg.Agent.ContextMemory.MemoryCacheTimeoutMillis != 50 ||
 				cfg.Agent.ContextMemory.MemoryMaxRatio != 0.20 ||
 				cfg.Agent.ContextMemory.SummaryMaxRatio != 0.05 ||
 				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
