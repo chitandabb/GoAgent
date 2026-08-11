@@ -34,6 +34,9 @@ timeoutMillis = 90000
 [agent.contextMemory]
 shadowPreflightEnabled = true
 continuousTailEnabled = true
+summaryTailEnabled = true
+memoryMaxRatio = 0.20
+summaryMaxRatio = 0.05
 tailMaxRatio = 0.15
 preflightTimeoutMillis = 250
 softThresholdRatio = 0.70

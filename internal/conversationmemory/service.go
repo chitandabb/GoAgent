@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	ErrSnapshotNotFound   = errors.New("conversation memory snapshot is not found")
-	ErrInvalidSnapshot    = errors.New("conversation memory snapshot is invalid")
-	ErrInvalidShadowInput = errors.New("conversation memory shadow input is invalid")
-	ErrCompactionFailed   = errors.New("conversation memory compaction failed")
+	ErrSnapshotNotFound           = errors.New("conversation memory snapshot is not found")
+	ErrSnapshotActivationConflict = errors.New("conversation memory snapshot activation conflict")
+	ErrInvalidSnapshot            = errors.New("conversation memory snapshot is invalid")
+	ErrInvalidShadowInput         = errors.New("conversation memory shadow input is invalid")
+	ErrCompactionFailed           = errors.New("conversation memory compaction failed")
 )
 
 type SnapshotStatus string
@@ -218,6 +219,29 @@ type Repository interface {
 	Save(context.Context, CandidateSnapshot) (Snapshot, error)
 }
 
+type ActivationRequest struct {
+	ConversationID           uuid.UUID
+	CandidateSnapshotID      uuid.UUID
+	ExpectedActiveSnapshotID *uuid.UUID
+	ActivatedAt              time.Time
+}
+
+func (r ActivationRequest) Validate() error {
+	if r.ConversationID == uuid.Nil || r.CandidateSnapshotID == uuid.Nil || r.ActivatedAt.IsZero() {
+		return ErrInvalidSnapshot
+	}
+	if r.ExpectedActiveSnapshotID != nil && *r.ExpectedActiveSnapshotID == uuid.Nil {
+		return ErrInvalidSnapshot
+	}
+	return nil
+}
+
+type ActivationRepository interface {
+	Repository
+	Active(context.Context, uuid.UUID) (*Snapshot, error)
+	Activate(context.Context, ActivationRequest) (Snapshot, error)
+}
+
 type ServiceConfig struct {
 	Repository      Repository
 	Compactor       Compactor
@@ -265,6 +289,12 @@ type ShadowRequest struct {
 	KnownReportReferences map[string][]int64
 }
 
+type PrepareActiveRequest struct {
+	ConversationID        uuid.UUID
+	CompletedMessages     []conversation.Message
+	KnownReportReferences map[string][]int64
+}
+
 // GenerateShadow compacts and persists a validated candidate Snapshot without
 // activating it or changing the Conversation Runner's model-visible prompt.
 func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Snapshot, error) {
@@ -278,6 +308,79 @@ func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Sn
 	if errors.Is(err, ErrSnapshotNotFound) {
 		previous = nil
 	}
+	return s.generateCandidate(ctx, request, previous)
+}
+
+func (s *Service) Active(ctx context.Context, conversationID uuid.UUID) (*Snapshot, error) {
+	if s == nil || conversationID == uuid.Nil {
+		return nil, ErrInvalidShadowInput
+	}
+	repository, ok := s.repository.(ActivationRepository)
+	if !ok {
+		return nil, errors.New("conversation memory activation repository is unavailable")
+	}
+	return repository.Active(ctx, conversationID)
+}
+
+// PrepareActive synchronously generates and CAS-activates a validated Snapshot.
+// A competing activation may win; an equal-or-newer winner is returned so the
+// caller can safely continue without overwriting it.
+func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveRequest) (Snapshot, error) {
+	if s == nil || request.ConversationID == uuid.Nil {
+		return Snapshot{}, ErrInvalidShadowInput
+	}
+	repository, ok := s.repository.(ActivationRepository)
+	if !ok {
+		return Snapshot{}, errors.New("conversation memory activation repository is unavailable")
+	}
+	previous, err := repository.Active(ctx, request.ConversationID)
+	if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
+		return Snapshot{}, fmt.Errorf("load active conversation memory snapshot: %w", err)
+	}
+	if errors.Is(err, ErrSnapshotNotFound) {
+		previous = nil
+	}
+	if previous != nil && (previous.ConversationID != request.ConversationID || previous.Validate() != nil) {
+		return Snapshot{}, ErrInvalidShadowInput
+	}
+	if _, err := validatedCompletedMessages(request.ConversationID, request.CompletedMessages); err != nil {
+		return Snapshot{}, err
+	}
+	if previous != nil && noMessagesAfter(request.CompletedMessages, previous.ThroughSeq) {
+		return *cloneSnapshot(previous), nil
+	}
+	candidate, err := s.generateCandidate(ctx, ShadowRequest{
+		ConversationID: request.ConversationID, CompletedMessages: request.CompletedMessages,
+		KnownReportReferences: request.KnownReportReferences,
+	}, previous)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	activation := ActivationRequest{
+		ConversationID: request.ConversationID, CandidateSnapshotID: candidate.ID,
+		ActivatedAt: s.clock().UTC(),
+	}
+	if previous != nil {
+		activation.ExpectedActiveSnapshotID = &previous.ID
+	}
+	activated, err := repository.Activate(ctx, activation)
+	if err == nil {
+		return activated, nil
+	}
+	if !errors.Is(err, ErrSnapshotActivationConflict) {
+		return Snapshot{}, fmt.Errorf("activate conversation memory snapshot: %w", err)
+	}
+	winner, winnerErr := repository.Active(ctx, request.ConversationID)
+	if winnerErr == nil && winner.FromSeq == candidate.FromSeq && winner.ThroughSeq >= candidate.ThroughSeq {
+		return *winner, nil
+	}
+	if winnerErr != nil && !errors.Is(winnerErr, ErrSnapshotNotFound) {
+		return Snapshot{}, fmt.Errorf("load winning conversation memory snapshot: %w", winnerErr)
+	}
+	return Snapshot{}, ErrSnapshotActivationConflict
+}
+
+func (s *Service) generateCandidate(ctx context.Context, request ShadowRequest, previous *Snapshot) (Snapshot, error) {
 	newMessages, fromSeq, throughSeq, err := prepareMessages(request.ConversationID, request.CompletedMessages, previous)
 	if err != nil {
 		return Snapshot{}, err
@@ -335,17 +438,19 @@ func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Sn
 	return Snapshot{}, fmt.Errorf("%w after %d attempts: %v", ErrCompactionFailed, s.maxAttempts, lastErr)
 }
 
-func prepareMessages(conversationID uuid.UUID, messages []conversation.Message, previous *Snapshot) ([]conversation.Message, int64, int64, error) {
-	if len(messages) == 0 {
-		return nil, 0, 0, ErrInvalidShadowInput
-	}
-	ordered := cloneMessages(messages)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Seq < ordered[j].Seq })
-	for index, message := range ordered {
-		if message.ID == uuid.Nil || message.ConversationID != conversationID || message.Seq < 1 || !message.Role.Valid() ||
-			strings.TrimSpace(message.Content) == "" || (index > 0 && message.Seq == ordered[index-1].Seq) {
-			return nil, 0, 0, ErrInvalidShadowInput
+func noMessagesAfter(messages []conversation.Message, throughSeq int64) bool {
+	for _, message := range messages {
+		if message.Seq > throughSeq {
+			return false
 		}
+	}
+	return true
+}
+
+func prepareMessages(conversationID uuid.UUID, messages []conversation.Message, previous *Snapshot) ([]conversation.Message, int64, int64, error) {
+	ordered, err := validatedCompletedMessages(conversationID, messages)
+	if err != nil {
+		return nil, 0, 0, err
 	}
 	start := int64(1)
 	fromSeq := int64(1)
@@ -371,6 +476,21 @@ func prepareMessages(conversationID uuid.UUID, messages []conversation.Message, 
 		}
 	}
 	return newMessages, fromSeq, newMessages[len(newMessages)-1].Seq, nil
+}
+
+func validatedCompletedMessages(conversationID uuid.UUID, messages []conversation.Message) ([]conversation.Message, error) {
+	if conversationID == uuid.Nil || len(messages) == 0 {
+		return nil, ErrInvalidShadowInput
+	}
+	ordered := cloneMessages(messages)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Seq < ordered[j].Seq })
+	for index, message := range ordered {
+		if message.ID == uuid.Nil || message.ConversationID != conversationID || message.Seq < 1 || !message.Role.Valid() ||
+			strings.TrimSpace(message.Content) == "" || (index > 0 && message.Seq == ordered[index-1].Seq) {
+			return nil, ErrInvalidShadowInput
+		}
+	}
+	return ordered, nil
 }
 
 func buildValidationContext(

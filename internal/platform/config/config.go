@@ -375,6 +375,9 @@ type AgentConfig struct {
 type ContextMemoryConfig struct {
 	ShadowPreflightEnabled  bool                            `toml:"shadowPreflightEnabled"`
 	ContinuousTailEnabled   bool                            `toml:"continuousTailEnabled"`
+	SummaryTailEnabled      bool                            `toml:"summaryTailEnabled"`
+	MemoryMaxRatio          float64                         `toml:"memoryMaxRatio"`
+	SummaryMaxRatio         float64                         `toml:"summaryMaxRatio"`
 	TailMaxRatio            float64                         `toml:"tailMaxRatio"`
 	PreflightTimeoutMillis  int                             `toml:"preflightTimeoutMillis"`
 	SoftThresholdRatio      float64                         `toml:"softThresholdRatio"`
@@ -383,9 +386,8 @@ type ContextMemoryConfig struct {
 	Summary                 ConversationMemorySummaryConfig `toml:"summary"`
 }
 
-// ConversationMemorySummaryConfig controls the independently callable Shadow
-// compactor. It does not activate Snapshots or mutate the main Conversation
-// prompt; those rollout stages are configured separately in later milestones.
+// ConversationMemorySummaryConfig controls the independently callable Summary
+// compactor shared by Shadow generation and synchronous Active preparation.
 type ConversationMemorySummaryConfig struct {
 	Enabled              bool   `toml:"enabled"`
 	PromptFile           string `toml:"promptFile"`
@@ -422,14 +424,27 @@ func (c ContextMemoryConfig) Validate() error {
 	if c.ContinuousTailEnabled && !c.ShadowPreflightEnabled {
 		return errors.New("agent contextMemory continuous Tail requires shadow preflight")
 	}
+	if c.SummaryTailEnabled && !c.ContinuousTailEnabled {
+		return errors.New("agent contextMemory Summary + Tail requires continuous Tail")
+	}
 	if err := c.Summary.Validate(); err != nil {
 		return err
+	}
+	if c.SummaryTailEnabled && !c.Summary.Enabled {
+		return errors.New("agent contextMemory Summary + Tail requires the Summary model")
 	}
 	if !c.ShadowPreflightEnabled {
 		return nil
 	}
 	if c.ContinuousTailEnabled && !contextgovernance.ValidTailWindowRatio(c.TailMaxRatio) {
 		return errors.New("agent contextMemory tailMaxRatio must satisfy 0 < tail <= 0.20")
+	}
+	if c.SummaryTailEnabled && (math.IsNaN(c.MemoryMaxRatio) || math.IsInf(c.MemoryMaxRatio, 0) ||
+		math.IsNaN(c.SummaryMaxRatio) || math.IsInf(c.SummaryMaxRatio, 0) ||
+		c.MemoryMaxRatio <= 0 || c.MemoryMaxRatio > contextgovernance.MaxTailWindowRatio ||
+		c.SummaryMaxRatio <= 0 || c.SummaryMaxRatio > 0.05 ||
+		c.SummaryMaxRatio+c.TailMaxRatio > c.MemoryMaxRatio+1e-12) {
+		return errors.New("agent contextMemory ratios must satisfy Summary <= 0.05 and Summary + Tail <= Memory <= 0.20")
 	}
 	if c.PreflightTimeoutMillis < 5 || c.PreflightTimeoutMillis > 5_000 {
 		return errors.New("agent contextMemory preflightTimeoutMillis must be between 5 and 5000")

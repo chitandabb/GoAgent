@@ -10,10 +10,17 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 )
+
+type ConversationMemory interface {
+	Active(context.Context, uuid.UUID) (*conversationmemory.Snapshot, error)
+	PrepareActive(context.Context, conversationmemory.PrepareActiveRequest) (conversationmemory.Snapshot, error)
+}
 
 type ConversationContextPreflightConfig struct {
 	Enabled                 bool
@@ -21,13 +28,16 @@ type ConversationContextPreflightConfig struct {
 	TailSelector            *contextgovernance.ContinuousTailSelector
 	ModelProfile            contextgovernance.ModelProfile
 	ContinuousTailEnabled   bool
+	SummaryTailEnabled      bool
+	Memory                  ConversationMemory
+	MemoryMaxRatio          float64
+	SummaryMaxRatio         float64
 	TailMaxRatio            float64
 	SoftThresholdRatio      float64
 	HardThresholdRatio      float64
 	ToolGrowthReserveTokens int
 	PreflightTimeout        time.Duration
 	PreloadedSkill          string
-	SummaryFingerprint      string
 }
 
 const defaultConversationPreflightTimeout = 250 * time.Millisecond
@@ -35,6 +45,9 @@ const defaultConversationPreflightTimeout = 250 * time.Millisecond
 func (c ConversationContextPreflightConfig) validate(modelProvider, modelID string) error {
 	if c.ContinuousTailEnabled && !c.Enabled {
 		return errors.New("conversation continuous Tail requires context preflight")
+	}
+	if c.SummaryTailEnabled && (!c.Enabled || !c.ContinuousTailEnabled) {
+		return errors.New("conversation Summary + Tail requires continuous Tail preflight")
 	}
 	if !c.Enabled {
 		return nil
@@ -51,12 +64,17 @@ func (c ConversationContextPreflightConfig) validate(modelProvider, modelID stri
 		len(c.PreloadedSkill) > 256*1024 {
 		return errors.New("conversation context preflight configuration is invalid")
 	}
-	if c.SummaryFingerprint != "" && !contextgovernance.IsSHA256Hex(c.SummaryFingerprint) {
-		return errors.New("conversation context preflight summary fingerprint is invalid")
-	}
 	if c.ContinuousTailEnabled && (c.TailSelector == nil ||
 		!contextgovernance.ValidTailWindowRatio(c.TailMaxRatio)) {
 		return errors.New("conversation continuous Tail configuration is invalid")
+	}
+	if c.SummaryTailEnabled && (c.Memory == nil ||
+		math.IsNaN(c.MemoryMaxRatio) || math.IsInf(c.MemoryMaxRatio, 0) ||
+		math.IsNaN(c.SummaryMaxRatio) || math.IsInf(c.SummaryMaxRatio, 0) ||
+		c.MemoryMaxRatio <= 0 || c.MemoryMaxRatio > contextgovernance.MaxTailWindowRatio ||
+		c.SummaryMaxRatio <= 0 || c.SummaryMaxRatio > 0.05 ||
+		c.SummaryMaxRatio+c.TailMaxRatio > c.MemoryMaxRatio+1e-12) {
+		return errors.New("conversation Summary + Tail configuration is invalid")
 	}
 	return nil
 }
@@ -108,7 +126,7 @@ func (r *ConversationRunner) buildConversationPromptManifest(
 		SystemPrompt:          r.systemInstruction,
 		ToolSchemaFingerprint: contract.Fingerprint,
 		PreloadedSkill:        r.contextPreflight.PreloadedSkill,
-		SummaryFingerprint:    r.contextPreflight.SummaryFingerprint,
+		SummaryFingerprint:    projection.summaryFingerprint,
 	})
 	if err != nil {
 		return r.failedConversationPromptManifest(projection, startedAt, nil, "prompt_identity_failed"), err
@@ -118,7 +136,7 @@ func (r *ConversationRunner) buildConversationPromptManifest(
 		{Kind: contextgovernance.PromptSegmentSystem, Content: r.systemInstruction},
 		{Kind: contextgovernance.PromptSegmentToolSchema, Content: contract.ModelVisibleJSON},
 		{Kind: contextgovernance.PromptSegmentPreloadedSkill, Content: r.contextPreflight.PreloadedSkill},
-		{Kind: contextgovernance.PromptSegmentSummary},
+		{Kind: contextgovernance.PromptSegmentSummary, Content: projection.summaryContent},
 		{Kind: contextgovernance.PromptSegmentHistory, Content: history},
 		{Kind: contextgovernance.PromptSegmentDynamicReferences, Content: dynamicReferences},
 		{Kind: contextgovernance.PromptSegmentCurrentUser, Content: currentUser},
@@ -130,10 +148,11 @@ func (r *ConversationRunner) buildConversationPromptManifest(
 		return r.failedConversationPromptManifest(projection, startedAt, &identity, "token_estimation_failed"), err
 	}
 	degradedReasons := append([]string(nil), plan.EstimatorDegradedReasons...)
-	contextDegraded := !projection.tailContinuous
-	if contextDegraded {
+	contextDegraded := !projection.tailContinuous || len(projection.degradedReasons) > 0
+	if !projection.tailContinuous {
 		degradedReasons = append(degradedReasons, "non_continuous_tail")
 	}
+	degradedReasons = append(degradedReasons, projection.degradedReasons...)
 	manifest := &contextgovernance.PromptManifest{
 		SchemaVersion:             1,
 		PreflightStatus:           contextgovernance.PreflightStatusSucceeded,
@@ -148,6 +167,8 @@ func (r *ConversationRunner) buildConversationPromptManifest(
 		ToolSchemaFingerprint:     identity.ToolSchemaFingerprint,
 		SkillPromptFingerprint:    identity.SkillPromptFingerprint,
 		SummaryFingerprint:        identity.SummaryFingerprint,
+		SummarySnapshotID:         projection.summarySnapshotID,
+		HardCompactionTriggered:   projection.hardCompactionTriggered,
 		TailFromSeq:               projection.tailFromSeq,
 		TailThroughSeq:            projection.tailThroughSeq,
 		AvailableInputTokens:      plan.AvailableInputTokens,
@@ -182,6 +203,7 @@ func (r *ConversationRunner) failedConversationPromptManifest(
 	if !projection.tailContinuous {
 		degradedReasons = append(degradedReasons, "non_continuous_tail")
 	}
+	degradedReasons = append(degradedReasons, projection.degradedReasons...)
 	manifest := &contextgovernance.PromptManifest{
 		SchemaVersion: 1, PreflightStatus: contextgovernance.PreflightStatusFailed,
 		FailureStage: reason, PromptIdentityAvailable: identity != nil,
@@ -202,6 +224,8 @@ func (r *ConversationRunner) failedConversationPromptManifest(
 		manifest.ToolSchemaFingerprint = identity.ToolSchemaFingerprint
 		manifest.SkillPromptFingerprint = identity.SkillPromptFingerprint
 		manifest.SummaryFingerprint = identity.SummaryFingerprint
+		manifest.SummarySnapshotID = projection.summarySnapshotID
+		manifest.HardCompactionTriggered = projection.hardCompactionTriggered
 	}
 	if manifest.Validate() != nil {
 		return nil

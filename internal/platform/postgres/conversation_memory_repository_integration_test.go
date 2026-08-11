@@ -79,22 +79,64 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 		t.Fatal("immutable snapshot payload update unexpectedly succeeded")
 	}
 
+	competingCandidate := integrationMemoryCandidate(t, current.ID, nil, 1, 4)
+	competing, err := repository.Save(ctx, competingCandidate)
+	if err != nil {
+		t.Fatalf("Save(competing root): %v", err)
+	}
+	active, err := repository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: current.ID, CandidateSnapshotID: first.ID, ActivatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Activate(first): %v", err)
+	}
+	if active.ID != first.ID || active.Status != conversationmemory.SnapshotStatusActive || active.ActivatedAt == nil {
+		t.Fatalf("active first snapshot = %+v", active)
+	}
+	if _, err := repository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: current.ID, CandidateSnapshotID: competing.ID, ActivatedAt: time.Now().UTC(),
+	}); !errors.Is(err, conversationmemory.ErrSnapshotActivationConflict) {
+		t.Fatalf("Activate(competing root) error = %v, want ErrSnapshotActivationConflict", err)
+	}
+	currentActive, err := repository.Active(ctx, current.ID)
+	if err != nil || currentActive.ID != first.ID {
+		t.Fatalf("Active() after root race = %+v, %v", currentActive, err)
+	}
+
 	secondCandidate := integrationMemoryCandidate(t, current.ID, &first.ID, 1, 5)
 	second, err := repository.Save(ctx, secondCandidate)
 	if err != nil {
 		t.Fatalf("Save(second): %v", err)
 	}
+	second, err = repository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: current.ID, CandidateSnapshotID: second.ID,
+		ExpectedActiveSnapshotID: &first.ID, ActivatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Activate(second): %v", err)
+	}
 	latest, err := repository.Latest(ctx, current.ID)
 	if err != nil {
 		t.Fatalf("Latest(): %v", err)
 	}
-	if second.Version != 2 || latest.ID != second.ID || latest.SupersedesSnapshotID == nil ||
+	if second.Version != 3 || latest.ID != second.ID || latest.SupersedesSnapshotID == nil ||
 		*latest.SupersedesSnapshotID != first.ID || latest.FromSeq != 1 || latest.ThroughSeq != 5 {
 		t.Fatalf("second/latest snapshots = %+v / %+v", second, latest)
 	}
-	disconnectedCandidate := integrationMemoryCandidate(t, current.ID, nil, 1, 7)
-	if _, err := repository.Save(ctx, disconnectedCandidate); !errors.Is(err, conversationmemory.ErrInvalidSnapshot) {
-		t.Fatalf("Save(disconnected successor) error = %v, want ErrInvalidSnapshot", err)
+	staleCandidate := integrationMemoryCandidate(t, current.ID, &first.ID, 1, 7)
+	stale, err := repository.Save(ctx, staleCandidate)
+	if err != nil {
+		t.Fatalf("Save(stale candidate for audit): %v", err)
+	}
+	if _, err := repository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: current.ID, CandidateSnapshotID: stale.ID,
+		ExpectedActiveSnapshotID: &first.ID, ActivatedAt: time.Now().UTC(),
+	}); !errors.Is(err, conversationmemory.ErrSnapshotActivationConflict) {
+		t.Fatalf("Activate(stale candidate) error = %v, want ErrSnapshotActivationConflict", err)
+	}
+	currentActive, err = repository.Active(ctx, current.ID)
+	if err != nil || currentActive.ID != second.ID {
+		t.Fatalf("Active() after stale race = %+v, %v", currentActive, err)
 	}
 
 	otherConversation, err := conversationRepository.Create(ctx, userID, conversation.CreateInput{Title: "其他会话"}, time.Now().UTC())
@@ -106,19 +148,12 @@ VALUES (?, ?, 'Memory Owner', 'integration-hash', 'analyst', 'active', false)`,
 		t.Fatalf("Save(cross-conversation predecessor) error = %v, want ErrInvalidSnapshot", err)
 	}
 
-	activatedAt := time.Now().UTC().Truncate(time.Microsecond)
-	if err := tx.Exec(`
-UPDATE conversation_memory_snapshots
-SET status = 'active', activated_at = ?
-WHERE id = ?`, activatedAt, second.ID).Error; err != nil {
-		t.Fatalf("activate second snapshot fixture: %v", err)
-	}
-	active, err := repository.Get(ctx, second.ID)
+	active, err = repository.Get(ctx, second.ID)
 	if err != nil {
 		t.Fatalf("Get(active second): %v", err)
 	}
 	if active.Status != conversationmemory.SnapshotStatusActive || active.ActivatedAt == nil ||
-		!active.ActivatedAt.Equal(activatedAt) {
+		active.ActivatedAt.Before(active.CreatedAt) {
 		t.Fatalf("active snapshot lifecycle = status %q, activatedAt %v", active.Status, active.ActivatedAt)
 	}
 

@@ -86,8 +86,26 @@ func TestAgentConfigValidate(t *testing.T) {
 		PromptVersion: "conversation-memory-v1", MaxPayloadBytes: 65536,
 		MaxAttempts: 3, RetryBaseDelayMillis: 250,
 	}
+	configured.ContextMemory.SummaryTailEnabled = true
+	configured.ContextMemory.MemoryMaxRatio = 0.20
+	configured.ContextMemory.SummaryMaxRatio = 0.05
 	if err := configured.Validate(); err != nil {
-		t.Fatalf("Validate configured structured Summary: %v", err)
+		t.Fatalf("Validate configured Summary + Tail: %v", err)
+	}
+	invalidMemoryRatio := configured
+	invalidMemoryRatio.ContextMemory.MemoryMaxRatio = 0.19
+	if err := invalidMemoryRatio.Validate(); err == nil {
+		t.Fatal("Validate accepted Summary + Tail above the total memory ratio")
+	}
+	invalidSummaryRatio := configured
+	invalidSummaryRatio.ContextMemory.SummaryMaxRatio = 0.06
+	if err := invalidSummaryRatio.Validate(); err == nil {
+		t.Fatal("Validate accepted Summary ratio above five percent")
+	}
+	summaryTailWithoutSummary := configured
+	summaryTailWithoutSummary.ContextMemory.Summary.Enabled = false
+	if err := summaryTailWithoutSummary.Validate(); err == nil {
+		t.Fatal("Validate accepted Summary + Tail while the Summary model is disabled")
 	}
 	invalidSummary := configured
 	invalidSummary.ContextMemory.Summary.PromptVersion = ""

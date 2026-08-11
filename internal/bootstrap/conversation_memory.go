@@ -22,9 +22,9 @@ type conversationMemoryModelFactory func(
 	string,
 ) (*chatmodel.Instance, error)
 
-// BuildConversationMemoryService is the explicit composition entry for future
-// evaluation tools and Memory Workers. Merely constructing this service does
-// not activate a Snapshot or alter ConversationRunner prompts.
+// BuildConversationMemoryService composes the shared Shadow and Active Summary
+// implementation. Constructing the service has no side effects; callers must
+// explicitly generate a candidate or CAS-activate it for a Conversation turn.
 func BuildConversationMemoryService(
 	ctx context.Context,
 	db *gorm.DB,

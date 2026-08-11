@@ -1540,25 +1540,42 @@ func insertConversationPromptManifest(
 	if err != nil {
 		return fmt.Errorf("encode prompt manifest degraded reasons: %w", err)
 	}
+	var summarySnapshotID any
+	if manifest.SummarySnapshotID != "" {
+		summarySnapshotID = manifest.SummarySnapshotID
+	}
 	query := tx.Exec(`
 INSERT INTO conversation_prompt_manifests
     (turn_id, schema_version, preflight_status, failure_stage,
      prompt_identity_available, estimate_available, prompt_epoch_id, stable_prefix_fingerprint,
      model_profile, model_profile_fingerprint, system_prompt_version, system_prompt_fingerprint,
      tool_schema_fingerprint, skill_prompt_fingerprint, summary_fingerprint,
+     summary_snapshot_id, hard_compaction_triggered,
      tail_from_seq, tail_through_seq, available_input_tokens,
      estimated_prompt_tokens, estimated_upper_bound_tokens, tool_growth_reserve_tokens, estimation_method,
      soft_threshold_ratio, hard_threshold_ratio, soft_threshold_reached, hard_threshold_reached,
      exceeds_hard_window, actual_usage_available, actual_prompt_tokens, cache_hit_tokens,
      cache_miss_tokens, completion_tokens, estimation_error_ratio, preflight_duration_micros,
      run_duration_millis, context_degraded, degraded_reasons, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?)`,
+VALUES (
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?, CAST(? AS jsonb), ?
+)`,
 		turnID, manifest.SchemaVersion, manifest.PreflightStatus, manifest.FailureStage,
 		manifest.PromptIdentityAvailable, manifest.EstimateAvailable,
 		manifest.PromptEpochID, manifest.StablePrefixFingerprint,
 		manifest.ModelProfile, manifest.ModelProfileFingerprint, manifest.SystemPromptVersion,
 		manifest.SystemPromptFingerprint, manifest.ToolSchemaFingerprint, manifest.SkillPromptFingerprint,
-		manifest.SummaryFingerprint, manifest.TailFromSeq, manifest.TailThroughSeq,
+		manifest.SummaryFingerprint, summarySnapshotID, manifest.HardCompactionTriggered,
+		manifest.TailFromSeq, manifest.TailThroughSeq,
 		manifest.AvailableInputTokens, manifest.EstimatedPromptTokens, manifest.EstimatedUpperBoundTokens,
 		manifest.ToolGrowthReserveTokens, manifest.EstimationMethod,
 		manifest.SoftThresholdRatio, manifest.HardThresholdRatio,
@@ -1616,17 +1633,40 @@ func loadConversationHistory(
 	if throughSeq < 1 {
 		return nil, conversation.ErrInvalidMessage
 	}
+	const maxExecutionHistoryMessages = 10_000
+	afterSeq := int64(0)
+	var activeSnapshot struct {
+		ThroughSeq int64 `gorm:"column:through_seq"`
+	}
+	activeQuery := db.Raw(`
+SELECT through_seq
+FROM conversation_memory_snapshots
+WHERE conversation_id = ? AND status = 'active'
+LIMIT 1`, conversationID).Scan(&activeSnapshot)
+	if activeQuery.Error != nil {
+		return nil, TranslateError(activeQuery.Error)
+	}
+	if activeQuery.RowsAffected == 1 {
+		afterSeq = activeSnapshot.ThroughSeq - conversation.MaxMessageLimit
+		if afterSeq < 0 {
+			afterSeq = 0
+		}
+	}
 	var records []messageRecord
 	query := db.Raw(`
 SELECT message.id, message.conversation_id, message.seq, message.role,
        message.content, message.content_schema_version, message.created_at
 FROM conversation_messages message
 JOIN conversations conversation ON conversation.id = message.conversation_id
-WHERE message.conversation_id = ? AND conversation.user_id = ? AND message.seq <= ?
+WHERE message.conversation_id = ? AND conversation.user_id = ?
+  AND message.seq > ? AND message.seq <= ?
 ORDER BY message.seq DESC
-LIMIT ?`, conversationID, userID, throughSeq, conversation.MaxMessageLimit).Scan(&records)
+LIMIT ?`, conversationID, userID, afterSeq, throughSeq, maxExecutionHistoryMessages+1).Scan(&records)
 	if query.Error != nil {
 		return nil, TranslateError(query.Error)
+	}
+	if len(records) > maxExecutionHistoryMessages {
+		return nil, errors.New("conversation execution history exceeds the bounded compaction input")
 	}
 	messages := make([]conversation.Message, len(records))
 	for index, record := range records {
@@ -1782,6 +1822,8 @@ type conversationPromptManifestRecord struct {
 	ToolSchemaFingerprint     string                             `gorm:"column:tool_schema_fingerprint"`
 	SkillPromptFingerprint    string                             `gorm:"column:skill_prompt_fingerprint"`
 	SummaryFingerprint        string                             `gorm:"column:summary_fingerprint"`
+	SummarySnapshotID         *uuid.UUID                         `gorm:"column:summary_snapshot_id"`
+	HardCompactionTriggered   bool                               `gorm:"column:hard_compaction_triggered"`
 	TailFromSeq               int64                              `gorm:"column:tail_from_seq"`
 	TailThroughSeq            int64                              `gorm:"column:tail_through_seq"`
 	AvailableInputTokens      int                                `gorm:"column:available_input_tokens"`
@@ -1923,7 +1965,8 @@ func loadConversationPromptManifest(
 SELECT schema_version, preflight_status, failure_stage, prompt_identity_available, estimate_available,
        prompt_epoch_id, stable_prefix_fingerprint,
        model_profile, model_profile_fingerprint, system_prompt_version, system_prompt_fingerprint,
-       tool_schema_fingerprint, skill_prompt_fingerprint, summary_fingerprint,
+	       tool_schema_fingerprint, skill_prompt_fingerprint, summary_fingerprint,
+	       summary_snapshot_id, hard_compaction_triggered,
        tail_from_seq, tail_through_seq, available_input_tokens,
        estimated_prompt_tokens, estimated_upper_bound_tokens, tool_growth_reserve_tokens, estimation_method,
        soft_threshold_ratio, hard_threshold_ratio, soft_threshold_reached, hard_threshold_reached,
@@ -1950,7 +1993,8 @@ WHERE turn_id = ?`, turnID).Scan(&record)
 		ModelProfileFingerprint: record.ModelProfileFingerprint,
 		SystemPromptVersion:     record.SystemPromptVersion, SystemPromptFingerprint: record.SystemPromptFingerprint,
 		ToolSchemaFingerprint: record.ToolSchemaFingerprint, SkillPromptFingerprint: record.SkillPromptFingerprint,
-		SummaryFingerprint: record.SummaryFingerprint, TailFromSeq: record.TailFromSeq,
+		SummaryFingerprint:      record.SummaryFingerprint,
+		HardCompactionTriggered: record.HardCompactionTriggered, TailFromSeq: record.TailFromSeq,
 		TailThroughSeq: record.TailThroughSeq, AvailableInputTokens: record.AvailableInputTokens,
 		EstimatedPromptTokens:     record.EstimatedPromptTokens,
 		EstimatedUpperBoundTokens: record.EstimatedUpperBoundTokens,
@@ -1963,6 +2007,9 @@ WHERE turn_id = ?`, turnID).Scan(&record)
 		EstimationErrorRatio:    record.EstimationErrorRatio,
 		PreflightDurationMicros: record.PreflightDurationMicros, RunDurationMillis: record.RunDurationMillis,
 		ContextDegraded: record.ContextDegraded, DegradedReasons: degradedReasons,
+	}
+	if record.SummarySnapshotID != nil {
+		manifest.SummarySnapshotID = record.SummarySnapshotID.String()
 	}
 	if err := manifest.Validate(); err != nil {
 		return nil, errors.New("conversation prompt manifest is invalid")

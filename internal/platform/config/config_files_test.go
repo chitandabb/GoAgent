@@ -28,6 +28,9 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			}
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
 				!cfg.Agent.ContextMemory.ContinuousTailEnabled ||
+				!cfg.Agent.ContextMemory.SummaryTailEnabled ||
+				cfg.Agent.ContextMemory.MemoryMaxRatio != 0.20 ||
+				cfg.Agent.ContextMemory.SummaryMaxRatio != 0.05 ||
 				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
 				cfg.Agent.ContextMemory.PreflightTimeoutMillis != 250 ||
 				cfg.Agent.ContextMemory.SoftThresholdRatio != 0.70 ||

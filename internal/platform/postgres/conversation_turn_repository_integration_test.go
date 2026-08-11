@@ -12,6 +12,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	repositorydomain "github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/google/uuid"
@@ -87,6 +88,18 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 	if retried.Created || retried.TurnID != first.TurnID || retried.UserMessage.ID != first.UserMessage.ID {
 		t.Fatalf("retried turn = %+v, first = %+v", retried, first)
 	}
+	memoryRepository := NewConversationMemoryRepository(tx)
+	memoryCandidate := integrationMemoryCandidate(t, current.ID, nil, 1, 1)
+	memorySnapshot, err := memoryRepository.Save(ctx, memoryCandidate)
+	if err != nil {
+		t.Fatalf("Save(prompt manifest Summary): %v", err)
+	}
+	memorySnapshot, err = memoryRepository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: current.ID, CandidateSnapshotID: memorySnapshot.ID, ActivatedAt: startedAt.Add(250 * time.Millisecond),
+	})
+	if err != nil {
+		t.Fatalf("Activate(prompt manifest Summary): %v", err)
+	}
 	knowledgeSourceRef := "knowledge:" + uuid.NewString() + "/" + uuid.NewString()
 	completed, err := repository.CompleteTurn(ctx, userID, first.TurnID, conversation.AgentResponse{
 		Content: "采用不可变版本重新发布。[source:" + knowledgeSourceRef + "]",
@@ -105,7 +118,7 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 				ModelCalls: 2, PromptTokens: 30, CompletionTokens: 10, TotalTokens: 40, CachedTokens: 5,
 			},
 			DurationMillis: 123,
-			PromptManifest: integrationPromptManifest(),
+			PromptManifest: integrationPromptManifest(memorySnapshot.ID),
 		},
 	}, startedAt.Add(3*time.Second))
 	if err != nil {
@@ -151,6 +164,8 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 		recordedRun.Observation.RetrievedSources[0].SourceRef != knowledgeSourceRef ||
 		recordedRun.Observation.PromptManifest == nil ||
 		recordedRun.Observation.PromptManifest.ActualPromptTokens != 20 ||
+		recordedRun.Observation.PromptManifest.SummarySnapshotID != memorySnapshot.ID.String() ||
+		!recordedRun.Observation.PromptManifest.HardCompactionTriggered ||
 		len(recordedRun.Citations) != 1 || recordedRun.Citations[0].SourceRef != knowledgeSourceRef {
 		t.Fatalf("recorded run = %+v", recordedRun)
 	}
@@ -220,7 +235,7 @@ VALUES (?, ?, 'Conversation Owner', 'integration-hash', 'analyst', 'active', fal
 	}
 }
 
-func integrationPromptManifest() *contextgovernance.PromptManifest {
+func integrationPromptManifest(summarySnapshotID uuid.UUID) *contextgovernance.PromptManifest {
 	manifest := &contextgovernance.PromptManifest{
 		SchemaVersion:             1,
 		PreflightStatus:           contextgovernance.PreflightStatusSucceeded,
@@ -235,6 +250,8 @@ func integrationPromptManifest() *contextgovernance.PromptManifest {
 		ToolSchemaFingerprint:     contextgovernance.SHA256Hex("integration-tools"),
 		SkillPromptFingerprint:    contextgovernance.SHA256Hex("integration-skill"),
 		SummaryFingerprint:        contextgovernance.SHA256Hex("integration-summary"),
+		SummarySnapshotID:         summarySnapshotID.String(),
+		HardCompactionTriggered:   true,
 		TailFromSeq:               1,
 		TailThroughSeq:            1,
 		AvailableInputTokens:      3000,
@@ -464,6 +481,41 @@ SELECT
 	if facts.TurnCount != 1 || facts.MessageCount != 2 || facts.OutboxCount != 1 ||
 		facts.EventType != "conversation.turn.execute" || !strings.Contains(facts.Payload, accepted.TurnID.String()) {
 		t.Fatalf("async turn facts = %+v", facts)
+	}
+
+	longConversation, err := repository.Create(ctx, userID, conversation.CreateInput{Title: "长会话压缩"}, reclaimAt.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("create long conversation: %v", err)
+	}
+	if err := tx.Exec(`
+INSERT INTO conversation_messages
+    (id, conversation_id, seq, role, content, content_schema_version, created_at)
+SELECT gen_random_uuid(), ?, sequence,
+       CASE WHEN sequence % 2 = 1 THEN 'user' ELSE 'assistant' END,
+       'history-' || sequence, 1, ?
+FROM generate_series(1, 101) AS sequence`, longConversation.ID, reclaimAt.Add(4*time.Second)).Error; err != nil {
+		t.Fatalf("insert long conversation history: %v", err)
+	}
+	longInput := input
+	longInput.Message.ConversationID = longConversation.ID
+	longInput.IdempotencyKey = uuid.NewString()
+	longInput.RequestFingerprint = strings.Repeat("9", 64)
+	longInput.CorrelationID = uuid.New()
+	longInput.StartedAt = reclaimAt.Add(5 * time.Second)
+	longAccepted, err := repository.AcceptTurn(ctx, userID, longInput)
+	if err != nil {
+		t.Fatalf("accept long conversation turn: %v", err)
+	}
+	longExecution, err := repository.ClaimTurn(
+		ctx, longAccepted.TurnID, workerOne, reclaimAt.Add(6*time.Second), reclaimAt.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("claim long conversation turn: %v", err)
+	}
+	if len(longExecution.History) != 102 || longExecution.History[0].Seq != 1 ||
+		longExecution.History[len(longExecution.History)-1].Seq != 102 {
+		t.Fatalf("long execution history range = len %d, %d..%d", len(longExecution.History),
+			longExecution.History[0].Seq, longExecution.History[len(longExecution.History)-1].Seq)
 	}
 
 	retryConversation, err := repository.Create(ctx, userID, conversation.CreateInput{Title: "失败重试"}, reclaimAt.Add(3*time.Second))
