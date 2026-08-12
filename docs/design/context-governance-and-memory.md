@@ -744,6 +744,19 @@ Observer 专用 60 秒覆盖运行，Provider 报告输入 61,561、输出 4,096
 进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
 Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。
 
+正式 Pilot Observer 现支持按检查点成对执行和断点恢复。`-paired-checkpoint` 要求同时指定一个
+Scenario 与 Checkpoint，只运行 Baseline 和 Experiment；`-resume` 严格读取既有 JSONL，按
+`runId` 及 `checkpoint + arm` 双重去重，并只为缺失 Arm 计算本批调用、Token 和费用门禁。已有
+失败 Observation 也视为已执行并原样保留，避免自动重跑失败样本造成额外费用与幸存者偏差。
+
+恢复文件必须匹配固定 Dataset/Fixture 版本和完整语料 SHA-256 指纹、检查点所属 Scenario，以及统一的主模型、推理参数、
+Tool Schema、输出预算、Conversation Prompt 合同；Experiment 还必须共享 Summary 模型、Profile
+与 Prompt 合同。合同漂移在 Provider 调用前失败，禁止跨配置拼接结果；`-resume` 要求目标 JSONL
+已经存在，路径错误不会静默退化为首次执行。每条 Observation 校验后立即通过临时文件、`fsync`、
+backup/rollback 原子替换持久化，进程在成对运行中途退出也不会丢失已付费 Arm。结果按固定语料顺序
+和 `Current -> Baseline -> Experiment` 稳定重写；未满 36 条会先失效旧 Summary，只报告
+`observations/added/remaining`，累计完整后才运行 Evaluator 并输出最终 Gate Summary。
+
 ### 15.3 指标
 
 质量门：

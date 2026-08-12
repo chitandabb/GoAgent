@@ -117,6 +117,7 @@ func commandObservation(
 	contract mesagent.ContextGovernancePilotContract,
 	promptTokens int,
 ) mesagent.ContextGovernancePilotObservation {
+	fixtureFingerprint, _ := mesagent.ContextGovernancePilotDatasetFingerprint(fixture)
 	scenarioID := ""
 	for _, scenario := range fixture.Scenarios {
 		for _, candidate := range scenario.Checkpoints {
@@ -130,7 +131,7 @@ func commandObservation(
 		ModelCalls: 1, PromptTokens: promptTokens, CompletionTokens: 100, TotalTokens: promptTokens + 100,
 	}
 	observation := mesagent.ContextGovernancePilotObservation{
-		DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion,
+		DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion, FixtureFingerprint: fixtureFingerprint,
 		ScenarioID: scenarioID, CheckpointID: checkpoint.CheckpointID,
 		RunID: string(arm) + "-" + checkpoint.CheckpointID + "-command-test", Arm: arm, Contract: contract,
 		Answer: answer, MainUsage: usage, WithinHardWindow: true,
