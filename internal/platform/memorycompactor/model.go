@@ -94,13 +94,20 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 		schema.UserMessage(string(payload)),
 	})
 	if err != nil {
+		var apiErr *modelopenai.APIError
+		if errors.As(err, &apiErr) && apiErr != nil && apiErr.HTTPStatusCode > 0 {
+			return conversationmemory.CompactionOutput{}, newProviderRequestError(err)
+		}
+	}
+	if response != nil && response.ResponseMeta != nil &&
+		strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
+		return conversationmemory.CompactionOutput{}, &outputTruncatedError{}
+	}
+	if err != nil {
 		return conversationmemory.CompactionOutput{}, newProviderRequestError(err)
 	}
 	if response == nil {
 		return conversationmemory.CompactionOutput{}, conversationmemory.ErrInvalidPayloadSchema
-	}
-	if response.ResponseMeta != nil && strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
-		return conversationmemory.CompactionOutput{}, &outputTruncatedError{}
 	}
 	if strings.TrimSpace(response.Content) == "" {
 		return conversationmemory.CompactionOutput{}, conversationmemory.ErrInvalidPayloadSchema

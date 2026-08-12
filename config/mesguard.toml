@@ -59,7 +59,7 @@ syncCompactionTimeoutMillis = 90000
 [agent.contextMemory.summary]
 enabled = true
 promptFile = "config/prompts/conversation-memory-summary.md"
-promptVersion = "conversation-memory-v1"
+promptVersion = "conversation-memory-v2"
 maxPayloadBytes = 65536
 maxAttempts = 3
 retryBaseDelayMillis = 250
@@ -111,7 +111,7 @@ responseSchema = "conversation_memory_v1"
 temperature = 0.0
 timeoutMillis = 60000
 contextWindowTokens = 131072
-maxOutputTokens = 4096
+maxOutputTokens = 6144
 promptSafetyMarginTokens = 2048
 promptSafetyMarginRatio = 0.05
 tokenizerStrategy = "local_calibrated"
