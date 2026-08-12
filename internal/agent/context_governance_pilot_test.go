@@ -225,7 +225,7 @@ func TestEvaluateContextGovernancePilotExcludesBaselineOverWindowFromTokenCompar
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.BaselineOverWindowCount != 1 || report.ComparablePairs != 11 || report.RawTokenReduction <= 0 || report.HardWindowViolationCount != 0 {
+	if report.BaselineOverWindowCount != 1 || report.ComparablePairs != 11 || report.RawTokenReduction <= 0 || report.ProviderHardWindowViolationCount != 0 {
 		t.Fatalf("over-window report = %+v", report)
 	}
 }
@@ -260,6 +260,84 @@ func TestEvaluateContextGovernancePilotExcludesFailedProviderPairAndFailsGate(t 
 	if report.FailedRuns != 1 || report.ComparablePairs != 11 ||
 		!slices.Contains(report.GateFailures, "run_failure") {
 		t.Fatalf("failed-run report = %+v", report)
+	}
+}
+
+func TestEvaluateContextGovernancePilotAccountsForFailedSummaryRetries(t *testing.T) {
+	fixture := ContextGovernancePilotFixture()
+	contract := ContextGovernancePilotContract{
+		ModelProvider: "fixture", ModelID: "main-v1", ModelProfile: "main-profile",
+		ModelProfileFingerprint: strings.Repeat("c", 64), ReasoningMode: "effort:low",
+		ToolContractFingerprint: strings.Repeat("b", 64), OutputReserveTokens: 512,
+		PromptVersion: "conversation-v6",
+	}
+	observations := make([]ContextGovernancePilotObservation, 0, 36)
+	for _, scenario := range fixture.Scenarios {
+		for _, checkpoint := range scenario.Checkpoints {
+			observations = append(observations,
+				pilotObservationForTest(fixture, checkpoint, PilotArmBaseline, contract, 2000, true),
+				pilotObservationForTest(fixture, checkpoint, PilotArmExperiment, contract, 500, true),
+				pilotObservationForTest(fixture, checkpoint, PilotArmCurrent, contract, 700, true),
+			)
+		}
+	}
+	failed := &observations[1]
+	failed.Answer = ""
+	failed.MainUsage = ContextGovernancePilotUsage{}
+	failed.SummaryUsage = ContextGovernancePilotUsage{
+		ModelCalls: 3, PromptTokens: 150_000, CompletionTokens: 3_000, TotalTokens: 153_000,
+	}
+	failed.FirstTokenLatencyMillis = 0
+	failed.ErrorType = "summary_payload_schema_invalid"
+
+	report, err := EvaluateContextGovernancePilot(fixture, observations, ContextGovernancePilotPricing{
+		SummaryInputCNYPerMillion: 1, SummaryOutputCNYPerMillion: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedAccounting := report.FailedAccountingByArm[PilotArmExperiment]
+	incomparable := report.IncomparableAccountingByArm[PilotArmExperiment]
+	observed := report.ObservedAccountingByArm[PilotArmExperiment]
+	if failedAccounting.Observations != 1 || failedAccounting.SummaryUsage.ModelCalls != 3 ||
+		failedAccounting.SummaryUsage.TotalTokens != 153_000 || failedAccounting.EstimatedCostCNY != 0.156 ||
+		incomparable.SummaryUsage.TotalTokens != 153_000 || observed.SummaryUsage.TotalTokens != 153_000 {
+		t.Fatalf("accounting failed/incomparable/observed = %+v/%+v/%+v", failedAccounting, incomparable, observed)
+	}
+}
+
+func TestEvaluateContextGovernancePilotSeparatesBlockedOverWindowFromProviderViolation(t *testing.T) {
+	fixture := ContextGovernancePilotFixture()
+	contract := ContextGovernancePilotContract{
+		ModelProvider: "fixture", ModelID: "main-v1", ModelProfile: "main-profile",
+		ModelProfileFingerprint: strings.Repeat("c", 64), ReasoningMode: "effort:low",
+		ToolContractFingerprint: strings.Repeat("b", 64), OutputReserveTokens: 512,
+		PromptVersion: "conversation-v6",
+	}
+	observations := make([]ContextGovernancePilotObservation, 0, 36)
+	for _, scenario := range fixture.Scenarios {
+		for _, checkpoint := range scenario.Checkpoints {
+			observations = append(observations,
+				pilotObservationForTest(fixture, checkpoint, PilotArmBaseline, contract, 2000, true),
+				pilotObservationForTest(fixture, checkpoint, PilotArmExperiment, contract, 500, true),
+				pilotObservationForTest(fixture, checkpoint, PilotArmCurrent, contract, 700, true),
+			)
+		}
+	}
+	blocked := &observations[1]
+	blocked.Answer = ""
+	blocked.MainUsage = ContextGovernancePilotUsage{}
+	blocked.WithinHardWindow = false
+	blocked.FirstTokenLatencyMillis = 0
+	blocked.ErrorType = "prompt_window_exceeded"
+
+	report, err := EvaluateContextGovernancePilot(fixture, observations, ContextGovernancePilotPricing{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ExperimentOverWindowCount != 1 || report.ProviderHardWindowViolationCount != 0 ||
+		slices.Contains(report.GateFailures, "hard_window_violation") {
+		t.Fatalf("blocked over-window report = %+v", report)
 	}
 }
 

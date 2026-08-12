@@ -96,8 +96,17 @@ remains an acceptance target and must be replaced by the fixed-set result if the
       persist high-water, model-projection truncation and hard-window block observations in the formal report.
 - [x] Implement the versioned 4-scenario/12-checkpoint Pilot fixture, three-arm evaluator, raw JSONL observer,
       model/Profile/Tool contract fingerprints, Provider-call/cost guards and provider-free pressure tests.
-- [ ] After explicit cost approval, run the Provider-backed Pilot, inspect quality/Token/cache/cost/latency gates,
-      then decide whether the implementation is ready for the 12-scenario Acceptance set.
+- [x] Validate the configured StepFun Conversation Memory `json_schema` short-input protocol through the
+      production compactor, strict decoder, and domain validator without writing a Snapshot; the bounded Smoke
+      passed with one call and content-free failure diagnostics.
+- [x] Enforce the strict Conversation Memory schema at the assembly boundary and centralize content-free
+      domain failure codes; production keeps three retries while Pilot budgets reserve their worst case.
+- [ ] Run one gated long-summary latency probe before changing the current 30-second Summary timeout; the
+      88,727-Token timeout and short-input Smoke are not sufficient to select a production timeout.
+- [ ] After explicit cost approval, rerun the Provider-backed Pilot under class-specific call/Token gates; the
+      2026-08-12 exploratory run is invalid because Summary retries amplified cost and comparable pairs were
+      insufficient. Inspect quality/Token/cache/cost/latency gates, then decide whether the implementation is
+      ready for the 12-scenario Acceptance set.
 - [ ] Run Acceptance evaluation; update the resume metric only from measured results.
 - [ ] Hand the completed backend contract to the frontend task.
 

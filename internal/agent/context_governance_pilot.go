@@ -420,9 +420,6 @@ func (o ContextGovernancePilotObservation) Validate() error {
 			o.FirstTokenLatencyMillis < 1) {
 		return errors.New("successful Pilot observation is incomplete")
 	}
-	if !o.WithinHardWindow && o.MainUsage.ModelCalls != 0 {
-		return errors.New("over-window Pilot observation must be blocked before the main provider")
-	}
 	if !o.WithinHardWindow && !conversationQualityLabelPattern.MatchString(o.ErrorType) {
 		return errors.New("failed Pilot observation requires a bounded error type")
 	}
@@ -608,34 +605,48 @@ type ContextGovernancePilotEpochChurn struct {
 	Experiment int `json:"experiment"`
 }
 
+// ContextGovernancePilotAccounting keeps every observed provider call visible,
+// including failed retries and observations excluded from paired comparison.
+type ContextGovernancePilotAccounting struct {
+	Observations     int                         `json:"observations"`
+	MainUsage        ContextGovernancePilotUsage `json:"mainUsage"`
+	SummaryUsage     ContextGovernancePilotUsage `json:"summaryUsage"`
+	AllModelTokens   int                         `json:"allModelTokens"`
+	EstimatedCostCNY float64                     `json:"estimatedCostCny"`
+}
+
 type ContextGovernancePilotReport struct {
-	DatasetVersion                    string                                                      `json:"datasetVersion"`
-	FixtureVersion                    string                                                      `json:"fixtureVersion"`
-	Contract                          ContextGovernancePilotContract                              `json:"contract"`
-	SummaryContract                   *ContextGovernancePilotSummaryContract                      `json:"summaryContract,omitempty"`
-	ExpectedRuns                      int                                                         `json:"expectedRuns"`
-	ObservedRuns                      int                                                         `json:"observedRuns"`
-	FailedRuns                        int                                                         `json:"failedRuns"`
-	ComparablePairs                   int                                                         `json:"comparablePairs"`
-	BaselineOverWindowCount           int                                                         `json:"baselineOverWindowCount"`
-	BaselineContinuationRate          float64                                                     `json:"baselineContinuationRate"`
-	HardWindowViolationCount          int                                                         `json:"hardWindowViolationCount"`
-	BaselineAllModelTokens            int                                                         `json:"baselineAllModelTokens"`
-	ExperimentAllModelTokens          int                                                         `json:"experimentAllModelTokens"`
-	RawTokenReduction                 float64                                                     `json:"rawTokenReduction"`
-	BaselineMainPromptTokens          int                                                         `json:"baselineMainPromptTokens"`
-	ExperimentMainPromptTokens        int                                                         `json:"experimentMainPromptTokens"`
-	MainPromptReduction               float64                                                     `json:"mainPromptReduction"`
-	SummaryOverheadTokens             int                                                         `json:"summaryOverheadTokens"`
-	CacheHitRatio                     float64                                                     `json:"cacheHitRatio"`
-	CacheAdjustedCostCNY              float64                                                     `json:"cacheAdjustedCostCny"`
-	BaselineFirstTokenLatencyMillis   float64                                                     `json:"baselineFirstTokenLatencyMillis"`
-	ExperimentFirstTokenLatencyMillis float64                                                     `json:"experimentFirstTokenLatencyMillis"`
-	PromptEpochChurn                  ContextGovernancePilotEpochChurn                            `json:"promptEpochChurn"`
-	EstimatorP95UnderestimateRatio    float64                                                     `json:"estimatorP95UnderestimateRatio"`
-	QualityByArm                      map[ContextGovernancePilotArm]ContextGovernancePilotQuality `json:"qualityByArm"`
-	AnswerCorrectnessDelta            float64                                                     `json:"answerCorrectnessDelta"`
-	GateFailures                      []string                                                    `json:"gateFailures"`
+	DatasetVersion                    string                                                         `json:"datasetVersion"`
+	FixtureVersion                    string                                                         `json:"fixtureVersion"`
+	Contract                          ContextGovernancePilotContract                                 `json:"contract"`
+	SummaryContract                   *ContextGovernancePilotSummaryContract                         `json:"summaryContract,omitempty"`
+	ExpectedRuns                      int                                                            `json:"expectedRuns"`
+	ObservedRuns                      int                                                            `json:"observedRuns"`
+	FailedRuns                        int                                                            `json:"failedRuns"`
+	ComparablePairs                   int                                                            `json:"comparablePairs"`
+	BaselineOverWindowCount           int                                                            `json:"baselineOverWindowCount"`
+	BaselineContinuationRate          float64                                                        `json:"baselineContinuationRate"`
+	ExperimentOverWindowCount         int                                                            `json:"experimentOverWindowCount"`
+	ProviderHardWindowViolationCount  int                                                            `json:"providerHardWindowViolationCount"`
+	BaselineAllModelTokens            int                                                            `json:"baselineAllModelTokens"`
+	ExperimentAllModelTokens          int                                                            `json:"experimentAllModelTokens"`
+	RawTokenReduction                 float64                                                        `json:"rawTokenReduction"`
+	BaselineMainPromptTokens          int                                                            `json:"baselineMainPromptTokens"`
+	ExperimentMainPromptTokens        int                                                            `json:"experimentMainPromptTokens"`
+	MainPromptReduction               float64                                                        `json:"mainPromptReduction"`
+	SummaryOverheadTokens             int                                                            `json:"summaryOverheadTokens"`
+	ObservedAccountingByArm           map[ContextGovernancePilotArm]ContextGovernancePilotAccounting `json:"observedAccountingByArm"`
+	FailedAccountingByArm             map[ContextGovernancePilotArm]ContextGovernancePilotAccounting `json:"failedAccountingByArm"`
+	IncomparableAccountingByArm       map[ContextGovernancePilotArm]ContextGovernancePilotAccounting `json:"incomparableAccountingByArm"`
+	CacheHitRatio                     float64                                                        `json:"cacheHitRatio"`
+	CacheAdjustedCostCNY              float64                                                        `json:"cacheAdjustedCostCny"`
+	BaselineFirstTokenLatencyMillis   float64                                                        `json:"baselineFirstTokenLatencyMillis"`
+	ExperimentFirstTokenLatencyMillis float64                                                        `json:"experimentFirstTokenLatencyMillis"`
+	PromptEpochChurn                  ContextGovernancePilotEpochChurn                               `json:"promptEpochChurn"`
+	EstimatorP95UnderestimateRatio    float64                                                        `json:"estimatorP95UnderestimateRatio"`
+	QualityByArm                      map[ContextGovernancePilotArm]ContextGovernancePilotQuality    `json:"qualityByArm"`
+	AnswerCorrectnessDelta            float64                                                        `json:"answerCorrectnessDelta"`
+	GateFailures                      []string                                                       `json:"gateFailures"`
 }
 
 func EvaluateContextGovernancePilot(
@@ -665,6 +676,9 @@ func EvaluateContextGovernancePilot(
 		QualityByArm: map[ContextGovernancePilotArm]ContextGovernancePilotQuality{
 			PilotArmCurrent: {}, PilotArmBaseline: {}, PilotArmExperiment: {},
 		},
+		ObservedAccountingByArm:     newPilotAccountingByArm(),
+		FailedAccountingByArm:       newPilotAccountingByArm(),
+		IncomparableAccountingByArm: newPilotAccountingByArm(),
 	}
 	if len(observations) != report.ExpectedRuns {
 		return ContextGovernancePilotReport{}, fmt.Errorf(
@@ -709,11 +723,20 @@ func EvaluateContextGovernancePilot(
 		quality := report.QualityByArm[observation.Arm]
 		scoreContextGovernancePilot(checkpointIndex[observation.CheckpointID].Gold, observation, &quality)
 		report.QualityByArm[observation.Arm] = quality
+		observedAccounting := report.ObservedAccountingByArm[observation.Arm]
+		addPilotObservationAccounting(&observedAccounting, observation)
+		report.ObservedAccountingByArm[observation.Arm] = observedAccounting
 		if observation.Arm == PilotArmExperiment && !observation.WithinHardWindow {
-			report.HardWindowViolationCount++
+			report.ExperimentOverWindowCount++
 		}
-		if observation.WithinHardWindow && observation.ErrorType != "" {
+		if !observation.WithinHardWindow && observation.MainUsage.ModelCalls > 0 {
+			report.ProviderHardWindowViolationCount++
+		}
+		if pilotObservationFailed(observation) {
 			report.FailedRuns++
+			failedAccounting := report.FailedAccountingByArm[observation.Arm]
+			addPilotObservationAccounting(&failedAccounting, observation)
+			report.FailedAccountingByArm[observation.Arm] = failedAccounting
 		}
 	}
 	report.ObservedRuns = len(observations)
@@ -743,6 +766,16 @@ func EvaluateContextGovernancePilot(
 		}
 		if !baselineOK || !experimentOK || !pilotObservationSucceeded(baseline) ||
 			!pilotObservationSucceeded(experiment) {
+			if baselineOK {
+				accounting := report.IncomparableAccountingByArm[PilotArmBaseline]
+				addPilotObservationAccounting(&accounting, baseline)
+				report.IncomparableAccountingByArm[PilotArmBaseline] = accounting
+			}
+			if experimentOK {
+				accounting := report.IncomparableAccountingByArm[PilotArmExperiment]
+				addPilotObservationAccounting(&accounting, experiment)
+				report.IncomparableAccountingByArm[PilotArmExperiment] = accounting
+			}
 			continue
 		}
 		report.ComparablePairs++
@@ -779,6 +812,9 @@ func EvaluateContextGovernancePilot(
 	}
 	report.EstimatorP95UnderestimateRatio = nearestRankP95(estimatorUnderestimates)
 	report.PromptEpochChurn = pilotPromptEpochChurn(byKey, checkpointOrder, scenarioByCheckpoint)
+	finalizePilotAccounting(report.ObservedAccountingByArm, pricing)
+	finalizePilotAccounting(report.FailedAccountingByArm, pricing)
+	finalizePilotAccounting(report.IncomparableAccountingByArm, pricing)
 	report.CacheHitRatio, report.CacheAdjustedCostCNY = pilotCacheAndCost(byKey, pricing)
 	baselineQuality := report.QualityByArm[PilotArmBaseline]
 	experimentQuality := report.QualityByArm[PilotArmExperiment]
@@ -791,6 +827,48 @@ func EvaluateContextGovernancePilot(
 
 func pilotObservationSucceeded(observation ContextGovernancePilotObservation) bool {
 	return observation.WithinHardWindow && observation.ErrorType == ""
+}
+
+func pilotObservationFailed(observation ContextGovernancePilotObservation) bool {
+	return observation.ErrorType != "" && observation.ErrorType != "prompt_window_exceeded"
+}
+
+func newPilotAccountingByArm() map[ContextGovernancePilotArm]ContextGovernancePilotAccounting {
+	return map[ContextGovernancePilotArm]ContextGovernancePilotAccounting{
+		PilotArmCurrent: {}, PilotArmBaseline: {}, PilotArmExperiment: {},
+	}
+}
+
+func addPilotObservationAccounting(
+	accounting *ContextGovernancePilotAccounting,
+	observation ContextGovernancePilotObservation,
+) {
+	accounting.Observations++
+	addPilotUsage(&accounting.MainUsage, observation.MainUsage)
+	addPilotUsage(&accounting.SummaryUsage, observation.SummaryUsage)
+}
+
+func addPilotUsage(total *ContextGovernancePilotUsage, usage ContextGovernancePilotUsage) {
+	total.ModelCalls += usage.ModelCalls
+	total.PromptTokens += usage.PromptTokens
+	total.CompletionTokens += usage.CompletionTokens
+	total.TotalTokens += usage.TotalTokens
+	total.CachedTokens += usage.CachedTokens
+	total.ReasoningTokens += usage.ReasoningTokens
+}
+
+func finalizePilotAccounting(
+	accountingByArm map[ContextGovernancePilotArm]ContextGovernancePilotAccounting,
+	pricing ContextGovernancePilotPricing,
+) {
+	for arm, accounting := range accountingByArm {
+		accounting.AllModelTokens = accounting.MainUsage.TotalTokens + accounting.SummaryUsage.TotalTokens
+		accounting.EstimatedCostCNY = usageCost(accounting.MainUsage, pricing.MainInputCNYPerMillion,
+			pricing.MainCachedInputCNYPerMillion, pricing.MainOutputCNYPerMillion) +
+			usageCost(accounting.SummaryUsage, pricing.SummaryInputCNYPerMillion,
+				pricing.SummaryCachedInputCNYPerMillion, pricing.SummaryOutputCNYPerMillion)
+		accountingByArm[arm] = accounting
+	}
 }
 
 func scoreContextGovernancePilot(
@@ -987,7 +1065,7 @@ func contextGovernancePilotGateFailures(report ContextGovernancePilotReport) []s
 	if report.EstimatorP95UnderestimateRatio > 0.05 {
 		failures = append(failures, "token_estimator_p95")
 	}
-	if report.HardWindowViolationCount > 0 {
+	if report.ProviderHardWindowViolationCount > 0 {
 		failures = append(failures, "hard_window_violation")
 	}
 	if report.FailedRuns > 0 {

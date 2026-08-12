@@ -21,9 +21,12 @@ import (
 	"github.com/chitandabb/GoAgent/internal/bootstrap"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/memorycompactor"
+	modelopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -31,13 +34,17 @@ import (
 const pilotRunTimeout = 30 * time.Minute
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	if err := runWithProgress(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdout io.Writer) error {
+	return runWithProgress(args, stdout, io.Discard)
+}
+
+func runWithProgress(args []string, stdout, progress io.Writer) error {
 	flags := flag.NewFlagSet("mesguard-context-governance-pilot-observe", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "optional MESGuard TOML configuration path")
@@ -45,8 +52,16 @@ func run(args []string, stdout io.Writer) error {
 	outputPath := flags.String("output", "output/evaluation/context-governance-pilot-v1.observations.jsonl", "raw observation JSONL output")
 	summaryOutputPath := flags.String("summary-output", "output/evaluation/context-governance-pilot-v1.summary.json", "aggregated Pilot summary JSON output")
 	executeProvider := flags.Bool("execute-provider", false, "required to create models and call Providers")
+	scenarioID := flags.String("scenario-id", "", "optional diagnostic scenario filter")
+	checkpointID := flags.String("checkpoint-id", "", "optional diagnostic checkpoint filter")
+	arm := flags.String("arm", "", "optional diagnostic arm filter: current, baseline, or experiment")
+	maxMainCalls := flags.Int("max-main-calls", 1, "hard main-model call limit enforced before Provider access")
+	maxSummaryCalls := flags.Int("max-summary-calls", 1, "hard Summary call limit enforced before Provider access")
+	maxMainPromptTokens := flags.Int("max-estimated-main-prompt-tokens", 130000, "cumulative estimated main prompt Token limit")
+	maxSummaryPromptTokens := flags.Int("max-estimated-summary-prompt-tokens", 130000, "cumulative estimated Summary prompt Token limit")
+	maxEstimatedCostCNY := flags.Float64("max-estimated-cost-cny", 0.50, "conservative estimated cost admission limit")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-context-governance-pilot-observe [-execute-provider] [-config path] [-fixture path] [-output path] [-summary-output path]")
+		return errors.New("usage: mesguard-context-governance-pilot-observe [-execute-provider] [-config path] [-fixture path] [-output path] [-summary-output path] [-scenario-id id] [-checkpoint-id id] [-arm arm] [-max-main-calls n] [-max-summary-calls n] [-max-estimated-main-prompt-tokens n] [-max-estimated-summary-prompt-tokens n] [-max-estimated-cost-cny amount]")
 	}
 	dataset := mesagent.ContextGovernancePilotFixture()
 	if strings.TrimSpace(*fixturePath) != "" {
@@ -57,12 +72,16 @@ func run(args []string, stdout io.Writer) error {
 	if err := dataset.Validate(); err != nil {
 		return fmt.Errorf("validate Pilot fixture: %w", err)
 	}
-	planOptions := mesagent.DefaultContextGovernancePilotPlanOptions()
-	plan, err := mesagent.BuildContextGovernancePilotPlan(dataset, planOptions)
+	selection, err := newPilotSelection(dataset, *scenarioID, *checkpointID, *arm)
 	if err != nil {
 		return err
 	}
+	planOptions := mesagent.DefaultContextGovernancePilotPlanOptions()
 	if !*executeProvider {
+		plan, err := mesagent.BuildContextGovernancePilotPlan(dataset, planOptions)
+		if err != nil {
+			return err
+		}
 		return writeJSONTo(stdout, plan)
 	}
 	if strings.TrimSpace(*configPath) != "" {
@@ -74,21 +93,40 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load Pilot config: %w", err)
 	}
+	planOptions.SummaryCallsPerExperimentCheckpoint = cfg.Agent.ContextMemory.Summary.MaxAttempts
+	plan, err := mesagent.BuildContextGovernancePilotPlan(dataset, planOptions)
+	if err != nil {
+		return err
+	}
+	executionLimits := mesagent.PilotModelCallLimits{
+		MaxProviderCalls: *maxMainCalls + *maxSummaryCalls,
+		MaxMainCalls:     *maxMainCalls, MaxSummaryCalls: *maxSummaryCalls,
+		MaxEstimatedMainPromptTokens:    *maxMainPromptTokens,
+		MaxEstimatedSummaryPromptTokens: *maxSummaryPromptTokens,
+		MaxEstimatedCostCNY:             *maxEstimatedCostCNY,
+	}
+	if err := validateSelectedPilotBudget(dataset, selection, cfg.Agent.ContextMemory.Summary.MaxAttempts, executionLimits); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), pilotRunTimeout)
 	defer cancel()
-	observations, err := executePilot(ctx, cfg, dataset, plan)
+	observations, err := executePilot(ctx, cfg, dataset, plan, selection, executionLimits, progress)
 	if err != nil {
 		return err
 	}
 	if err := writeJSONL(*outputPath, observations); err != nil {
 		return err
 	}
-	report, err := mesagent.EvaluateContextGovernancePilot(dataset, observations, planOptions.Pricing)
-	if err != nil {
-		return fmt.Errorf("aggregate Pilot observations: %w", err)
-	}
-	if err := writeJSONFile(*summaryOutputPath, report); err != nil {
-		return err
+	if !selection.partial() {
+		report, err := mesagent.EvaluateContextGovernancePilot(dataset, observations, planOptions.Pricing)
+		if err != nil {
+			return fmt.Errorf("aggregate Pilot observations: %w", err)
+		}
+		if err := writeJSONFile(*summaryOutputPath, report); err != nil {
+			return err
+		}
+	} else {
+		*summaryOutputPath = ""
 	}
 	return writeJSONTo(stdout, struct {
 		DatasetVersion string `json:"datasetVersion"`
@@ -97,6 +135,88 @@ func run(args []string, stdout io.Writer) error {
 		Output         string `json:"output"`
 		SummaryOutput  string `json:"summaryOutput"`
 	}{dataset.DatasetVersion, dataset.FixtureVersion, len(observations), *outputPath, *summaryOutputPath})
+}
+
+type pilotSelection struct {
+	scenarioID   string
+	checkpointID string
+	arm          mesagent.ContextGovernancePilotArm
+}
+
+func newPilotSelection(
+	dataset mesagent.ContextGovernancePilotDataset,
+	scenarioID, checkpointID, arm string,
+) (pilotSelection, error) {
+	selection := pilotSelection{
+		scenarioID: strings.TrimSpace(scenarioID), checkpointID: strings.TrimSpace(checkpointID),
+		arm: mesagent.ContextGovernancePilotArm(strings.ToLower(strings.TrimSpace(arm))),
+	}
+	if selection.arm != "" && !selection.arm.Valid() {
+		return pilotSelection{}, errors.New("Pilot diagnostic arm must be current, baseline, or experiment")
+	}
+	matchedScenario, matchedCheckpoint := selection.scenarioID == "", selection.checkpointID == ""
+	checkpointScenario := ""
+	for _, scenario := range dataset.Scenarios {
+		if scenario.ScenarioID == selection.scenarioID {
+			matchedScenario = true
+		}
+		for _, checkpoint := range scenario.Checkpoints {
+			if checkpoint.CheckpointID == selection.checkpointID {
+				matchedCheckpoint = true
+				checkpointScenario = scenario.ScenarioID
+			}
+		}
+	}
+	if !matchedScenario || !matchedCheckpoint || (selection.scenarioID != "" && checkpointScenario != "" &&
+		checkpointScenario != selection.scenarioID) {
+		return pilotSelection{}, errors.New("Pilot diagnostic selection does not match the fixed fixture")
+	}
+	return selection, nil
+}
+
+func (s pilotSelection) partial() bool {
+	return s.scenarioID != "" || s.checkpointID != "" || s.arm != ""
+}
+
+func (s pilotSelection) includes(
+	scenarioID, checkpointID string,
+	arm mesagent.ContextGovernancePilotArm,
+) bool {
+	return (s.scenarioID == "" || s.scenarioID == scenarioID) &&
+		(s.checkpointID == "" || s.checkpointID == checkpointID) &&
+		(s.arm == "" || s.arm == arm)
+}
+
+func validateSelectedPilotBudget(
+	dataset mesagent.ContextGovernancePilotDataset,
+	selection pilotSelection,
+	summaryAttempts int,
+	limits mesagent.PilotModelCallLimits,
+) error {
+	mainCalls, summaryCalls := 0, 0
+	for _, scenario := range dataset.Scenarios {
+		for _, checkpoint := range scenario.Checkpoints {
+			for _, candidateArm := range []mesagent.ContextGovernancePilotArm{
+				mesagent.PilotArmCurrent, mesagent.PilotArmBaseline, mesagent.PilotArmExperiment,
+			} {
+				if !selection.includes(scenario.ScenarioID, checkpoint.CheckpointID, candidateArm) {
+					continue
+				}
+				mainCalls++
+				if candidateArm == mesagent.PilotArmExperiment {
+					summaryCalls += summaryAttempts
+				}
+			}
+		}
+	}
+	if mainCalls > limits.MaxMainCalls || summaryCalls > limits.MaxSummaryCalls ||
+		mainCalls+summaryCalls > limits.MaxProviderCalls {
+		return fmt.Errorf(
+			"selected Pilot exceeds explicit execution budget before model creation: main calls %d/%d, Summary calls %d/%d; narrow the selection or explicitly raise all relevant limits",
+			mainCalls, limits.MaxMainCalls, summaryCalls, limits.MaxSummaryCalls,
+		)
+	}
+	return nil
 }
 
 type pilotArmRuntime struct {
@@ -110,6 +230,9 @@ func executePilot(
 	cfg config.Config,
 	dataset mesagent.ContextGovernancePilotDataset,
 	plan mesagent.ContextGovernancePilotPlan,
+	selection pilotSelection,
+	executionLimits mesagent.PilotModelCallLimits,
+	progress io.Writer,
 ) ([]mesagent.ContextGovernancePilotObservation, error) {
 	mainProfile, err := cfg.Models.Chat.ActiveProfile()
 	if err != nil {
@@ -154,6 +277,16 @@ func executePilot(
 	); err != nil {
 		return nil, err
 	}
+	summaryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
+	if err != nil {
+		return nil, err
+	}
+	budget, err := mesagent.NewPilotModelCallBudgetWithLimits(
+		executionLimits, planPricing(), mainProfile.MaxOutputTokens, summaryProfile.MaxOutputTokens,
+	)
+	if err != nil {
+		return nil, err
+	}
 	mainInstance, err := chatmodel.NewActive(ctx, cfg.Models.Chat)
 	if err != nil {
 		return nil, fmt.Errorf("build Pilot main model: %w", err)
@@ -165,14 +298,6 @@ func executePilot(
 		OutputReserveTokens: mainProfile.MaxOutputTokens, PromptVersion: cfg.Agent.ConversationPromptVersion,
 	}
 	if err := contract.Validate(); err != nil {
-		return nil, err
-	}
-	summaryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
-	if err != nil {
-		return nil, err
-	}
-	budget, err := mesagent.NewPilotModelCallBudget(plan, planPricing(), mainProfile.MaxOutputTokens, summaryProfile.MaxOutputTokens)
-	if err != nil {
 		return nil, err
 	}
 	mainModel, err := mesagent.NewPilotMeasuredModel(mainInstance.Model, mesagent.PilotMainModelCall, budget)
@@ -187,7 +312,7 @@ func executePilot(
 		}
 		armRuntimes[scenario.ScenarioID] = runtimes
 	}
-	return runPilotArms(ctx, dataset, contract, armRuntimes, mainModel)
+	return runPilotArms(ctx, dataset, contract, armRuntimes, mainModel, selection, progress)
 }
 
 func buildScenarioRuntimes(
@@ -258,7 +383,13 @@ func buildPilotPreflight(
 	if err != nil {
 		return mesagent.ConversationContextPreflightConfig{}, nil, nil, err
 	}
-	summaryInstance, err := chatmodel.NewProfile(ctx, cfg.Models.Chat, cfg.Models.Chat.ConversationMemoryProfileName)
+	summaryInstance, err := chatmodel.NewProfileWithResponseSchema(
+		ctx, cfg.Models.Chat, cfg.Models.Chat.ConversationMemoryProfileName, chatmodel.ResponseSchema{
+			Name:        conversationmemory.ResponseSchemaName,
+			Description: "MESGuard structured conversation memory snapshot",
+			Schema:      conversationmemory.PayloadJSONSchema(), Strict: true,
+		},
+	)
 	if err != nil {
 		return mesagent.ConversationContextPreflightConfig{}, nil, nil, fmt.Errorf("build Pilot Summary model: %w", err)
 	}
@@ -301,10 +432,21 @@ func runPilotArms(
 	contract mesagent.ContextGovernancePilotContract,
 	runtimes map[string]map[mesagent.ContextGovernancePilotArm]pilotArmRuntime,
 	mainModel *mesagent.PilotMeasuredModel,
+	selection pilotSelection,
+	progress io.Writer,
 ) ([]mesagent.ContextGovernancePilotObservation, error) {
 	var observations []mesagent.ContextGovernancePilotObservation
 	for _, scenario := range dataset.Scenarios {
 		for _, arm := range []mesagent.ContextGovernancePilotArm{mesagent.PilotArmCurrent, mesagent.PilotArmBaseline, mesagent.PilotArmExperiment} {
+			selectedCheckpoints := make([]mesagent.ContextGovernancePilotCheckpoint, 0, len(scenario.Checkpoints))
+			for _, checkpoint := range scenario.Checkpoints {
+				if selection.includes(scenario.ScenarioID, checkpoint.CheckpointID, arm) {
+					selectedCheckpoints = append(selectedCheckpoints, checkpoint)
+				}
+			}
+			if len(selectedCheckpoints) == 0 {
+				continue
+			}
 			runtime := runtimes[scenario.ScenarioID][arm]
 			conversationID := uuid.New()
 			timeline := newPilotScenarioTimeline(scenario, string(arm), conversationID)
@@ -313,6 +455,12 @@ func runPilotArms(
 				if timelineErr != nil {
 					return nil, fmt.Errorf("build %s/%s Pilot timeline: %w", arm, checkpoint.CheckpointID, timelineErr)
 				}
+				if !selection.includes(scenario.ScenarioID, checkpoint.CheckpointID, arm) {
+					timeline.Complete(checkpoint, current)
+					continue
+				}
+				started := time.Now()
+				fmt.Fprintf(progress, "pilot scenario=%s arm=%s checkpoint=%s stage=started\n", scenario.ScenarioID, arm, checkpoint.CheckpointID)
 				request := conversation.AgentRequest{
 					Conversation: conversation.Conversation{ID: conversationID, UserID: uuid.Nil, Status: conversation.StatusActive},
 					UserMessage:  current, History: history,
@@ -332,6 +480,9 @@ func runPilotArms(
 					return nil, fmt.Errorf("validate %s/%s Pilot observation: %w", arm, checkpoint.CheckpointID, err)
 				}
 				observations = append(observations, observation)
+				fmt.Fprintf(progress, "pilot scenario=%s arm=%s checkpoint=%s stage=completed main_calls=%d summary_calls=%d elapsed=%s error=%s\n",
+					scenario.ScenarioID, arm, checkpoint.CheckpointID, mainDelta.Usage.ModelCalls,
+					summaryDelta.ModelCalls, time.Since(started).Round(time.Millisecond), observation.ErrorType)
 				timeline.Complete(checkpoint, current)
 			}
 		}
@@ -397,8 +548,42 @@ func pilotErrorType(err error) string {
 	if errors.Is(err, mesagent.ErrConversationPromptWindowExceeded) {
 		return "prompt_window_exceeded"
 	}
+	if errors.Is(err, memorycompactor.ErrProviderRequest) {
+		var apiErr *modelopenai.APIError
+		if errors.As(err, &apiErr) && apiErr != nil {
+			switch {
+			case apiErr.HTTPStatusCode == 400:
+				return "summary_bad_request"
+			case apiErr.HTTPStatusCode == 401 || apiErr.HTTPStatusCode == 403:
+				return "summary_auth_failed"
+			case apiErr.HTTPStatusCode == 429:
+				return "summary_rate_limited"
+			case apiErr.HTTPStatusCode >= 500:
+				return "summary_provider_5xx"
+			}
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "summary_timeout"
+		}
+		return "summary_provider_failed"
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "agent_timeout"
+	}
+	if errors.Is(err, memorycompactor.ErrOutputTooLarge) {
+		return "summary_output_too_large"
+	}
+	if code := conversationmemory.FailureCode(err); code != "" {
+		return "summary_" + code
+	}
+	if errors.Is(err, conversationmemory.ErrInvalidSnapshot) {
+		return "summary_snapshot_invalid"
+	}
+	if errors.Is(err, conversationmemory.ErrCompactionFailed) {
+		return "summary_compaction_failed"
+	}
+	if errors.Is(err, mesagent.ErrConversationContextPreparationFailed) {
+		return "context_preparation_failed"
 	}
 	return "provider_or_runner_failed"
 }

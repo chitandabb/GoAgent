@@ -96,6 +96,13 @@ func TestChatModelProfileConfigValidate(t *testing.T) {
 		{name: "invalid api key env", mutate: func(c *ChatModelProfileConfig) { c.APIKeyEnv = "step-key" }},
 		{name: "invalid effort", mutate: func(c *ChatModelProfileConfig) { c.ReasoningEffort = "extreme" }},
 		{name: "invalid thinking mode", mutate: func(c *ChatModelProfileConfig) { c.ThinkingMode = "auto" }},
+		{name: "valid JSON object response", mutate: func(c *ChatModelProfileConfig) { c.ResponseFormat = "json_object" }, valid: true},
+		{name: "valid JSON schema response", mutate: func(c *ChatModelProfileConfig) {
+			c.ResponseFormat, c.ResponseSchema = "json_schema", "conversation_memory_v1"
+		}, valid: true},
+		{name: "missing response schema", mutate: func(c *ChatModelProfileConfig) { c.ResponseFormat = "json_schema" }},
+		{name: "orphan response schema", mutate: func(c *ChatModelProfileConfig) { c.ResponseSchema = "conversation_memory_v1" }},
+		{name: "invalid response format", mutate: func(c *ChatModelProfileConfig) { c.ResponseFormat = "yaml" }},
 		{name: "invalid timeout", mutate: func(c *ChatModelProfileConfig) { c.TimeoutMillis = 0 }},
 		{name: "invalid output limit", mutate: func(c *ChatModelProfileConfig) { c.MaxOutputTokens = 0 }},
 		{name: "missing context window", mutate: func(c *ChatModelProfileConfig) { c.ContextWindowTokens = 0 }},
@@ -172,6 +179,24 @@ func TestChatModelProfilePromptFingerprintTracksBehaviorButNotAPIKeyLocation(t *
 	}
 	if withContractChange == original {
 		t.Fatal("prompt-window contract change did not change prompt fingerprint")
+	}
+	profile.MaxOutputTokens--
+	profile.ResponseFormat = "json_object"
+	withResponseFormat, err := profile.PromptProfileFingerprint("stepfun-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withResponseFormat == original {
+		t.Fatal("response format change did not change prompt fingerprint")
+	}
+	profile.ResponseFormat = "json_schema"
+	profile.ResponseSchema = "conversation_memory_v1"
+	withResponseSchema, err := profile.PromptProfileFingerprint("stepfun-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withResponseSchema == withResponseFormat {
+		t.Fatal("response schema change did not change prompt fingerprint")
 	}
 }
 

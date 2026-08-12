@@ -105,7 +105,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 			failed.hardCompactionTriggered = hardTriggered
 			failed.degradedReasons = append(failed.degradedReasons, "tail_selection_failed")
 			failedManifest, _ := r.buildConversationPromptManifest(ctx, tools, failed)
-			return failed, failedManifest, fmt.Errorf("%w: %v", ErrConversationContextPreparationFailed, err)
+			return failed, failedManifest, fmt.Errorf("%w: %w", ErrConversationContextPreparationFailed, err)
 		}
 		final.summaryContent = summaryContent
 		final.summaryFingerprint = summaryFingerprint

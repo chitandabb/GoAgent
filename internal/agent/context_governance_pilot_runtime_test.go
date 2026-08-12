@@ -138,6 +138,55 @@ func TestPilotMeasuredModelStopsBeforeProviderCallWhenCostBudgetIsExceeded(t *te
 	}
 }
 
+func TestPilotMeasuredModelStopsBeforeProviderCallWhenSummaryCallBudgetIsExhausted(t *testing.T) {
+	limits := PilotModelCallLimits{
+		MaxProviderCalls: 3, MaxMainCalls: 2, MaxSummaryCalls: 1,
+		MaxEstimatedMainPromptTokens: 1000, MaxEstimatedSummaryPromptTokens: 1000,
+		MaxEstimatedCostCNY: 1,
+	}
+	budget, err := NewPilotModelCallBudgetWithLimits(limits, ContextGovernancePilotPricing{}, 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &pilotModelStubState{generate: schema.AssistantMessage("ok", nil)}
+	measured, err := NewPilotMeasuredModel(pilotModelStub{state: state}, PilotSummaryModelCall, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []*schema.Message{schema.UserMessage("hello")}
+	if _, err := measured.Generate(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := measured.Generate(context.Background(), input); err == nil {
+		t.Fatal("Generate() accepted a second Summary call beyond the class budget")
+	}
+	if state.generateCalls != 1 {
+		t.Fatalf("provider generate calls = %d, want 1", state.generateCalls)
+	}
+}
+
+func TestPilotMeasuredModelStopsBeforeProviderCallWhenSummaryTokenBudgetIsExceeded(t *testing.T) {
+	limits := PilotModelCallLimits{
+		MaxProviderCalls: 2, MaxMainCalls: 0, MaxSummaryCalls: 2,
+		MaxEstimatedSummaryPromptTokens: 8, MaxEstimatedCostCNY: 1,
+	}
+	budget, err := NewPilotModelCallBudgetWithLimits(limits, ContextGovernancePilotPricing{}, 64, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &pilotModelStubState{generate: schema.AssistantMessage("ok", nil)}
+	measured, err := NewPilotMeasuredModel(pilotModelStub{state: state}, PilotSummaryModelCall, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := measured.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err == nil {
+		t.Fatal("Generate() reached Provider after the Summary prompt Token budget was exceeded")
+	}
+	if state.generateCalls != 0 {
+		t.Fatalf("provider generate calls = %d, want 0", state.generateCalls)
+	}
+}
+
 func TestPilotMeasuredModelReservesBoundToolSchemaCost(t *testing.T) {
 	plan := ContextGovernancePilotPlan{MaxProviderCalls: 10, MaxCostCNY: 10}
 	pricing := ContextGovernancePilotPricing{MainInputCNYPerMillion: 1}

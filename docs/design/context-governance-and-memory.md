@@ -57,8 +57,8 @@ TaskScope 最小 Tool 集合，不是 Skill 选择后的动态 Tool 注册。
   Fencing Token、指数退避 + 可配置 jitter；候选 Snapshot 先保存，只有持有有效 Lease/Fencing
   的 Complete 事务才能 CAS 激活，过期 Worker 的候选可保留审计但不能发布；
 - 异步 Worker 每个持久化 Job Attempt 只进行一次模型压缩，默认三个 Job Attempt 即总计最多
-  三次模型调用，避免与 Service 内部重试相乘成九次；同步硬阈值路径仍在当前请求内进行最多
-  三次带修复码的候选生成；
+  三次模型调用，避免与 Service 内部重试相乘；同步硬阈值路径按 Summary `maxAttempts` 执行，
+  当前默认一次，失败后向调用方返回可重试错误；
 - 已通过真实 PostgreSQL 验证 Job 调度、并发 Claim 单赢家、Lease reclaim、过期 Worker 拒绝、
   重叠 Job 的 CAS Winner 收敛和 Retry Outbox；RabbitMQ Publisher/Consumer 路由及独立
   `mesguard-memory-worker` Compose 进程已启动验证；
@@ -69,7 +69,8 @@ TaskScope 最小 Tool 集合，不是 Skill 选择后的动态 Tool 注册。
   观测，降级使用 Warn 并记录原因和缓存耗时，不会被描述为记忆丢失；真实 Redis 测试已覆盖
   TTL、索引删除和污染索引成员保护；
 - 已实现 `context-governance-pilot-v1` 的 4 场景/12 检查点固定集、Current/Baseline/Experiment
-  三组 Evaluator 和显式 Provider Observer；真实 Provider Pilot 尚未执行。
+  三组 Evaluator 和显式 Provider Observer；2026-08-12 的首轮真实 Provider 试跑因摘要失败率、
+  可比样本和费用门禁问题判为无效，受控 Pilot 尚待重新执行。
 
 ## 3. 目标与非目标
 
@@ -507,7 +508,7 @@ Provider 切换：不依赖旧 Provider 私有会话状态
 ```toml
 [models.chat]
 activeProfile = "stepfun-main"
-conversationMemoryProfile = "qwen-conversation-memory"
+conversationMemoryProfile = "stepfun-conversation-memory"
 
 [models.chat.profiles.stepfun-main]
 provider = "stepfun"
@@ -520,9 +521,12 @@ tokenizerStrategy = "local_calibrated"
 toolExposureStrategy = "static_frozen"
 providerNativeCompactionEnabled = false
 
-[models.chat.profiles.qwen-conversation-memory]
-provider = "dashscope"
-model = "..."
+[models.chat.profiles.stepfun-conversation-memory]
+provider = "stepfun"
+model = "step-3.7-flash"
+reasoningEffort = "low"
+responseFormat = "json_schema"
+responseSchema = "conversation_memory_v1"
 contextWindowTokens = 131072
 maxOutputTokens = 4096
 promptSafetyMarginTokens = 2048
@@ -563,6 +567,25 @@ Chat Profile 的窗口、输出、Safety Margin、Tokenizer 和 Tool/Compaction 
 建立 Provider 凭证。`agent.contextMemory` 已启用 Shadow Preflight、Continuous Tail 与
 Summary + Tail。关闭 `summaryTailEnabled` 可回退 Continuous Tail；再关闭
 `continuousTailEnabled` 可回退 Rune 路径，原始消息和已生成 Snapshot 都不需要回滚。
+
+结构化摘要采用 Provider 能力协商，而不是假设所有 OpenAI 兼容端点能力相同：
+
+| Provider | `json_object` | 严格 `json_schema` | 当前摘要用途 |
+|---|---:|---:|---|
+| StepFun | 支持 | 支持 | 默认，使用 `conversation_memory_v1` 且 `strict=true` |
+| DeepSeek | 支持 | 未确认 | 不允许静默承接严格 Schema Profile |
+| DashScope | 支持 | 支持 | 可选 Profile，不再作为当前默认摘要模型 |
+
+以上边界以 2026-08-12 官方 Chat/JSON Output 文档为准。DeepSeek 文档只给出
+`response_format={"type":"json_object"}`，并提示可能返回空 `content`；因此 Factory 将
+`JSONOutput` 与 `JSONSchemaOutput` 分开声明。切换 Provider 时先校验 Profile 所需能力：
+严格 Schema 不可用就 fail-fast，不能偷偷降级为 Prompt-only。若未来允许弱化，需要管理员显式
+选择独立 Profile，并接受质量口径变化。
+
+无论原生约束强弱，摘要都保留三层防线：Provider 原生格式约束、Prompt 中的字段说明与示例、
+Go 侧严格解码及领域校验。JSON Schema 只能保证形状，来源序号存在性、用户事实不可丢、
+supersede 唯一性、lineage 和会话边界仍由应用校验。`finish_reason=length`、空内容、解析失败和
+领域不变量失败均不得激活 Snapshot。
 
 只观测/Continuous Tail 路径的 Preflight 使用独立、可配置的短超时，主模型超时在观测完成后
 单独起算；观测失败只记录有界错误码与降级 Manifest。启用 Summary + Tail 后，同步压缩与
@@ -641,9 +664,71 @@ maxEstimatedCostCNY = 10
 evaluationConcurrency = 1
 ```
 
-Provider-free 默认计划为 36 次主模型调用和最多 12 次 Summary 调用，共 48 次，按保守
-Token/价格假设估算 `4.716 CNY`。该数字不是账单，也不包含无法预知的失败重试；真实 Observer
-将每次主模型、Summary 和重试都在 Provider 调用前纳入共享的 200 次/10 元硬门禁。
+Provider-free 全量计划仍用于容量评审，不再直接作为远程执行许可；Summary 最坏调用数按配置的
+`maxAttempts` 计算。真实 Observer 默认只允许筛选后的单个检查点，硬上限为 1 次主模型、1 次
+Summary，累计估算输入 Token 各 130K、保守费用 0.50 CNY。扩大范围必须显式提高相关预算；
+每次主模型、Summary 和失败重试都会在 Provider 前分别预留调用数、累计输入 Token 和费用。
+
+2026-08-12 首轮试跑暴露了旧门禁错误：全量运行及后续诊断文件共记录 89 次 DashScope Summary
+请求；其中 Provider 返回 Usage 的输入约 6,771,035 Token、输出约 42,036 Token，另有 3 次
+失败请求没有 Usage。根因是 65K-100K Token 的长摘要输入叠加 `maxAttempts=3` 和连续复测。
+该批次可比样本不足，全部作废，不进入简历指标。当前摘要 Profile 已切换到 StepFun Token Plan；
+生产可靠性默认仍保留 `maxAttempts=3`，测试成本由 Observer 在 Provider 调用前按最坏重试次数实施
+独立分类型预算，不能通过降低生产重试次数来规避评测费用门禁。
+远程复测需用户再次明确授权。
+
+该轮仍产出了可复用的工程结果，但没有产出 Token 降幅结论：修复了 Experiment 摘要失败成本被
+汇总隐藏的问题；区分“实验 Arm 超窗”和“Provider 实际硬窗口违规”；将 Continuous Tail 从固定
+100 条改为受 10,000 条、8 MiB 和 Token 预算共同约束的连续后缀选择；补齐当前消息必选、序号
+缺口停止、摘要错误分类及错误链；并把主模型与 Summary 的调用数、输入 Token 和费用改为独立的
+Provider 前硬门禁。首轮 36 条运行只有 4 个可比 Pair，表面 Raw Token Reduction 约 -0.08%，
+失败率过高，不能解释为方案无收益或作为简历数据。
+
+以后每次远程评测必须在执行前给出 Provider/Profile、样本数、最坏调用次数、单次估算输入/输出
+Token、最坏总 Token、费用上限和重试次数。默认只允许一次筛选后的最小探针；没有用户对该预算
+的当次明确授权，不得扩大样本或连续重跑。
+
+2026-08-12 StepFun 严格 Schema 首次探针只执行 `incident-correction/incident-cp2/experiment`：
+Summary 预估输入 88,727 Token，在 Profile 的 30 秒超时内没有返回，记录 1 次 Summary 请求、
+0 次主模型请求且无 Provider Usage。它证明分类型调用门禁和“失败不进入主模型”生效，但既不能
+证明严格 Schema 已被端点接受，也不能把未知 Usage 当作 0 Token。原错误分类将嵌套在
+`ErrProviderRequest` 内的 Deadline 误记为 `agent_timeout`，现已区分为 `summary_timeout`。
+下一次协议兼容验证应使用小输入专用 Smoke；长输入延迟另设单样本测试，不能再拿高成本 Pilot
+同时承担协议探测、质量和性能验证三种职责。
+
+小输入协议 Smoke 已落在 `tools/smoke/mesguard-conversation-memory-smoke`，默认只输出离线
+Preflight，必须显式增加 `-execute-provider` 才允许一次 Provider 调用。它使用最小协议 Prompt、
+生产 `conversation_memory_v1` Schema、同一 `memorycompactor` 严格解码和 `ValidatePayload` 领域
+校验，不写 PostgreSQL、不激活 Snapshot，也不调用主模型。字段级 Schema 约束补齐后，保守输入
+上界硬限制调整为 3,000 Token；这仍与 88K 长输入 Pilot 明确隔离。
+
+2026-08-12 首次小输入 StepFun Smoke 已确认端点接受 `type=json_schema`、`strict=true` 请求，
+返回内容也通过 JSON 解码和固定九字段结构检查，但 Go 领域校验以
+`conversation memory entry status is invalid` 拒绝结果。根因是反射生成的原 Schema 只把
+`EntryStatus` 和 `ReferenceType` 表达成任意字符串；现已将状态和引用类型合法值写入 Schema
+枚举，同时继续保留“不同分区允许哪些状态”等 Go 侧语义校验。枚举增强后的初版离线保守输入
+上界为 1,984 Token；继续补齐 Entry ID、内容长度和来源数组约束后，完整 Schema 的保守上界约为
+2,581 Token。
+
+随后将未经 StepFun 子集确认的 `pattern`、`minItems/maxItems`、`uniqueItems` 等关键字从 Wire
+Schema 移除，完整约束继续由 Go 领域层执行；这样既保持了 Provider 严格结构约束，也避免把
+Draft JSON Schema 的全部能力错误地假设为 Provider 能力。最终离线保守上界为 1,984 Token。
+修复后的单次 Smoke 已通过：StepFun 接受严格 Schema，输入 224、输出 1,837、总计 2,061
+Token，耗时 14.8 秒，`domainValidated=true`，没有写入 Snapshot。这个结果只证明协议与小输入
+领域契约，不代表 88K 长摘要的延迟或 Pilot/Acceptance 指标已经通过。
+
+Smoke 的失败输出只允许稳定机器码，例如 `provider_http_400`、`provider_timeout`、
+`entry_entry_id` 和 `entry_status`，不输出 Provider 原始错误或模型生成内容。这样失败请求的
+Usage、延迟和阶段可审计，同时不会把敏感 Prompt 或摘要泄露到评测日志。
+
+会话记忆装配边界同时强制 `responseFormat=json_schema` 与
+`responseSchema=conversation_memory_v1`；配置为 `text`、`json_object` 或其他 Schema 时，在
+Provider 调用前 fail-fast。领域校验错误由 `conversationmemory.FailureCode` 统一归一化，生产
+修复提示、Smoke 和 Pilot 只添加各自阶段语义，避免同一错误在三处产生不同统计名称。
+
+长输入延迟仍是独立未完成验收项：88,727 Token 样本在 30 秒超时，短输入 Smoke 不能证明
+生产长摘要可用。下一轮只选择一个最低压力但确实触发硬压缩的固定检查点，在调用/Token/费用
+门禁下测 60 秒或 90 秒上限；依据实测延迟分布决定摘要 Profile 超时，不凭单次短 Smoke 猜值。
 
 ### 15.3 指标
 

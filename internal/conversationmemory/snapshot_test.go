@@ -139,10 +139,73 @@ func TestDecodePayloadRequiresTheFixedSchema(t *testing.T) {
 	}
 }
 
+func TestDecodePayloadReportsContentFreeSchemaLocation(t *testing.T) {
+	_, err := conversationmemory.DecodePayload([]byte(`{
+		"conversationGoal":null,"facts":"not-an-array","decisions":[],"corrections":[],
+		"evidenceReferences":[],"openQuestions":[],"todos":[],"taskReferences":[],"reportReferences":[]
+	}`))
+	if !errors.Is(err, conversationmemory.ErrInvalidPayloadSchema) ||
+		conversationmemory.PayloadSchemaFailureCode(err) != "field_facts_string" {
+		t.Fatalf("DecodePayload() error/code = %v/%q", err, conversationmemory.PayloadSchemaFailureCode(err))
+	}
+}
+
 func TestDecodePayloadRejectsDuplicateFields(t *testing.T) {
 	encoded := []byte(`{"conversationGoal":null,"facts":[{"entryId":"fact_a","entryId":"fact_b","content":"x","sourceMessageSeqs":[1],"status":"active"}],"decisions":[],"corrections":[],"evidenceReferences":[],"openQuestions":[],"todos":[],"taskReferences":[],"reportReferences":[]}`)
 	if _, err := conversationmemory.DecodePayload(encoded); !errors.Is(err, conversationmemory.ErrInvalidPayloadSchema) {
 		t.Fatalf("DecodePayload() duplicate field error = %v, want ErrInvalidPayloadSchema", err)
+	}
+}
+
+func TestValidatePayloadReportsContentFreeEntryFailureCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*conversationmemory.Payload)
+		code   string
+	}{
+		{name: "entry id", mutate: func(payload *conversationmemory.Payload) {
+			payload.ConversationGoal.EntryID = "Invalid ID"
+		}, code: "entry_id"},
+		{name: "content", mutate: func(payload *conversationmemory.Payload) {
+			payload.ConversationGoal.Content = ""
+		}, code: "content"},
+		{name: "source count", mutate: func(payload *conversationmemory.Payload) {
+			payload.ConversationGoal.SourceMessageSeqs = nil
+		}, code: "source_count"},
+		{name: "source order", mutate: func(payload *conversationmemory.Payload) {
+			payload.ConversationGoal.SourceMessageSeqs = []int64{3, 1}
+		}, code: "source_order"},
+		{name: "source duplicate", mutate: func(payload *conversationmemory.Payload) {
+			payload.ConversationGoal.SourceMessageSeqs = []int64{1, 1}
+		}, code: "source_duplicate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := validPayload()
+			tt.mutate(&payload)
+			err := conversationmemory.ValidatePayload(payload, validValidationContext())
+			if !errors.Is(err, conversationmemory.ErrInvalidEntry) ||
+				conversationmemory.EntryValidationFailureCode(err) != tt.code {
+				t.Fatalf("ValidatePayload() error/code = %v/%q, want ErrInvalidEntry/%s",
+					err, conversationmemory.EntryValidationFailureCode(err), tt.code)
+			}
+		})
+	}
+}
+
+func TestFailureCodeNormalizesDomainValidationFailures(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{err: conversationmemory.ErrUserSourceRequired, want: "user_source_required"},
+		{err: &conversationmemory.EntryValidationError{Code: "entry_id"}, want: "entry_entry_id"},
+		{err: &conversationmemory.PayloadSchemaError{Code: "top_level_json"}, want: "payload_schema_top_level_json"},
+	}
+	for _, tt := range tests {
+		if got := conversationmemory.FailureCode(tt.err); got != tt.want {
+			t.Fatalf("FailureCode(%v) = %q, want %q", tt.err, got, tt.want)
+		}
 	}
 }
 

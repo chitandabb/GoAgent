@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	maxContinuousTailMessages = 100
+	maxContinuousTailMessages = 10_000
+	maxContinuousTailBytes    = 8 * 1024 * 1024
 	MaxTailWindowRatio        = 0.20
 )
 
@@ -61,25 +62,29 @@ func (s *ContinuousTailSelector) Select(
 		return ContinuousTailSelection{}, err
 	}
 	last := len(request.Messages) - 1
+	contiguousFrom := last
+	for contiguousFrom > 0 && request.Messages[contiguousFrom-1].Sequence+1 == request.Messages[contiguousFrom].Sequence {
+		contiguousFrom--
+	}
 	selectedFrom := last
 	estimate, err := s.estimate(ctx, request.Profile, request.Messages[last:])
 	if err != nil {
 		return ContinuousTailSelection{}, err
 	}
 	currentExceedsBudget := estimate.UpperBoundTokens > request.MaxTokens
-	for index := last - 1; index >= 0; index-- {
-		if request.Messages[index].Sequence+1 != request.Messages[index+1].Sequence {
-			break
-		}
+	low, high := contiguousFrom, last
+	for low <= high {
+		index := low + (high-low)/2
 		candidate, estimateErr := s.estimate(ctx, request.Profile, request.Messages[index:])
 		if estimateErr != nil {
 			return ContinuousTailSelection{}, estimateErr
 		}
-		if candidate.UpperBoundTokens > request.MaxTokens {
-			break
+		if candidate.UpperBoundTokens <= request.MaxTokens {
+			selectedFrom, estimate = index, candidate
+			high = index - 1
+		} else {
+			low = index + 1
 		}
-		selectedFrom = index
-		estimate = candidate
 	}
 	return ContinuousTailSelection{
 		Messages:                    append([]TailMessage(nil), request.Messages[selectedFrom:]...),
@@ -96,15 +101,19 @@ func (s *ContinuousTailSelector) estimate(
 	profile string,
 	messages []TailMessage,
 ) (TokenEstimate, error) {
-	segments := make([]PromptSegment, 0, len(messages))
+	var combined strings.Builder
+	reservedTokens := 0
 	for _, message := range messages {
-		kind := PromptSegmentHistory
-		if message.Current {
-			kind = PromptSegmentCurrentUser
+		if combined.Len() > 0 {
+			combined.WriteByte('\n')
 		}
-		segments = append(segments, PromptSegment{Kind: kind, Content: message.Content})
+		combined.WriteString(message.Content)
+		reservedTokens += 4
 	}
-	estimate, err := s.estimator.Estimate(ctx, PromptInput{Profile: profile, Segments: segments})
+	estimate, err := s.estimator.Estimate(ctx, PromptInput{Profile: profile, Segments: []PromptSegment{
+		{Kind: PromptSegmentHistory, Content: combined.String()},
+		{Kind: PromptSegmentToolGrowthReserve, ReservedTokens: reservedTokens},
+	}})
 	if err != nil {
 		return TokenEstimate{}, err
 	}
@@ -119,9 +128,12 @@ func validateContinuousTailRequest(request ContinuousTailRequest) error {
 		request.MaxTokens < 1 || len(request.Messages) == 0 || len(request.Messages) > maxContinuousTailMessages {
 		return errors.New("continuous Tail request is invalid")
 	}
+	totalBytes := 0
 	for index, message := range request.Messages {
+		totalBytes += len(message.Content)
 		if message.Sequence < 1 || strings.TrimSpace(message.Content) == "" ||
 			len(message.Content) > 8*1024*1024 ||
+			totalBytes > maxContinuousTailBytes ||
 			(index > 0 && message.Sequence <= request.Messages[index-1].Sequence) ||
 			message.Current != (index == len(request.Messages)-1) {
 			return errors.New("continuous Tail messages are invalid")

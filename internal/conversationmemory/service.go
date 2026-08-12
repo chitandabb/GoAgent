@@ -209,6 +209,13 @@ type CompactionOutput struct {
 	Usage   SummaryUsage
 }
 
+// NonRetryableCompactionError lets provider adapters mark deterministic
+// request/auth failures without coupling this domain to an HTTP client type.
+type NonRetryableCompactionError interface {
+	error
+	NonRetryableCompaction() bool
+}
+
 type Compactor interface {
 	Compact(context.Context, CompactionInput) (CompactionOutput, error)
 }
@@ -578,7 +585,7 @@ func (s *Service) generateCandidate(
 	for attempt := firstAttempt; attempt <= lastAttempt; attempt++ {
 		if attempt > firstAttempt && s.retryBaseDelay > 0 {
 			if err := waitForRetry(ctx, s.retryBaseDelay*time.Duration(1<<(attempt-firstAttempt-1))); err != nil {
-				return Snapshot{}, fmt.Errorf("%w: %v", ErrCompactionFailed, err)
+				return Snapshot{}, fmt.Errorf("%w: %w", ErrCompactionFailed, err)
 			}
 		}
 		output, compactErr := s.compactor.Compact(ctx, CompactionInput{
@@ -588,7 +595,11 @@ func (s *Service) generateCandidate(
 		})
 		if compactErr != nil {
 			lastErr = compactErr
-			repairCode = "generation_failed"
+			var nonRetryable NonRetryableCompactionError
+			if errors.As(compactErr, &nonRetryable) && nonRetryable.NonRetryableCompaction() {
+				break
+			}
+			repairCode = compactionRepairCode(compactErr)
 			continue
 		}
 		if output.Usage.Validate() != nil {
@@ -622,7 +633,7 @@ func (s *Service) generateCandidate(
 		}
 		return s.repository.Save(ctx, candidate)
 	}
-	return Snapshot{}, fmt.Errorf("%w after %d attempts: %v", ErrCompactionFailed,
+	return Snapshot{}, fmt.Errorf("%w after %d attempts: %w", ErrCompactionFailed,
 		lastAttempt-firstAttempt+1, lastErr)
 }
 
@@ -751,24 +762,17 @@ func appendUniqueSequence(sequences []int64, value int64) []int64 {
 }
 
 func validationRepairCode(err error) string {
-	switch {
-	case errors.Is(err, ErrUserSourceRequired):
-		return "user_source_required"
-	case errors.Is(err, ErrSourceOutOfRange):
-		return "source_out_of_range"
-	case errors.Is(err, ErrUnknownEntryReference):
-		return "entry_reference_unknown"
-	case errors.Is(err, ErrUnknownStableReference):
-		return "stable_reference_unknown"
-	case errors.Is(err, ErrSupersedeCycle):
-		return "supersede_cycle"
-	case errors.Is(err, ErrMultipleActiveEntries):
-		return "multiple_active_entries"
-	case errors.Is(err, ErrPayloadTooLarge):
-		return "payload_too_large"
-	default:
-		return "payload_invalid"
+	if code := FailureCode(err); code != "" {
+		return code
 	}
+	return "payload_invalid"
+}
+
+func compactionRepairCode(err error) string {
+	if code := FailureCode(err); strings.HasPrefix(code, "payload_schema_") {
+		return code
+	}
+	return "generation_failed"
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {

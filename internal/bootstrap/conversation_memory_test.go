@@ -28,6 +28,8 @@ func TestBuildConversationMemoryServiceUsesTheIndependentMemoryProfile(t *testin
 	memoryProfile.Model = "qwen3.6-flash"
 	memoryProfile.ReasoningEffort = ""
 	memoryProfile.ThinkingMode = "disabled"
+	memoryProfile.ResponseFormat = "json_schema"
+	memoryProfile.ResponseSchema = "conversation_memory_v1"
 	memoryProfile.TimeoutMillis = 30_000
 	cfg.Models.Chat.Profiles["memory"] = memoryProfile
 	cfg.Models.Chat.ConversationMemoryProfileName = "memory"
@@ -48,5 +50,23 @@ func TestBuildConversationMemoryServiceUsesTheIndependentMemoryProfile(t *testin
 	}
 	if service == nil || requestedProfile != "memory" || requestedProfile == cfg.Models.Chat.ActiveProfileName {
 		t.Fatalf("service/profile = %v/%q, active = %q", service, requestedProfile, cfg.Models.Chat.ActiveProfileName)
+	}
+}
+
+func TestValidateConversationMemoryProfileRequiresStrictSchemaContract(t *testing.T) {
+	valid := config.ChatModelProfileConfig{
+		ResponseFormat: "json_schema", ResponseSchema: "conversation_memory_v1",
+	}
+	if err := validateConversationMemoryProfile(valid); err != nil {
+		t.Fatalf("valid profile error = %v", err)
+	}
+	for _, profile := range []config.ChatModelProfileConfig{
+		{ResponseFormat: "json_object"},
+		{ResponseFormat: "text"},
+		{ResponseFormat: "json_schema", ResponseSchema: "other_v1"},
+	} {
+		if err := validateConversationMemoryProfile(profile); err == nil {
+			t.Fatalf("validateConversationMemoryProfile(%+v) succeeded", profile)
+		}
 	}
 }
