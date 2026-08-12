@@ -9,6 +9,7 @@ package config
 // ============================================================
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -231,6 +232,51 @@ func (c ChatModelProfileConfig) EffectivePromptSafetyMarginTokens() int {
 		return ratioMargin
 	}
 	return c.PromptSafetyMarginTokens
+}
+
+// PromptProfileFingerprint identifies every configured profile field that can
+// change model-visible behavior or the prompt-window contract. Secrets and the
+// API key environment variable are intentionally excluded.
+func (c ChatModelProfileConfig) PromptProfileFingerprint(profileName string) (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
+	}
+	profileName = strings.TrimSpace(profileName)
+	if !modelName.MatchString(profileName) {
+		return "", errors.New("chat model profile name is invalid")
+	}
+	encoded, err := json.Marshal(struct {
+		Name                     string               `json:"name"`
+		Provider                 string               `json:"provider"`
+		BaseURL                  string               `json:"baseUrl"`
+		Model                    string               `json:"model"`
+		ReasoningEffort          string               `json:"reasoningEffort"`
+		ThinkingMode             string               `json:"thinkingMode"`
+		Temperature              *float32             `json:"temperature,omitempty"`
+		TimeoutMillis            int                  `json:"timeoutMillis"`
+		ContextWindowTokens      int                  `json:"contextWindowTokens"`
+		MaxOutputTokens          int                  `json:"maxOutputTokens"`
+		PromptSafetyMarginTokens int                  `json:"promptSafetyMarginTokens"`
+		PromptSafetyMarginRatio  float64              `json:"promptSafetyMarginRatio"`
+		TokenizerStrategy        string               `json:"tokenizerStrategy"`
+		ToolExposureStrategy     ToolExposureStrategy `json:"toolExposureStrategy"`
+		ProviderNativeCompaction bool                 `json:"providerNativeCompaction"`
+	}{
+		Name: profileName, Provider: strings.ToLower(strings.TrimSpace(c.Provider)),
+		BaseURL: strings.TrimRight(strings.TrimSpace(c.BaseURL), "/"), Model: strings.TrimSpace(c.Model),
+		ReasoningEffort: strings.ToLower(strings.TrimSpace(c.ReasoningEffort)),
+		ThinkingMode:    strings.ToLower(strings.TrimSpace(c.ThinkingMode)), Temperature: c.Temperature,
+		TimeoutMillis: c.TimeoutMillis, ContextWindowTokens: c.ContextWindowTokens,
+		MaxOutputTokens: c.MaxOutputTokens, PromptSafetyMarginTokens: c.PromptSafetyMarginTokens,
+		PromptSafetyMarginRatio:  c.PromptSafetyMarginRatio,
+		TokenizerStrategy:        strings.ToLower(strings.TrimSpace(string(c.TokenizerStrategy))),
+		ToolExposureStrategy:     c.EffectiveToolExposureStrategy(),
+		ProviderNativeCompaction: c.ProviderNativeCompactionEnabled,
+	})
+	if err != nil {
+		return "", err
+	}
+	return contextgovernance.SHA256Hex(string(encoded)), nil
 }
 
 func (c ChatModelProfileConfig) EffectiveToolExposureStrategy() ToolExposureStrategy {

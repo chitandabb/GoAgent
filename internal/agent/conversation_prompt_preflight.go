@@ -28,6 +28,8 @@ type ConversationContextPreflightConfig struct {
 	TailSelector            *contextgovernance.ContinuousTailSelector
 	ModelProfile            contextgovernance.ModelProfile
 	ContinuousTailEnabled   bool
+	HardWindowEnforced      bool
+	FullHistoryEnabled      bool
 	SummaryTailEnabled      bool
 	Memory                  ConversationMemory
 	MemoryMaxRatio          float64
@@ -45,6 +47,12 @@ const defaultConversationPreflightTimeout = 250 * time.Millisecond
 func (c ConversationContextPreflightConfig) validate(modelProvider, modelID string) error {
 	if c.ContinuousTailEnabled && !c.Enabled {
 		return errors.New("conversation continuous Tail requires context preflight")
+	}
+	if c.HardWindowEnforced && !c.Enabled {
+		return errors.New("conversation hard-window enforcement requires context preflight")
+	}
+	if c.FullHistoryEnabled && (!c.Enabled || c.ContinuousTailEnabled || c.SummaryTailEnabled) {
+		return errors.New("conversation full-history preflight must be enabled without Tail or Summary")
 	}
 	if c.SummaryTailEnabled && (!c.Enabled || !c.ContinuousTailEnabled) {
 		return errors.New("conversation Summary + Tail requires continuous Tail preflight")
@@ -280,6 +288,27 @@ func canonicalConversationToolInfoContract(
 		})
 	}
 	return contextgovernance.NewCanonicalToolContract(definitions)
+}
+
+// CanonicalToolContractFingerprint returns the fingerprint of the exact
+// model-visible Tool Schema. Evaluation and diagnostics use it to prove that
+// paired arms changed only the context policy, not authorization.
+func CanonicalToolContract(
+	ctx context.Context,
+	tools []tool.BaseTool,
+) (contextgovernance.CanonicalToolContract, error) {
+	return canonicalConversationToolContract(ctx, tools)
+}
+
+func CanonicalToolContractFingerprint(
+	ctx context.Context,
+	tools []tool.BaseTool,
+) (string, error) {
+	contract, err := CanonicalToolContract(ctx, tools)
+	if err != nil {
+		return "", err
+	}
+	return contract.Fingerprint, nil
 }
 
 func conversationPromptSegments(projection conversationPromptProjection) (history, dynamicReferences, currentUser string) {

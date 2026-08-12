@@ -676,12 +676,90 @@ It verifies the strict JSON/protected-signal contract, not Recall, ranking quali
 or cost reduction. See `docs/evaluations/query-rewrite-v1.md` for the current smoke observations.
 
 `[models.chat]` is a named-profile model assembly layer. `activeProfile` selects the diagnosis
-Agent model; other roles resolve their own profile. The Factory currently registers StepFun,
+Agent model, while `conversationMemoryProfile` independently selects the future fast conversation
+compaction model without duplicating Provider credentials. Other roles resolve their own profile. The Factory currently registers StepFun,
 DeepSeek and DashScope adapters and returns normalized profile/provider/model/capability identity.
 All configured profiles are statically validated, but only a selected profile reads its API key.
 StepFun maps `reasoningEffort`; DeepSeek requires explicit thinking mode and rejects effort while
 thinking is disabled; DashScope maps thinking mode to `enable_thinking`. Unsupported combinations
 fail during construction instead of being silently ignored.
+
+Every enabled named Chat profile also declares `contextWindowTokens`, `maxOutputTokens`, absolute
+and ratio prompt safety margins, and a `tokenizerStrategy`. Validation requires output plus the
+effective safety margin to leave positive input capacity. `toolExposureStrategy` defaults to
+`static_frozen` and can represent `native_deferred`, `epoch_rebind`, or `gateway` for later Provider
+adapters; `providerNativeCompactionEnabled` is capability configuration only.
+
+`[agent.contextMemory]` enables preflight observation with configurable soft/hard thresholds and a
+Tool-growth reserve. `continuousTailEnabled=true` activates Token-aware history selection, while
+`tailMaxRatio` caps the Tail at 20% of the model window (the checked-in value is 15%). The
+current User Message is always retained and counted; earlier messages are selected backwards as one
+continuous sequence, and selection stops at the first message that does not fit. Case, diagnosis-task
+and attachment references use bounded model-visible descriptions and stable identifiers, so their
+Token cost is included without copying object payloads into history. Turning the Feature Flag off
+returns to `conversationMaxContextRunes` for staged rollback.
+
+Preflight has a separate short timeout that defaults to 250 ms; the model-run timeout starts after this
+observation, so an estimator timeout cannot cancel or consume the model execution window. A failed
+observation stays non-blocking but produces a bounded degraded Manifest with a stable machine reason
+instead of disappearing. Explicit identity/estimate availability flags prevent an unknown Tool
+contract or failed estimate from being counted as an empty Epoch or zero-Token sample. The local-first
+estimator and Provider-independent planner observe the selected messages, model-visible canonical Tool
+contract, system prompt, optional Skill/Summary segments, dynamic references and current user message.
+They persist one bounded
+`conversation_prompt_manifests` record with the Prompt Epoch and stable fingerprints, visible-prompt
+estimate, reserve-inclusive upper bound, first Provider call Usage/Cache tokens, signed estimation
+error and latency. If a later ReAct call is blocked, that same turn Manifest is updated to the blocked
+runtime estimate, marked `react_prompt_blocked`, and leaves actual usage unavailable for the unsent call;
+the Run observation still carries aggregate usage from earlier successful calls. The reserve is
+intentionally excluded from calibration error, and Cache Hit tokens
+never reduce window occupancy. When Continuous Tail is active and the conservative initial-prompt bound
+exceeds the hard model window, MESGuard persists the blocked Manifest and does not call the Provider.
+The per-turn model boundary then re-runs the same conservative Planner before every subsequent ReAct
+call after Tool results have been appended. A failed estimator is fail-closed only after Continuous Tail
+activation; observation-only rollout remains fail-open. Oversized Tool output is kept only in a bounded,
+in-memory store owned by the current Agent Run. The model receives a preview, stable `sha256` reference
+and original byte count, then can page the exact result through `read_conversation_tool_result`. The Tool
+is always present in the frozen Conversation Tool Schema, is authorized by TaskScope, limits each read,
+cannot search the store, and cannot resolve a reference after the Run ends. Results above the bounded
+store capacity fail safely instead of creating an unresolvable handle. Diagnosis now reuses the same
+Provider-independent preflight and persists bounded high-water/block observations without adding
+conversation memory to diagnosis tasks.
+
+The M3 Context Governance Pilot has a checked-in provider-free fixture and separate evaluation/observation
+commands. Validate the 4-scenario/12-checkpoint fixture or print the conservative plan without loading model
+configuration:
+
+```powershell
+go run ./tools/evaluation/mesguard-context-governance-pilot `
+  -validate-only `
+  -fixture testdata/context-governance-pilot-v1.json
+
+go run ./tools/observation/mesguard-context-governance-pilot-observe
+```
+
+The default observer prints 36 main calls, at most 12 Summary calls, 48 total calls, concurrency 1 and a
+conservative `4.716 CNY` estimate. It does not read the config or call a Provider. The estimate is not an
+invoice; retries are unknown in advance. Every actual main/Summary/retry attempt is still reserved before
+the Provider against a shared 200-call/10-CNY runtime ceiling.
+
+Only after explicitly approving that budget and loading the required keys into the current shell, execute:
+
+```powershell
+go run ./tools/observation/mesguard-context-governance-pilot-observe `
+  -execute-provider `
+  -output output/evaluation/context-governance-pilot-v1.observations.jsonl `
+  -summary-output output/evaluation/context-governance-pilot-v1.summary.json
+```
+
+The command does not load `.env` itself. It writes one strictly validated raw observation per arm/checkpoint
+and an aggregated report. `60%+` remains an Acceptance target until the real Pilot and larger Acceptance set
+produce measured results.
+
+The evaluator does not treat a failed Provider-backed run as a zero-token success. A Baseline/Experiment
+checkpoint enters comparable Token, cost, and first-token-latency metrics only when both observations are
+within the hard window and have no error. In-window Provider or Runner failures are counted as `failedRuns`
+and fail the `run_failure` quality gate.
 
 This is configuration-level replaceability, not runtime hot reload or production acceptance for
 every model. Config/key changes require restart. Judge, Embedding, Rerank, OCR and Vision still use

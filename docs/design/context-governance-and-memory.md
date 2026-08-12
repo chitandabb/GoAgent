@@ -68,7 +68,8 @@ TaskScope 最小 Tool 集合，不是 Skill 选择后的动态 Tool 注册。
 - Redis 默认 TTL 为两小时、10% jitter、单次命令 50ms 超时；命中/未命中使用 Debug 结构化
   观测，降级使用 Warn 并记录原因和缓存耗时，不会被描述为记忆丢失；真实 Redis 测试已覆盖
   TTL、索引删除和污染索引成员保护；
-- 没有固定长会话 Baseline/Experiment 评测集。
+- 已实现 `context-governance-pilot-v1` 的 4 场景/12 检查点固定集、Current/Baseline/Experiment
+  三组 Evaluator 和显式 Provider Observer；真实 Provider Pilot 尚未执行。
 
 ## 3. 目标与非目标
 
@@ -629,11 +630,20 @@ Pilot：4 个会话剧本，每个 3 个检查点；Acceptance：12 个会话剧
 历史消息直接预置，不为构造 100 轮历史调用 100 次模型。检查点才调用 Summary、主模型和可选
 Judge。
 
+当前 Pilot 固定集版本为 `fixture-2026-08-12-v3`。生产本地估算器已固定压力梯度：每个场景
+`cp1` 未达到硬阈值，`cp2` 达到 85% 硬阈值但仍可先压缩，`cp3` 的完整 Baseline 历史超过
+模型窗口。各 Arm 的检查点时间线单调递增，真实检查点回答不反馈给下一个检查点，避免不同
+Arm 的回答质量反向改变后续输入；Experiment 在同一场景内复用 Active Snapshot。
+
 ```toml
 maxEvaluationCalls = 200
 maxEstimatedCostCNY = 10
 evaluationConcurrency = 1
 ```
+
+Provider-free 默认计划为 36 次主模型调用和最多 12 次 Summary 调用，共 48 次，按保守
+Token/价格假设估算 `4.716 CNY`。该数字不是账单，也不包含无法预知的失败重试；真实 Observer
+将每次主模型、Summary 和重试都在 Provider 调用前纳入共享的 200 次/10 元硬门禁。
 
 ### 15.3 指标
 
@@ -666,16 +676,20 @@ rawTokenReduction =
 
 另行报告 Main Prompt Reduction、Summary Overhead、Cache Hit Ratio、Cache-adjusted Cost、
 First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装成被摘要消除的 Token。
+可比 Token、成本和首 Token 延迟只纳入 Baseline 与 Experiment 均在硬窗口内且无错误的检查点；
+窗口内 Provider/Runner 失败单独计入 `failedRuns` 并触发 `run_failure` 质量门，避免失败样本被
+静默排除后抬高降幅。
 
 ## 16. Feature Flag 与上线顺序
 
 1. 影子计算 Token Estimate 和 Prompt Manifest，不改变 Prompt（已完成）；
 2. 在独立 Feature Flag 下启用 Continuous Tail 和逐次 Provider 硬窗口保护，保留 Rune 回滚（已完成）；
 3. 生成 Shadow Snapshot，但不用于回答（已完成）；
-4. 在独立 Feature Flag 下启用硬阈值同步 CAS 激活和 Summary + Tail（已完成，待 Pilot）；
-5. 启用软阈值 Memory Outbox/Worker，异步生成候选并在有效 Lease/Fencing 下 CAS 发布（已完成，待 Pilot）；
-6. Pilot 与 Acceptance 通过后全量启用；
-7. 发生质量问题关闭 Summary，回退 Continuous Tail；再关闭 Continuous Tail 可回退 Rune 路径，
+4. 在独立 Feature Flag 下启用硬阈值同步 CAS 激活和 Summary + Tail（已完成，待真实 Pilot）；
+5. 启用软阈值 Memory Outbox/Worker，异步生成候选并在有效 Lease/Fencing 下 CAS 发布（已完成，待真实 Pilot）；
+6. Pilot 固定集、Evaluator 和受预算保护的 Observer（已完成；真实 Provider 执行待显式成本确认）；
+7. Pilot 与 Acceptance 通过后全量启用；
+8. 发生质量问题关闭 Summary，回退 Continuous Tail；再关闭 Continuous Tail 可回退 Rune 路径，
    原始消息和 Snapshot 均无需回滚。
 
 ## 17. 有序实现切片
@@ -690,8 +704,9 @@ First Token Latency 和 Prompt Epoch Churn，不能把缓存命中 Token 伪装�
 8. `read_conversation_memory_sources` Tool（已完成：相关窗口、单条偏移、Run 级 Cursor 与单轮预算截断）；
 9. Diagnosis Context Preflight 与有界 Tool Result（已完成）；
 10. Provider 原生 Compaction/Tool Exposure 接口预留；
-11. Pilot、Acceptance、指标核验和简历最终口径；
-12. 后端闭环后统一设计前端压缩状态和管理员观测页。
+11. Pilot 工具链（已完成）与真实 Provider 观测（待显式成本确认）；
+12. Acceptance、指标核验和简历最终口径；
+13. 后端闭环后统一设计前端压缩状态和管理员观测页。
 
 ## 18. 后续增强点
 

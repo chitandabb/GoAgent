@@ -13,6 +13,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/memorycompactor"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
+	"github.com/cloudwego/eino/components/model"
 
 	"github.com/google/uuid"
 	rediscli "github.com/redis/go-redis/v9"
@@ -35,6 +36,54 @@ func BuildConversationMemoryService(
 	cfg config.Config,
 ) (*conversationmemory.Service, error) {
 	return buildConversationMemoryService(ctx, db, cfg, chatmodel.NewProfile)
+}
+
+// BuildConversationMemoryServiceWithModel is the production compactor
+// assembly with an injected model and repository. It is used by the bounded
+// offline Pilot so the real Summary prompt, validator, retry, and incremental
+// merge path can run without writing evaluation snapshots to PostgreSQL.
+func BuildConversationMemoryServiceWithModel(
+	ctx context.Context,
+	cfg config.Config,
+	modelOverride model.ToolCallingChatModel,
+	repository conversationmemory.ActivationRepository,
+) (*conversationmemory.Service, conversationmemory.SummaryProvenance, error) {
+	if repository == nil || modelOverride == nil {
+		return nil, conversationmemory.SummaryProvenance{}, errors.New("conversation memory Pilot dependencies are unavailable")
+	}
+	summaryConfig := cfg.Agent.ContextMemory.Summary
+	if err := summaryConfig.Validate(); err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, err
+	}
+	profileName := strings.TrimSpace(cfg.Models.Chat.ConversationMemoryProfileName)
+	profile, err := cfg.Models.Chat.ConversationMemoryProfile()
+	if err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, fmt.Errorf("resolve conversation memory model profile: %w", err)
+	}
+	prompt, err := summaryConfig.LoadPrompt()
+	if err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, err
+	}
+	compactor, err := memorycompactor.New(memorycompactor.Config{
+		Generator: modelOverride, Prompt: prompt, PromptVersion: summaryConfig.PromptVersion,
+		Timeout: time.Duration(profile.TimeoutMillis) * time.Millisecond, MaxOutputBytes: summaryConfig.MaxPayloadBytes,
+	})
+	if err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, err
+	}
+	provenance := conversationmemory.SummaryProvenance{
+		ModelProfile: profileName, ModelProvider: strings.ToLower(strings.TrimSpace(profile.Provider)),
+		ModelID: strings.TrimSpace(profile.Model), PromptVersion: summaryConfig.PromptVersion,
+	}
+	service, err := conversationmemory.NewService(conversationmemory.ServiceConfig{
+		Repository: repository, Compactor: compactor, SchemaVersion: conversationmemory.CurrentSchemaVersion,
+		MaxPayloadBytes: summaryConfig.MaxPayloadBytes, Provenance: provenance,
+		MaxAttempts: summaryConfig.MaxAttempts, RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
+	})
+	if err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, err
+	}
+	return service, provenance, nil
 }
 
 // BuildCachedConversationMemoryService adds the degradable Redis read-through
