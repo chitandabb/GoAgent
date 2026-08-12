@@ -172,6 +172,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	}
 	startedAt := time.Now()
 	var citationTrace *conversationCitationTrace
+	var reportReferenceTrace *conversationReportReferenceTrace
 	var usageTrace *modelUsageTrace
 	var promptManifest *contextgovernance.PromptManifest
 	var runtimePromptObservation *conversationRuntimePromptObservation
@@ -235,6 +236,8 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	runCtx = withExecutionTrace(runCtx, trace)
 	citationTrace = &conversationCitationTrace{}
 	runCtx = withConversationCitationTrace(runCtx, citationTrace)
+	reportReferenceTrace = &conversationReportReferenceTrace{}
+	runCtx = withConversationReportReferenceTrace(runCtx, reportReferenceTrace)
 	usageTrace = &modelUsageTrace{onUsage: budget.recordUsage}
 	observeFailure = true
 	tools, err := r.toolCatalog.ToolsFor(runCtx, scope)
@@ -367,7 +370,10 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if observation.Validate() != nil {
 		return conversation.AgentResponse{}, conversation.ErrAgentResponseInvalid
 	}
-	return conversation.AgentResponse{Content: answer, Citations: citations, RunObservation: &observation}, nil
+	return conversation.AgentResponse{
+		Content: answer, Citations: citations, ReportReferences: reportReferenceTrace.snapshot(),
+		RunObservation: &observation,
+	}, nil
 }
 
 func (r *ConversationRunner) buildRunObservation(
@@ -659,7 +665,8 @@ func conversationMessagePrompt(message conversation.Message) string {
 }
 
 func conversationMessageReferencePrompt(message conversation.Message) string {
-	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 && len(message.Attachments) == 0 {
+	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 &&
+		len(message.ReportReferences) == 0 && len(message.Attachments) == 0 {
 		return ""
 	}
 	var contextBlock strings.Builder
@@ -669,6 +676,9 @@ func conversationMessageReferencePrompt(message conversation.Message) string {
 	}
 	for _, reference := range message.TaskReferences {
 		fmt.Fprintf(&contextBlock, "task id=%s kind=%s\n", reference.TaskID, reference.Kind)
+	}
+	for _, reference := range message.ReportReferences {
+		fmt.Fprintf(&contextBlock, "report id=%s\n", reference.ReferenceID)
 	}
 	for _, reference := range message.Attachments {
 		fmt.Fprintf(

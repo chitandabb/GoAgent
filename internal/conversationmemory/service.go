@@ -379,16 +379,14 @@ func NewService(config ServiceConfig) (*Service, error) {
 }
 
 type ShadowRequest struct {
-	ConversationID        uuid.UUID
-	CompletedMessages     []conversation.Message
-	KnownReportReferences map[string][]int64
+	ConversationID    uuid.UUID
+	CompletedMessages []conversation.Message
 }
 
 type PrepareActiveRequest struct {
-	ConversationID        uuid.UUID
-	CompletedMessages     []conversation.Message
-	KnownReportReferences map[string][]int64
-	ActivationGate        ActivationGate
+	ConversationID    uuid.UUID
+	CompletedMessages []conversation.Message
+	ActivationGate    ActivationGate
 }
 
 // PreparedActivation separates model-backed candidate generation from the
@@ -588,7 +586,6 @@ func (s *Service) prepareActivationCandidate(
 	}
 	candidate, err := s.generateCandidate(ctx, ShadowRequest{
 		ConversationID: request.ConversationID, CompletedMessages: request.CompletedMessages,
-		KnownReportReferences: request.KnownReportReferences,
 	}, previous, firstAttempt, lastAttempt)
 	if err != nil {
 		return PreparedActivation{}, err
@@ -656,7 +653,8 @@ func (s *Service) generateCandidate(
 	if err != nil {
 		return Snapshot{}, err
 	}
-	validation := buildValidationContext(fromSeq, throughSeq, s.maxPayloadBytes, previous, newMessages, request.KnownReportReferences)
+	knownReports := knownReportReferences(request.CompletedMessages)
+	validation := buildValidationContext(fromSeq, throughSeq, s.maxPayloadBytes, previous, newMessages, knownReports)
 	repairCode := ""
 	var lastErr error
 	failureCodes := make([]string, 0, lastAttempt-firstAttempt+1)
@@ -671,7 +669,7 @@ func (s *Service) generateCandidate(
 		output, compactErr := s.compactor.Compact(ctx, CompactionInput{
 			ConversationID: request.ConversationID, FromSeq: fromSeq, ThroughSeq: throughSeq,
 			PreviousSnapshot: cloneSnapshot(previous), NewMessages: cloneMessages(newMessages),
-			KnownReportReferences: cloneReferenceSources(request.KnownReportReferences), Attempt: attempt, RepairCode: repairCode,
+			KnownReportReferences: cloneReferenceSources(knownReports), Attempt: attempt, RepairCode: repairCode,
 		})
 		if compactErr != nil {
 			lastErr = compactErr
@@ -986,6 +984,7 @@ func cloneMessages(messages []conversation.Message) []conversation.Message {
 	for index := range result {
 		result[index].CaseReferences = append([]conversation.CaseReference(nil), messages[index].CaseReferences...)
 		result[index].TaskReferences = append([]conversation.TaskReference(nil), messages[index].TaskReferences...)
+		result[index].ReportReferences = append([]conversation.ReportReference(nil), messages[index].ReportReferences...)
 		result[index].Attachments = append([]conversation.MessageAttachment(nil), messages[index].Attachments...)
 		result[index].Citations = append([]conversation.MessageCitation(nil), messages[index].Citations...)
 	}
@@ -996,6 +995,16 @@ func cloneReferenceSources(source map[string][]int64) map[string][]int64 {
 	result := make(map[string][]int64, len(source))
 	for key, sequences := range source {
 		result[key] = append([]int64(nil), sequences...)
+	}
+	return result
+}
+
+func knownReportReferences(messages []conversation.Message) map[string][]int64 {
+	result := make(map[string][]int64)
+	for _, message := range messages {
+		for _, reference := range message.ReportReferences {
+			result[reference.ReferenceID] = append(result[reference.ReferenceID], message.Seq)
+		}
 	}
 	return result
 }

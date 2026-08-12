@@ -140,6 +140,10 @@ type TaskReference struct {
 	Kind   ReferenceKind
 }
 
+type ReportReference struct {
+	ReferenceID string
+}
+
 type Message struct {
 	ID                   uuid.UUID
 	ConversationID       uuid.UUID
@@ -149,6 +153,7 @@ type Message struct {
 	ContentSchemaVersion int
 	CaseReferences       []CaseReference
 	TaskReferences       []TaskReference
+	ReportReferences     []ReportReference
 	Attachments          []MessageAttachment
 	Citations            []MessageCitation
 	CreatedAt            time.Time
@@ -407,29 +412,30 @@ type CreateInput struct {
 }
 
 type AppendMessageInput struct {
-	ConversationID uuid.UUID
-	Role           MessageRole
-	Content        string
-	CaseReferences []CaseReference
-	TaskReferences []TaskReference
-	Attachments    []MessageAttachmentInput
-	Citations      []MessageCitation
+	ConversationID   uuid.UUID
+	Role             MessageRole
+	Content          string
+	CaseReferences   []CaseReference
+	TaskReferences   []TaskReference
+	ReportReferences []ReportReference
+	Attachments      []MessageAttachmentInput
+	Citations        []MessageCitation
 }
 
 // AgentRequest is the bounded input passed to the independent conversation Agent.
 // Tool results are deliberately not persisted into this history contract; they are
 // scoped to one invocation and can contain transient or untrusted data.
 type AgentRequest struct {
-	Conversation          Conversation
-	UserMessage           Message
-	History               []Message
-	KnownReportReferences map[string][]int64
+	Conversation Conversation
+	UserMessage  Message
+	History      []Message
 }
 
 type AgentResponse struct {
-	Content        string
-	Citations      []MessageCitation
-	RunObservation *AgentRunObservation
+	Content          string
+	Citations        []MessageCitation
+	ReportReferences []ReportReference
+	RunObservation   *AgentRunObservation
 }
 
 func (r AgentResponse) Validate() error {
@@ -934,7 +940,7 @@ func prepareMessageInput(actor Actor, input AppendMessageInput) (AppendMessageIn
 			return AppendMessageInput{}, ErrInvalidMessage
 		}
 		input.Content, input.Citations = prepared.Content, prepared.Citations
-	} else if len(input.Citations) > 0 {
+	} else if len(input.Citations) > 0 || len(input.ReportReferences) > 0 {
 		return AppendMessageInput{}, ErrInvalidMessage
 	}
 	for index := range input.Attachments {
@@ -960,6 +966,10 @@ func prepareAgentResponse(response AgentResponse) (AgentResponse, error) {
 		return AgentResponse{}, ErrAgentResponseInvalid
 	}
 	response.Citations = append([]MessageCitation(nil), resolved...)
+	if err := validateReportReferences(response.ReportReferences); err != nil {
+		return AgentResponse{}, ErrAgentResponseInvalid
+	}
+	response.ReportReferences = append([]ReportReference(nil), response.ReportReferences...)
 	if response.RunObservation != nil {
 		if response.RunObservation.Validate() != nil {
 			return AgentResponse{}, ErrAgentResponseInvalid
@@ -1079,7 +1089,8 @@ func turnRequestFingerprint(input AppendMessageInput) (string, error) {
 
 func validateReferences(input AppendMessageInput) error {
 	if len(input.CaseReferences) > 20 || len(input.TaskReferences) > 20 ||
-		len(input.Attachments) > MaxAttachmentsPerMessage || len(input.Citations) > MaxCitationsPerMessage {
+		len(input.ReportReferences) > 20 || len(input.Attachments) > MaxAttachmentsPerMessage ||
+		len(input.Citations) > MaxCitationsPerMessage {
 		return ErrInvalidMessage
 	}
 	caseSeen := make(map[uuid.UUID]struct{}, len(input.CaseReferences))
@@ -1104,6 +1115,9 @@ func validateReferences(input AppendMessageInput) error {
 		}
 		taskSeen[ref.TaskID] = struct{}{}
 	}
+	if err := validateReportReferences(input.ReportReferences); err != nil {
+		return err
+	}
 	attachmentSeen := make(map[uuid.UUID]struct{}, len(input.Attachments))
 	for _, ref := range input.Attachments {
 		if ref.AttachmentID == uuid.Nil || strings.TrimSpace(ref.Purpose) == "" ||
@@ -1126,6 +1140,31 @@ func validateReferences(input AppendMessageInput) error {
 		citationSeen[citation.SourceRef] = struct{}{}
 	}
 	return nil
+}
+
+func validateReportReferences(references []ReportReference) error {
+	if len(references) > 20 {
+		return ErrInvalidMessage
+	}
+	seen := make(map[string]struct{}, len(references))
+	for _, reference := range references {
+		if !validReportReferenceID(reference.ReferenceID) {
+			return ErrInvalidMessage
+		}
+		if _, duplicate := seen[reference.ReferenceID]; duplicate {
+			return ErrInvalidMessage
+		}
+		seen[reference.ReferenceID] = struct{}{}
+	}
+	return nil
+}
+
+func validReportReferenceID(value string) bool {
+	if !strings.HasPrefix(value, "report:") || value != strings.TrimSpace(value) {
+		return false
+	}
+	parsed, err := uuid.Parse(strings.TrimPrefix(value, "report:"))
+	return err == nil && parsed != uuid.Nil
 }
 
 func citationMarkerRefs(content string) ([]string, error) {

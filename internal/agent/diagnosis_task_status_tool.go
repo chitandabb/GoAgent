@@ -67,6 +67,7 @@ func NewGetDiagnosisTaskStatusTool(reader DiagnosisTaskStatusReader) (tool.Invok
 			}
 			if task.ReportID != nil {
 				response.ReportID = task.ReportID.String()
+				conversationReportReferenceTraceFromContext(ctx).append("report:" + task.ReportID.String())
 			}
 			if task.StartedAt != nil {
 				response.StartedAt = formatTaskStatusTime(*task.StartedAt)

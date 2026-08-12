@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
+	"github.com/google/uuid"
 )
 
 const (
@@ -137,8 +138,11 @@ func (d ContextGovernancePilotDataset) Validate() error {
 }
 
 func validPilotReportReference(reference string) bool {
-	return strings.HasPrefix(reference, "report:") && len(reference) <= 256 &&
-		reference == strings.TrimSpace(reference) && !strings.ContainsAny(reference, "[]\r\n")
+	if !strings.HasPrefix(reference, "report:") || reference != strings.TrimSpace(reference) {
+		return false
+	}
+	parsed, err := uuid.Parse(strings.TrimPrefix(reference, "report:"))
+	return err == nil && parsed != uuid.Nil
 }
 
 func (g ContextGovernancePilotGold) validate() error {
@@ -190,20 +194,20 @@ func validPilotTermGroup(values []string, required bool) bool {
 func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 	return ContextGovernancePilotDataset{
 		DatasetVersion: "context-governance-pilot-v1",
-		FixtureVersion: "fixture-2026-08-12-v4",
+		FixtureVersion: "fixture-2026-08-12-v5",
 		Scenarios: []ContextGovernancePilotScenario{
 			buildContextPilotScenario(
 				"incident-correction", "生产故障判断被后续证据修正",
 				[]pilotMilestone{
-					{seq: 20, content: "用户确认故障发生于工单 TKT-2048，数据库报告 1205，初步根因写为网络抖动。证据引用 report:diag-2048-a。", reportReferences: []string{"report:diag-2048-a"}},
+					{seq: 20, content: "用户确认故障发生于工单 TKT-2048，数据库报告 1205，初步根因写为网络抖动。证据引用 report:11111111-1111-4111-8111-111111111111。", reportReferences: []string{"report:11111111-1111-4111-8111-111111111111"}},
 					{seq: 40, content: "团队决定优先检查数据库锁等待，不执行服务无限重启；待办是采集锁等待图，状态为进行中。"},
-					{seq: 70, content: "新证据证明根因是库存行锁死锁，不是网络抖动；report:diag-2048-b 取代旧判断。", reportReferences: []string{"report:diag-2048-b"}},
+					{seq: 70, content: "新证据证明根因是库存行锁死锁，不是网络抖动；report:22222222-2222-4222-8222-222222222222 取代旧判断。", reportReferences: []string{"report:22222222-2222-4222-8222-222222222222"}},
 					{seq: 100, content: "锁等待图已经采集完成；团队决定先修正事务加锁顺序，再观察 30 分钟。"},
 				},
 				[]ContextGovernancePilotCheckpoint{
-					pilotCheckpoint("incident-cp1", 40, "当前故障、初步判断和待办是什么？", []string{"TKT-2048", "网络抖动", "采集锁等待图", "进行中"}, []string{"TKT-2048", "数据库 1205"}, []string{"优先检查数据库锁等待"}, nil, []ContextGovernancePilotTodoGold{{[]string{"采集锁等待图"}, []string{"进行中"}}}, []string{"report:diag-2048-a"}, nil),
-					pilotCheckpoint("incident-cp2", 80, "根据新证据给出当前根因并说明被推翻的判断。", []string{"库存行锁死锁", "不是网络抖动", "report:diag-2048-b"}, []string{"库存行锁死锁"}, nil, []ContextGovernancePilotCorrectionGold{{[]string{"库存行锁死锁"}, []string{"根因是网络抖动"}}}, nil, []string{"report:diag-2048-b"}, []string{"根因仍是网络抖动"}),
-					pilotCheckpoint("incident-cp3", 120, "总结最终根因、处置决策和待办状态。", []string{"库存行锁死锁", "修正事务加锁顺序", "采集锁等待图", "已完成"}, []string{"库存行锁死锁"}, []string{"修正事务加锁顺序", "观察 30 分钟"}, nil, []ContextGovernancePilotTodoGold{{[]string{"采集锁等待图"}, []string{"已完成"}}}, []string{"report:diag-2048-b"}, []string{"无限重启"}),
+					pilotCheckpoint("incident-cp1", 40, "当前故障、初步判断和待办是什么？", []string{"TKT-2048", "网络抖动", "采集锁等待图", "进行中"}, []string{"TKT-2048", "数据库 1205"}, []string{"优先检查数据库锁等待"}, nil, []ContextGovernancePilotTodoGold{{[]string{"采集锁等待图"}, []string{"进行中"}}}, []string{"report:11111111-1111-4111-8111-111111111111"}, nil),
+					pilotCheckpoint("incident-cp2", 80, "根据新证据给出当前根因并说明被推翻的判断。", []string{"库存行锁死锁", "不是网络抖动", "report:22222222-2222-4222-8222-222222222222"}, []string{"库存行锁死锁"}, nil, []ContextGovernancePilotCorrectionGold{{[]string{"库存行锁死锁"}, []string{"根因是网络抖动"}}}, nil, []string{"report:22222222-2222-4222-8222-222222222222"}, []string{"根因仍是网络抖动"}),
+					pilotCheckpoint("incident-cp3", 120, "总结最终根因、处置决策和待办状态。", []string{"库存行锁死锁", "修正事务加锁顺序", "采集锁等待图", "已完成"}, []string{"库存行锁死锁"}, []string{"修正事务加锁顺序", "观察 30 分钟"}, nil, []ContextGovernancePilotTodoGold{{[]string{"采集锁等待图"}, []string{"已完成"}}}, []string{"report:22222222-2222-4222-8222-222222222222"}, []string{"无限重启"}),
 				},
 			),
 			buildContextPilotScenario(
@@ -240,12 +244,12 @@ func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 					{seq: 16, content: "附件 attachment:invoice-778 初次 OCR 读到批次号 B-17，置信度较低。"},
 					{seq: 36, content: "VLM 复核确认批次号实际为 B-71，不是 B-17，证据哈希 sha256:invoice-778-v2。"},
 					{seq: 66, content: "团队决定用 B-71 查询追溯表；待办是核对供应商批次，状态为进行中。"},
-					{seq: 96, content: "供应商确认 B-71 属于华东二厂，核对待办已完成，报告引用 report:invoice-778。", reportReferences: []string{"report:invoice-778"}},
+					{seq: 96, content: "供应商确认 B-71 属于华东二厂，核对待办已完成，报告引用 report:33333333-3333-4333-8333-333333333333。", reportReferences: []string{"report:33333333-3333-4333-8333-333333333333"}},
 				},
 				[]ContextGovernancePilotCheckpoint{
 					pilotCheckpoint("attachment-cp1", 40, "附件中的批次号最终识别为什么？", []string{"B-71", "不是 B-17", "sha256:invoice-778-v2"}, []string{"批次号为 B-71"}, nil, []ContextGovernancePilotCorrectionGold{{[]string{"B-71"}, []string{"批次号仍为 B-17"}}}, nil, []string{"attachment:invoice-778"}, []string{"最终批次号是 B-17"}),
 					pilotCheckpoint("attachment-cp2", 80, "当前查询决策和供应商核对待办是什么？", []string{"用 B-71 查询追溯表", "核对供应商批次", "进行中"}, nil, []string{"用 B-71 查询追溯表"}, nil, []ContextGovernancePilotTodoGold{{[]string{"核对供应商批次"}, []string{"进行中"}}}, []string{"attachment:invoice-778"}, []string{"用 B-17 查询"}),
-					pilotCheckpoint("attachment-cp3", 120, "总结批次、供应商、待办状态和报告引用。", []string{"B-71", "华东二厂", "已完成", "report:invoice-778"}, []string{"B-71 属于华东二厂"}, nil, nil, []ContextGovernancePilotTodoGold{{[]string{"核对供应商批次"}, []string{"已完成"}}}, []string{"report:invoice-778"}, []string{"B-17"}),
+					pilotCheckpoint("attachment-cp3", 120, "总结批次、供应商、待办状态和报告引用。", []string{"B-71", "华东二厂", "已完成", "report:33333333-3333-4333-8333-333333333333"}, []string{"B-71 属于华东二厂"}, nil, nil, []ContextGovernancePilotTodoGold{{[]string{"核对供应商批次"}, []string{"已完成"}}}, []string{"report:33333333-3333-4333-8333-333333333333"}, []string{"B-17"}),
 				},
 			),
 		},
