@@ -370,24 +370,25 @@ func (j ContextGovernancePilotJudge) validate() error {
 }
 
 type ContextGovernancePilotObservation struct {
-	DatasetVersion          string                                 `json:"datasetVersion"`
-	FixtureVersion          string                                 `json:"fixtureVersion"`
-	FixtureFingerprint      string                                 `json:"fixtureFingerprint"`
-	ScenarioID              string                                 `json:"scenarioId"`
-	CheckpointID            string                                 `json:"checkpointId"`
-	RunID                   string                                 `json:"runId"`
-	Arm                     ContextGovernancePilotArm              `json:"arm"`
-	Contract                ContextGovernancePilotContract         `json:"contract"`
-	SummaryContract         *ContextGovernancePilotSummaryContract `json:"summaryContract,omitempty"`
-	Answer                  string                                 `json:"answer,omitempty"`
-	MainUsage               ContextGovernancePilotUsage            `json:"mainUsage"`
-	SummaryUsage            ContextGovernancePilotUsage            `json:"summaryUsage"`
-	EstimatedPromptTokens   int                                    `json:"estimatedPromptTokens"`
-	WithinHardWindow        bool                                   `json:"withinHardWindow"`
-	FirstTokenLatencyMillis int64                                  `json:"firstTokenLatencyMillis"`
-	PromptEpochID           string                                 `json:"promptEpochId"`
-	Judge                   *ContextGovernancePilotJudge           `json:"judge,omitempty"`
-	ErrorType               string                                 `json:"errorType,omitempty"`
+	DatasetVersion             string                                 `json:"datasetVersion"`
+	FixtureVersion             string                                 `json:"fixtureVersion"`
+	FixtureFingerprint         string                                 `json:"fixtureFingerprint"`
+	ScenarioID                 string                                 `json:"scenarioId"`
+	CheckpointID               string                                 `json:"checkpointId"`
+	RunID                      string                                 `json:"runId"`
+	Arm                        ContextGovernancePilotArm              `json:"arm"`
+	Contract                   ContextGovernancePilotContract         `json:"contract"`
+	SummaryContract            *ContextGovernancePilotSummaryContract `json:"summaryContract,omitempty"`
+	Answer                     string                                 `json:"answer,omitempty"`
+	MainUsage                  ContextGovernancePilotUsage            `json:"mainUsage"`
+	SummaryUsage               ContextGovernancePilotUsage            `json:"summaryUsage"`
+	EstimatedPromptTokens      int                                    `json:"estimatedPromptTokens"`
+	WithinHardWindow           bool                                   `json:"withinHardWindow"`
+	FirstTokenLatencyMillis    int64                                  `json:"firstTokenLatencyMillis"`
+	PromptEpochID              string                                 `json:"promptEpochId"`
+	Judge                      *ContextGovernancePilotJudge           `json:"judge,omitempty"`
+	ErrorType                  string                                 `json:"errorType,omitempty"`
+	SummaryAttemptFailureCodes []string                               `json:"summaryAttemptFailureCodes,omitempty"`
 }
 
 type contextGovernancePilotObservationKey struct {
@@ -406,11 +407,20 @@ func (o ContextGovernancePilotObservation) Validate() error {
 		o.EstimatedPromptTokens < 0 || o.FirstTokenLatencyMillis < 0 ||
 		(o.PromptEpochID != "" && !conversationQualityLabelPattern.MatchString(o.PromptEpochID)) ||
 		(o.ErrorType != "" && !conversationQualityLabelPattern.MatchString(o.ErrorType)) ||
+		len(o.SummaryAttemptFailureCodes) > 10 ||
 		len([]rune(o.Answer)) > 20_000 {
 		return errors.New("context governance Pilot observation is invalid")
 	}
 	if o.Arm != PilotArmExperiment && o.SummaryUsage.TotalTokens != 0 {
 		return errors.New("only the Experiment arm may contain Summary usage")
+	}
+	if o.Arm != PilotArmExperiment && len(o.SummaryAttemptFailureCodes) > 0 {
+		return errors.New("only the Experiment arm may contain Summary failure codes")
+	}
+	for _, code := range o.SummaryAttemptFailureCodes {
+		if !conversationQualityLabelPattern.MatchString(code) || len(code) > 96 {
+			return errors.New("Summary failure code is invalid")
+		}
 	}
 	if o.Arm == PilotArmExperiment {
 		if o.SummaryContract == nil || o.SummaryContract.Validate() != nil {

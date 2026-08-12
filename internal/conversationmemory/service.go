@@ -223,6 +223,65 @@ type CompactionRepairCodeError interface {
 	CompactionRepairCode() string
 }
 
+// CompactionFailureCodeError exposes a stable, content-free failure category
+// for observability. Implementations must not return provider error text.
+type CompactionFailureCodeError interface {
+	error
+	CompactionFailureCode() string
+}
+
+// CompactionAttemptsError preserves the bounded failure category for every
+// attempted compaction while keeping errors.Is/As compatible with the final
+// cause.
+type CompactionAttemptsError struct {
+	cause        error
+	failureCodes []string
+}
+
+func NewCompactionAttemptsError(cause error, failureCodes []string) *CompactionAttemptsError {
+	normalized := make([]string, 0, len(failureCodes))
+	for _, code := range failureCodes {
+		normalized = append(normalized, NormalizeCompactionFailureCode(code))
+	}
+	return &CompactionAttemptsError{cause: cause, failureCodes: normalized}
+}
+
+func (e *CompactionAttemptsError) Error() string {
+	if e == nil {
+		return ErrCompactionFailed.Error()
+	}
+	return fmt.Sprintf("%s after %d attempts", ErrCompactionFailed, len(e.failureCodes))
+}
+
+func (e *CompactionAttemptsError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *CompactionAttemptsError) Codes() []string {
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.failureCodes...)
+}
+
+func (e *CompactionAttemptsError) AttemptCount() int {
+	if e == nil {
+		return 0
+	}
+	return len(e.failureCodes)
+}
+
+func CompactionAttemptFailureCodes(err error) []string {
+	var attempts *CompactionAttemptsError
+	if !errors.As(err, &attempts) || attempts == nil {
+		return nil
+	}
+	return attempts.Codes()
+}
+
 type Compactor interface {
 	Compact(context.Context, CompactionInput) (CompactionOutput, error)
 }
@@ -600,10 +659,13 @@ func (s *Service) generateCandidate(
 	validation := buildValidationContext(fromSeq, throughSeq, s.maxPayloadBytes, previous, newMessages, request.KnownReportReferences)
 	repairCode := ""
 	var lastErr error
+	failureCodes := make([]string, 0, lastAttempt-firstAttempt+1)
 	for attempt := firstAttempt; attempt <= lastAttempt; attempt++ {
 		if attempt > firstAttempt && s.retryBaseDelay > 0 {
 			if err := waitForRetry(ctx, s.retryDelay(attempt-firstAttempt)); err != nil {
-				return Snapshot{}, fmt.Errorf("%w: %w", ErrCompactionFailed, err)
+				return Snapshot{}, NewCompactionAttemptsError(errors.Join(
+					fmt.Errorf("%w: retry wait canceled", ErrCompactionFailed), lastErr, err,
+				), failureCodes)
 			}
 		}
 		output, compactErr := s.compactor.Compact(ctx, CompactionInput{
@@ -613,6 +675,14 @@ func (s *Service) generateCandidate(
 		})
 		if compactErr != nil {
 			lastErr = compactErr
+			var coded CompactionFailureCodeError
+			if errors.As(compactErr, &coded) {
+				failureCodes = append(failureCodes, NormalizeCompactionFailureCode(coded.CompactionFailureCode()))
+			} else if code := FailureCode(compactErr); code != "" {
+				failureCodes = append(failureCodes, code)
+			} else {
+				failureCodes = append(failureCodes, "compaction_failed")
+			}
 			var nonRetryable NonRetryableCompactionError
 			if errors.As(compactErr, &nonRetryable) && nonRetryable.NonRetryableCompaction() {
 				break
@@ -623,11 +693,13 @@ func (s *Service) generateCandidate(
 		if output.Usage.Validate() != nil {
 			lastErr = ErrInvalidSnapshot
 			repairCode = "usage_invalid"
+			failureCodes = append(failureCodes, repairCode)
 			continue
 		}
 		if validateErr := ValidatePayload(output.Payload, validation); validateErr != nil {
 			lastErr = validateErr
 			repairCode = validationRepairCode(validateErr)
+			failureCodes = append(failureCodes, repairCode)
 			continue
 		}
 		id, idErr := uuid.NewV7()
@@ -647,12 +719,68 @@ func (s *Service) generateCandidate(
 		if candidateErr != nil {
 			lastErr = candidateErr
 			repairCode = "snapshot_invalid"
+			failureCodes = append(failureCodes, repairCode)
 			continue
 		}
 		return s.repository.Save(ctx, candidate)
 	}
-	return Snapshot{}, fmt.Errorf("%w after %d attempts: %w", ErrCompactionFailed,
-		lastAttempt-firstAttempt+1, lastErr)
+	return Snapshot{}, NewCompactionAttemptsError(fmt.Errorf("%w after %d attempts: %w", ErrCompactionFailed,
+		lastAttempt-firstAttempt+1, lastErr), failureCodes)
+}
+
+var compactionFailureCodes = map[string]struct{}{
+	"provider_http_400": {}, "provider_http_401": {}, "provider_http_403": {},
+	"provider_http_429": {}, "provider_http_5xx": {}, "provider_timeout": {},
+	"provider_canceled": {}, "provider_connection_failed": {}, "provider_request_failed": {},
+	"compaction_failed": {}, "usage_invalid": {}, "snapshot_invalid": {}, "output_truncated": {},
+	"output_too_large": {},
+}
+
+func NormalizeCompactionFailureCode(code string) string {
+	code = strings.TrimSpace(code)
+	if _, ok := compactionFailureCodes[code]; ok {
+		return code
+	}
+	if validDomainCompactionFailureCode(code) {
+		return code
+	}
+	return "compaction_failed"
+}
+
+func validDomainCompactionFailureCode(code string) bool {
+	switch code {
+	case "user_source_required", "source_out_of_range", "entry_reference_unknown", "stable_reference_unknown",
+		"supersede_cycle", "multiple_active_entries", "correction_target_required", "payload_too_large",
+		"payload_schema_empty", "payload_schema_top_level_json", "payload_schema_top_level_extra_fields",
+		"payload_schema_null_array", "payload_schema_invalid", "entry_entry_id", "entry_content",
+		"entry_source_count", "entry_source_order", "entry_source_duplicate", "entry_invalid", "entry_status":
+		return true
+	}
+	const missingPrefix = "payload_schema_top_level_missing_"
+	if strings.HasPrefix(code, missingPrefix) {
+		return validPayloadSchemaField(strings.TrimPrefix(code, missingPrefix))
+	}
+	const fieldPrefix = "payload_schema_field_"
+	if !strings.HasPrefix(code, fieldPrefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(code, fieldPrefix)
+	for _, kind := range []string{"invalid", "object", "array", "string", "null", "boolean", "number"} {
+		if field := strings.TrimSuffix(remainder, "_"+kind); field != remainder && validPayloadSchemaField(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func validPayloadSchemaField(field string) bool {
+	switch field {
+	case "conversation_goal", "facts", "decisions", "corrections", "evidence_references",
+		"open_questions", "todos", "task_references", "report_references":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) retryDelay(retryNumber int) time.Duration {
