@@ -653,7 +653,7 @@ Pilot：4 个会话剧本，每个 3 个检查点；Acceptance：12 个会话剧
 历史消息直接预置，不为构造 100 轮历史调用 100 次模型。检查点才调用 Summary、主模型和可选
 Judge。
 
-当前 Pilot 固定集版本为 `fixture-2026-08-12-v4`。v4 为包含报告引用的里程碑增加了结构化
+当前 Pilot 固定集版本为 `fixture-2026-08-12-v5`。v5 为包含报告引用的里程碑增加了结构化
 `reportReferences`，Observer 按真实消息序号构造 `knownReportReferences` 白名单；正文中的
 `report:*` 字符串不再被当作权威引用来源。该合同变化会改变 Fixture 指纹，v3 Observation 不得与
 v4 混合恢复或汇总。生产本地估算器已固定压力梯度：每个场景
@@ -734,7 +734,7 @@ Provider 调用前 fail-fast。领域校验错误由 `conversationmemory.Failure
 Observer 专用 60 秒覆盖运行，Provider 报告输入 61,561、输出 4,096 Token，暴露一次输出顶满
 波动。最终以 `summary-attempts=1` 复测成功：Summary 输入 61,632、输出 3,542、缓存 896 Token，
 主模型输入 12,303、输出 249 Token，总耗时 38.57 秒，回答正确保留“库存行锁死锁替代网络抖动”
-和 `report:diag-2048-b`。据此生产 Summary 单次超时调整为 60 秒，Conversation 总截止时间调整为
+和后续替代它的结构化诊断报告引用。据此生产 Summary 单次超时调整为 60 秒，Conversation 总截止时间调整为
 120 秒；同步硬压缩另设 90 秒阶段上限，始终为主回答预留至少约 30 秒。三次修复重试是请求
 截止时间内的尝试上限，不承诺每次都耗满 60 秒；异步软压缩仍由 Worker 的持久化重试完成。
 
@@ -799,15 +799,18 @@ Payload 不超过 24 个 Entry、单条内容不超过 120 个中文字符、每
 v3 单次探针将输出从 6,144 降至 2,896 Token，证明容量策略有效，但领域校验仍返回泛化
 `stable_reference_unknown`。检查发现生产同步压缩没有可信报告引用输入，而 Pilot 当时也只把
 `report:*` 写进自然语言正文。Fixture v4 因此增加结构化 `reportReferences` 并由 Timeline 映射到
-真实消息序号；`AgentRequest` 同时预留显式 `KnownReportReferences` 运行期合同并透传到压缩服务。
+真实消息序号；生产实现则把报告引用建模为消息上的不可变结构化关系。
 Prompt 再升级为 `conversation-memory-v4`，明确正文中的类引用文本不是授权，只有结构化
 `taskReferences`、`citations` 和 `knownReportReferences` 可以生成 Reference Entry。稳定引用校验
 也细分为 evidence/task/report 的 `id_unknown`、`identity_mismatch` 和 `source_mismatch`，仍不记录
 实际 ID 或来源值。
 
-当前生产仍缺少“诊断报告引用随会话消息持久化并在加载历史时重建白名单”的数据库闭环；本轮仅
-完成运行期合同和 Pilot 的可信 Fixture，不能据此宣称生产报告引用记忆已完成。后续需要新增会话
-报告引用关联表、Repository 读写与诊断完成消息接入，再补 PostgreSQL 集成测试。
+生产报告引用闭环现已接通：`get_diagnosis_task_status` 仍先通过当前用户消息上的 Task Reference 和
+任务所有权校验，只有返回真实 `ReportID` 时才把 `report:<uuid>` 记录到本轮受控 Trace；Runner 将
+Trace 快照附到助手消息，`conversation_report_references` 通过报告、任务和创建者关系做外键写入，
+Repository 在加载历史时回读。`conversationmemory.Service` 从 `CompletedMessages` 的结构化关系自行
+重建 `KnownReportReferences`，同步硬压缩和异步软压缩共用同一规则。调用方不再能直接传入白名单，
+自然语言正文中的 `report:*` 也不会获得授权。
 
 Fixture v4 + Prompt v4 的单次 `cp2 Experiment` 探针输入 62,074、输出 3,033、缓存命中 704 Token，
 耗时 30.872 秒，未再触发容量或报告引用错误，但以 `task_reference_id_unknown` 被拒绝。模型仍把正文

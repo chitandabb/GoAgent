@@ -251,14 +251,14 @@ func TestPilotErrorTypePreservesCompactionFailureStage(t *testing.T) {
 	}
 }
 
-func TestPilotTimelineExposesOnlyReportReferencesAlreadyObserved(t *testing.T) {
+func TestPilotTimelineAttachesOnlyReportReferencesAlreadyObserved(t *testing.T) {
 	dataset := mesagent.ContextGovernancePilotFixture()
 	scenario := dataset.Scenarios[0]
 	timeline := newPilotScenarioTimeline(scenario, "experiment", uuid.New())
 	if _, _, err := timeline.Request(scenario.Checkpoints[0]); err != nil {
 		t.Fatal(err)
 	}
-	if got := timeline.KnownReportReferences(); !reflect.DeepEqual(got, map[string][]int64{"report:diag-2048-a": {20}}) {
+	if got := reportReferencesFromMessages(timeline.history); !reflect.DeepEqual(got, map[string][]int64{"report:11111111-1111-4111-8111-111111111111": {20}}) {
 		t.Fatalf("cp1 report references = %#v", got)
 	}
 	current := conversation.Message{ID: uuid.New(), Seq: 41}
@@ -266,10 +266,23 @@ func TestPilotTimelineExposesOnlyReportReferencesAlreadyObserved(t *testing.T) {
 	if _, _, err := timeline.Request(scenario.Checkpoints[1]); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][]int64{"report:diag-2048-a": {20}, "report:diag-2048-b": {72}}
-	if got := timeline.KnownReportReferences(); !reflect.DeepEqual(got, want) {
+	want := map[string][]int64{
+		"report:11111111-1111-4111-8111-111111111111": {20},
+		"report:22222222-2222-4222-8222-222222222222": {72},
+	}
+	if got := reportReferencesFromMessages(timeline.history); !reflect.DeepEqual(got, want) {
 		t.Fatalf("cp2 report references = %#v, want %#v", got, want)
 	}
+}
+
+func reportReferencesFromMessages(messages []conversation.Message) map[string][]int64 {
+	result := make(map[string][]int64)
+	for _, message := range messages {
+		for _, reference := range message.ReportReferences {
+			result[reference.ReferenceID] = append(result[reference.ReferenceID], message.Seq)
+		}
+	}
+	return result
 }
 
 func TestPilotErrorTypeDistinguishesSummaryAndAgentTimeout(t *testing.T) {

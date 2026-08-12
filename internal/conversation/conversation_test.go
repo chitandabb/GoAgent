@@ -123,7 +123,10 @@ func TestServiceExecuteTurnPersistsAssistantAndCreatedTaskReference(t *testing.T
 	repository := &turnRepositoryStub{
 		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
 	}
-	agent := &conversationAgentResponderStub{response: AgentResponse{Content: "  已创建异步诊断任务。  "}}
+	reportReference := ReportReference{ReferenceID: "report:" + uuid.NewString()}
+	agent := &conversationAgentResponderStub{response: AgentResponse{
+		Content: "  已创建异步诊断任务。  ", ReportReferences: []ReportReference{reportReference},
+	}}
 	agent.hook = func(ctx context.Context, request AgentRequest) error {
 		commandContext, ok := CommandContextFromContext(ctx)
 		if !ok || commandContext.ConversationID != conversationID || commandContext.UserMessageID != request.UserMessage.ID {
@@ -151,8 +154,21 @@ func TestServiceExecuteTurnPersistsAssistantAndCreatedTaskReference(t *testing.T
 		turn.AssistantMessage.TaskReferences[0] != (TaskReference{TaskID: taskID, Kind: ReferenceKindCreated}) {
 		t.Fatalf("assistant task references = %+v", turn.AssistantMessage.TaskReferences)
 	}
+	if len(turn.AssistantMessage.ReportReferences) != 1 || turn.AssistantMessage.ReportReferences[0] != reportReference {
+		t.Fatalf("assistant report references = %+v", turn.AssistantMessage.ReportReferences)
+	}
 	if len(repository.messages) != 2 || agent.calls != 1 || agent.request.UserMessage.ID != turn.UserMessage.ID {
 		t.Fatalf("messages=%d agent calls=%d request=%+v", len(repository.messages), agent.calls, agent.request)
+	}
+}
+
+func TestAgentResponseRejectsNonUUIDReportReference(t *testing.T) {
+	response := AgentResponse{
+		Content:          "报告已生成。",
+		ReportReferences: []ReportReference{{ReferenceID: "report:invented"}},
+	}
+	if err := response.Validate(); !errors.Is(err, ErrAgentResponseInvalid) {
+		t.Fatalf("Validate() error = %v, want ErrAgentResponseInvalid", err)
 	}
 }
 
@@ -466,9 +482,10 @@ func (s *turnRepositoryStub) AppendMessage(_ context.Context, userID uuid.UUID, 
 	message := Message{
 		ID: uuid.New(), ConversationID: input.ConversationID, Seq: int64(len(s.messages) + 1),
 		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
-		CaseReferences: append([]CaseReference(nil), input.CaseReferences...),
-		TaskReferences: append([]TaskReference(nil), input.TaskReferences...),
-		Citations:      append([]MessageCitation(nil), input.Citations...), CreatedAt: createdAt,
+		CaseReferences:   append([]CaseReference(nil), input.CaseReferences...),
+		TaskReferences:   append([]TaskReference(nil), input.TaskReferences...),
+		ReportReferences: append([]ReportReference(nil), input.ReportReferences...),
+		Citations:        append([]MessageCitation(nil), input.Citations...), CreatedAt: createdAt,
 	}
 	s.messages = append(s.messages, message)
 	return message, nil
@@ -563,7 +580,8 @@ func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid
 		}
 		assistant, err := s.AppendMessage(context.Background(), userID, AppendMessageInput{
 			ConversationID: s.conversation.ID, Role: MessageRoleAssistant,
-			Content: response.Content, TaskReferences: created, Citations: response.Citations,
+			Content: response.Content, TaskReferences: created,
+			ReportReferences: response.ReportReferences, Citations: response.Citations,
 		}, completedAt)
 		if err != nil {
 			return ConversationTurn{}, err

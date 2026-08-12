@@ -257,7 +257,8 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
 		request.UserMessage,
 	}
-	request.KnownReportReferences = map[string][]int64{"report:diag-1": {1}}
+	reportReferenceID := "report:" + uuid.NewString()
+	request.History[0].ReportReferences = []conversation.ReportReference{{ReferenceID: reportReferenceID}}
 	memory := &conversationMemoryStub{prepared: conversationActiveSummaryFixture(t, request.Conversation.ID, 2)}
 	preflight.SummaryTailEnabled = true
 	preflight.Memory = memory
@@ -287,7 +288,8 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 	}
 	if len(memory.prepareRequests) != 1 || len(memory.prepareRequests[0].CompletedMessages) != 2 ||
 		memory.prepareRequests[0].CompletedMessages[1].Seq != 2 ||
-		!slices.Equal(memory.prepareRequests[0].KnownReportReferences["report:diag-1"], []int64{1}) {
+		len(memory.prepareRequests[0].CompletedMessages[0].ReportReferences) != 1 ||
+		memory.prepareRequests[0].CompletedMessages[0].ReportReferences[0].ReferenceID != reportReferenceID {
 		t.Fatalf("hard-compaction completed messages = %+v", memory.prepareRequests)
 	}
 	for _, message := range memory.prepareRequests[0].CompletedMessages {
@@ -1431,4 +1433,14 @@ func conversationRunnerRequest(references []conversation.CaseReference) (convers
 		Actor:          conversation.Actor{UserID: userID},
 	})
 	return request, ctx
+}
+
+func TestConversationMessageReferencePromptIncludesStructuredReportReference(t *testing.T) {
+	referenceID := "report:" + uuid.NewString()
+	prompt := conversationMessageReferencePrompt(conversation.Message{
+		ReportReferences: []conversation.ReportReference{{ReferenceID: referenceID}},
+	})
+	if !strings.Contains(prompt, "report id="+referenceID) || !strings.Contains(prompt, "<message_references>") {
+		t.Fatalf("report reference prompt = %q", prompt)
+	}
 }

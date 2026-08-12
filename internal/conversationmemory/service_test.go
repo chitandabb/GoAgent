@@ -263,6 +263,57 @@ func TestConversationMemoryPreparesAndActivatesInitialSnapshot(t *testing.T) {
 	}
 }
 
+func TestConversationMemoryBuildsReportWhitelistFromStructuredMessages(t *testing.T) {
+	conversationID := uuid.New()
+	reportID := "report:" + uuid.NewString()
+	messages := initialMessages(conversationID)
+	messages[0].Content = "正文伪造 report:forged"
+	messages[1].ReportReferences = []conversation.ReportReference{{ReferenceID: reportID}}
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		if !reflect.DeepEqual(input.KnownReportReferences, map[string][]int64{reportID: {messages[1].Seq}}) {
+			t.Fatalf("known report references = %+v", input.KnownReportReferences)
+		}
+		if _, exists := input.KnownReportReferences["report:forged"]; exists {
+			t.Fatal("free-text report reference was trusted")
+		}
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25},
+		}, nil
+	}), time.Now().UTC(), 1)
+	if _, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: messages,
+		ActivationGate: acceptConversationMemoryActivation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConversationMemoryCompactionInputClonesReportReferences(t *testing.T) {
+	conversationID := uuid.New()
+	messages := initialMessages(conversationID)
+	reportID := "report:" + uuid.NewString()
+	messages[0].ReportReferences = []conversation.ReportReference{{ReferenceID: reportID}}
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		input.NewMessages[0].ReportReferences[0].ReferenceID = "report:" + uuid.NewString()
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25},
+		}, nil
+	}), time.Now().UTC(), 1)
+	if _, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: messages,
+		ActivationGate: acceptConversationMemoryActivation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if messages[0].ReportReferences[0].ReferenceID != reportID {
+		t.Fatalf("caller-owned report reference mutated to %q", messages[0].ReportReferences[0].ReferenceID)
+	}
+}
+
 func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.T) {
 	conversationID := uuid.New()
 	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}

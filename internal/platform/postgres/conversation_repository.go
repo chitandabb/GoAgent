@@ -914,7 +914,7 @@ FOR UPDATE`, turnID, userID).Scan(&turn)
 		assistantMessage, err := insertConversationMessage(tx, userID, conversation.AppendMessageInput{
 			ConversationID: turn.ConversationID, Role: conversation.MessageRoleAssistant,
 			Content: response.Content, TaskReferences: createdTaskReferences(userMessage),
-			Citations: response.Citations,
+			ReportReferences: response.ReportReferences, Citations: response.Citations,
 		}, assistantMessageID, completedAt)
 		if err != nil {
 			return err
@@ -1287,7 +1287,7 @@ FOR UPDATE`, turnID, userID).Scan(&turn)
 		assistantMessage, err := insertConversationMessage(tx, userID, conversation.AppendMessageInput{
 			ConversationID: turn.ConversationID, Role: conversation.MessageRoleAssistant,
 			Content: response.Content, TaskReferences: createdTaskReferences(userMessage),
-			Citations: response.Citations,
+			ReportReferences: response.ReportReferences, Citations: response.Citations,
 		}, assistantMessageID, completedAt)
 		if err != nil {
 			return err
@@ -1536,6 +1536,30 @@ INSERT INTO conversation_task_references (message_id, task_id, reference_kind, c
 SELECT ?, id, ?, ?
 FROM diagnosis_tasks
 WHERE id = ? AND created_by = ?`, id, ref.Kind, createdAt, ref.TaskID, userID)
+		if query.Error != nil {
+			return conversation.Message{}, TranslateError(query.Error)
+		}
+		if query.RowsAffected != 1 {
+			return conversation.Message{}, repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+	}
+	for _, ref := range input.ReportReferences {
+		reportID, err := uuid.Parse(strings.TrimPrefix(ref.ReferenceID, "report:"))
+		if err != nil || reportID == uuid.Nil {
+			return conversation.Message{}, conversation.ErrInvalidMessage
+		}
+		query = tx.Exec(`
+INSERT INTO conversation_report_references (message_id, report_id, created_at)
+SELECT ?, report.id, ?
+FROM diagnosis_reports report
+JOIN diagnosis_tasks task ON task.id = report.task_id
+WHERE report.id = ? AND task.created_by = ?
+  AND EXISTS (
+      SELECT 1
+      FROM conversation_task_references task_reference
+      JOIN conversation_messages referenced_message ON referenced_message.id = task_reference.message_id
+      WHERE task_reference.task_id = task.id AND referenced_message.conversation_id = ?
+  )`, id, createdAt, reportID, userID, input.ConversationID)
 		if query.Error != nil {
 			return conversation.Message{}, TranslateError(query.Error)
 		}
@@ -1842,6 +1866,20 @@ WHERE message_id IN ?`, ids).Scan(&taskRefs).Error; err != nil {
 		if position, ok := index[ref.MessageID]; ok {
 			messages[position].TaskReferences = append(messages[position].TaskReferences, conversation.TaskReference{
 				TaskID: ref.TaskID, Kind: ref.Kind,
+			})
+		}
+	}
+	var reportRefs []reportReferenceRecord
+	if err := db.Raw(`
+SELECT message_id, report_id
+FROM conversation_report_references
+WHERE message_id IN ?`, ids).Scan(&reportRefs).Error; err != nil {
+		return TranslateError(err)
+	}
+	for _, ref := range reportRefs {
+		if position, ok := index[ref.MessageID]; ok {
+			messages[position].ReportReferences = append(messages[position].ReportReferences, conversation.ReportReference{
+				ReferenceID: "report:" + ref.ReportID.String(),
 			})
 		}
 	}
@@ -2386,6 +2424,11 @@ type taskReferenceRecord struct {
 	MessageID uuid.UUID                  `gorm:"column:message_id"`
 	TaskID    uuid.UUID                  `gorm:"column:task_id"`
 	Kind      conversation.ReferenceKind `gorm:"column:reference_kind"`
+}
+
+type reportReferenceRecord struct {
+	MessageID uuid.UUID `gorm:"column:message_id"`
+	ReportID  uuid.UUID `gorm:"column:report_id"`
 }
 
 type messageAttachmentRecord struct {

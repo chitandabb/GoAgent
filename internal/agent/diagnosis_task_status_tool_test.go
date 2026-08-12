@@ -25,7 +25,11 @@ func TestGetDiagnosisTaskStatusToolReturnsSafeProgressSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGetDiagnosisTaskStatusTool(): %v", err)
 	}
-	result, err := current.InvokableRun(context.Background(), `{"taskId":"`+taskID.String()+`"}`)
+	trace := &conversationReportReferenceTrace{}
+	result, err := current.InvokableRun(
+		withConversationReportReferenceTrace(context.Background(), trace),
+		`{"taskId":"`+taskID.String()+`"}`,
+	)
 	if err != nil {
 		t.Fatalf("InvokableRun(): %v", err)
 	}
@@ -39,6 +43,27 @@ func TestGetDiagnosisTaskStatusToolReturnsSafeProgressSummary(t *testing.T) {
 	}
 	if reader.taskID != taskID {
 		t.Fatalf("reader task id = %s, want %s", reader.taskID, taskID)
+	}
+	if got := trace.snapshot(); len(got) != 1 || got[0].ReferenceID != "report:"+reportID.String() {
+		t.Fatalf("report references = %+v", got)
+	}
+}
+
+func TestGetDiagnosisTaskStatusToolDoesNotInventUnavailableReportReference(t *testing.T) {
+	taskID := uuid.New()
+	reader := &diagnosisTaskStatusReaderStub{result: conversation.DiagnosisTaskStatusResult{
+		Task: diagnosis.DiagnosisTask{ID: taskID, Status: diagnosis.TaskRunning, UpdatedAt: time.Now()},
+	}}
+	current, _ := NewGetDiagnosisTaskStatusTool(reader)
+	trace := &conversationReportReferenceTrace{}
+	if _, err := current.InvokableRun(
+		withConversationReportReferenceTrace(context.Background(), trace),
+		`{"taskId":"`+taskID.String()+`"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := trace.snapshot(); len(got) != 0 {
+		t.Fatalf("report references = %+v, want none", got)
 	}
 }
 
