@@ -726,9 +726,23 @@ Usage、延迟和阶段可审计，同时不会把敏感 Prompt 或摘要泄露�
 Provider 调用前 fail-fast。领域校验错误由 `conversationmemory.FailureCode` 统一归一化，生产
 修复提示、Smoke 和 Pilot 只添加各自阶段语义，避免同一错误在三处产生不同统计名称。
 
-长输入延迟仍是独立未完成验收项：88,727 Token 样本在 30 秒超时，短输入 Smoke 不能证明
-生产长摘要可用。下一轮只选择一个最低压力但确实触发硬压缩的固定检查点，在调用/Token/费用
-门禁下测 60 秒或 90 秒上限；依据实测延迟分布决定摘要 Profile 超时，不凭单次短 Smoke 猜值。
+长输入延迟已完成单检查点探针。固定 `incident-correction/incident-cp2/experiment` 的压缩前
+本地估算为 88,727 Token：30 秒配置只产生 1 次 Summary、0 次主模型调用且无 Usage；随后用
+Observer 专用 60 秒覆盖运行，Provider 报告输入 61,561、输出 4,096 Token，暴露一次输出顶满
+波动。最终以 `summary-attempts=1` 复测成功：Summary 输入 61,632、输出 3,542、缓存 896 Token，
+主模型输入 12,303、输出 249 Token，总耗时 38.57 秒，回答正确保留“库存行锁死锁替代网络抖动”
+和 `report:diag-2048-b`。据此生产 Summary 单次超时调整为 60 秒，Conversation 总截止时间调整为
+120 秒；同步硬压缩另设 90 秒阶段上限，始终为主回答预留至少约 30 秒。三次修复重试是请求
+截止时间内的尝试上限，不承诺每次都耗满 60 秒；异步软压缩仍由 Worker 的持久化重试完成。
+
+`finish_reason=length` 现在映射为稳定的 `summary_output_truncated`，并在重试时传入
+`repairCode=output_truncated`，要求模型删除重复和低价值条目，而不是把截断误报为泛化 Provider
+失败。Observer 的 `summary-timeout`/`summary-attempts` 仅覆盖评测进程，不修改生产配置；每次
+请求仍受调用、累计 Prompt Token 和费用门禁约束。单检查点成功只完成长摘要延迟与链路验收，
+不等于 4 场景 Pilot 或 12 场景 Acceptance 已通过。
+
+进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
+Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。
 
 ### 15.3 指标
 

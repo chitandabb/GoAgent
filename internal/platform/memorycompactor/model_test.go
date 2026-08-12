@@ -121,3 +121,27 @@ func TestModelCompactorRejectsMalformedOrOversizedOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestModelCompactorRejectsLengthTruncatedOutputBeforeJSONDecode(t *testing.T) {
+	for _, content := range []string{`{"conversationGoal":`, ""} {
+		compactor, err := memorycompactor.New(memorycompactor.Config{
+			Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+				return &schema.Message{
+					Role: schema.Assistant, Content: content,
+					ResponseMeta: &schema.ResponseMeta{FinishReason: "length"},
+				}, nil
+			}),
+			Prompt: "Return JSON.", PromptVersion: "memory-v1", Timeout: time.Second, MaxOutputBytes: 1024,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = compactor.Compact(context.Background(), conversationmemory.CompactionInput{
+			ConversationID: uuid.New(), FromSeq: 1, ThroughSeq: 1, Attempt: 1,
+			NewMessages: []conversation.Message{{ID: uuid.New(), ConversationID: uuid.New(), Seq: 1, Role: conversation.MessageRoleUser, Content: "x"}},
+		})
+		if !errors.Is(err, memorycompactor.ErrOutputTruncated) {
+			t.Fatalf("Compact(content=%q) error = %v, want ErrOutputTruncated", content, err)
+		}
+	}
+}

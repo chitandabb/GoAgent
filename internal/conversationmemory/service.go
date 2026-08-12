@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"regexp"
 	"sort"
 	"strings"
@@ -216,6 +218,11 @@ type NonRetryableCompactionError interface {
 	NonRetryableCompaction() bool
 }
 
+type CompactionRepairCodeError interface {
+	error
+	CompactionRepairCode() string
+}
+
 type Compactor interface {
 	Compact(context.Context, CompactionInput) (CompactionOutput, error)
 }
@@ -251,38 +258,44 @@ type ActivationRepository interface {
 }
 
 type ServiceConfig struct {
-	Repository      ActivationRepository
-	Compactor       Compactor
-	SchemaVersion   int
-	MaxPayloadBytes int
-	Provenance      SummaryProvenance
-	MaxAttempts     int
-	RetryBaseDelay  time.Duration
-	Clock           func() time.Time
-	Cache           SnapshotCache
-	CacheExpected   bool
-	CacheObserver   CacheObserver
+	Repository       ActivationRepository
+	Compactor        Compactor
+	SchemaVersion    int
+	MaxPayloadBytes  int
+	Provenance       SummaryProvenance
+	MaxAttempts      int
+	RetryBaseDelay   time.Duration
+	RetryJitterRatio float64
+	RandomFloat      func() float64
+	Clock            func() time.Time
+	Cache            SnapshotCache
+	CacheExpected    bool
+	CacheObserver    CacheObserver
 }
 
 type Service struct {
-	repository      ActivationRepository
-	compactor       Compactor
-	schemaVersion   int
-	maxPayloadBytes int
-	provenance      SummaryProvenance
-	maxAttempts     int
-	retryBaseDelay  time.Duration
-	clock           func() time.Time
-	cache           SnapshotCache
-	cacheExpected   bool
-	cacheObserver   CacheObserver
+	repository       ActivationRepository
+	compactor        Compactor
+	schemaVersion    int
+	maxPayloadBytes  int
+	provenance       SummaryProvenance
+	maxAttempts      int
+	retryBaseDelay   time.Duration
+	retryJitterRatio float64
+	randomFloat      func() float64
+	clock            func() time.Time
+	cache            SnapshotCache
+	cacheExpected    bool
+	cacheObserver    CacheObserver
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
 	if config.Repository == nil || config.Compactor == nil || config.SchemaVersion != CurrentSchemaVersion ||
 		config.MaxPayloadBytes < 1024 || config.MaxPayloadBytes > 1024*1024 ||
 		config.Provenance.Validate() != nil ||
-		config.MaxAttempts < 1 || config.MaxAttempts > 5 || config.RetryBaseDelay < 0 || config.RetryBaseDelay > time.Minute {
+		config.MaxAttempts < 1 || config.MaxAttempts > 5 || config.RetryBaseDelay < 0 || config.RetryBaseDelay > time.Minute ||
+		math.IsNaN(config.RetryJitterRatio) || math.IsInf(config.RetryJitterRatio, 0) ||
+		config.RetryJitterRatio < 0 || config.RetryJitterRatio > 0.50 {
 		return nil, ErrInvalidSnapshot
 	}
 	if config.Cache != nil && !config.CacheExpected {
@@ -292,11 +305,16 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if clock == nil {
 		clock = time.Now
 	}
+	randomFloat := config.RandomFloat
+	if randomFloat == nil {
+		randomFloat = rand.Float64
+	}
 	return &Service{
 		repository: config.Repository, compactor: config.Compactor, schemaVersion: config.SchemaVersion,
 		maxPayloadBytes: config.MaxPayloadBytes,
 		provenance:      config.Provenance.normalized(),
-		maxAttempts:     config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay, clock: clock,
+		maxAttempts:     config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay,
+		retryJitterRatio: config.RetryJitterRatio, randomFloat: randomFloat, clock: clock,
 		cache: config.Cache, cacheExpected: config.CacheExpected, cacheObserver: config.CacheObserver,
 	}, nil
 }
@@ -584,7 +602,7 @@ func (s *Service) generateCandidate(
 	var lastErr error
 	for attempt := firstAttempt; attempt <= lastAttempt; attempt++ {
 		if attempt > firstAttempt && s.retryBaseDelay > 0 {
-			if err := waitForRetry(ctx, s.retryBaseDelay*time.Duration(1<<(attempt-firstAttempt-1))); err != nil {
+			if err := waitForRetry(ctx, s.retryDelay(attempt-firstAttempt)); err != nil {
 				return Snapshot{}, fmt.Errorf("%w: %w", ErrCompactionFailed, err)
 			}
 		}
@@ -635,6 +653,20 @@ func (s *Service) generateCandidate(
 	}
 	return Snapshot{}, fmt.Errorf("%w after %d attempts: %w", ErrCompactionFailed,
 		lastAttempt-firstAttempt+1, lastErr)
+}
+
+func (s *Service) retryDelay(retryNumber int) time.Duration {
+	base := s.retryBaseDelay * time.Duration(1<<(retryNumber-1))
+	if s.retryJitterRatio == 0 {
+		return base
+	}
+	random := s.randomFloat()
+	if random < 0 {
+		random = 0
+	} else if random > 1 {
+		random = 1
+	}
+	return time.Duration(float64(base) * (1 + (random*2-1)*s.retryJitterRatio))
 }
 
 func noMessagesAfter(messages []conversation.Message, throughSeq int64) bool {
@@ -769,6 +801,10 @@ func validationRepairCode(err error) string {
 }
 
 func compactionRepairCode(err error) string {
+	var coded CompactionRepairCodeError
+	if errors.As(err, &coded) && coded.CompactionRepairCode() != "" {
+		return coded.CompactionRepairCode()
+	}
 	if code := FailureCode(err); strings.HasPrefix(code, "payload_schema_") {
 		return code
 	}

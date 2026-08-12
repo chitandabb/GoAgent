@@ -39,6 +39,7 @@ type ConversationContextPreflightConfig struct {
 	HardThresholdRatio      float64
 	ToolGrowthReserveTokens int
 	PreflightTimeout        time.Duration
+	SyncCompactionTimeout   time.Duration
 	PreloadedSkill          string
 }
 
@@ -81,7 +82,8 @@ func (c ConversationContextPreflightConfig) validate(modelProvider, modelID stri
 		math.IsNaN(c.SummaryMaxRatio) || math.IsInf(c.SummaryMaxRatio, 0) ||
 		c.MemoryMaxRatio <= 0 || c.MemoryMaxRatio > contextgovernance.MaxTailWindowRatio ||
 		c.SummaryMaxRatio <= 0 || c.SummaryMaxRatio > 0.05 ||
-		c.SummaryMaxRatio+c.TailMaxRatio > c.MemoryMaxRatio+1e-12) {
+		c.SummaryMaxRatio+c.TailMaxRatio > c.MemoryMaxRatio+1e-12 ||
+		c.SyncCompactionTimeout < time.Second || c.SyncCompactionTimeout > 5*time.Minute) {
 		return errors.New("conversation Summary + Tail configuration is invalid")
 	}
 	return nil

@@ -71,3 +71,4 @@ Reference Entry 在普通 Entry 字段之外还包含：
 - `reportReferences` 的 `referenceType` 固定为 `diagnosis_report`，`referenceId` 和 `sourceMessageSeqs` 必须来自同一个 `knownReportReferences` 条目，不输出 `contentSha256`。
 
 如果 `repairCode` 非空，修复对应结构问题，但仍只根据可信输入生成内容。不要为了通过校验而捏造来源、ID、事实或引用。
+如果 `repairCode` 为 `output_truncated`，必须显著缩短输出：只保留仍会影响后续回答的目标、当前有效事实、决策、修正、未完成待办和稳定引用；删除寒暄、重复表述、已被替代且不再需要追溯的细节，并避免为同一结论生成多个 Entry。

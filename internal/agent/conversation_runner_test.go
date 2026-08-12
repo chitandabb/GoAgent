@@ -1408,6 +1408,7 @@ func newConversationContinuousPreflightForTest(
 		ContinuousTailEnabled: true, TailMaxRatio: tailMaxRatio,
 		ModelProfile: profile, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
 		ToolGrowthReserveTokens: toolGrowthReserveTokens, PreflightTimeout: 100 * time.Millisecond,
+		SyncCompactionTimeout: time.Second,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,6 +35,20 @@ func TestRunWithoutExecuteProviderOnlyPrintsBoundedPlan(t *testing.T) {
 		plan.SummaryCalls != 12 || plan.ProviderCalls != 48 || plan.EstimatedCostCNY != 4.716 ||
 		plan.MaxProviderCalls != 200 || plan.MaxCostCNY != 10 || plan.Concurrency != 1 {
 		t.Fatalf("default provider-free plan = %+v", plan)
+	}
+}
+
+func TestRunRejectsUnsafeSummaryTimeoutOverrideBeforeProvider(t *testing.T) {
+	for _, value := range []string{"500ms", "6m"} {
+		if err := run([]string{"-summary-timeout", value}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("run accepted unsafe Summary timeout %q", value)
+		}
+	}
+}
+
+func TestRunRejectsUnsafeSummaryAttemptOverrideBeforeProvider(t *testing.T) {
+	if err := run([]string{"-summary-attempts", "6"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("run accepted unsafe Summary attempt override")
 	}
 }
 
@@ -122,6 +137,20 @@ func TestPilotErrorTypeDistinguishesSummaryAndAgentTimeout(t *testing.T) {
 	}
 	if got := pilotErrorType(context.DeadlineExceeded); got != "agent_timeout" {
 		t.Fatalf("pilotErrorType(agent timeout) = %q, want agent_timeout", got)
+	}
+}
+
+func TestPilotErrorTypeRecognizesWrappedNetworkTimeout(t *testing.T) {
+	networkTimeout := &net.DNSError{IsTimeout: true, Err: "timeout", Name: "provider.invalid"}
+	err := fmt.Errorf("outer: %w", fmt.Errorf("%w: %w", memorycompactor.ErrProviderRequest, networkTimeout))
+	if got := pilotErrorType(err); got != "summary_timeout" {
+		t.Fatalf("pilotErrorType(network timeout) = %q, want summary_timeout", got)
+	}
+}
+
+func TestPilotErrorTypeRecognizesTruncatedSummary(t *testing.T) {
+	if got := pilotErrorType(memorycompactor.ErrOutputTruncated); got != "summary_output_truncated" {
+		t.Fatalf("pilotErrorType(truncated) = %q, want summary_output_truncated", got)
 	}
 }
 
