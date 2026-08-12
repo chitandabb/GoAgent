@@ -106,6 +106,11 @@ remains an acceptance target and must be replaced by the fixed-set result if the
       now uses a 60-second Summary timeout, a 90-second synchronous compaction phase, and a 120-second
       Conversation deadline that reserves answer time; length truncation has a stable repair code, retries use
       exponential backoff plus jitter, and observer-only timeout/attempt overrides remain cost-gated.
+- [x] Make the Provider Pilot resumable and checkpoint-paired: existing JSONL is strictly validated and
+      de-duplicated, failed observations remain immutable evidence, only missing runs consume the next batch
+      budget, fixture/content and runtime contract drift fail before Provider access, each paid observation is
+      atomically persisted with backup rollback, and stale Gate reports are invalidated until all 36
+      Current/Baseline/Experiment observations are present.
 - [ ] After explicit cost approval, rerun the Provider-backed Pilot under class-specific call/Token gates; the
       2026-08-12 exploratory run is invalid because Summary retries amplified cost and comparable pairs were
       insufficient. Inspect quality/Token/cache/cost/latency gates, then decide whether the implementation is

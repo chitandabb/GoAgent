@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +72,7 @@ func TestPilotReasoningModeSupportsProviderSpecificControls(t *testing.T) {
 
 func TestPilotSelectionAcceptsOneDiagnosticCheckpoint(t *testing.T) {
 	dataset := mesagent.ContextGovernancePilotFixture()
-	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment")
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +83,31 @@ func TestPilotSelectionAcceptsOneDiagnosticCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPilotSelectionPairsBaselineAndExperiment(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.partial() || selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmCurrent) ||
+		!selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmBaseline) ||
+		!selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmExperiment) {
+		t.Fatalf("paired selection = %+v", selection)
+	}
+}
+
+func TestPilotSelectionRejectsPairedCheckpointWithArm(t *testing.T) {
+	_, err := newPilotSelection(
+		mesagent.ContextGovernancePilotFixture(), "incident-correction", "incident-cp2", "experiment", true,
+	)
+	if err == nil {
+		t.Fatal("newPilotSelection() accepted paired checkpoint with an explicit arm")
+	}
+}
+
 func TestPilotSelectionRejectsCheckpointFromAnotherScenario(t *testing.T) {
 	_, err := newPilotSelection(
-		mesagent.ContextGovernancePilotFixture(), "release-policy", "incident-cp2", "experiment",
+		mesagent.ContextGovernancePilotFixture(), "release-policy", "incident-cp2", "experiment", false,
 	)
 	if err == nil {
 		t.Fatal("newPilotSelection() accepted a checkpoint from another scenario")
@@ -104,7 +128,7 @@ func TestValidateSelectedPilotBudgetRejectsDefaultFullRun(t *testing.T) {
 
 func TestValidateSelectedPilotBudgetAccountsForSummaryRetries(t *testing.T) {
 	dataset := mesagent.ContextGovernancePilotFixture()
-	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment")
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +142,102 @@ func TestValidateSelectedPilotBudgetAccountsForSummaryRetries(t *testing.T) {
 	}
 	if err := validateSelectedPilotBudget(dataset, selection, 3, limits); err == nil {
 		t.Fatal("validateSelectedPilotBudget() ignored the configured Summary retry multiplier")
+	}
+}
+
+func TestReadPilotObservationsRejectsDuplicateRunID(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	observation := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmBaseline, true)
+	path := filepath.Join(t.TempDir(), "observations.jsonl")
+	writeObservationLines(t, path, observation, observation)
+
+	if _, err := readPilotObservations(path, dataset, true); err == nil {
+		t.Fatal("readPilotObservations() accepted a duplicate runId")
+	}
+}
+
+func TestReadPilotObservationsRequiresResumeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.jsonl")
+	if _, err := readPilotObservations(path, mesagent.ContextGovernancePilotFixture(), true); err == nil {
+		t.Fatal("readPilotObservations() accepted a missing resume file")
+	}
+}
+
+func TestReadPilotObservationsRejectsFixtureContentDrift(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	observation := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmBaseline, true)
+	path := filepath.Join(t.TempDir(), "observations.jsonl")
+	writeObservationLines(t, path, observation)
+	mutated := dataset
+	mutated.Scenarios[0].Checkpoints[0].Question += " changed without version bump"
+
+	if _, err := readPilotObservations(path, mutated, true); err == nil {
+		t.Fatal("readPilotObservations() accepted fixture content drift under the same version")
+	}
+}
+
+func TestMergePilotObservationsPreservesFailureAndStableFixtureOrder(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	failed := pilotObservationForObserverTest(dataset, "incident-cp2", mesagent.PilotArmExperiment, false)
+	current := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmCurrent, true)
+	baseline := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmBaseline, true)
+	experiment := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmExperiment, true)
+
+	merged, err := mergePilotObservations(dataset, []mesagent.ContextGovernancePilotObservation{failed, current},
+		[]mesagent.ContextGovernancePilotObservation{experiment, baseline})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"current-incident-cp1", "baseline-incident-cp1", "experiment-incident-cp1", "experiment-incident-cp2"}
+	for index, runID := range want {
+		if merged[index].RunID != runID {
+			t.Fatalf("merged[%d].RunID = %q, want %q", index, merged[index].RunID, runID)
+		}
+	}
+	if merged[3].ErrorType != "provider_or_runner_failed" || merged[3].WithinHardWindow {
+		t.Fatalf("failed observation was not preserved: %+v", merged[3])
+	}
+}
+
+func TestMergePilotObservationsRejectsContractDrift(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	existing := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmBaseline, true)
+	added := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmExperiment, true)
+	added.Contract.PromptVersion = "conversation-v7"
+
+	if _, err := mergePilotObservations(dataset,
+		[]mesagent.ContextGovernancePilotObservation{existing},
+		[]mesagent.ContextGovernancePilotObservation{added},
+	); err == nil {
+		t.Fatal("mergePilotObservations() accepted main-model contract drift")
+	}
+}
+
+func TestValidateResumedPilotContractsRejectsSummaryDriftBeforeExecution(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	existing := pilotObservationForObserverTest(dataset, "incident-cp1", mesagent.PilotArmExperiment, true)
+	summaryContract := *existing.SummaryContract
+	summaryContract.ModelID = "summary-v2"
+
+	if err := validateResumedPilotContracts(
+		[]mesagent.ContextGovernancePilotObservation{existing}, existing.Contract, &summaryContract,
+	); err == nil {
+		t.Fatal("validateResumedPilotContracts() accepted Summary contract drift")
+	}
+}
+
+func TestPilotSelectionSkipsExistingObservation(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection = selection.withCompleted([]mesagent.ContextGovernancePilotObservation{
+		pilotObservationForObserverTest(dataset, "incident-cp2", mesagent.PilotArmBaseline, true),
+	})
+	if selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmBaseline) ||
+		!selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmExperiment) {
+		t.Fatalf("resumed selection = %+v", selection)
 	}
 }
 
@@ -303,6 +423,66 @@ func pilotMemoryCandidate(
 ) conversationmemory.CandidateSnapshot {
 	t.Helper()
 	return pilotMemoryCandidateAt(t, conversationID, fromSeq, throughSeq, supersedes, content, time.Now().UTC())
+}
+
+func pilotObservationForObserverTest(
+	dataset mesagent.ContextGovernancePilotDataset,
+	checkpointID string,
+	arm mesagent.ContextGovernancePilotArm,
+	success bool,
+) mesagent.ContextGovernancePilotObservation {
+	fixtureFingerprint, _ := mesagent.ContextGovernancePilotDatasetFingerprint(dataset)
+	scenarioID := ""
+	for _, scenario := range dataset.Scenarios {
+		for _, checkpoint := range scenario.Checkpoints {
+			if checkpoint.CheckpointID == checkpointID {
+				scenarioID = scenario.ScenarioID
+			}
+		}
+	}
+	contract := mesagent.ContextGovernancePilotContract{
+		ModelProvider: "fixture", ModelID: "main-v1", ModelProfile: "main-profile",
+		ModelProfileFingerprint: strings.Repeat("c", 64), ReasoningMode: "effort:low",
+		ToolContractFingerprint: strings.Repeat("b", 64), OutputReserveTokens: 512,
+		PromptVersion: "conversation-v6",
+	}
+	observation := mesagent.ContextGovernancePilotObservation{
+		DatasetVersion: dataset.DatasetVersion, FixtureVersion: dataset.FixtureVersion, FixtureFingerprint: fixtureFingerprint,
+		ScenarioID: scenarioID, CheckpointID: checkpointID, RunID: string(arm) + "-" + checkpointID,
+		Arm: arm, Contract: contract, WithinHardWindow: success, PromptEpochID: "epoch-test",
+	}
+	if arm == mesagent.PilotArmExperiment {
+		observation.SummaryContract = &mesagent.ContextGovernancePilotSummaryContract{
+			ModelProvider: "fixture", ModelID: "summary-v1", ModelProfile: "summary-profile",
+			ModelProfileFingerprint: strings.Repeat("d", 64), PromptVersion: "conversation-memory-v1",
+		}
+	}
+	if success {
+		observation.Answer = "fixture answer"
+		observation.MainUsage = mesagent.ContextGovernancePilotUsage{ModelCalls: 1, PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
+		observation.FirstTokenLatencyMillis = 10
+	} else {
+		observation.ErrorType = "provider_or_runner_failed"
+	}
+	return observation
+}
+
+func writeObservationLines(t *testing.T, path string, observations ...mesagent.ContextGovernancePilotObservation) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := json.NewEncoder(file)
+	for _, observation := range observations {
+		if err := encoder.Encode(observation); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func pilotMemoryCandidateAt(

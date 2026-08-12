@@ -151,6 +151,7 @@ func TestContextGovernancePilotFixtureCreatesThePinnedPromptPressureGradient(t *
 
 func TestEvaluateContextGovernancePilotIncludesSummaryUsageInRawReduction(t *testing.T) {
 	fixture := ContextGovernancePilotFixture()
+	fixtureFingerprint, _ := ContextGovernancePilotDatasetFingerprint(fixture)
 	contract := ContextGovernancePilotContract{
 		ModelProvider: "fixture", ModelID: "main-v1", ModelProfile: "main-profile",
 		ModelProfileFingerprint: strings.Repeat("c", 64),
@@ -163,7 +164,7 @@ func TestEvaluateContextGovernancePilotIncludesSummaryUsageInRawReduction(t *tes
 		for _, checkpoint := range scenario.Checkpoints {
 			for _, arm := range []ContextGovernancePilotArm{PilotArmCurrent, PilotArmBaseline, PilotArmExperiment} {
 				observation := ContextGovernancePilotObservation{
-					DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion,
+					DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion, FixtureFingerprint: fixtureFingerprint,
 					ScenarioID: scenario.ScenarioID, CheckpointID: checkpoint.CheckpointID,
 					RunID: string(arm) + "-" + scenario.ScenarioID + "-" + checkpoint.CheckpointID,
 					Arm:   arm, Contract: contract, Answer: checkpoint.Gold.RequiredAnswerTerms[0],
@@ -346,6 +347,7 @@ func pilotObservationForTest(
 	arm ContextGovernancePilotArm, contract ContextGovernancePilotContract,
 	promptTokens int, withinWindow bool,
 ) ContextGovernancePilotObservation {
+	fixtureFingerprint, _ := ContextGovernancePilotDatasetFingerprint(fixture)
 	scenarioID := ""
 	for _, scenario := range fixture.Scenarios {
 		for _, candidate := range scenario.Checkpoints {
@@ -375,7 +377,7 @@ func pilotObservationForTest(
 	}
 	runID := string(arm) + "-" + checkpoint.CheckpointID
 	return ContextGovernancePilotObservation{
-		DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion,
+		DatasetVersion: fixture.DatasetVersion, FixtureVersion: fixture.FixtureVersion, FixtureFingerprint: fixtureFingerprint,
 		ScenarioID: scenarioID, CheckpointID: checkpoint.CheckpointID,
 		RunID: runID, Arm: arm, Contract: contract, SummaryContract: summaryContract,
 		Answer: answer, MainUsage: mainUsage,

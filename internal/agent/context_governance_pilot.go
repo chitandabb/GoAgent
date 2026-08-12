@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -370,6 +372,7 @@ func (j ContextGovernancePilotJudge) validate() error {
 type ContextGovernancePilotObservation struct {
 	DatasetVersion          string                                 `json:"datasetVersion"`
 	FixtureVersion          string                                 `json:"fixtureVersion"`
+	FixtureFingerprint      string                                 `json:"fixtureFingerprint"`
 	ScenarioID              string                                 `json:"scenarioId"`
 	CheckpointID            string                                 `json:"checkpointId"`
 	RunID                   string                                 `json:"runId"`
@@ -395,6 +398,7 @@ type contextGovernancePilotObservationKey struct {
 func (o ContextGovernancePilotObservation) Validate() error {
 	if !conversationQualityLabelPattern.MatchString(o.DatasetVersion) ||
 		!conversationQualityLabelPattern.MatchString(o.FixtureVersion) ||
+		!validConversationQualitySHA256(o.FixtureFingerprint) ||
 		!conversationQualityLabelPattern.MatchString(o.ScenarioID) ||
 		!conversationQualityLabelPattern.MatchString(o.CheckpointID) ||
 		!conversationQualityLabelPattern.MatchString(o.RunID) || !o.Arm.Valid() ||
@@ -427,6 +431,14 @@ func (o ContextGovernancePilotObservation) Validate() error {
 		return errors.New("context governance Pilot Judge observation is invalid")
 	}
 	return nil
+}
+
+func ContextGovernancePilotDatasetFingerprint(dataset ContextGovernancePilotDataset) (string, error) {
+	encoded, err := json.Marshal(dataset)
+	if err != nil {
+		return "", fmt.Errorf("marshal context governance Pilot dataset: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(encoded)), nil
 }
 
 type ContextGovernancePilotBudget struct {
@@ -680,6 +692,10 @@ func EvaluateContextGovernancePilot(
 		FailedAccountingByArm:       newPilotAccountingByArm(),
 		IncomparableAccountingByArm: newPilotAccountingByArm(),
 	}
+	expectedFixtureFingerprint, err := ContextGovernancePilotDatasetFingerprint(dataset)
+	if err != nil {
+		return ContextGovernancePilotReport{}, err
+	}
 	if len(observations) != report.ExpectedRuns {
 		return ContextGovernancePilotReport{}, fmt.Errorf(
 			"Pilot requires exactly %d observations, got %d", report.ExpectedRuns, len(observations),
@@ -694,6 +710,7 @@ func EvaluateContextGovernancePilot(
 			return ContextGovernancePilotReport{}, fmt.Errorf("observation %d: %w", index, err)
 		}
 		if observation.DatasetVersion != dataset.DatasetVersion || observation.FixtureVersion != dataset.FixtureVersion ||
+			observation.FixtureFingerprint != expectedFixtureFingerprint ||
 			scenarioByCheckpoint[observation.CheckpointID] != observation.ScenarioID {
 			return ContextGovernancePilotReport{}, fmt.Errorf("observation %q does not match the Pilot fixture", observation.RunID)
 		}
