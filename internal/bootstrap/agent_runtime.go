@@ -267,7 +267,7 @@ func buildAgentRuntimeForRole(
 		cfg.Agent.ContextMemory.SummaryTailEnabled
 	sourceRecoveryEnabled := role == agentRuntimeRoleConversation &&
 		cfg.Agent.ContextMemory.SourceRecoveryEnabled
-	var tokenBudget conversationTokenBudgetRuntime
+	var tokenBudget ConversationTokenBudgetRuntime
 	if cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
 		cfg.Agent.ContextMemory.DiagnosisPreflightEnabled || sourceRecoveryEnabled {
 		tokenBudget, err = buildConversationTokenBudgetRuntime(cfg)
@@ -299,7 +299,7 @@ func buildAgentRuntimeForRole(
 			return nil, errors.New("conversation memory source recovery requires PostgreSQL")
 		}
 		tokenCounter, counterErr := conversationmemory.NewSourceTokenCounter(
-			tokenBudget.estimator, tokenBudget.profile.Name,
+			tokenBudget.Estimator, tokenBudget.Profile.Name,
 		)
 		if counterErr != nil {
 			_ = runtime.close()
@@ -321,7 +321,7 @@ func buildAgentRuntimeForRole(
 	var diagnosisPreflight mesagent.DiagnosisContextPreflightConfig
 	if cfg.Agent.ContextMemory.DiagnosisPreflightEnabled {
 		diagnosisPreflight = mesagent.DiagnosisContextPreflightConfig{
-			Enabled: true, Planner: tokenBudget.planner, ModelProfile: tokenBudget.profile,
+			Enabled: true, Planner: tokenBudget.Planner, ModelProfile: tokenBudget.Profile,
 			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
 			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
 			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
@@ -386,13 +386,13 @@ func buildAgentRuntimeForRole(
 	}
 	var contextPreflight mesagent.ConversationContextPreflightConfig
 	if cfg.Agent.ContextMemory.ShadowPreflightEnabled {
-		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(tokenBudget.estimator)
+		tailSelector, tailSelectorErr := contextgovernance.NewContinuousTailSelector(tokenBudget.Estimator)
 		if tailSelectorErr != nil {
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation continuous Tail selector: %w", tailSelectorErr)
 		}
 		contextPreflight = mesagent.ConversationContextPreflightConfig{
-			Enabled: true, Planner: tokenBudget.planner, TailSelector: tailSelector,
+			Enabled: true, Planner: tokenBudget.Planner, TailSelector: tailSelector,
 			ContinuousTailEnabled:   cfg.Agent.ContextMemory.ContinuousTailEnabled,
 			SummaryTailEnabled:      summaryTailEnabled,
 			Memory:                  conversationMemory,
@@ -400,7 +400,7 @@ func buildAgentRuntimeForRole(
 			SummaryMaxRatio:         cfg.Agent.ContextMemory.SummaryMaxRatio,
 			TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio,
 			PreflightTimeout:        time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
-			ModelProfile:            tokenBudget.profile,
+			ModelProfile:            tokenBudget.Profile,
 			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
 			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
 			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,

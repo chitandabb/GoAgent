@@ -121,8 +121,8 @@ func buildConversationMemoryActivationGate(cfg config.Config) (conversationmemor
 		return nil, err
 	}
 	return mesagent.NewConversationMemoryActivationGate(mesagent.ConversationContextPreflightConfig{
-		Enabled: true, SummaryTailEnabled: true, Planner: tokenBudget.planner,
-		ModelProfile:       tokenBudget.profile,
+		Enabled: true, SummaryTailEnabled: true, Planner: tokenBudget.Planner,
+		ModelProfile:       tokenBudget.Profile,
 		MemoryMaxRatio:     cfg.Agent.ContextMemory.MemoryMaxRatio,
 		SummaryMaxRatio:    cfg.Agent.ContextMemory.SummaryMaxRatio,
 		TailMaxRatio:       cfg.Agent.ContextMemory.TailMaxRatio,

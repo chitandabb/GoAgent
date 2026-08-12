@@ -55,8 +55,9 @@ Target design: [`design/context-governance-and-memory.md`](design/context-govern
 Implementation spec: [`specs/m3-context-governance-and-layered-memory.md`](specs/m3-context-governance-and-layered-memory.md).
 The design interview is complete. Context contract, shadow preflight, Continuous Token Tail, structured
 Snapshot, hard-threshold Summary + Tail, soft-threshold Memory Outbox/Worker, source recovery and Diagnosis
-per-call preflight are implemented; measured acceptance has not started. `60%+` remains an acceptance target
-and must be replaced by the fixed-set result if the measured value differs.
+per-call preflight are implemented. The provider-free Pilot fixture/evaluator and an explicitly enabled real
+Provider observer are also implemented; paid Pilot execution and measured Acceptance have not started. `60%+`
+remains an acceptance target and must be replaced by the fixed-set result if the measured value differs.
 
 - [x] Confirm Conversation-only isolated memory; cross-conversation long-term memory remains an enhancement.
 - [x] Confirm shared Provider-independent TokenBudgetPlanner for Conversation and Diagnosis.
@@ -93,7 +94,11 @@ and must be replaced by the fixed-set result if the measured value differs.
       single-source Rune offsets, Run-only cursors and an explicit second-call turn-budget truncation contract.
 - [x] Apply shared preflight and bounded Tool Result accounting to Diagnosis without adding diagnosis memory;
       persist high-water, model-projection truncation and hard-window block observations in the formal report.
-- [ ] Run Pilot then Acceptance evaluation; update the resume metric only from measured results.
+- [x] Implement the versioned 4-scenario/12-checkpoint Pilot fixture, three-arm evaluator, raw JSONL observer,
+      model/Profile/Tool contract fingerprints, Provider-call/cost guards and provider-free pressure tests.
+- [ ] After explicit cost approval, run the Provider-backed Pilot, inspect quality/Token/cache/cost/latency gates,
+      then decide whether the implementation is ready for the 12-scenario Acceptance set.
+- [ ] Run Acceptance evaluation; update the resume metric only from measured results.
 - [ ] Hand the completed backend contract to the frontend task.
 
 ## M0: Before Business Code

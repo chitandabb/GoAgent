@@ -26,6 +26,8 @@ import (
 
 type conversationRunnerModelState struct {
 	mu                         sync.Mutex
+	generateCalls              int
+	streamCalls                int
 	createIfAvailable          bool
 	repeatCreate               bool
 	searchKnowledgeIfAvailable bool
@@ -119,6 +121,7 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 		names = append(names, info.Name)
 	}
 	m.state.mu.Lock()
+	m.state.generateCalls++
 	if len(m.state.inputs) == 0 {
 		if deadline, ok := ctx.Deadline(); ok {
 			m.state.firstDeadlineRemaining = time.Until(deadline)
@@ -621,6 +624,43 @@ func TestConversationRunnerContinuousTokenTailStopsAtFirstOversizedMessage(t *te
 	}
 }
 
+func TestConversationRunnerHardWindowEnforcementBlocksFullHistoryWithoutTail(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	preflight := newConversationContinuousPreflightForTest(t, contextgovernance.ModelProfile{
+		Name: "fixture-main", Provider: "fixture", ModelID: "fixture-v1",
+		ContextWindowTokens: 1024, MaxOutputTokens: 128, SafetyMarginTokens: 128,
+	}, 0.15, 128)
+	preflight.ContinuousTailEnabled = false
+	preflight.TailSelector = nil
+	preflight.HardWindowEnforced = true
+	preflight.FullHistoryEnabled = true
+	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{}, preflight)
+	request, ctx := conversationRunnerRequest(nil)
+	conversationID := request.Conversation.ID
+	request.History = []conversation.Message{
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: strings.Repeat("中", 900)},
+		{ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: strings.Repeat("中", 900)},
+	}
+	request.UserMessage.Seq = 3
+	request.UserMessage.Content = "现在给出结论"
+
+	response, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrConversationPromptWindowExceeded) {
+		t.Fatalf("Respond() error = %v, want hard-window block", err)
+	}
+	state.mu.Lock()
+	providerCalls := len(state.inputs)
+	state.mu.Unlock()
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want 0", providerCalls)
+	}
+	failure, ok := conversation.AgentRunFailureRecordFrom(err)
+	if !ok || response.RunObservation == nil || failure.Observation.PromptManifest == nil ||
+		!failure.Observation.PromptManifest.ExceedsHardWindow {
+		t.Fatalf("failure observation = %+v response=%+v present=%v", failure, response.RunObservation, ok)
+	}
+}
+
 func TestConversationRunnerContinuousTailCountsBoundedAttachmentReferencesAndKeepsCurrentMessage(t *testing.T) {
 	state := &conversationRunnerModelState{}
 	runner := newConversationRunnerTestWithPreflight(t, state, &diagnosisToolCreatorStub{},
@@ -970,11 +1010,43 @@ func (s *conversationCitationRepairerStub) Repair(
 }
 
 func (m *conversationRunnerTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.state.mu.Lock()
+	m.state.streamCalls++
+	m.state.mu.Unlock()
 	message, err := m.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func TestConversationRunnerUsesStreamingOnlyWhenExplicitlyEnabled(t *testing.T) {
+	state := &conversationRunnerModelState{}
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
+		SystemInstruction: "streaming observer test", ModelProvider: "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes, EnableStreaming: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	if _, err := runner.Respond(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	streamCalls, generateCalls := state.streamCalls, state.generateCalls
+	state.mu.Unlock()
+	if streamCalls != 1 || generateCalls != 1 {
+		t.Fatalf("stream/generate calls = %d/%d, want 1/1 through the stream-backed fixture", streamCalls, generateCalls)
+	}
 }
 
 func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) {

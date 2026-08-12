@@ -151,6 +151,30 @@ func TestChatModelProfileConfigEffectiveContextContract(t *testing.T) {
 	}
 }
 
+func TestChatModelProfilePromptFingerprintTracksBehaviorButNotAPIKeyLocation(t *testing.T) {
+	profile := validChatModelProfileConfig()
+	original, err := profile.PromptProfileFingerprint("stepfun-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.APIKeyEnv = "MESGUARD_ALTERNATE_STEPFUN_API_KEY"
+	withoutSecretLocation, err := profile.PromptProfileFingerprint("stepfun-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutSecretLocation != original {
+		t.Fatalf("API key environment name changed prompt fingerprint: %q != %q", withoutSecretLocation, original)
+	}
+	profile.MaxOutputTokens++
+	withContractChange, err := profile.PromptProfileFingerprint("stepfun-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withContractChange == original {
+		t.Fatal("prompt-window contract change did not change prompt fingerprint")
+	}
+}
+
 func TestChatModelConfigConversationMemoryProfile(t *testing.T) {
 	cfg := validChatModelConfig()
 	profile, err := cfg.ConversationMemoryProfile()

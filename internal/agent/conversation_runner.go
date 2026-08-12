@@ -51,6 +51,7 @@ type ConversationRunnerConfig struct {
 	MaxToolResultBytes           int
 	MemorySourceRecoveryEnabled  bool
 	MemorySourceRecoveryMaxCalls int
+	EnableStreaming              bool
 	ContextPreflight             ConversationContextPreflightConfig
 }
 
@@ -75,6 +76,7 @@ type ConversationRunner struct {
 	maxToolResultBytes           int
 	memorySourceRecoveryEnabled  bool
 	memorySourceRecoveryMaxCalls int
+	enableStreaming              bool
 	contextPreflight             ConversationContextPreflightConfig
 }
 
@@ -159,6 +161,7 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
 		memorySourceRecoveryEnabled:  cfg.MemorySourceRecoveryEnabled,
 		memorySourceRecoveryMaxCalls: cfg.MemorySourceRecoveryMaxCalls,
+		enableStreaming:              cfg.EnableStreaming,
 		contextPreflight:             cfg.ContextPreflight,
 	}, nil
 }
@@ -262,11 +265,11 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 			zap.String("model_profile", r.contextPreflight.ModelProfile.Name),
 			zap.Error(err),
 		)
-		if r.contextPreflight.ContinuousTailEnabled {
+		if r.contextPreflight.ContinuousTailEnabled || r.contextPreflight.HardWindowEnforced {
 			return conversation.AgentResponse{}, fmt.Errorf("%w: %v", ErrConversationContextPreparationFailed, err)
 		}
 	}
-	if r.contextPreflight.ContinuousTailEnabled && promptManifest != nil &&
+	if (r.contextPreflight.ContinuousTailEnabled || r.contextPreflight.HardWindowEnforced) && promptManifest != nil &&
 		promptManifest.EstimateAvailable && promptManifest.ExceedsHardWindow {
 		return conversation.AgentResponse{}, ErrConversationPromptWindowExceeded
 	}
@@ -276,7 +279,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		defer cancel()
 	}
 	chatModel := r.chatModel
-	if r.contextPreflight.ContinuousTailEnabled {
+	if r.contextPreflight.ContinuousTailEnabled || r.contextPreflight.HardWindowEnforced {
 		chatModel, runtimePromptObservation = newConversationWindowGuardModel(chatModel, r.contextPreflight)
 	}
 	agentInstance, err := adk.NewChatModelAgent(runCtx, &adk.ChatModelAgentConfig{
@@ -295,7 +298,9 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("build per-turn conversation Agent: %w", err)
 	}
-	iterator := adk.NewRunner(runCtx, adk.RunnerConfig{Agent: agentInstance}).Run(
+	iterator := adk.NewRunner(runCtx, adk.RunnerConfig{
+		Agent: agentInstance, EnableStreaming: r.enableStreaming,
+	}).Run(
 		runCtx,
 		messages,
 		adk.WithCallbacks(newModelUsageHandler(usageTrace)),
@@ -489,6 +494,9 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
 ) (conversationPromptProjection, error) {
+	if r.contextPreflight.FullHistoryEnabled {
+		return buildFullConversationPromptProjection(history, current)
+	}
 	if !r.contextPreflight.ContinuousTailEnabled {
 		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes), nil
 	}
