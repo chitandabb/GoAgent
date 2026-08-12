@@ -114,6 +114,8 @@ type ChatModelProfileConfig struct {
 	Model                           string               `toml:"model"`
 	ReasoningEffort                 string               `toml:"reasoningEffort"`
 	ThinkingMode                    string               `toml:"thinkingMode"`
+	ResponseFormat                  string               `toml:"responseFormat"`
+	ResponseSchema                  string               `toml:"responseSchema"`
 	Temperature                     *float32             `toml:"temperature"`
 	TimeoutMillis                   int                  `toml:"timeoutMillis"`
 	ContextWindowTokens             int                  `toml:"contextWindowTokens"`
@@ -211,6 +213,17 @@ func (c ChatModelProfileConfig) Validate() error {
 	if thinking := strings.ToLower(strings.TrimSpace(c.ThinkingMode)); thinking != "" && thinking != "enabled" && thinking != "disabled" {
 		return errors.New("thinkingMode must be enabled or disabled when configured")
 	}
+	format := strings.ToLower(strings.TrimSpace(c.ResponseFormat))
+	if format != "" && format != "text" && format != "json_object" && format != "json_schema" {
+		return errors.New("responseFormat must be text, json_object, or json_schema when configured")
+	}
+	responseSchema := strings.TrimSpace(c.ResponseSchema)
+	if format == "json_schema" && !modelName.MatchString(responseSchema) {
+		return errors.New("responseSchema is required for json_schema responseFormat")
+	}
+	if format != "json_schema" && responseSchema != "" {
+		return errors.New("responseSchema requires json_schema responseFormat")
+	}
 	if c.Temperature != nil && (*c.Temperature < 0 || *c.Temperature > 2) {
 		return errors.New("temperature must be between 0 and 2")
 	}
@@ -252,6 +265,8 @@ func (c ChatModelProfileConfig) PromptProfileFingerprint(profileName string) (st
 		Model                    string               `json:"model"`
 		ReasoningEffort          string               `json:"reasoningEffort"`
 		ThinkingMode             string               `json:"thinkingMode"`
+		ResponseFormat           string               `json:"responseFormat"`
+		ResponseSchema           string               `json:"responseSchema"`
 		Temperature              *float32             `json:"temperature,omitempty"`
 		TimeoutMillis            int                  `json:"timeoutMillis"`
 		ContextWindowTokens      int                  `json:"contextWindowTokens"`
@@ -265,8 +280,10 @@ func (c ChatModelProfileConfig) PromptProfileFingerprint(profileName string) (st
 		Name: profileName, Provider: strings.ToLower(strings.TrimSpace(c.Provider)),
 		BaseURL: strings.TrimRight(strings.TrimSpace(c.BaseURL), "/"), Model: strings.TrimSpace(c.Model),
 		ReasoningEffort: strings.ToLower(strings.TrimSpace(c.ReasoningEffort)),
-		ThinkingMode:    strings.ToLower(strings.TrimSpace(c.ThinkingMode)), Temperature: c.Temperature,
-		TimeoutMillis: c.TimeoutMillis, ContextWindowTokens: c.ContextWindowTokens,
+		ThinkingMode:    strings.ToLower(strings.TrimSpace(c.ThinkingMode)),
+		ResponseFormat:  strings.ToLower(strings.TrimSpace(c.ResponseFormat)), Temperature: c.Temperature,
+		ResponseSchema: strings.TrimSpace(c.ResponseSchema),
+		TimeoutMillis:  c.TimeoutMillis, ContextWindowTokens: c.ContextWindowTokens,
 		MaxOutputTokens: c.MaxOutputTokens, PromptSafetyMarginTokens: c.PromptSafetyMarginTokens,
 		PromptSafetyMarginRatio:  c.PromptSafetyMarginRatio,
 		TokenizerStrategy:        strings.ToLower(strings.TrimSpace(string(c.TokenizerStrategy))),

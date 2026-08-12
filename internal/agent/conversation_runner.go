@@ -266,7 +266,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 			zap.Error(err),
 		)
 		if r.contextPreflight.ContinuousTailEnabled || r.contextPreflight.HardWindowEnforced {
-			return conversation.AgentResponse{}, fmt.Errorf("%w: %v", ErrConversationContextPreparationFailed, err)
+			return conversation.AgentResponse{}, fmt.Errorf("%w: %w", ErrConversationContextPreparationFailed, err)
 		}
 	}
 	if (r.contextPreflight.ContinuousTailEnabled || r.contextPreflight.HardWindowEnforced) && promptManifest != nil &&

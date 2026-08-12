@@ -38,6 +38,105 @@ var (
 	ErrPayloadTooLarge          = errors.New("conversation memory payload exceeds its size limit")
 )
 
+// EntryValidationError reports a stable contract location without exposing
+// model-produced IDs, content, or source values.
+type EntryValidationError struct {
+	Code string
+}
+
+func (e *EntryValidationError) Error() string {
+	if e == nil || e.Code == "" {
+		return ErrInvalidEntry.Error()
+	}
+	return ErrInvalidEntry.Error() + ": " + e.Code
+}
+
+func (e *EntryValidationError) Unwrap() error { return ErrInvalidEntry }
+
+func newEntryValidationError(code string) error {
+	return &EntryValidationError{Code: code}
+}
+
+// EntryValidationFailureCode returns a bounded, content-free failure code.
+func EntryValidationFailureCode(err error) string {
+	var validationErr *EntryValidationError
+	if errors.As(err, &validationErr) && validationErr != nil {
+		return validationErr.Code
+	}
+	return ""
+}
+
+const (
+	PayloadSchemaFailureEmpty          = "empty"
+	PayloadSchemaFailureTopLevelJSON   = "top_level_json"
+	PayloadSchemaFailureTopLevelFields = "top_level_fields"
+	PayloadSchemaFailureNullArray      = "null_array"
+)
+
+// PayloadSchemaError exposes only the fixed contract location that failed.
+// It deliberately omits model output and decoded values from logs and metrics.
+type PayloadSchemaError struct {
+	Code string
+}
+
+func (e *PayloadSchemaError) Error() string {
+	if e == nil || e.Code == "" {
+		return ErrInvalidPayloadSchema.Error()
+	}
+	return ErrInvalidPayloadSchema.Error() + ": " + e.Code
+}
+
+func (e *PayloadSchemaError) Unwrap() error { return ErrInvalidPayloadSchema }
+
+func newPayloadSchemaError(code string) error {
+	return &PayloadSchemaError{Code: code}
+}
+
+// PayloadSchemaFailureCode returns a bounded, content-free failure code.
+func PayloadSchemaFailureCode(err error) string {
+	var schemaErr *PayloadSchemaError
+	if errors.As(err, &schemaErr) && schemaErr != nil {
+		return schemaErr.Code
+	}
+	return ""
+}
+
+// FailureCode returns the bounded, content-free domain code shared by the
+// production repair path and offline observability tools.
+func FailureCode(err error) string {
+	switch {
+	case errors.Is(err, ErrUserSourceRequired):
+		return "user_source_required"
+	case errors.Is(err, ErrSourceOutOfRange):
+		return "source_out_of_range"
+	case errors.Is(err, ErrUnknownEntryReference):
+		return "entry_reference_unknown"
+	case errors.Is(err, ErrUnknownStableReference):
+		return "stable_reference_unknown"
+	case errors.Is(err, ErrSupersedeCycle):
+		return "supersede_cycle"
+	case errors.Is(err, ErrMultipleActiveEntries):
+		return "multiple_active_entries"
+	case errors.Is(err, ErrCorrectionTargetRequired):
+		return "correction_target_required"
+	case errors.Is(err, ErrPayloadTooLarge):
+		return "payload_too_large"
+	case errors.Is(err, ErrInvalidPayloadSchema):
+		if code := PayloadSchemaFailureCode(err); code != "" {
+			return "payload_schema_" + code
+		}
+		return "payload_schema_invalid"
+	case errors.Is(err, ErrInvalidEntry):
+		if code := EntryValidationFailureCode(err); code != "" {
+			return "entry_" + code
+		}
+		return "entry_invalid"
+	case errors.Is(err, ErrInvalidEntryStatus):
+		return "entry_status"
+	}
+	return ""
+}
+
 type EntryStatus string
 
 const (
@@ -63,7 +162,7 @@ type Entry struct {
 	EntryID           string      `json:"entryId"`
 	Content           string      `json:"content"`
 	SourceMessageSeqs []int64     `json:"sourceMessageSeqs"`
-	Status            EntryStatus `json:"status"`
+	Status            EntryStatus `json:"status" jsonschema:"enum=active,enum=superseded,enum=open,enum=completed,enum=cancelled"`
 	SupersedesEntryID string      `json:"supersedesEntryId,omitempty"`
 }
 
@@ -72,7 +171,7 @@ type Entry struct {
 // storage coordinates, or a copied evidence body.
 type ReferenceEntry struct {
 	Entry
-	ReferenceType ReferenceType `json:"referenceType"`
+	ReferenceType ReferenceType `json:"referenceType" jsonschema:"enum=knowledge_chunk,enum=attachment,enum=web,enum=diagnosis_task,enum=diagnosis_report"`
 	ReferenceID   string        `json:"referenceId"`
 	ContentSHA256 string        `json:"contentSha256,omitempty"`
 }
@@ -149,42 +248,93 @@ var entryIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 // unknown, missing, duplicated and null array fields before semantic validation.
 func DecodePayload(encoded []byte) (Payload, error) {
 	if len(bytes.TrimSpace(encoded)) == 0 {
-		return Payload{}, ErrInvalidPayloadSchema
+		return Payload{}, newPayloadSchemaError(PayloadSchemaFailureEmpty)
 	}
 	var raw map[string]json.RawMessage
 	if err := decodeStrictJSON(encoded, &raw); err != nil {
-		return Payload{}, fmt.Errorf("%w: %v", ErrInvalidPayloadSchema, err)
+		return Payload{}, newPayloadSchemaError(PayloadSchemaFailureTopLevelJSON)
 	}
 	want := []string{
 		"conversationGoal", "facts", "decisions", "corrections", "evidenceReferences",
 		"openQuestions", "todos", "taskReferences", "reportReferences",
 	}
-	if len(raw) != len(want) {
-		return Payload{}, ErrInvalidPayloadSchema
-	}
 	for _, field := range want {
 		if _, ok := raw[field]; !ok {
-			return Payload{}, ErrInvalidPayloadSchema
+			return Payload{}, newPayloadSchemaError("top_level_missing_" + payloadSchemaFieldCode(field))
 		}
 	}
+	if len(raw) != len(want) {
+		return Payload{}, newPayloadSchemaError("top_level_extra_fields")
+	}
 	var payload Payload
-	if err := decodeRawField(raw, "conversationGoal", &payload.ConversationGoal); err != nil ||
-		decodeRawField(raw, "facts", &payload.Facts) != nil ||
-		decodeRawField(raw, "decisions", &payload.Decisions) != nil ||
-		decodeRawField(raw, "corrections", &payload.Corrections) != nil ||
-		decodeRawField(raw, "evidenceReferences", &payload.EvidenceReferences) != nil ||
-		decodeRawField(raw, "openQuestions", &payload.OpenQuestions) != nil ||
-		decodeRawField(raw, "todos", &payload.Todos) != nil ||
-		decodeRawField(raw, "taskReferences", &payload.TaskReferences) != nil ||
-		decodeRawField(raw, "reportReferences", &payload.ReportReferences) != nil {
-		return Payload{}, ErrInvalidPayloadSchema
+	fields := []struct {
+		name   string
+		target any
+	}{
+		{"conversation_goal", &payload.ConversationGoal},
+		{"facts", &payload.Facts},
+		{"decisions", &payload.Decisions},
+		{"corrections", &payload.Corrections},
+		{"evidence_references", &payload.EvidenceReferences},
+		{"open_questions", &payload.OpenQuestions},
+		{"todos", &payload.Todos},
+		{"task_references", &payload.TaskReferences},
+		{"report_references", &payload.ReportReferences},
+	}
+	jsonNames := []string{
+		"conversationGoal", "facts", "decisions", "corrections", "evidenceReferences",
+		"openQuestions", "todos", "taskReferences", "reportReferences",
+	}
+	for index, field := range fields {
+		if err := decodeRawField(raw, jsonNames[index], field.target); err != nil {
+			return Payload{}, newPayloadSchemaError(payloadFieldFailureCode(field.name, raw[jsonNames[index]]))
+		}
 	}
 	if payload.Facts == nil || payload.Decisions == nil || payload.Corrections == nil ||
 		payload.EvidenceReferences == nil || payload.OpenQuestions == nil || payload.Todos == nil ||
 		payload.TaskReferences == nil || payload.ReportReferences == nil {
-		return Payload{}, ErrInvalidPayloadSchema
+		return Payload{}, newPayloadSchemaError(PayloadSchemaFailureNullArray)
 	}
 	return payload, nil
+}
+
+func payloadSchemaFieldCode(field string) string {
+	switch field {
+	case "conversationGoal":
+		return "conversation_goal"
+	case "evidenceReferences":
+		return "evidence_references"
+	case "openQuestions":
+		return "open_questions"
+	case "taskReferences":
+		return "task_references"
+	case "reportReferences":
+		return "report_references"
+	default:
+		return field
+	}
+}
+
+func payloadFieldFailureCode(field string, encoded json.RawMessage) string {
+	trimmed := bytes.TrimSpace(encoded)
+	kind := "invalid"
+	if len(trimmed) > 0 {
+		switch trimmed[0] {
+		case '{':
+			kind = "object"
+		case '[':
+			kind = "array"
+		case '"':
+			kind = "string"
+		case 'n':
+			kind = "null"
+		case 't', 'f':
+			kind = "boolean"
+		default:
+			kind = "number"
+		}
+	}
+	return "field_" + field + "_" + kind
 }
 
 func decodeRawField(raw map[string]json.RawMessage, name string, target any) error {
@@ -345,10 +495,15 @@ func collectEntries(payload *Payload) []indexedEntry {
 }
 
 func validateEntry(entry *Entry, section entrySection, context ValidationContext, trustedPrevious bool) error {
-	if entry == nil || !entryIDPattern.MatchString(entry.EntryID) || strings.TrimSpace(entry.Content) == "" ||
-		entry.Content != strings.TrimSpace(entry.Content) || len([]rune(entry.Content)) > MaxEntryContentRunes ||
-		len(entry.SourceMessageSeqs) == 0 || len(entry.SourceMessageSeqs) > 32 {
-		return ErrInvalidEntry
+	if entry == nil || !entryIDPattern.MatchString(entry.EntryID) {
+		return newEntryValidationError("entry_id")
+	}
+	if strings.TrimSpace(entry.Content) == "" || entry.Content != strings.TrimSpace(entry.Content) ||
+		len([]rune(entry.Content)) > MaxEntryContentRunes {
+		return newEntryValidationError("content")
+	}
+	if len(entry.SourceMessageSeqs) == 0 || len(entry.SourceMessageSeqs) > 32 {
+		return newEntryValidationError("source_count")
 	}
 	if section == sectionTodo {
 		if !entry.Status.isTodoStatus() {
@@ -364,7 +519,7 @@ func validateEntry(entry *Entry, section entrySection, context ValidationContext
 		return ErrUnknownEntryReference
 	}
 	if !slices.IsSorted(entry.SourceMessageSeqs) {
-		return ErrInvalidEntry
+		return newEntryValidationError("source_order")
 	}
 	hasUserSource := false
 	var previous int64
@@ -377,7 +532,7 @@ func validateEntry(entry *Entry, section entrySection, context ValidationContext
 			return ErrSourceOutOfRange
 		}
 		if index > 0 && seq == previous {
-			return ErrInvalidEntry
+			return newEntryValidationError("source_duplicate")
 		}
 		previous = seq
 		hasUserSource = hasUserSource || role == conversation.MessageRoleUser || trustedPrevious

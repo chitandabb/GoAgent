@@ -22,17 +22,54 @@ const (
 // PilotModelCallBudget reserves every main, Summary, and retry call before it
 // reaches a Provider. It never refunds conservative estimates during one run.
 type PilotModelCallBudget struct {
-	mu                   sync.Mutex
-	maxCalls             int
-	maxCostCNY           float64
-	usedCalls            int
-	reservedCostCNY      float64
-	mainInputPrice       float64
-	mainOutputPrice      float64
-	summaryInputPrice    float64
-	summaryOutputPrice   float64
-	mainOutputReserve    int
-	summaryOutputReserve int
+	mu                          sync.Mutex
+	maxCalls                    int
+	maxMainCalls                int
+	maxSummaryCalls             int
+	maxMainPromptTokens         int
+	maxSummaryPromptTokens      int
+	maxCostCNY                  float64
+	usedCalls                   int
+	usedMainCalls               int
+	usedSummaryCalls            int
+	reservedMainPromptTokens    int
+	reservedSummaryPromptTokens int
+	reservedCostCNY             float64
+	mainInputPrice              float64
+	mainOutputPrice             float64
+	summaryInputPrice           float64
+	summaryOutputPrice          float64
+	mainOutputReserve           int
+	summaryOutputReserve        int
+}
+
+// PilotModelCallLimits are enforced immediately before each Provider call.
+// Prompt token fields are cumulative conservative estimates for one process
+// run; reservations are never refunded after failed requests.
+type PilotModelCallLimits struct {
+	MaxProviderCalls                int
+	MaxMainCalls                    int
+	MaxSummaryCalls                 int
+	MaxEstimatedMainPromptTokens    int
+	MaxEstimatedSummaryPromptTokens int
+	MaxEstimatedCostCNY             float64
+}
+
+func (l PilotModelCallLimits) validate() error {
+	if l.MaxProviderCalls < 1 || l.MaxProviderCalls > 200 ||
+		l.MaxMainCalls < 0 || l.MaxMainCalls > l.MaxProviderCalls ||
+		l.MaxSummaryCalls < 0 || l.MaxSummaryCalls > l.MaxProviderCalls ||
+		l.MaxMainCalls+l.MaxSummaryCalls < 1 ||
+		l.MaxEstimatedMainPromptTokens < 0 || l.MaxEstimatedMainPromptTokens > 10_000_000 ||
+		l.MaxEstimatedSummaryPromptTokens < 0 || l.MaxEstimatedSummaryPromptTokens > 10_000_000 ||
+		l.MaxEstimatedCostCNY <= 0 || l.MaxEstimatedCostCNY > 10 {
+		return errors.New("Pilot model call limits are invalid")
+	}
+	if (l.MaxMainCalls > 0 && l.MaxEstimatedMainPromptTokens < 1) ||
+		(l.MaxSummaryCalls > 0 && l.MaxEstimatedSummaryPromptTokens < 1) {
+		return errors.New("Pilot model call Token limits are invalid")
+	}
+	return nil
 }
 
 func NewPilotModelCallBudget(
@@ -40,13 +77,29 @@ func NewPilotModelCallBudget(
 	pricing ContextGovernancePilotPricing,
 	mainOutputReserve, summaryOutputReserve int,
 ) (*PilotModelCallBudget, error) {
-	if plan.MaxProviderCalls < 1 || plan.MaxProviderCalls > 200 || plan.MaxCostCNY <= 0 || plan.MaxCostCNY > 10 ||
-		pricing.validate() != nil || mainOutputReserve < 1 || summaryOutputReserve < 1 {
+	return NewPilotModelCallBudgetWithLimits(PilotModelCallLimits{
+		MaxProviderCalls: plan.MaxProviderCalls,
+		MaxMainCalls:     plan.MaxProviderCalls, MaxSummaryCalls: plan.MaxProviderCalls,
+		MaxEstimatedMainPromptTokens: 10_000_000, MaxEstimatedSummaryPromptTokens: 10_000_000,
+		MaxEstimatedCostCNY: plan.MaxCostCNY,
+	}, pricing, mainOutputReserve, summaryOutputReserve)
+}
+
+func NewPilotModelCallBudgetWithLimits(
+	limits PilotModelCallLimits,
+	pricing ContextGovernancePilotPricing,
+	mainOutputReserve, summaryOutputReserve int,
+) (*PilotModelCallBudget, error) {
+	if limits.validate() != nil || pricing.validate() != nil || mainOutputReserve < 1 || summaryOutputReserve < 1 {
 		return nil, errors.New("Pilot model call budget configuration is invalid")
 	}
 	return &PilotModelCallBudget{
-		maxCalls: plan.MaxProviderCalls, maxCostCNY: plan.MaxCostCNY,
-		mainInputPrice: pricing.MainInputCNYPerMillion, mainOutputPrice: pricing.MainOutputCNYPerMillion,
+		maxCalls:     limits.MaxProviderCalls,
+		maxMainCalls: limits.MaxMainCalls, maxSummaryCalls: limits.MaxSummaryCalls,
+		maxMainPromptTokens:    limits.MaxEstimatedMainPromptTokens,
+		maxSummaryPromptTokens: limits.MaxEstimatedSummaryPromptTokens,
+		maxCostCNY:             limits.MaxEstimatedCostCNY,
+		mainInputPrice:         pricing.MainInputCNYPerMillion, mainOutputPrice: pricing.MainOutputCNYPerMillion,
 		summaryInputPrice: pricing.SummaryInputCNYPerMillion, summaryOutputPrice: pricing.SummaryOutputCNYPerMillion,
 		mainOutputReserve: mainOutputReserve, summaryOutputReserve: summaryOutputReserve,
 	}, nil
@@ -63,7 +116,20 @@ func (b *PilotModelCallBudget) Reserve(class PilotModelCallClass, promptTokens i
 	}
 	inputPrice, outputPrice, outputReserve := b.mainInputPrice, b.mainOutputPrice, b.mainOutputReserve
 	if class == PilotSummaryModelCall {
+		if b.usedSummaryCalls >= b.maxSummaryCalls {
+			return errors.New("Pilot Summary call budget exceeded before provider call")
+		}
+		if b.reservedSummaryPromptTokens+promptTokens > b.maxSummaryPromptTokens {
+			return errors.New("Pilot Summary prompt Token budget exceeded before provider call")
+		}
 		inputPrice, outputPrice, outputReserve = b.summaryInputPrice, b.summaryOutputPrice, b.summaryOutputReserve
+	} else {
+		if b.usedMainCalls >= b.maxMainCalls {
+			return errors.New("Pilot main-model call budget exceeded before provider call")
+		}
+		if b.reservedMainPromptTokens+promptTokens > b.maxMainPromptTokens {
+			return errors.New("Pilot main-model prompt Token budget exceeded before provider call")
+		}
 	}
 	cost := (float64(promptTokens)*inputPrice + float64(outputReserve)*outputPrice) / 1_000_000
 	if b.reservedCostCNY+cost > b.maxCostCNY+1e-9 {
@@ -73,6 +139,13 @@ func (b *PilotModelCallBudget) Reserve(class PilotModelCallClass, promptTokens i
 		)
 	}
 	b.usedCalls++
+	if class == PilotSummaryModelCall {
+		b.usedSummaryCalls++
+		b.reservedSummaryPromptTokens += promptTokens
+	} else {
+		b.usedMainCalls++
+		b.reservedMainPromptTokens += promptTokens
+	}
 	b.reservedCostCNY += cost
 	return nil
 }

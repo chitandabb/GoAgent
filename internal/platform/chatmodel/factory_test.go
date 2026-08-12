@@ -10,6 +10,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
 )
 
 func TestProviderAdaptersUseExpectedRequestShape(t *testing.T) {
@@ -24,6 +25,20 @@ func TestProviderAdaptersUseExpectedRequestShape(t *testing.T) {
 			assertBody: func(t *testing.T, body map[string]any) {
 				if body["reasoning_effort"] != "medium" {
 					t.Fatalf("reasoning_effort = %v", body["reasoning_effort"])
+				}
+			},
+		},
+		{
+			name: "stepfun json object",
+			profile: func() config.ChatModelProfileConfig {
+				profile := profileForTest("stepfun", "step-3.7-flash", "low", "")
+				profile.ResponseFormat = "json_object"
+				return profile
+			}(),
+			assertBody: func(t *testing.T, body map[string]any) {
+				format, ok := body["response_format"].(map[string]any)
+				if !ok || format["type"] != "json_object" {
+					t.Fatalf("response_format = %#v", body["response_format"])
 				}
 			},
 		},
@@ -48,11 +63,19 @@ func TestProviderAdaptersUseExpectedRequestShape(t *testing.T) {
 			},
 		},
 		{
-			name:    "dashscope thinking disabled",
-			profile: profileForTest("dashscope", "qwen3.6-flash", "", "disabled"),
+			name: "dashscope thinking disabled",
+			profile: func() config.ChatModelProfileConfig {
+				profile := profileForTest("dashscope", "qwen3.6-flash", "", "disabled")
+				profile.ResponseFormat = "json_object"
+				return profile
+			}(),
 			assertBody: func(t *testing.T, body map[string]any) {
 				if body["enable_thinking"] != false {
 					t.Fatalf("enable_thinking = %#v", body["enable_thinking"])
+				}
+				format, ok := body["response_format"].(map[string]any)
+				if !ok || format["type"] != "json_object" {
+					t.Fatalf("response_format = %#v", body["response_format"])
 				}
 			},
 		},
@@ -101,6 +124,54 @@ func TestProviderAdaptersUseExpectedRequestShape(t *testing.T) {
 	}
 }
 
+func TestProviderAdaptersUseInjectedJSONSchema(t *testing.T) {
+	for _, tt := range []struct {
+		provider, model, reasoningEffort, thinkingMode string
+	}{
+		{provider: "stepfun", model: "step-3.7-flash", reasoningEffort: "low"},
+		{provider: "dashscope", model: "qwen3.6-flash", thinkingMode: "disabled"},
+	} {
+		t.Run(tt.provider, func(t *testing.T) {
+			var requestBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{
+					"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model",
+					"choices":[{"index":0,"message":{"role":"assistant","content":"{\"answer\":\"ok\"}"},"finish_reason":"stop"}],
+					"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}
+				}`))
+			}))
+			defer server.Close()
+
+			profile := profileForTest(tt.provider, tt.model, tt.reasoningEffort, tt.thinkingMode)
+			profile.BaseURL = server.URL + "/v1"
+			profile.ResponseFormat, profile.ResponseSchema = "json_schema", "fixture_v1"
+			t.Setenv("MESGUARD_TEST_CHAT_KEY", "test-key")
+			instance, err := newInstance(context.Background(), "fixture", profile, &ResponseSchema{
+				Name: "fixture_v1", Description: "fixture response", Strict: true,
+				Schema: &jsonschema.Schema{Type: "object", Required: []string{"answer"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := instance.Model.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err != nil {
+				t.Fatal(err)
+			}
+			format, ok := requestBody["response_format"].(map[string]any)
+			schemaBody, schemaOK := format["json_schema"].(map[string]any)
+			schemaValue, valueOK := schemaBody["schema"].(map[string]any)
+			if !ok || format["type"] != "json_schema" || !schemaOK ||
+				schemaBody["name"] != "fixture_v1" || schemaBody["description"] != "fixture response" ||
+				schemaBody["strict"] != true || !valueOK || schemaValue["type"] != "object" {
+				t.Fatalf("response_format = %#v", requestBody["response_format"])
+			}
+		})
+	}
+}
+
 func TestNewActiveReadsOnlySelectedProfileKey(t *testing.T) {
 	active := profileForTest("stepfun", "step-3.7-flash", "low", "")
 	active.APIKeyEnv = "ACTIVE_CHAT_KEY"
@@ -127,6 +198,11 @@ func TestProviderAdapterRejectsUnsupportedParameters(t *testing.T) {
 		profileForTest("deepseek", "deepseek-chat", "low", "disabled"),
 		profileForTest("dashscope", "qwen", "low", "disabled"),
 		profileForTest("deepseek", "deepseek-chat", "", ""),
+		func() config.ChatModelProfileConfig {
+			profile := profileForTest("deepseek", "deepseek-chat", "", "disabled")
+			profile.ResponseFormat, profile.ResponseSchema = "json_schema", "fixture_v1"
+			return profile
+		}(),
 	}
 	for _, profile := range tests {
 		t.Run(profile.Provider+profile.ReasoningEffort+profile.ThinkingMode, func(t *testing.T) {

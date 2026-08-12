@@ -292,6 +292,32 @@ func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.
 	}
 }
 
+func TestConversationMemoryFeedsSchemaFailureCodeIntoRepairAttempt(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	var repairCodes []string
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		repairCodes = append(repairCodes, input.RepairCode)
+		if input.Attempt == 1 {
+			_, err := conversationmemory.DecodePayload([]byte(`{"facts":"invalid"}`))
+			return conversationmemory.CompactionOutput{}, err
+		}
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 2)
+	conversationID := uuid.New()
+	_, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repairCodes) != 2 || repairCodes[0] != "" || repairCodes[1] != "payload_schema_top_level_missing_conversation_goal" {
+		t.Fatalf("repair codes = %#v", repairCodes)
+	}
+}
+
 func TestConversationMemoryRejectsInvalidCompletedMessagesBeforeActiveFastPath(t *testing.T) {
 	conversationID := uuid.New()
 	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)

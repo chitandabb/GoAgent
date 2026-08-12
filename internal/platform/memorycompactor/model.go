@@ -14,15 +14,17 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 
+	modelopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
 var (
-	ErrInvalidConfig  = errors.New("conversation memory model compactor config is invalid")
-	ErrInvalidInput   = errors.New("conversation memory model compactor input is invalid")
-	ErrOutputTooLarge = errors.New("conversation memory model output is too large")
+	ErrInvalidConfig   = errors.New("conversation memory model compactor config is invalid")
+	ErrInvalidInput    = errors.New("conversation memory model compactor input is invalid")
+	ErrProviderRequest = errors.New("conversation memory model provider request failed")
+	ErrOutputTooLarge  = errors.New("conversation memory model output is too large")
 )
 
 type Generator interface {
@@ -44,6 +46,17 @@ type ModelCompactor struct {
 	timeout        time.Duration
 	maxOutputBytes int
 }
+
+type providerRequestError struct {
+	cause        error
+	nonRetryable bool
+}
+
+func (e *providerRequestError) Error() string { return ErrProviderRequest.Error() }
+
+func (e *providerRequestError) Unwrap() []error { return []error{ErrProviderRequest, e.cause} }
+
+func (e *providerRequestError) NonRetryableCompaction() bool { return e != nil && e.nonRetryable }
 
 func New(config Config) (*ModelCompactor, error) {
 	if config.Generator == nil || strings.TrimSpace(config.Prompt) == "" || config.Prompt != strings.TrimSpace(config.Prompt) ||
@@ -74,7 +87,7 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 		schema.UserMessage(string(payload)),
 	})
 	if err != nil {
-		return conversationmemory.CompactionOutput{}, fmt.Errorf("conversation memory model request: %w", err)
+		return conversationmemory.CompactionOutput{}, newProviderRequestError(err)
 	}
 	if response == nil || strings.TrimSpace(response.Content) == "" {
 		return conversationmemory.CompactionOutput{}, conversationmemory.ErrInvalidPayloadSchema
@@ -102,6 +115,15 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 		}
 	}
 	return result, nil
+}
+
+func newProviderRequestError(err error) error {
+	nonRetryable := false
+	var apiErr *modelopenai.APIError
+	if errors.As(err, &apiErr) && apiErr != nil {
+		nonRetryable = apiErr.HTTPStatusCode == 400 || apiErr.HTTPStatusCode == 401 || apiErr.HTTPStatusCode == 403
+	}
+	return &providerRequestError{cause: err, nonRetryable: nonRetryable}
 }
 
 type requestCoverage struct {

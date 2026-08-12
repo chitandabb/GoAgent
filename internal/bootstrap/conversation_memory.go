@@ -35,7 +35,7 @@ func BuildConversationMemoryService(
 	db *gorm.DB,
 	cfg config.Config,
 ) (*conversationmemory.Service, error) {
-	return buildConversationMemoryService(ctx, db, cfg, chatmodel.NewProfile)
+	return buildConversationMemoryService(ctx, db, cfg, newConversationMemoryModelProfile)
 }
 
 // BuildConversationMemoryServiceWithModel is the production compactor
@@ -59,6 +59,9 @@ func BuildConversationMemoryServiceWithModel(
 	profile, err := cfg.Models.Chat.ConversationMemoryProfile()
 	if err != nil {
 		return nil, conversationmemory.SummaryProvenance{}, fmt.Errorf("resolve conversation memory model profile: %w", err)
+	}
+	if err := validateConversationMemoryProfile(profile); err != nil {
+		return nil, conversationmemory.SummaryProvenance{}, err
 	}
 	prompt, err := summaryConfig.LoadPrompt()
 	if err != nil {
@@ -117,8 +120,20 @@ func BuildCachedConversationMemoryService(
 		observer = conversationMemoryCacheLogger{log: log.Named("redis_cache")}
 	}
 	return buildConversationMemoryServiceWithCache(
-		ctx, db, cfg, chatmodel.NewProfile, cache, cacheExpected, observer,
+		ctx, db, cfg, newConversationMemoryModelProfile, cache, cacheExpected, observer,
 	)
+}
+
+func newConversationMemoryModelProfile(
+	ctx context.Context,
+	cfg config.ChatModelConfig,
+	profileName string,
+) (*chatmodel.Instance, error) {
+	return chatmodel.NewProfileWithResponseSchema(ctx, cfg, profileName, chatmodel.ResponseSchema{
+		Name:        conversationmemory.ResponseSchemaName,
+		Description: "MESGuard structured conversation memory snapshot",
+		Schema:      conversationmemory.PayloadJSONSchema(), Strict: true,
+	})
 }
 
 func buildConversationMemoryService(
@@ -154,6 +169,9 @@ func buildConversationMemoryServiceWithCache(
 	if err != nil {
 		return nil, fmt.Errorf("resolve conversation memory model profile: %w", err)
 	}
+	if err := validateConversationMemoryProfile(profile); err != nil {
+		return nil, err
+	}
 	prompt, err := summaryConfig.LoadPrompt()
 	if err != nil {
 		return nil, err
@@ -185,6 +203,16 @@ func buildConversationMemoryServiceWithCache(
 		RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
 		Cache:          cache, CacheExpected: cacheExpected, CacheObserver: cacheObserver,
 	})
+}
+
+func validateConversationMemoryProfile(profile config.ChatModelProfileConfig) error {
+	if strings.ToLower(strings.TrimSpace(profile.ResponseFormat)) != "json_schema" {
+		return errors.New("conversation memory model must use json_schema response format")
+	}
+	if strings.TrimSpace(profile.ResponseSchema) != conversationmemory.ResponseSchemaName {
+		return fmt.Errorf("conversation memory model must use response schema %q", conversationmemory.ResponseSchemaName)
+	}
+	return nil
 }
 
 type conversationMemoryCacheLogger struct {

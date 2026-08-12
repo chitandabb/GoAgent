@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/eino-contrib/jsonschema"
 )
 
 type Capabilities struct {
@@ -19,6 +20,8 @@ type Capabilities struct {
 	ReasoningEffort          bool
 	ThinkingMode             bool
 	ReasoningContentRequired bool
+	JSONOutput               bool
+	JSONSchemaOutput         bool
 }
 
 type Identity struct {
@@ -33,6 +36,13 @@ type Identity struct {
 type Instance struct {
 	Model    model.ToolCallingChatModel
 	Identity Identity
+}
+
+type ResponseSchema struct {
+	Name        string
+	Description string
+	Schema      *jsonschema.Schema
+	Strict      bool
 }
 
 type providerAdapter interface {
@@ -65,8 +75,33 @@ func NewProfile(ctx context.Context, cfg config.ChatModelConfig, name string) (*
 	return New(ctx, name, profile)
 }
 
+// NewProfileWithResponseSchema injects a domain-owned JSON Schema into a
+// provider-neutral named model profile. The generic Factory never imports the
+// domain that defines the schema.
+func NewProfileWithResponseSchema(
+	ctx context.Context,
+	cfg config.ChatModelConfig,
+	name string,
+	schema ResponseSchema,
+) (*Instance, error) {
+	profile, err := cfg.Profile(name)
+	if err != nil {
+		return nil, err
+	}
+	return newInstance(ctx, name, profile, &schema)
+}
+
 // New resolves a provider Adapter and returns normalized model identity with the client.
 func New(ctx context.Context, profileName string, profile config.ChatModelProfileConfig) (*Instance, error) {
+	return newInstance(ctx, profileName, profile, nil)
+}
+
+func newInstance(
+	ctx context.Context,
+	profileName string,
+	profile config.ChatModelProfileConfig,
+	responseSchema *ResponseSchema,
+) (*Instance, error) {
 	if err := profile.Validate(); err != nil {
 		return nil, fmt.Errorf("chat model profile %q: %w", profileName, err)
 	}
@@ -89,6 +124,30 @@ func New(ctx context.Context, profileName string, profile config.ChatModelProfil
 		MaxTokens: &maxOutputTokens, Temperature: profile.Temperature,
 	}
 	adapter.configure(clientConfig, profile)
+	switch strings.ToLower(strings.TrimSpace(profile.ResponseFormat)) {
+	case "json_object":
+		if !adapter.capabilities(profile).JSONOutput {
+			return nil, fmt.Errorf("chat model profile %q: provider %s does not support json_object response format", profileName, provider)
+		}
+		clientConfig.ResponseFormat = &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+		}
+	case "json_schema":
+		if !adapter.capabilities(profile).JSONSchemaOutput {
+			return nil, fmt.Errorf("chat model profile %q: provider %s does not support json_schema response format", profileName, provider)
+		}
+		if responseSchema == nil || responseSchema.Schema == nil ||
+			strings.TrimSpace(responseSchema.Name) != strings.TrimSpace(profile.ResponseSchema) {
+			return nil, fmt.Errorf("chat model profile %q: configured response schema is unavailable", profileName)
+		}
+		clientConfig.ResponseFormat = &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
+			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
+				Name: strings.TrimSpace(responseSchema.Name), Description: strings.TrimSpace(responseSchema.Description),
+				JSONSchema: responseSchema.Schema, Strict: responseSchema.Strict,
+			},
+		}
+	}
 	chatModel, err := openai.NewChatModel(ctx, clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create %s chat model: %w", provider, err)
@@ -134,7 +193,10 @@ func (stepFunAdapter) validate(profile config.ChatModelProfileConfig) error {
 }
 
 func (stepFunAdapter) capabilities(config.ChatModelProfileConfig) Capabilities {
-	return Capabilities{ToolCalling: true, ReasoningEffort: true}
+	return Capabilities{
+		ToolCalling: true, ReasoningEffort: true,
+		JSONOutput: true, JSONSchemaOutput: true,
+	}
 }
 
 func (stepFunAdapter) configure(target *openai.ChatModelConfig, profile config.ChatModelProfileConfig) {
@@ -161,7 +223,7 @@ func (deepSeekAdapter) validate(profile config.ChatModelProfileConfig) error {
 func (deepSeekAdapter) capabilities(profile config.ChatModelProfileConfig) Capabilities {
 	return Capabilities{
 		ToolCalling: true, ReasoningEffort: true, ThinkingMode: true,
-		ReasoningContentRequired: strings.EqualFold(strings.TrimSpace(profile.ThinkingMode), "enabled"),
+		ReasoningContentRequired: strings.EqualFold(strings.TrimSpace(profile.ThinkingMode), "enabled"), JSONOutput: true,
 	}
 }
 
@@ -187,7 +249,7 @@ func (dashScopeAdapter) validate(profile config.ChatModelProfileConfig) error {
 }
 
 func (dashScopeAdapter) capabilities(config.ChatModelProfileConfig) Capabilities {
-	return Capabilities{ToolCalling: true, ThinkingMode: true}
+	return Capabilities{ToolCalling: true, ThinkingMode: true, JSONOutput: true, JSONSchemaOutput: true}
 }
 
 func (dashScopeAdapter) configure(target *openai.ChatModelConfig, profile config.ChatModelProfileConfig) {

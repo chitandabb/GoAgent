@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/memorycompactor"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +50,78 @@ func TestPilotReasoningModeSupportsProviderSpecificControls(t *testing.T) {
 		if got := pilotReasoningMode(item.identity); got != item.want {
 			t.Fatalf("pilotReasoningMode(%+v) = %q, want %q", item.identity, got, item.want)
 		}
+	}
+}
+
+func TestPilotSelectionAcceptsOneDiagnosticCheckpoint(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.partial() || !selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmExperiment) ||
+		selection.includes("incident-correction", "incident-cp1", mesagent.PilotArmExperiment) ||
+		selection.includes("incident-correction", "incident-cp2", mesagent.PilotArmBaseline) {
+		t.Fatalf("diagnostic selection = %+v", selection)
+	}
+}
+
+func TestPilotSelectionRejectsCheckpointFromAnotherScenario(t *testing.T) {
+	_, err := newPilotSelection(
+		mesagent.ContextGovernancePilotFixture(), "release-policy", "incident-cp2", "experiment",
+	)
+	if err == nil {
+		t.Fatal("newPilotSelection() accepted a checkpoint from another scenario")
+	}
+}
+
+func TestValidateSelectedPilotBudgetRejectsDefaultFullRun(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	limits := mesagent.PilotModelCallLimits{
+		MaxProviderCalls: 2, MaxMainCalls: 1, MaxSummaryCalls: 1,
+		MaxEstimatedMainPromptTokens: 130000, MaxEstimatedSummaryPromptTokens: 130000,
+		MaxEstimatedCostCNY: 0.5,
+	}
+	if err := validateSelectedPilotBudget(dataset, pilotSelection{}, 1, limits); err == nil {
+		t.Fatal("validateSelectedPilotBudget() accepted the full Pilot under diagnostic defaults")
+	}
+}
+
+func TestValidateSelectedPilotBudgetAccountsForSummaryRetries(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	selection, err := newPilotSelection(dataset, "incident-correction", "incident-cp2", "experiment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := mesagent.PilotModelCallLimits{
+		MaxProviderCalls: 2, MaxMainCalls: 1, MaxSummaryCalls: 1,
+		MaxEstimatedMainPromptTokens: 130000, MaxEstimatedSummaryPromptTokens: 130000,
+		MaxEstimatedCostCNY: 0.5,
+	}
+	if err := validateSelectedPilotBudget(dataset, selection, 1, limits); err != nil {
+		t.Fatalf("one-attempt diagnostic selection error = %v", err)
+	}
+	if err := validateSelectedPilotBudget(dataset, selection, 3, limits); err == nil {
+		t.Fatal("validateSelectedPilotBudget() ignored the configured Summary retry multiplier")
+	}
+}
+
+func TestPilotErrorTypePreservesCompactionFailureStage(t *testing.T) {
+	err := fmt.Errorf("outer: %w", fmt.Errorf("%w: %w",
+		conversationmemory.ErrCompactionFailed, conversationmemory.ErrSourceOutOfRange))
+	if got := pilotErrorType(err); got != "summary_source_out_of_range" {
+		t.Fatalf("pilotErrorType() = %q, want summary_source_out_of_range", got)
+	}
+}
+
+func TestPilotErrorTypeDistinguishesSummaryAndAgentTimeout(t *testing.T) {
+	summaryErr := fmt.Errorf("outer: %w", fmt.Errorf("%w: %w",
+		memorycompactor.ErrProviderRequest, context.DeadlineExceeded))
+	if got := pilotErrorType(summaryErr); got != "summary_timeout" {
+		t.Fatalf("pilotErrorType(summary timeout) = %q, want summary_timeout", got)
+	}
+	if got := pilotErrorType(context.DeadlineExceeded); got != "agent_timeout" {
+		t.Fatalf("pilotErrorType(agent timeout) = %q, want agent_timeout", got)
 	}
 }
 

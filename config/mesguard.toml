@@ -66,7 +66,7 @@ retryBaseDelayMillis = 250
 [models.chat]
 enabled = true
 activeProfile = "stepfun-main"
-conversationMemoryProfile = "qwen-conversation-memory"
+conversationMemoryProfile = "stepfun-conversation-memory"
 
 [models.chat.profiles.stepfun-main]
 provider = "stepfun"
@@ -99,12 +99,14 @@ tokenizerStrategy = "local_calibrated"
 toolExposureStrategy = "static_frozen"
 providerNativeCompactionEnabled = false
 
-[models.chat.profiles.qwen-conversation-memory]
-provider = "dashscope"
-baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-apiKeyEnv = "DASHSCOPE_API_KEY"
-model = "qwen3.6-flash"
-thinkingMode = "disabled"
+[models.chat.profiles.stepfun-conversation-memory]
+provider = "stepfun"
+baseURL = "https://api.stepfun.com/step_plan/v1"
+apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
+model = "step-3.7-flash"
+reasoningEffort = "low"
+responseFormat = "json_schema"
+responseSchema = "conversation_memory_v1"
 temperature = 0.0
 timeoutMillis = 30000
 contextWindowTokens = 131072

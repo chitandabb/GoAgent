@@ -11,6 +11,8 @@
 
 必须输出以下九个顶层字段，字段不能缺失，数组为空时必须输出 `[]`：
 
+`conversationGoal` 只能是一个普通 Entry 对象或 JSON `null`，绝不能输出数组、字符串或空对象；其余八个字段只能是数组，绝不能输出 `null`。
+
 ```json
 {
   "conversationGoal": null,
