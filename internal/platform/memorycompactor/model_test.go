@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/platform/memorycompactor"
 
+	modelopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
@@ -143,5 +145,61 @@ func TestModelCompactorRejectsLengthTruncatedOutputBeforeJSONDecode(t *testing.T
 		if !errors.Is(err, memorycompactor.ErrOutputTruncated) {
 			t.Fatalf("Compact(content=%q) error = %v, want ErrOutputTruncated", content, err)
 		}
+	}
+}
+
+func TestModelCompactorPrefersLengthTruncationWhenProviderReturnsResponseAndError(t *testing.T) {
+	providerErr := errors.New("provider rejected incomplete strict JSON")
+	compactor, err := memorycompactor.New(memorycompactor.Config{
+		Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return &schema.Message{
+				Role: schema.Assistant, Content: `{"conversationGoal":`,
+				ResponseMeta: &schema.ResponseMeta{FinishReason: "length"},
+			}, providerErr
+		}),
+		Prompt: "Return JSON.", PromptVersion: "memory-v1", Timeout: time.Second, MaxOutputBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = compactor.Compact(context.Background(), conversationmemory.CompactionInput{
+		ConversationID: uuid.New(), FromSeq: 1, ThroughSeq: 1, Attempt: 1,
+		NewMessages: []conversation.Message{{ID: uuid.New(), ConversationID: uuid.New(), Seq: 1, Role: conversation.MessageRoleUser, Content: "x"}},
+	})
+	if !errors.Is(err, memorycompactor.ErrOutputTruncated) || errors.Is(err, memorycompactor.ErrProviderRequest) {
+		t.Fatalf("Compact() error = %v, want only ErrOutputTruncated", err)
+	}
+}
+
+func TestModelCompactorPreservesHTTPProviderErrorsBeforeLengthTruncation(t *testing.T) {
+	for _, status := range []int{401, 429, 500} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			apiErr := &modelopenai.APIError{HTTPStatusCode: status, Message: "fixture provider error"}
+			compactor, err := memorycompactor.New(memorycompactor.Config{
+				Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+					return &schema.Message{
+						Role: schema.Assistant, Content: `{"conversationGoal":`,
+						ResponseMeta: &schema.ResponseMeta{FinishReason: "length"},
+					}, apiErr
+				}),
+				Prompt: "Return JSON.", PromptVersion: "memory-v1", Timeout: time.Second, MaxOutputBytes: 1024,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = compactor.Compact(context.Background(), conversationmemory.CompactionInput{
+				ConversationID: uuid.New(), FromSeq: 1, ThroughSeq: 1, Attempt: 1,
+				NewMessages: []conversation.Message{{ID: uuid.New(), ConversationID: uuid.New(), Seq: 1, Role: conversation.MessageRoleUser, Content: "x"}},
+			})
+			var gotAPIError *modelopenai.APIError
+			if !errors.Is(err, memorycompactor.ErrProviderRequest) || errors.Is(err, memorycompactor.ErrOutputTruncated) ||
+				!errors.As(err, &gotAPIError) || gotAPIError.HTTPStatusCode != status {
+				t.Fatalf("Compact() error = %v, want preserved HTTP %d Provider error", err, status)
+			}
+			var nonRetryable conversationmemory.NonRetryableCompactionError
+			if !errors.As(err, &nonRetryable) || nonRetryable.NonRetryableCompaction() != (status == 401) {
+				t.Fatalf("NonRetryableCompaction(status=%d) = %v", status, nonRetryable != nil && nonRetryable.NonRetryableCompaction())
+			}
+		})
 	}
 }

@@ -277,7 +277,7 @@ supersedesEntryId（可选）
 - Evidence/Task/Report 只保留稳定 ID、类型、来源和一句话结论；
 - 新 Snapshot 基于旧 Snapshot + 新增可压缩消息增量合并；
 - 记录 `from_seq`、`through_seq` 和 `supersedes_snapshot_id`；
-- 默认 `maxSummaryOutputTokens=4096`，硬上限不超过模型窗口约 5%，配置化；
+- 当前 `maxSummaryOutputTokens=6144`，硬上限不超过模型窗口约 5%，配置化；
 - Snapshot 生成后先通过严格 JSON Schema、来源、范围、引用和 active Entry 校验；
 - 校验失败不激活，继续使用上一份有效 Snapshot。
 - Summary 作为带明确边界标签的 User-role 不可信上下文进入主模型，不提升为 System 指令；
@@ -528,7 +528,7 @@ reasoningEffort = "low"
 responseFormat = "json_schema"
 responseSchema = "conversation_memory_v1"
 contextWindowTokens = 131072
-maxOutputTokens = 4096
+maxOutputTokens = 6144
 promptSafetyMarginTokens = 2048
 promptSafetyMarginRatio = 0.05
 tokenizerStrategy = "local_calibrated"
@@ -556,7 +556,7 @@ toolGrowthReserveTokens = 8192
 [agent.contextMemory.summary]
 enabled = true
 promptFile = "config/prompts/conversation-memory-summary.md"
-promptVersion = "conversation-memory-v1"
+promptVersion = "conversation-memory-v2"
 maxPayloadBytes = 65536
 maxAttempts = 3
 retryBaseDelayMillis = 250
@@ -740,6 +740,32 @@ Observer 专用 60 秒覆盖运行，Provider 报告输入 61,561、输出 4,096
 失败。Observer 的 `summary-timeout`/`summary-attempts` 仅覆盖评测进程，不修改生产配置；每次
 请求仍受调用、累计 Prompt Token 和费用门禁约束。单检查点成功只完成长摘要延迟与链路验收，
 不等于 4 场景 Pilot 或 12 场景 Acceptance 已通过。
+
+2026-08-12 之后的正式 Pilot 首批使用独立输出制品 `formal-v1`，只执行了
+`incident-correction` 的 `cp1` 与 `cp2`，没有扩大到其它 Scenario。`cp1` 三臂均成功：Baseline
+主模型 30,128 输入 Token、362 输出 Token；Experiment 同样 30,128 输入、488 输出，摘要调用为
+0，Current 主模型输入 20,671、输出 450。`cp1` 的缓存字段也被分别记录，不能把缓存命中 Token
+当成降低窗口占用的 Token。
+
+`cp2` 的 Baseline 成功，主模型输入 59,298、输出 791；Experiment 聚合记录 2 次 Summary、
+123,259 输入、8,192 输出、131,451 总 Token 和 61,504 Cached Token，两次输出都达到 4,096
+上限，但当时制品只记录为泛化 `summary_provider_failed`，主模型没有被
+调用。回归检查发现 Provider 同时返回 Message 与 Error 时，Compactor 在读取
+`finish_reason=length` 前先包装 Provider Error；现已改为优先保留确定性的截断语义，后续同类响应
+会记录为 `summary_output_truncated`。该结果证明“失败 Observation 不重跑”和逐条落盘有效，但
+不能作为 Token 降幅 Pair。
+
+针对这个瓶颈，摘要 Profile 的 `maxOutputTokens` 从 4,096 调整为 6,144，仍不超过活动模型
+131,072 窗口的 `summaryMaxRatio=0.05` 上限；摘要 Prompt 也从首次尝试开始要求合并同义/重复流水
+记录。新的 `conversation-memory-v2` 单次 `cp2` 探针输出 5,145 Token、输入 61,669 Token，未再
+触发截断，但因模型生成了输入白名单之外的引用而被领域校验拒绝为
+`summary_entry_reference_unknown`，主模型未调用。随后两次尝试探针消耗 1 次摘要并以未细分的
+`summary_provider_failed` 结束，Provider 原始错误未写入制品，因此不能推断为 429、鉴权或 Schema
+错误。该轮只用于定位容量与结构问题，不进入简历指标，也不继续盲目重跑。
+
+当前结论：摘要输出容量瓶颈已缓解，但“引用白名单遵守”和 Provider 错误分类仍未完成验收；正式
+Pilot 暂停在 `cp2`，需要先修复/补强这两个可观测性与重试边界，再以新的合同版本重新开始可比数据
+收集。`formal-v1` 只作为失败证据保留，不得与 `conversation-memory-v2` 的探针混合汇总。
 
 进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
 Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。

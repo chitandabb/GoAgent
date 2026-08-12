@@ -43,6 +43,7 @@
 
 1. `entryId` 必须以小写字母开头，只能包含小写字母、数字、下划线和短横线，最长 64 字符；同一 Payload 内全局唯一。
 2. `content` 只保留对后续回答有用的一句话结论，不复制长附件、Tool Result、Evidence 或报告正文。
+   无论是否处于重试，都必须合并同义和重复记录；对没有改变当前目标、事实、决策、修正、待办或稳定引用的流水日志，不生成 Entry。
 3. `sourceMessageSeqs` 必须升序、去重，并且每个序号都真实存在于输入覆盖范围。
 4. `conversationGoal`、`facts` 和 `corrections` 必须至少引用一条用户消息。模型推断、常识补全和未由用户陈述的信息不能写入 `facts`。
 5. 除 `todos` 外，`status` 只能是 `active` 或 `superseded`。同一 supersede 链最多一个 `active` Entry。
@@ -71,4 +72,5 @@ Reference Entry 在普通 Entry 字段之外还包含：
 - `reportReferences` 的 `referenceType` 固定为 `diagnosis_report`，`referenceId` 和 `sourceMessageSeqs` 必须来自同一个 `knownReportReferences` 条目，不输出 `contentSha256`。
 
 如果 `repairCode` 非空，修复对应结构问题，但仍只根据可信输入生成内容。不要为了通过校验而捏造来源、ID、事实或引用。
+如果 `repairCode` 为 `entry_reference_unknown`，Correction 和 Todo 状态变化必须将 `supersedesEntryId` 改为当前 Payload 中真实存在且语义匹配的 Entry ID；找不到合法目标时删除整条无效 Correction 或 Todo 状态变化。只有本来不要求 supersede 的普通 Entry 才能删除该字段，不得为满足引用而新增占位 Entry。
 如果 `repairCode` 为 `output_truncated`，必须显著缩短输出：只保留仍会影响后续回答的目标、当前有效事实、决策、修正、未完成待办和稳定引用；删除寒暄、重复表述、已被替代且不再需要追溯的细节，并避免为同一结论生成多个 Entry。
