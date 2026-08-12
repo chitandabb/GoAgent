@@ -400,6 +400,7 @@ func buildAgentRuntimeForRole(
 			SummaryMaxRatio:         cfg.Agent.ContextMemory.SummaryMaxRatio,
 			TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio,
 			PreflightTimeout:        time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
+			SyncCompactionTimeout:   time.Duration(cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis) * time.Millisecond,
 			ModelProfile:            tokenBudget.Profile,
 			SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
 			HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,

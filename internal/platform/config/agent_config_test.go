@@ -95,6 +95,7 @@ func TestAgentConfigValidate(t *testing.T) {
 		MaxAttempts: 3, RetryBaseDelayMillis: 250,
 	}
 	configured.ContextMemory.SummaryTailEnabled = true
+	configured.ContextMemory.SyncCompactionTimeoutMillis = 45_000
 	configured.ContextMemory.AsyncCompactionEnabled = true
 	configured.ContextMemory.AsyncMaxAttempts = 3
 	configured.ContextMemory.RetryJitterRatio = 0.10
@@ -110,6 +111,11 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.ContextMemory.SourceRecoveryMaxCalls = 2
 	if err := configured.Validate(); err != nil {
 		t.Fatalf("Validate configured Summary + Tail: %v", err)
+	}
+	invalidSyncBudget := configured
+	invalidSyncBudget.ContextMemory.SyncCompactionTimeoutMillis = configured.ConversationTimeoutMillis
+	if err := invalidSyncBudget.Validate(); err == nil {
+		t.Fatal("Validate accepted synchronous compaction without answer time reserve")
 	}
 	if ttl, err := configured.ContextMemory.MemoryCacheDuration(); err != nil || ttl.String() != "2h0m0s" {
 		t.Fatalf("MemoryCacheDuration() = %s, %v", ttl, err)

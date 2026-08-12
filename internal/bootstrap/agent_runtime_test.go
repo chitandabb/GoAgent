@@ -93,7 +93,7 @@ func TestBuildAgentRuntimeWiresConversationShadowPreflight(t *testing.T) {
 		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
 		PreflightTimeoutMillis: 250,
 		SoftThresholdRatio:     0.70, HardThresholdRatio: 0.85,
-		ToolGrowthReserveTokens: 256,
+		ToolGrowthReserveTokens: 256, SyncCompactionTimeoutMillis: 45_000,
 	}
 	memoryBuilt := false
 	runtime, err := buildAgentRuntime(
@@ -143,8 +143,8 @@ func TestBuildAgentRuntimeSharesActiveMemoryWithSourceRecovery(t *testing.T) {
 		ShadowPreflightEnabled: true, ContinuousTailEnabled: true, SummaryTailEnabled: true,
 		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
 		PreflightTimeoutMillis: 250, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
-		ToolGrowthReserveTokens: 256,
-		SourceRecoveryEnabled:   true, SourceRecoveryMaxMessages: 20,
+		ToolGrowthReserveTokens: 256, SyncCompactionTimeoutMillis: 45_000,
+		SourceRecoveryEnabled: true, SourceRecoveryMaxMessages: 20,
 		SourceRecoveryMaxTokens: 8192, SourceRecoveryMaxCalls: 2,
 	}
 	memoryBuildCount := 0
@@ -186,7 +186,7 @@ func TestBuildDiagnosisAgentRuntimeDoesNotRequireConversationMemory(t *testing.T
 		ShadowPreflightEnabled: true, ContinuousTailEnabled: true, SummaryTailEnabled: true,
 		MemoryMaxRatio: 0.20, SummaryMaxRatio: 0.05, TailMaxRatio: 0.15,
 		PreflightTimeoutMillis: 250, SoftThresholdRatio: 0.70, HardThresholdRatio: 0.85,
-		ToolGrowthReserveTokens: 256,
+		ToolGrowthReserveTokens: 256, SyncCompactionTimeoutMillis: 45_000,
 	}
 	memoryBuilt := false
 

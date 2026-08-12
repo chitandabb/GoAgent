@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,8 +61,16 @@ func runWithProgress(args []string, stdout, progress io.Writer) error {
 	maxMainPromptTokens := flags.Int("max-estimated-main-prompt-tokens", 130000, "cumulative estimated main prompt Token limit")
 	maxSummaryPromptTokens := flags.Int("max-estimated-summary-prompt-tokens", 130000, "cumulative estimated Summary prompt Token limit")
 	maxEstimatedCostCNY := flags.Float64("max-estimated-cost-cny", 0.50, "conservative estimated cost admission limit")
+	summaryTimeout := flags.Duration("summary-timeout", 0, "optional observer-only Summary timeout override (1s..5m)")
+	summaryAttempts := flags.Int("summary-attempts", 0, "optional observer-only Summary attempt override (1..5)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-context-governance-pilot-observe [-execute-provider] [-config path] [-fixture path] [-output path] [-summary-output path] [-scenario-id id] [-checkpoint-id id] [-arm arm] [-max-main-calls n] [-max-summary-calls n] [-max-estimated-main-prompt-tokens n] [-max-estimated-summary-prompt-tokens n] [-max-estimated-cost-cny amount]")
+		return errors.New("usage: mesguard-context-governance-pilot-observe [-execute-provider] [-config path] [-fixture path] [-output path] [-summary-output path] [-scenario-id id] [-checkpoint-id id] [-arm arm] [-summary-timeout duration] [-summary-attempts n] [-max-main-calls n] [-max-summary-calls n] [-max-estimated-main-prompt-tokens n] [-max-estimated-summary-prompt-tokens n] [-max-estimated-cost-cny amount]")
+	}
+	if *summaryTimeout < 0 || *summaryTimeout > 5*time.Minute || (*summaryTimeout > 0 && *summaryTimeout < time.Second) {
+		return errors.New("observer Summary timeout override must be between 1s and 5m")
+	}
+	if *summaryAttempts < 0 || *summaryAttempts > 5 {
+		return errors.New("observer Summary attempt override must be between 1 and 5")
 	}
 	dataset := mesagent.ContextGovernancePilotFixture()
 	if strings.TrimSpace(*fixturePath) != "" {
@@ -92,6 +101,15 @@ func runWithProgress(args []string, stdout, progress io.Writer) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load Pilot config: %w", err)
+	}
+	if *summaryTimeout > 0 {
+		profileName := cfg.Models.Chat.ConversationMemoryProfileName
+		profile := cfg.Models.Chat.Profiles[profileName]
+		profile.TimeoutMillis = int(summaryTimeout.Milliseconds())
+		cfg.Models.Chat.Profiles[profileName] = profile
+	}
+	if *summaryAttempts > 0 {
+		cfg.Agent.ContextMemory.Summary.MaxAttempts = *summaryAttempts
 	}
 	planOptions.SummaryCallsPerExperimentCheckpoint = cfg.Agent.ContextMemory.Summary.MaxAttempts
 	plan, err := mesagent.BuildContextGovernancePilotPlan(dataset, planOptions)
@@ -363,6 +381,7 @@ func buildPilotPreflight(
 		HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
 		ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
 		PreflightTimeout:        time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
+		SyncCompactionTimeout:   time.Duration(cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis) * time.Millisecond,
 	}
 	if arm == mesagent.PilotArmBaseline {
 		preflight.HardWindowEnforced, preflight.FullHistoryEnabled = true, true
@@ -408,6 +427,7 @@ func buildPilotPreflight(
 		MemoryMaxRatio: cfg.Agent.ContextMemory.MemoryMaxRatio, SummaryMaxRatio: cfg.Agent.ContextMemory.SummaryMaxRatio,
 		TailMaxRatio: cfg.Agent.ContextMemory.TailMaxRatio, SoftThresholdRatio: cfg.Agent.ContextMemory.SoftThresholdRatio,
 		HardThresholdRatio: cfg.Agent.ContextMemory.HardThresholdRatio, ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
+		SyncCompactionTimeout: time.Duration(cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis) * time.Millisecond,
 	})
 	if err != nil {
 		return mesagent.ConversationContextPreflightConfig{}, nil, nil, err
@@ -562,7 +582,7 @@ func pilotErrorType(err error) string {
 				return "summary_provider_5xx"
 			}
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
+		if isTimeoutError(err) {
 			return "summary_timeout"
 		}
 		return "summary_provider_failed"
@@ -572,6 +592,9 @@ func pilotErrorType(err error) string {
 	}
 	if errors.Is(err, memorycompactor.ErrOutputTooLarge) {
 		return "summary_output_too_large"
+	}
+	if errors.Is(err, memorycompactor.ErrOutputTruncated) {
+		return "summary_output_truncated"
 	}
 	if code := conversationmemory.FailureCode(err); code != "" {
 		return "summary_" + code
@@ -586,6 +609,14 @@ func pilotErrorType(err error) string {
 		return "context_preparation_failed"
 	}
 	return "provider_or_runner_failed"
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 type pilotScenarioTimeline struct {

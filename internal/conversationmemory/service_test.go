@@ -318,6 +318,35 @@ func TestConversationMemoryFeedsSchemaFailureCodeIntoRepairAttempt(t *testing.T)
 	}
 }
 
+type repairCodedCompactionError struct{ code string }
+
+func (e repairCodedCompactionError) Error() string                { return "coded compaction failure" }
+func (e repairCodedCompactionError) CompactionRepairCode() string { return e.code }
+
+func TestConversationMemoryFeedsCompactorRepairCodeIntoRetry(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	var repairCodes []string
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		repairCodes = append(repairCodes, input.RepairCode)
+		if input.Attempt == 1 {
+			return conversationmemory.CompactionOutput{}, repairCodedCompactionError{code: "output_truncated"}
+		}
+		return conversationmemory.CompactionOutput{
+			Payload: validPayload(),
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 2)
+	conversationID := uuid.New()
+	if _, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repairCodes) != 2 || repairCodes[0] != "" || repairCodes[1] != "output_truncated" {
+		t.Fatalf("repair codes = %#v", repairCodes)
+	}
+}
+
 func TestConversationMemoryRejectsInvalidCompletedMessagesBeforeActiveFastPath(t *testing.T) {
 	conversationID := uuid.New()
 	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)

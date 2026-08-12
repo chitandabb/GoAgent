@@ -58,11 +58,13 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	}
 	refreshFailed := false
 	if refreshNeeded {
-		prepared, prepareErr := r.contextPreflight.Memory.PrepareActive(ctx, conversationmemory.PrepareActiveRequest{
+		compactionCtx, cancel := context.WithTimeout(ctx, r.contextPreflight.SyncCompactionTimeout)
+		prepared, prepareErr := r.contextPreflight.Memory.PrepareActive(compactionCtx, conversationmemory.PrepareActiveRequest{
 			ConversationID:    request.Conversation.ID,
 			CompletedMessages: completedConversationMessages(request.History, request.UserMessage),
 			ActivationGate:    conversationSummaryActivationGate{preflight: r.contextPreflight},
 		})
+		cancel()
 		if prepareErr != nil {
 			if active == nil {
 				pressure.hardCompactionTriggered = true

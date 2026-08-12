@@ -24,7 +24,7 @@ conversationCitationRepairTimeoutMillis = 30000
 conversationCitationRepairMaxOutputTokens = 768
 conversationMaxIterations = 8
 conversationMaxContextRunes = 32000
-conversationTimeoutMillis = 60000
+conversationTimeoutMillis = 120000
 maxAgentRuns = 2
 maxToolCalls = 8
 maxEvidenceItems = 16
@@ -54,6 +54,7 @@ preflightTimeoutMillis = 250
 softThresholdRatio = 0.70
 hardThresholdRatio = 0.85
 toolGrowthReserveTokens = 8192
+syncCompactionTimeoutMillis = 90000
 
 [agent.contextMemory.summary]
 enabled = true
@@ -108,7 +109,7 @@ reasoningEffort = "low"
 responseFormat = "json_schema"
 responseSchema = "conversation_memory_v1"
 temperature = 0.0
-timeoutMillis = 30000
+timeoutMillis = 60000
 contextWindowTokens = 131072
 maxOutputTokens = 4096
 promptSafetyMarginTokens = 2048

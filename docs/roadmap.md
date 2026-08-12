@@ -101,8 +101,11 @@ remains an acceptance target and must be replaced by the fixed-set result if the
       passed with one call and content-free failure diagnostics.
 - [x] Enforce the strict Conversation Memory schema at the assembly boundary and centralize content-free
       domain failure codes; production keeps three retries while Pilot budgets reserve their worst case.
-- [ ] Run one gated long-summary latency probe before changing the current 30-second Summary timeout; the
-      88,727-Token timeout and short-input Smoke are not sufficient to select a production timeout.
+- [x] Run one gated long-summary latency probe: the 60-second single-attempt run completed Summary and main
+      answer in 38.57 seconds with 61,632/3,542 Summary and 12,303/249 main prompt/output Tokens. Production
+      now uses a 60-second Summary timeout, a 90-second synchronous compaction phase, and a 120-second
+      Conversation deadline that reserves answer time; length truncation has a stable repair code, retries use
+      exponential backoff plus jitter, and observer-only timeout/attempt overrides remain cost-gated.
 - [ ] After explicit cost approval, rerun the Provider-backed Pilot under class-specific call/Token gates; the
       2026-08-12 exploratory run is invalid because Summary retries amplified cost and comparable pairs were
       insufficient. Inspect quality/Token/cache/cost/latency gates, then decide whether the implementation is

@@ -25,6 +25,7 @@ var (
 	ErrInvalidInput    = errors.New("conversation memory model compactor input is invalid")
 	ErrProviderRequest = errors.New("conversation memory model provider request failed")
 	ErrOutputTooLarge  = errors.New("conversation memory model output is too large")
+	ErrOutputTruncated = errors.New("conversation memory model output was truncated")
 )
 
 type Generator interface {
@@ -58,6 +59,12 @@ func (e *providerRequestError) Unwrap() []error { return []error{ErrProviderRequ
 
 func (e *providerRequestError) NonRetryableCompaction() bool { return e != nil && e.nonRetryable }
 
+type outputTruncatedError struct{}
+
+func (*outputTruncatedError) Error() string                { return ErrOutputTruncated.Error() }
+func (*outputTruncatedError) Unwrap() error                { return ErrOutputTruncated }
+func (*outputTruncatedError) CompactionRepairCode() string { return "output_truncated" }
+
 func New(config Config) (*ModelCompactor, error) {
 	if config.Generator == nil || strings.TrimSpace(config.Prompt) == "" || config.Prompt != strings.TrimSpace(config.Prompt) ||
 		strings.TrimSpace(config.PromptVersion) == "" || config.PromptVersion != strings.TrimSpace(config.PromptVersion) ||
@@ -89,7 +96,13 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 	if err != nil {
 		return conversationmemory.CompactionOutput{}, newProviderRequestError(err)
 	}
-	if response == nil || strings.TrimSpace(response.Content) == "" {
+	if response == nil {
+		return conversationmemory.CompactionOutput{}, conversationmemory.ErrInvalidPayloadSchema
+	}
+	if response.ResponseMeta != nil && strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
+		return conversationmemory.CompactionOutput{}, &outputTruncatedError{}
+	}
+	if strings.TrimSpace(response.Content) == "" {
 		return conversationmemory.CompactionOutput{}, conversationmemory.ErrInvalidPayloadSchema
 	}
 	if len(response.Content) > c.maxOutputBytes {

@@ -82,6 +82,7 @@ func BuildConversationMemoryServiceWithModel(
 		Repository: repository, Compactor: compactor, SchemaVersion: conversationmemory.CurrentSchemaVersion,
 		MaxPayloadBytes: summaryConfig.MaxPayloadBytes, Provenance: provenance,
 		MaxAttempts: summaryConfig.MaxAttempts, RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
+		RetryJitterRatio: cfg.Agent.ContextMemory.RetryJitterRatio,
 	})
 	if err != nil {
 		return nil, conversationmemory.SummaryProvenance{}, err
@@ -199,9 +200,10 @@ func buildConversationMemoryServiceWithCache(
 			ModelProfile: profileName, ModelProvider: instance.Identity.Provider,
 			ModelID: instance.Identity.ModelID, PromptVersion: summaryConfig.PromptVersion,
 		},
-		MaxAttempts:    summaryConfig.MaxAttempts,
-		RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
-		Cache:          cache, CacheExpected: cacheExpected, CacheObserver: cacheObserver,
+		MaxAttempts:      summaryConfig.MaxAttempts,
+		RetryBaseDelay:   time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
+		RetryJitterRatio: cfg.Agent.ContextMemory.RetryJitterRatio,
+		Cache:            cache, CacheExpected: cacheExpected, CacheObserver: cacheObserver,
 	})
 }
 
