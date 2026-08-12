@@ -60,9 +60,10 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	if refreshNeeded {
 		compactionCtx, cancel := context.WithTimeout(ctx, r.contextPreflight.SyncCompactionTimeout)
 		prepared, prepareErr := r.contextPreflight.Memory.PrepareActive(compactionCtx, conversationmemory.PrepareActiveRequest{
-			ConversationID:    request.Conversation.ID,
-			CompletedMessages: completedConversationMessages(request.History, request.UserMessage),
-			ActivationGate:    conversationSummaryActivationGate{preflight: r.contextPreflight},
+			ConversationID:        request.Conversation.ID,
+			CompletedMessages:     completedConversationMessages(request.History, request.UserMessage),
+			KnownReportReferences: request.KnownReportReferences,
+			ActivationGate:        conversationSummaryActivationGate{preflight: r.contextPreflight},
 		})
 		cancel()
 		if prepareErr != nil {

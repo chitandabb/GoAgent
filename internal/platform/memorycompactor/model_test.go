@@ -252,6 +252,34 @@ func TestModelCompactorClassifiesProviderFailuresWithoutExposingProviderText(t *
 	}
 }
 
+type localBudgetErrorFixture struct{}
+
+func (localBudgetErrorFixture) Error() string                 { return "local budget detail" }
+func (localBudgetErrorFixture) CompactionFailureCode() string { return "local_budget_exceeded" }
+func (localBudgetErrorFixture) NonRetryableCompaction() bool  { return true }
+
+func TestModelCompactorPreservesStableDownstreamFailureContract(t *testing.T) {
+	compactor, err := memorycompactor.New(memorycompactor.Config{
+		Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return nil, localBudgetErrorFixture{}
+		}),
+		Prompt: "Return JSON.", PromptVersion: "memory-v1", Timeout: time.Second, MaxOutputBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, compactErr := compactor.Compact(context.Background(), validCompactionInput())
+	var coded conversationmemory.CompactionFailureCodeError
+	var nonRetryable conversationmemory.NonRetryableCompactionError
+	if !errors.As(compactErr, &coded) || coded.CompactionFailureCode() != "local_budget_exceeded" ||
+		!errors.As(compactErr, &nonRetryable) || !nonRetryable.NonRetryableCompaction() {
+		t.Fatalf("Compact() error = %v, want stable non-retryable local_budget_exceeded", compactErr)
+	}
+	if errors.Is(compactErr, memorycompactor.ErrProviderRequest) {
+		t.Fatalf("Compact() error = %v, local budget rejection must not be classified as a Provider request failure", compactErr)
+	}
+}
+
 type timeoutErrorFixture struct{}
 
 func (timeoutErrorFixture) Error() string   { return "sensitive network timeout" }

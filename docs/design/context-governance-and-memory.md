@@ -556,7 +556,7 @@ toolGrowthReserveTokens = 8192
 [agent.contextMemory.summary]
 enabled = true
 promptFile = "config/prompts/conversation-memory-summary.md"
-promptVersion = "conversation-memory-v2"
+promptVersion = "conversation-memory-v5"
 maxPayloadBytes = 65536
 maxAttempts = 3
 retryBaseDelayMillis = 250
@@ -653,7 +653,10 @@ Pilot：4 个会话剧本，每个 3 个检查点；Acceptance：12 个会话剧
 历史消息直接预置，不为构造 100 轮历史调用 100 次模型。检查点才调用 Summary、主模型和可选
 Judge。
 
-当前 Pilot 固定集版本为 `fixture-2026-08-12-v3`。生产本地估算器已固定压力梯度：每个场景
+当前 Pilot 固定集版本为 `fixture-2026-08-12-v4`。v4 为包含报告引用的里程碑增加了结构化
+`reportReferences`，Observer 按真实消息序号构造 `knownReportReferences` 白名单；正文中的
+`report:*` 字符串不再被当作权威引用来源。该合同变化会改变 Fixture 指纹，v3 Observation 不得与
+v4 混合恢复或汇总。生产本地估算器已固定压力梯度：每个场景
 `cp1` 未达到硬阈值，`cp2` 达到 85% 硬阈值但仍可先压缩，`cp3` 的完整 Baseline 历史超过
 模型窗口。各 Arm 的检查点时间线单调递增，真实检查点回答不反馈给下一个检查点，避免不同
 Arm 的回答质量反向改变后续输入；Experiment 在同一场景内复用 Active Snapshot。
@@ -776,6 +779,43 @@ Observer 使用最后一次失败码作为 `errorType` 的具体后缀，同时�
 主动取消同样不重试，429/5xx/超时与连接失败等瞬态错误才进入既定重试次数。退避等待期间取消时
 仍保留此前已发生的 Provider 失败链与尝试码。该能力只改善失败诊断和评测可比性，不改变 Token
 降幅口径，也不把失败样本计入成功 Pair。
+
+错误分类增强后的首个 `cp2 Experiment` 探针只发生 1 次真实 Summary 调用：输入 61,759、输出
+6,144、总计 67,903 Token，耗时 47.861 秒，主模型调用为 0。第一次尝试再次以
+`output_truncated` 结束；第二次尝试在 Provider 前被累计 Summary 输入门禁拒绝，因为 Observer 对
+单次 Summary 请求的保守预留高于 100,000 且不超过 130,000 Token，两次将超过本轮 130,000 Token
+累计上限；Observation 中的 88,727 是会话 Prompt 预检值，不能当作 Summary 请求预留。旧分类把本地门禁包装成
+`provider_request_failed`；现已增加不可重试的 `local_budget_exceeded`，避免将成本保护误报为远端
+故障。该探针仍不进入正式指标，也不通过提高门禁盲目重跑。
+
+连续两次输出顶满证明瓶颈不是 JSON Schema 兼容，而是模型把 80 条历史中的模板化运行流水过度
+展开。继续把 `maxOutputTokens` 提高到 8K/12K 会超过主模型 5% Summary 预算并挤压 Tail，因此
+Summary 合同先升级为 `conversation-memory-v3`：从首次生成就忽略无状态变化的模板流水，建议整个
+Payload 不超过 24 个 Entry、单条内容不超过 120 个中文字符、每条最多保留 8 个最直接来源，并按
+“当前目标、修正后事实、有效决策、待办、稳定引用、未决问题”排序取舍。领域层仍保留 256 Entry
+和 4,096 Rune 的宽安全上限；Prompt 上限是信息选择策略，不是应用侧静默截断，避免在容量边界直接
+丢失关键事实。
+
+v3 单次探针将输出从 6,144 降至 2,896 Token，证明容量策略有效，但领域校验仍返回泛化
+`stable_reference_unknown`。检查发现生产同步压缩没有可信报告引用输入，而 Pilot 当时也只把
+`report:*` 写进自然语言正文。Fixture v4 因此增加结构化 `reportReferences` 并由 Timeline 映射到
+真实消息序号；`AgentRequest` 同时预留显式 `KnownReportReferences` 运行期合同并透传到压缩服务。
+Prompt 再升级为 `conversation-memory-v4`，明确正文中的类引用文本不是授权，只有结构化
+`taskReferences`、`citations` 和 `knownReportReferences` 可以生成 Reference Entry。稳定引用校验
+也细分为 evidence/task/report 的 `id_unknown`、`identity_mismatch` 和 `source_mismatch`，仍不记录
+实际 ID 或来源值。
+
+当前生产仍缺少“诊断报告引用随会话消息持久化并在加载历史时重建白名单”的数据库闭环；本轮仅
+完成运行期合同和 Pilot 的可信 Fixture，不能据此宣称生产报告引用记忆已完成。后续需要新增会话
+报告引用关联表、Repository 读写与诊断完成消息接入，再补 PostgreSQL 集成测试。
+
+Fixture v4 + Prompt v4 的单次 `cp2 Experiment` 探针输入 62,074、输出 3,033、缓存命中 704 Token，
+耗时 30.872 秒，未再触发容量或报告引用错误，但以 `task_reference_id_unknown` 被拒绝。模型仍把正文
+中的 `TKT-2048` 推断成任务引用，而 Fixture 没有对应结构化 `taskReferences`；应用侧拒绝是正确的。
+Prompt 因此升级为 `conversation-memory-v5`，为 evidence/task/report 的 ID、身份和来源失败增加
+确定性修复指令：只能恢复结构化白名单值，找不到唯一合法映射就删除 Entry。该规则供生产默认的
+有界重试使用；本轮不再用远程调用验证第二次尝试，下一次仅允许一个双尝试 `cp2 Experiment`
+探针。
 
 进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
 Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。

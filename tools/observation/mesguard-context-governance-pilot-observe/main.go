@@ -570,8 +570,10 @@ func runPilotArms(
 				started := time.Now()
 				fmt.Fprintf(progress, "pilot scenario=%s arm=%s checkpoint=%s stage=started\n", scenario.ScenarioID, arm, checkpoint.CheckpointID)
 				request := conversation.AgentRequest{
-					Conversation: conversation.Conversation{ID: conversationID, UserID: uuid.Nil, Status: conversation.StatusActive},
-					UserMessage:  current, History: history,
+					Conversation:          conversation.Conversation{ID: conversationID, UserID: uuid.Nil, Status: conversation.StatusActive},
+					UserMessage:           current,
+					History:               history,
+					KnownReportReferences: timeline.KnownReportReferences(),
 				}
 				// Respond requires a real command actor; keep the fixture isolated by
 				// using one synthetic actor per scenario/arm.
@@ -724,6 +726,7 @@ type pilotScenarioTimeline struct {
 	history        []conversation.Message
 	baseCount      int
 	nextSeq        int64
+	knownReports   map[string][]int64
 }
 
 func newPilotScenarioTimeline(
@@ -731,7 +734,10 @@ func newPilotScenarioTimeline(
 	arm string,
 	conversationID uuid.UUID,
 ) *pilotScenarioTimeline {
-	return &pilotScenarioTimeline{scenario: scenario, arm: arm, conversationID: conversationID, nextSeq: 1}
+	return &pilotScenarioTimeline{
+		scenario: scenario, arm: arm, conversationID: conversationID, nextSeq: 1,
+		knownReports: make(map[string][]int64),
+	}
 }
 
 func (t *pilotScenarioTimeline) Request(
@@ -751,6 +757,9 @@ func (t *pilotScenarioTimeline) Request(
 			ID:             pilotMessageID(t.scenario.ScenarioID, t.arm, fmt.Sprintf("base-%d", item.Seq)),
 			ConversationID: t.conversationID, Seq: t.nextSeq, Role: role, Content: item.Content,
 		})
+		for _, reference := range item.ReportReferences {
+			t.knownReports[reference] = append(t.knownReports[reference], t.nextSeq)
+		}
 		t.baseCount++
 		t.nextSeq++
 	}
@@ -760,6 +769,14 @@ func (t *pilotScenarioTimeline) Request(
 		Content: checkpoint.Question,
 	}
 	return append([]conversation.Message(nil), t.history...), current, nil
+}
+
+func (t *pilotScenarioTimeline) KnownReportReferences() map[string][]int64 {
+	result := make(map[string][]int64, len(t.knownReports))
+	for reference, sequences := range t.knownReports {
+		result[reference] = append([]int64(nil), sequences...)
+	}
+	return result
 }
 
 func (t *pilotScenarioTimeline) Complete(
