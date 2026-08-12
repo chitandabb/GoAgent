@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,4 +204,71 @@ func TestModelCompactorPreservesHTTPProviderErrorsBeforeLengthTruncation(t *test
 			}
 		})
 	}
+}
+
+func TestModelCompactorClassifiesProviderFailuresWithoutExposingProviderText(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		wantCode     string
+		nonRetryable bool
+	}{
+		{name: "bad request", err: &modelopenai.APIError{HTTPStatusCode: 400, Message: "sensitive request detail"}, wantCode: "provider_http_400", nonRetryable: true},
+		{name: "unauthorized", err: &modelopenai.APIError{HTTPStatusCode: 401, Message: "sensitive credential detail"}, wantCode: "provider_http_401", nonRetryable: true},
+		{name: "forbidden", err: &modelopenai.APIError{HTTPStatusCode: 403, Message: "sensitive policy detail"}, wantCode: "provider_http_403", nonRetryable: true},
+		{name: "rate limited", err: &modelopenai.APIError{HTTPStatusCode: 429, Message: "sensitive quota detail"}, wantCode: "provider_http_429"},
+		{name: "server error", err: &modelopenai.APIError{HTTPStatusCode: 503, Message: "sensitive upstream detail"}, wantCode: "provider_http_5xx"},
+		{name: "timeout", err: context.DeadlineExceeded, wantCode: "provider_timeout"},
+		{name: "canceled", err: context.Canceled, wantCode: "provider_canceled", nonRetryable: true},
+		{name: "network timeout", err: timeoutErrorFixture{}, wantCode: "provider_timeout"},
+		{name: "connection", err: &net.DNSError{Err: "sensitive host lookup", Name: "private.example"}, wantCode: "provider_connection_failed"},
+		{name: "connection refused", err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("sensitive connection refused")}, wantCode: "provider_connection_failed"},
+		{name: "unknown", err: errors.New("sensitive provider protocol detail"), wantCode: "provider_request_failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compactor, err := memorycompactor.New(memorycompactor.Config{
+				Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+					return nil, tt.err
+				}),
+				Prompt: "Return JSON.", PromptVersion: "memory-v1", Timeout: time.Second, MaxOutputBytes: 1024,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, compactErr := compactor.Compact(context.Background(), validCompactionInput())
+			var coded conversationmemory.CompactionFailureCodeError
+			if !errors.As(compactErr, &coded) || coded.CompactionFailureCode() != tt.wantCode {
+				t.Fatalf("Compact() code = %q, error = %v, want %q", codeOrEmpty(coded), compactErr, tt.wantCode)
+			}
+			var nonRetryable conversationmemory.NonRetryableCompactionError
+			if !errors.As(compactErr, &nonRetryable) || nonRetryable.NonRetryableCompaction() != tt.nonRetryable {
+				t.Fatalf("Compact() non-retryable = %v, want %v", nonRetryable != nil && nonRetryable.NonRetryableCompaction(), tt.nonRetryable)
+			}
+			if strings.Contains(compactErr.Error(), "sensitive") || strings.Contains(compactErr.Error(), "private.example") {
+				t.Fatalf("Compact() leaked provider detail: %v", compactErr)
+			}
+		})
+	}
+}
+
+type timeoutErrorFixture struct{}
+
+func (timeoutErrorFixture) Error() string   { return "sensitive network timeout" }
+func (timeoutErrorFixture) Timeout() bool   { return true }
+func (timeoutErrorFixture) Temporary() bool { return true }
+
+func validCompactionInput() conversationmemory.CompactionInput {
+	conversationID := uuid.New()
+	return conversationmemory.CompactionInput{
+		ConversationID: conversationID, FromSeq: 1, ThroughSeq: 1, Attempt: 1,
+		NewMessages: []conversation.Message{{ID: uuid.New(), ConversationID: conversationID, Seq: 1, Role: conversation.MessageRoleUser, Content: "x"}},
+	}
+}
+
+func codeOrEmpty(coded conversationmemory.CompactionFailureCodeError) string {
+	if coded == nil {
+		return ""
+	}
+	return coded.CompactionFailureCode()
 }

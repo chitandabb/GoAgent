@@ -648,6 +648,7 @@ func makePilotObservation(
 	}
 	if runErr != nil {
 		observation.ErrorType = pilotErrorType(runErr)
+		observation.SummaryAttemptFailureCodes = conversationmemory.CompactionAttemptFailureCodes(runErr)
 		if errors.Is(runErr, mesagent.ErrConversationPromptWindowExceeded) {
 			observation.WithinHardWindow = false
 		}
@@ -663,6 +664,9 @@ func pilotErrorType(err error) string {
 		return "prompt_window_exceeded"
 	}
 	if errors.Is(err, memorycompactor.ErrProviderRequest) {
+		if codes := conversationmemory.CompactionAttemptFailureCodes(err); len(codes) > 0 {
+			return "summary_" + codes[len(codes)-1]
+		}
 		var apiErr *modelopenai.APIError
 		if errors.As(err, &apiErr) && apiErr != nil {
 			switch {

@@ -767,6 +767,16 @@ Observer 专用 60 秒覆盖运行，Provider 报告输入 61,561、输出 4,096
 Pilot 暂停在 `cp2`，需要先修复/补强这两个可观测性与重试边界，再以新的合同版本重新开始可比数据
 收集。`formal-v1` 只作为失败证据保留，不得与 `conversation-memory-v2` 的探针混合汇总。
 
+摘要失败观测现在保留有界的 `summaryAttemptFailureCodes`，每个值只表示稳定类别，例如
+`provider_http_401`、`provider_http_429`、`provider_http_5xx`、`provider_timeout`、
+`provider_canceled`、`provider_connection_failed` 或 `provider_request_failed`。服务层通过封闭白名单
+归一化错误码，未知实现返回的值统一记为 `compaction_failed`，并保留按尝试顺序排列的失败码，
+Observer 使用最后一次失败码作为 `errorType` 的具体后缀，同时保留整组码用于审计重试路径。错误码
+不包含 Provider 原始响应、请求内容、模型输出或凭证信息；400/401/403 仍按不可重试错误处理，
+主动取消同样不重试，429/5xx/超时与连接失败等瞬态错误才进入既定重试次数。退避等待期间取消时
+仍保留此前已发生的 Provider 失败链与尝试码。该能力只改善失败诊断和评测可比性，不改变 Token
+降幅口径，也不把失败样本计入成功 Pair。
+
 进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
 Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。
 

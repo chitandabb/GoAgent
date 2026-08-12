@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/bootstrap"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
+	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
@@ -271,6 +273,33 @@ func TestPilotErrorTypeRecognizesWrappedNetworkTimeout(t *testing.T) {
 func TestPilotErrorTypeRecognizesTruncatedSummary(t *testing.T) {
 	if got := pilotErrorType(memorycompactor.ErrOutputTruncated); got != "summary_output_truncated" {
 		t.Fatalf("pilotErrorType(truncated) = %q, want summary_output_truncated", got)
+	}
+}
+
+func TestPilotErrorTypeUsesLastStableSummaryFailureCode(t *testing.T) {
+	err := conversationmemory.NewCompactionAttemptsError(
+		fmt.Errorf("%w: %w", conversationmemory.ErrCompactionFailed, memorycompactor.ErrProviderRequest),
+		[]string{"provider_http_429", "provider_http_5xx"},
+	)
+	if got := pilotErrorType(err); got != "summary_provider_http_5xx" {
+		t.Fatalf("pilotErrorType() = %q, want summary_provider_http_5xx", got)
+	}
+}
+
+func TestMakePilotObservationPersistsContentFreeSummaryAttemptCodes(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	scenario := dataset.Scenarios[0]
+	checkpoint := scenario.Checkpoints[1]
+	runErr := conversationmemory.NewCompactionAttemptsError(
+		fmt.Errorf("%w: %w", conversationmemory.ErrCompactionFailed, memorycompactor.ErrProviderRequest),
+		[]string{"provider_http_429", "provider_http_5xx"},
+	)
+	observation := makePilotObservation(dataset, scenario, checkpoint, mesagent.PilotArmExperiment,
+		pilotObservationForObserverTest(dataset, checkpoint.CheckpointID, mesagent.PilotArmExperiment, true).Contract,
+		pilotObservationForObserverTest(dataset, checkpoint.CheckpointID, mesagent.PilotArmExperiment, true).SummaryContract,
+		conversation.AgentResponse{}, runErr, mesagent.PilotMeasuredModelSnapshot{}, mesagent.ContextGovernancePilotUsage{ModelCalls: 2})
+	if want := []string{"provider_http_429", "provider_http_5xx"}; !reflect.DeepEqual(observation.SummaryAttemptFailureCodes, want) {
+		t.Fatalf("summary attempt codes = %#v, want %#v", observation.SummaryAttemptFailureCodes, want)
 	}
 }
 

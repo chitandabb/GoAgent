@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +52,7 @@ type ModelCompactor struct {
 type providerRequestError struct {
 	cause        error
 	nonRetryable bool
+	code         string
 }
 
 func (e *providerRequestError) Error() string { return ErrProviderRequest.Error() }
@@ -59,11 +61,19 @@ func (e *providerRequestError) Unwrap() []error { return []error{ErrProviderRequ
 
 func (e *providerRequestError) NonRetryableCompaction() bool { return e != nil && e.nonRetryable }
 
+func (e *providerRequestError) CompactionFailureCode() string {
+	if e == nil || e.code == "" {
+		return "provider_request_failed"
+	}
+	return e.code
+}
+
 type outputTruncatedError struct{}
 
-func (*outputTruncatedError) Error() string                { return ErrOutputTruncated.Error() }
-func (*outputTruncatedError) Unwrap() error                { return ErrOutputTruncated }
-func (*outputTruncatedError) CompactionRepairCode() string { return "output_truncated" }
+func (*outputTruncatedError) Error() string                 { return ErrOutputTruncated.Error() }
+func (*outputTruncatedError) Unwrap() error                 { return ErrOutputTruncated }
+func (*outputTruncatedError) CompactionRepairCode() string  { return "output_truncated" }
+func (*outputTruncatedError) CompactionFailureCode() string { return "output_truncated" }
 
 func New(config Config) (*ModelCompactor, error) {
 	if config.Generator == nil || strings.TrimSpace(config.Prompt) == "" || config.Prompt != strings.TrimSpace(config.Prompt) ||
@@ -139,11 +149,37 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 
 func newProviderRequestError(err error) error {
 	nonRetryable := false
+	code := "provider_request_failed"
 	var apiErr *modelopenai.APIError
 	if errors.As(err, &apiErr) && apiErr != nil {
-		nonRetryable = apiErr.HTTPStatusCode == 400 || apiErr.HTTPStatusCode == 401 || apiErr.HTTPStatusCode == 403
+		switch {
+		case apiErr.HTTPStatusCode == 400:
+			code, nonRetryable = "provider_http_400", true
+		case apiErr.HTTPStatusCode == 401:
+			code, nonRetryable = "provider_http_401", true
+		case apiErr.HTTPStatusCode == 403:
+			code, nonRetryable = "provider_http_403", true
+		case apiErr.HTTPStatusCode == 429:
+			code = "provider_http_429"
+		case apiErr.HTTPStatusCode >= 500 && apiErr.HTTPStatusCode <= 599:
+			code = "provider_http_5xx"
+		}
+	} else if errors.Is(err, context.Canceled) {
+		code, nonRetryable = "provider_canceled", true
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		code = "provider_timeout"
+	} else {
+		var timeout net.Error
+		var dnsErr *net.DNSError
+		var operationErr *net.OpError
+		switch {
+		case errors.As(err, &timeout) && timeout.Timeout():
+			code = "provider_timeout"
+		case errors.As(err, &dnsErr), errors.As(err, &operationErr):
+			code = "provider_connection_failed"
+		}
 	}
-	return &providerRequestError{cause: err, nonRetryable: nonRetryable}
+	return &providerRequestError{cause: err, nonRetryable: nonRetryable, code: code}
 }
 
 type requestCoverage struct {

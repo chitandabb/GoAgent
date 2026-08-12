@@ -3,6 +3,7 @@ package conversationmemory_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +316,129 @@ func TestConversationMemoryFeedsSchemaFailureCodeIntoRepairAttempt(t *testing.T)
 	}
 	if len(repairCodes) != 2 || repairCodes[0] != "" || repairCodes[1] != "payload_schema_top_level_missing_conversation_goal" {
 		t.Fatalf("repair codes = %#v", repairCodes)
+	}
+}
+
+type failureCodedCompactionError struct {
+	code         string
+	nonRetryable bool
+}
+
+func (e failureCodedCompactionError) Error() string                 { return "content-free compaction failure" }
+func (e failureCodedCompactionError) CompactionFailureCode() string { return e.code }
+func (e failureCodedCompactionError) NonRetryableCompaction() bool  { return e.nonRetryable }
+
+func TestConversationMemoryPreservesBoundedAttemptFailureCodes(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	attempts := 0
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		attempts++
+		if attempts == 1 {
+			return conversationmemory.CompactionOutput{}, failureCodedCompactionError{code: "provider_http_429"}
+		}
+		return conversationmemory.CompactionOutput{}, failureCodedCompactionError{code: "provider_http_5xx"}
+	}), time.Now().UTC(), 3)
+
+	conversationID := uuid.New()
+	_, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if !errors.Is(err, conversationmemory.ErrCompactionFailed) {
+		t.Fatalf("GenerateShadow() error = %v, want ErrCompactionFailed", err)
+	}
+	codes := conversationmemory.CompactionAttemptFailureCodes(err)
+	want := []string{"provider_http_429", "provider_http_5xx", "provider_http_5xx"}
+	if !reflect.DeepEqual(codes, want) {
+		t.Fatalf("attempt codes = %#v, want %#v", codes, want)
+	}
+}
+
+func TestConversationMemoryStopsAfterNonRetryableFailureAndPreservesCode(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	attempts := 0
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		attempts++
+		return conversationmemory.CompactionOutput{}, failureCodedCompactionError{code: "provider_http_401", nonRetryable: true}
+	}), time.Now().UTC(), 3)
+
+	conversationID := uuid.New()
+	_, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if got := conversationmemory.CompactionAttemptFailureCodes(err); !reflect.DeepEqual(got, []string{"provider_http_401"}) {
+		t.Fatalf("attempt codes = %#v, want provider_http_401", got)
+	}
+}
+
+func TestConversationMemoryPreservesDomainValidationFailureForEveryAttempt(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		payload := validPayload()
+		payload.Facts[0].SourceMessageSeqs = []int64{99}
+		return conversationmemory.CompactionOutput{
+			Payload: payload,
+			Usage:   conversationmemory.SummaryUsage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120},
+		}, nil
+	}), time.Now().UTC(), 2)
+
+	conversationID := uuid.New()
+	_, err := service.GenerateShadow(context.Background(), conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	want := []string{"source_out_of_range", "source_out_of_range"}
+	if got := conversationmemory.CompactionAttemptFailureCodes(err); !reflect.DeepEqual(got, want) {
+		t.Fatalf("attempt codes = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeCompactionFailureCodeRejectsUnboundedValues(t *testing.T) {
+	tests := map[string]string{
+		"provider_http_429":                         "provider_http_429",
+		"source_out_of_range":                       "source_out_of_range",
+		"payload_schema_field_facts_string":         "payload_schema_field_facts_string",
+		"payload_schema_top_level_missing_facts":    "payload_schema_top_level_missing_facts",
+		"tenant_123456789":                          "compaction_failed",
+		"payload_schema_field_private_model_string": "compaction_failed",
+	}
+	for input, want := range tests {
+		if got := conversationmemory.NormalizeCompactionFailureCode(input); got != want {
+			t.Fatalf("NormalizeCompactionFailureCode(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestConversationMemoryPreservesFailureCodesWhenRetryWaitIsCanceled(t *testing.T) {
+	repository := &memoryRepositoryStub{}
+	ctx, cancel := context.WithCancel(context.Background())
+	service, err := conversationmemory.NewService(conversationmemory.ServiceConfig{
+		Repository: repository,
+		Compactor: compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+			cancel()
+			return conversationmemory.CompactionOutput{}, failureCodedCompactionError{code: "provider_http_429"}
+		}),
+		SchemaVersion:   conversationmemory.CurrentSchemaVersion,
+		MaxPayloadBytes: 64 * 1024,
+		Provenance: conversationmemory.SummaryProvenance{
+			ModelProfile: "conversation-memory", ModelProvider: "stepfun",
+			ModelID: "step-3.5-flash", PromptVersion: "conversation-memory-v2",
+		},
+		MaxAttempts: 3, RetryBaseDelay: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := uuid.New()
+	_, err = service.GenerateShadow(ctx, conversationmemory.ShadowRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID),
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GenerateShadow() error = %v, want context.Canceled", err)
+	}
+	if got := conversationmemory.CompactionAttemptFailureCodes(err); !reflect.DeepEqual(got, []string{"provider_http_429"}) {
+		t.Fatalf("attempt codes = %#v, want provider_http_429", got)
 	}
 }
 
