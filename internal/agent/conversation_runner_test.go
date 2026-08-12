@@ -257,6 +257,7 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 		{ID: uuid.New(), ConversationID: request.Conversation.ID, Seq: 2, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
 		request.UserMessage,
 	}
+	request.KnownReportReferences = map[string][]int64{"report:diag-1": {1}}
 	memory := &conversationMemoryStub{prepared: conversationActiveSummaryFixture(t, request.Conversation.ID, 2)}
 	preflight.SummaryTailEnabled = true
 	preflight.Memory = memory
@@ -285,7 +286,8 @@ func TestConversationRunnerHardThresholdActivatesSummaryAndUsesSummaryTail(t *te
 		t.Fatalf("summary-tail manifest = %+v", manifest)
 	}
 	if len(memory.prepareRequests) != 1 || len(memory.prepareRequests[0].CompletedMessages) != 2 ||
-		memory.prepareRequests[0].CompletedMessages[1].Seq != 2 {
+		memory.prepareRequests[0].CompletedMessages[1].Seq != 2 ||
+		!slices.Equal(memory.prepareRequests[0].KnownReportReferences["report:diag-1"], []int64{1}) {
 		t.Fatalf("hard-compaction completed messages = %+v", memory.prepareRequests)
 	}
 	for _, message := range memory.prepareRequests[0].CompletedMessages {

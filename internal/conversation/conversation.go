@@ -420,9 +420,10 @@ type AppendMessageInput struct {
 // Tool results are deliberately not persisted into this history contract; they are
 // scoped to one invocation and can contain transient or untrusted data.
 type AgentRequest struct {
-	Conversation Conversation
-	UserMessage  Message
-	History      []Message
+	Conversation          Conversation
+	UserMessage           Message
+	History               []Message
+	KnownReportReferences map[string][]int64
 }
 
 type AgentResponse struct {

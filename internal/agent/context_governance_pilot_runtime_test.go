@@ -181,6 +181,13 @@ func TestPilotMeasuredModelStopsBeforeProviderCallWhenSummaryTokenBudgetIsExceed
 	}
 	if _, err := measured.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err == nil {
 		t.Fatal("Generate() reached Provider after the Summary prompt Token budget was exceeded")
+	} else {
+		var coded interface{ CompactionFailureCode() string }
+		var nonRetryable interface{ NonRetryableCompaction() bool }
+		if !errors.As(err, &coded) || coded.CompactionFailureCode() != "local_budget_exceeded" ||
+			!errors.As(err, &nonRetryable) || !nonRetryable.NonRetryableCompaction() {
+			t.Fatalf("budget error = %v, want stable non-retryable local_budget_exceeded", err)
+		}
 	}
 	if state.generateCalls != 0 {
 		t.Fatalf("provider generate calls = %d, want 0", state.generateCalls)

@@ -150,6 +150,17 @@ func (c *ModelCompactor) Compact(ctx context.Context, input conversationmemory.C
 func newProviderRequestError(err error) error {
 	nonRetryable := false
 	code := "provider_request_failed"
+	var coded conversationmemory.CompactionFailureCodeError
+	var deterministic conversationmemory.NonRetryableCompactionError
+	if errors.As(err, &coded) {
+		code = coded.CompactionFailureCode()
+	}
+	if errors.As(err, &deterministic) && deterministic.NonRetryableCompaction() {
+		nonRetryable = true
+	}
+	if code == "local_budget_exceeded" && nonRetryable {
+		return err
+	}
 	var apiErr *modelopenai.APIError
 	if errors.As(err, &apiErr) && apiErr != nil {
 		switch {

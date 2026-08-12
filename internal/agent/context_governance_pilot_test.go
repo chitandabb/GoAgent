@@ -203,6 +203,28 @@ func TestEvaluateContextGovernancePilotIncludesSummaryUsageInRawReduction(t *tes
 	}
 }
 
+func TestContextGovernancePilotObservationRejectsUnknownSummaryFailureCode(t *testing.T) {
+	fixture := ContextGovernancePilotFixture()
+	observation := pilotObservationForTest(
+		fixture, fixture.Scenarios[0].Checkpoints[0], PilotArmExperiment,
+		ContextGovernancePilotContract{
+			ModelProvider: "fixture", ModelID: "main-v1", ModelProfile: "main-profile",
+			ModelProfileFingerprint: strings.Repeat("c", 64), ReasoningMode: "effort:low",
+			ToolContractFingerprint: strings.Repeat("a", 64), OutputReserveTokens: 512,
+			PromptVersion: "conversation-v6",
+		},
+		1000, true,
+	)
+	observation.SummaryAttemptFailureCodes = []string{"tenant_123456789"}
+	if err := observation.Validate(); err == nil {
+		t.Fatal("Validate() accepted an unknown Summary failure code")
+	}
+	observation.SummaryAttemptFailureCodes = []string{"local_budget_exceeded"}
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("Validate() rejected a stable Summary failure code: %v", err)
+	}
+}
+
 func TestEvaluateContextGovernancePilotExcludesBaselineOverWindowFromTokenComparison(t *testing.T) {
 	fixture := ContextGovernancePilotFixture()
 	contract := ContextGovernancePilotContract{

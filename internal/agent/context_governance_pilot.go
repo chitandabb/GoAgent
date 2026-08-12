@@ -9,6 +9,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 )
 
 const (
@@ -46,9 +48,10 @@ type ContextGovernancePilotScenario struct {
 }
 
 type ContextGovernancePilotMessage struct {
-	Seq     int64  `json:"seq"`
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Seq              int64    `json:"seq"`
+	Role             string   `json:"role"`
+	Content          string   `json:"content"`
+	ReportReferences []string `json:"reportReferences,omitempty"`
 }
 
 type ContextGovernancePilotCheckpoint struct {
@@ -105,6 +108,14 @@ func (d ContextGovernancePilotDataset) Validate() error {
 				len([]rune(message.Content)) > 20_000 {
 				return fmt.Errorf("scenario %s history message %d is invalid", scenario.ScenarioID, messageIndex)
 			}
+			if len(message.ReportReferences) > 8 || hasDuplicate(message.ReportReferences) {
+				return fmt.Errorf("scenario %s history message %d report references are invalid", scenario.ScenarioID, messageIndex)
+			}
+			for _, reference := range message.ReportReferences {
+				if !validPilotReportReference(reference) {
+					return fmt.Errorf("scenario %s history message %d report reference is invalid", scenario.ScenarioID, messageIndex)
+				}
+			}
 		}
 		var previousThrough int64
 		for checkpointIndex, checkpoint := range scenario.Checkpoints {
@@ -123,6 +134,11 @@ func (d ContextGovernancePilotDataset) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validPilotReportReference(reference string) bool {
+	return strings.HasPrefix(reference, "report:") && len(reference) <= 256 &&
+		reference == strings.TrimSpace(reference) && !strings.ContainsAny(reference, "[]\r\n")
 }
 
 func (g ContextGovernancePilotGold) validate() error {
@@ -174,15 +190,15 @@ func validPilotTermGroup(values []string, required bool) bool {
 func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 	return ContextGovernancePilotDataset{
 		DatasetVersion: "context-governance-pilot-v1",
-		FixtureVersion: "fixture-2026-08-12-v3",
+		FixtureVersion: "fixture-2026-08-12-v4",
 		Scenarios: []ContextGovernancePilotScenario{
 			buildContextPilotScenario(
 				"incident-correction", "生产故障判断被后续证据修正",
 				[]pilotMilestone{
-					{20, "用户确认故障发生于工单 TKT-2048，数据库报告 1205，初步根因写为网络抖动。证据引用 report:diag-2048-a。"},
-					{40, "团队决定优先检查数据库锁等待，不执行服务无限重启；待办是采集锁等待图，状态为进行中。"},
-					{70, "新证据证明根因是库存行锁死锁，不是网络抖动；report:diag-2048-b 取代旧判断。"},
-					{100, "锁等待图已经采集完成；团队决定先修正事务加锁顺序，再观察 30 分钟。"},
+					{seq: 20, content: "用户确认故障发生于工单 TKT-2048，数据库报告 1205，初步根因写为网络抖动。证据引用 report:diag-2048-a。", reportReferences: []string{"report:diag-2048-a"}},
+					{seq: 40, content: "团队决定优先检查数据库锁等待，不执行服务无限重启；待办是采集锁等待图，状态为进行中。"},
+					{seq: 70, content: "新证据证明根因是库存行锁死锁，不是网络抖动；report:diag-2048-b 取代旧判断。", reportReferences: []string{"report:diag-2048-b"}},
+					{seq: 100, content: "锁等待图已经采集完成；团队决定先修正事务加锁顺序，再观察 30 分钟。"},
 				},
 				[]ContextGovernancePilotCheckpoint{
 					pilotCheckpoint("incident-cp1", 40, "当前故障、初步判断和待办是什么？", []string{"TKT-2048", "网络抖动", "采集锁等待图", "进行中"}, []string{"TKT-2048", "数据库 1205"}, []string{"优先检查数据库锁等待"}, nil, []ContextGovernancePilotTodoGold{{[]string{"采集锁等待图"}, []string{"进行中"}}}, []string{"report:diag-2048-a"}, nil),
@@ -193,10 +209,10 @@ func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 			buildContextPilotScenario(
 				"release-policy", "发布方案与回滚窗口在长会话中变更",
 				[]pilotMilestone{
-					{15, "用户提出 MES 3.8 发布，最初计划全量发布，回滚观察窗口为 30 分钟。证据引用 knowledge:release-38-v1。"},
-					{35, "评审决定采用 10% 灰度发布，不再直接全量；待办是核对迁移脚本，状态为进行中。"},
-					{65, "审批将回滚观察窗口从 30 分钟改为 45 分钟，引用 knowledge:release-38-v2。"},
-					{95, "迁移脚本核对完成，最终决定错误率超过 1% 时回滚。"},
+					{seq: 15, content: "用户提出 MES 3.8 发布，最初计划全量发布，回滚观察窗口为 30 分钟。证据引用 knowledge:release-38-v1。"},
+					{seq: 35, content: "评审决定采用 10% 灰度发布，不再直接全量；待办是核对迁移脚本，状态为进行中。"},
+					{seq: 65, content: "审批将回滚观察窗口从 30 分钟改为 45 分钟，引用 knowledge:release-38-v2。"},
+					{seq: 95, content: "迁移脚本核对完成，最终决定错误率超过 1% 时回滚。"},
 				},
 				[]ContextGovernancePilotCheckpoint{
 					pilotCheckpoint("release-cp1", 40, "当前发布方式和待办是什么？", []string{"10% 灰度发布", "核对迁移脚本", "进行中"}, nil, []string{"10% 灰度发布"}, nil, []ContextGovernancePilotTodoGold{{[]string{"核对迁移脚本"}, []string{"进行中"}}}, []string{"knowledge:release-38-v1"}, []string{"直接全量发布"}),
@@ -207,10 +223,10 @@ func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 			buildContextPilotScenario(
 				"policy-version", "知识制度更新后保留当前版本语义",
 				[]pilotMilestone{
-					{18, "旧制度规定高温停机阈值为 80 摄氏度，来源 knowledge:safety-v3。"},
-					{38, "管理员发布新制度：阈值调整为 75 摄氏度，旧 80 摄氏度规则作废，来源 knowledge:safety-v4。"},
-					{68, "团队决定所有新回答只引用 v4；待办是通知二厂，状态为待处理。"},
-					{98, "二厂已经收到通知并确认，待办状态改为已完成。"},
+					{seq: 18, content: "旧制度规定高温停机阈值为 80 摄氏度，来源 knowledge:safety-v3。"},
+					{seq: 38, content: "管理员发布新制度：阈值调整为 75 摄氏度，旧 80 摄氏度规则作废，来源 knowledge:safety-v4。"},
+					{seq: 68, content: "团队决定所有新回答只引用 v4；待办是通知二厂，状态为待处理。"},
+					{seq: 98, content: "二厂已经收到通知并确认，待办状态改为已完成。"},
 				},
 				[]ContextGovernancePilotCheckpoint{
 					pilotCheckpoint("policy-cp1", 40, "当前高温停机阈值和有效来源是什么？", []string{"75 摄氏度", "knowledge:safety-v4"}, []string{"高温停机阈值为 75 摄氏度"}, nil, []ContextGovernancePilotCorrectionGold{{[]string{"75 摄氏度"}, []string{"阈值仍为 80 摄氏度"}}}, nil, []string{"knowledge:safety-v4"}, []string{"当前阈值为 80 摄氏度"}),
@@ -221,10 +237,10 @@ func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 			buildContextPilotScenario(
 				"attachment-evidence", "附件识别结论和诊断报告引用演进",
 				[]pilotMilestone{
-					{16, "附件 attachment:invoice-778 初次 OCR 读到批次号 B-17，置信度较低。"},
-					{36, "VLM 复核确认批次号实际为 B-71，不是 B-17，证据哈希 sha256:invoice-778-v2。"},
-					{66, "团队决定用 B-71 查询追溯表；待办是核对供应商批次，状态为进行中。"},
-					{96, "供应商确认 B-71 属于华东二厂，核对待办已完成，报告引用 report:invoice-778。"},
+					{seq: 16, content: "附件 attachment:invoice-778 初次 OCR 读到批次号 B-17，置信度较低。"},
+					{seq: 36, content: "VLM 复核确认批次号实际为 B-71，不是 B-17，证据哈希 sha256:invoice-778-v2。"},
+					{seq: 66, content: "团队决定用 B-71 查询追溯表；待办是核对供应商批次，状态为进行中。"},
+					{seq: 96, content: "供应商确认 B-71 属于华东二厂，核对待办已完成，报告引用 report:invoice-778。", reportReferences: []string{"report:invoice-778"}},
 				},
 				[]ContextGovernancePilotCheckpoint{
 					pilotCheckpoint("attachment-cp1", 40, "附件中的批次号最终识别为什么？", []string{"B-71", "不是 B-17", "sha256:invoice-778-v2"}, []string{"批次号为 B-71"}, nil, []ContextGovernancePilotCorrectionGold{{[]string{"B-71"}, []string{"批次号仍为 B-17"}}}, nil, []string{"attachment:invoice-778"}, []string{"最终批次号是 B-17"}),
@@ -237,8 +253,9 @@ func ContextGovernancePilotFixture() ContextGovernancePilotDataset {
 }
 
 type pilotMilestone struct {
-	seq     int64
-	content string
+	seq              int64
+	content          string
+	reportReferences []string
 }
 
 func buildContextPilotScenario(
@@ -259,10 +276,11 @@ func buildContextPilotScenario(
 			if milestone.seq == seq {
 				content = milestone.content + " " + content
 				role = "user"
+				history[index].ReportReferences = append([]string(nil), milestone.reportReferences...)
 				break
 			}
 		}
-		history[index] = ContextGovernancePilotMessage{Seq: seq, Role: role, Content: strings.TrimSpace(content)}
+		history[index].Seq, history[index].Role, history[index].Content = seq, role, strings.TrimSpace(content)
 	}
 	return ContextGovernancePilotScenario{ScenarioID: id, Title: title, History: history, Checkpoints: checkpoints}
 }
@@ -418,7 +436,8 @@ func (o ContextGovernancePilotObservation) Validate() error {
 		return errors.New("only the Experiment arm may contain Summary failure codes")
 	}
 	for _, code := range o.SummaryAttemptFailureCodes {
-		if !conversationQualityLabelPattern.MatchString(code) || len(code) > 96 {
+		if !conversationQualityLabelPattern.MatchString(code) || len(code) > 96 ||
+			!conversationmemory.ValidCompactionFailureCode(code) {
 			return errors.New("Summary failure code is invalid")
 		}
 	}

@@ -251,6 +251,27 @@ func TestPilotErrorTypePreservesCompactionFailureStage(t *testing.T) {
 	}
 }
 
+func TestPilotTimelineExposesOnlyReportReferencesAlreadyObserved(t *testing.T) {
+	dataset := mesagent.ContextGovernancePilotFixture()
+	scenario := dataset.Scenarios[0]
+	timeline := newPilotScenarioTimeline(scenario, "experiment", uuid.New())
+	if _, _, err := timeline.Request(scenario.Checkpoints[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := timeline.KnownReportReferences(); !reflect.DeepEqual(got, map[string][]int64{"report:diag-2048-a": {20}}) {
+		t.Fatalf("cp1 report references = %#v", got)
+	}
+	current := conversation.Message{ID: uuid.New(), Seq: 41}
+	timeline.Complete(scenario.Checkpoints[0], current)
+	if _, _, err := timeline.Request(scenario.Checkpoints[1]); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]int64{"report:diag-2048-a": {20}, "report:diag-2048-b": {72}}
+	if got := timeline.KnownReportReferences(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cp2 report references = %#v, want %#v", got, want)
+	}
+}
+
 func TestPilotErrorTypeDistinguishesSummaryAndAgentTimeout(t *testing.T) {
 	summaryErr := fmt.Errorf("outer: %w", fmt.Errorf("%w: %w",
 		memorycompactor.ErrProviderRequest, context.DeadlineExceeded))

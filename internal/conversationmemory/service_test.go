@@ -407,6 +407,9 @@ func TestNormalizeCompactionFailureCodeRejectsUnboundedValues(t *testing.T) {
 		if got := conversationmemory.NormalizeCompactionFailureCode(input); got != want {
 			t.Fatalf("NormalizeCompactionFailureCode(%q) = %q, want %q", input, got, want)
 		}
+		if got := conversationmemory.ValidCompactionFailureCode(input); got != (input == want) {
+			t.Fatalf("ValidCompactionFailureCode(%q) = %v, want %v", input, got, input == want)
+		}
 	}
 }
 

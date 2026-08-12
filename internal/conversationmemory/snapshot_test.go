@@ -209,6 +209,36 @@ func TestFailureCodeNormalizesDomainValidationFailures(t *testing.T) {
 	}
 }
 
+func TestStableReferenceValidationFailureCodeDistinguishesSectionAndReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*conversationmemory.Payload)
+		want   string
+	}{
+		{name: "unknown task id", mutate: func(payload *conversationmemory.Payload) {
+			payload.TaskReferences[0].ReferenceID = "d6a901c9-1472-4c63-a2d6-b7b3b4276299"
+		}, want: "task_reference_id_unknown"},
+		{name: "report source mismatch", mutate: func(payload *conversationmemory.Payload) {
+			payload.ReportReferences = []conversationmemory.ReferenceEntry{{
+				Entry:         conversationmemory.Entry{EntryID: "report_one", Content: "report", SourceMessageSeqs: []int64{2}, Status: conversationmemory.EntryStatusActive},
+				ReferenceType: conversationmemory.ReferenceTypeDiagnosisReport, ReferenceID: "report:one",
+			}}
+		}, want: "report_reference_source_mismatch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := validPayload()
+			context := validValidationContext()
+			context.KnownReportReferences["report:one"] = conversationmemory.StableReferenceIdentity{SourceMessageSeqs: []int64{3}}
+			tt.mutate(&payload)
+			err := conversationmemory.ValidatePayload(payload, context)
+			if !errors.Is(err, conversationmemory.ErrUnknownStableReference) || conversationmemory.FailureCode(err) != tt.want {
+				t.Fatalf("ValidatePayload() error/code = %v/%q, want %q", err, conversationmemory.FailureCode(err), tt.want)
+			}
+		})
+	}
+}
+
 func TestIncrementalPayloadCannotDropPreviouslyValidatedEntries(t *testing.T) {
 	previous := validPayload()
 	candidate := validPayload()

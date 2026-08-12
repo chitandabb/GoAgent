@@ -38,6 +38,15 @@ var (
 	ErrPayloadTooLarge          = errors.New("conversation memory payload exceeds its size limit")
 )
 
+type StableReferenceValidationError struct{ code string }
+
+func (e *StableReferenceValidationError) Error() string { return ErrUnknownStableReference.Error() }
+func (e *StableReferenceValidationError) Unwrap() error { return ErrUnknownStableReference }
+
+func newStableReferenceValidationError(section, reason string) error {
+	return &StableReferenceValidationError{code: section + "_reference_" + reason}
+}
+
 // EntryValidationError reports a stable contract location without exposing
 // model-produced IDs, content, or source values.
 type EntryValidationError struct {
@@ -112,6 +121,10 @@ func FailureCode(err error) string {
 	case errors.Is(err, ErrUnknownEntryReference):
 		return "entry_reference_unknown"
 	case errors.Is(err, ErrUnknownStableReference):
+		var stableErr *StableReferenceValidationError
+		if errors.As(err, &stableErr) && stableErr != nil && stableErr.code != "" {
+			return stableErr.code
+		}
 		return "stable_reference_unknown"
 	case errors.Is(err, ErrSupersedeCycle):
 		return "supersede_cycle"
@@ -631,23 +644,38 @@ func payloadEntryRecords(payload Payload) map[string]payloadEntryRecord {
 func validateStableReferences(payload Payload, context ValidationContext) error {
 	for _, current := range payload.EvidenceReferences {
 		identity, exists := context.KnownEvidenceReferences[current.ReferenceID]
-		if !exists || current.ReferenceType != identity.ReferenceType || current.ContentSHA256 != identity.ContentSHA256 ||
-			!validSHA256(current.ContentSHA256) || !sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
-			return ErrUnknownStableReference
+		if !exists {
+			return newStableReferenceValidationError("evidence", "id_unknown")
+		}
+		if current.ReferenceType != identity.ReferenceType || current.ContentSHA256 != identity.ContentSHA256 || !validSHA256(current.ContentSHA256) {
+			return newStableReferenceValidationError("evidence", "identity_mismatch")
+		}
+		if !sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+			return newStableReferenceValidationError("evidence", "source_mismatch")
 		}
 	}
 	for _, current := range payload.TaskReferences {
 		identity, exists := context.KnownTaskReferences[current.ReferenceID]
-		if current.ReferenceType != ReferenceTypeDiagnosisTask || !exists || current.ContentSHA256 != "" ||
-			!sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
-			return ErrUnknownStableReference
+		if !exists {
+			return newStableReferenceValidationError("task", "id_unknown")
+		}
+		if current.ReferenceType != ReferenceTypeDiagnosisTask || current.ContentSHA256 != "" {
+			return newStableReferenceValidationError("task", "identity_mismatch")
+		}
+		if !sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+			return newStableReferenceValidationError("task", "source_mismatch")
 		}
 	}
 	for _, current := range payload.ReportReferences {
 		identity, exists := context.KnownReportReferences[current.ReferenceID]
-		if current.ReferenceType != ReferenceTypeDiagnosisReport || !exists || current.ContentSHA256 != "" ||
-			!sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
-			return ErrUnknownStableReference
+		if !exists {
+			return newStableReferenceValidationError("report", "id_unknown")
+		}
+		if current.ReferenceType != ReferenceTypeDiagnosisReport || current.ContentSHA256 != "" {
+			return newStableReferenceValidationError("report", "identity_mismatch")
+		}
+		if !sourcesAllowed(current.SourceMessageSeqs, identity.SourceMessageSeqs) {
+			return newStableReferenceValidationError("report", "source_mismatch")
 		}
 	}
 	return nil

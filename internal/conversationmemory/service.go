@@ -733,18 +733,23 @@ var compactionFailureCodes = map[string]struct{}{
 	"provider_http_429": {}, "provider_http_5xx": {}, "provider_timeout": {},
 	"provider_canceled": {}, "provider_connection_failed": {}, "provider_request_failed": {},
 	"compaction_failed": {}, "usage_invalid": {}, "snapshot_invalid": {}, "output_truncated": {},
-	"output_too_large": {},
+	"output_too_large": {}, "local_budget_exceeded": {},
 }
 
 func NormalizeCompactionFailureCode(code string) string {
 	code = strings.TrimSpace(code)
-	if _, ok := compactionFailureCodes[code]; ok {
-		return code
-	}
-	if validDomainCompactionFailureCode(code) {
+	if ValidCompactionFailureCode(code) {
 		return code
 	}
 	return "compaction_failed"
+}
+
+func ValidCompactionFailureCode(code string) bool {
+	code = strings.TrimSpace(code)
+	if _, ok := compactionFailureCodes[code]; ok {
+		return true
+	}
+	return validDomainCompactionFailureCode(code)
 }
 
 func validDomainCompactionFailureCode(code string) bool {
@@ -753,7 +758,10 @@ func validDomainCompactionFailureCode(code string) bool {
 		"supersede_cycle", "multiple_active_entries", "correction_target_required", "payload_too_large",
 		"payload_schema_empty", "payload_schema_top_level_json", "payload_schema_top_level_extra_fields",
 		"payload_schema_null_array", "payload_schema_invalid", "entry_entry_id", "entry_content",
-		"entry_source_count", "entry_source_order", "entry_source_duplicate", "entry_invalid", "entry_status":
+		"entry_source_count", "entry_source_order", "entry_source_duplicate", "entry_invalid", "entry_status",
+		"evidence_reference_id_unknown", "evidence_reference_identity_mismatch", "evidence_reference_source_mismatch",
+		"task_reference_id_unknown", "task_reference_identity_mismatch", "task_reference_source_mismatch",
+		"report_reference_id_unknown", "report_reference_identity_mismatch", "report_reference_source_mismatch":
 		return true
 	}
 	const missingPrefix = "payload_schema_top_level_missing_"

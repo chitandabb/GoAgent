@@ -19,6 +19,14 @@ const (
 	PilotSummaryModelCall PilotModelCallClass = "summary"
 )
 
+type pilotBudgetExceededError struct{}
+
+func (pilotBudgetExceededError) Error() string                 { return "Pilot model call budget exceeded" }
+func (pilotBudgetExceededError) CompactionFailureCode() string { return "local_budget_exceeded" }
+func (pilotBudgetExceededError) NonRetryableCompaction() bool  { return true }
+
+func newPilotBudgetExceededError() error { return pilotBudgetExceededError{} }
+
 // PilotModelCallBudget reserves every main, Summary, and retry call before it
 // reaches a Provider. It never refunds conservative estimates during one run.
 type PilotModelCallBudget struct {
@@ -112,31 +120,28 @@ func (b *PilotModelCallBudget) Reserve(class PilotModelCallClass, promptTokens i
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.usedCalls >= b.maxCalls {
-		return errors.New("Pilot provider call budget exceeded before provider call")
+		return newPilotBudgetExceededError()
 	}
 	inputPrice, outputPrice, outputReserve := b.mainInputPrice, b.mainOutputPrice, b.mainOutputReserve
 	if class == PilotSummaryModelCall {
 		if b.usedSummaryCalls >= b.maxSummaryCalls {
-			return errors.New("Pilot Summary call budget exceeded before provider call")
+			return newPilotBudgetExceededError()
 		}
 		if b.reservedSummaryPromptTokens+promptTokens > b.maxSummaryPromptTokens {
-			return errors.New("Pilot Summary prompt Token budget exceeded before provider call")
+			return newPilotBudgetExceededError()
 		}
 		inputPrice, outputPrice, outputReserve = b.summaryInputPrice, b.summaryOutputPrice, b.summaryOutputReserve
 	} else {
 		if b.usedMainCalls >= b.maxMainCalls {
-			return errors.New("Pilot main-model call budget exceeded before provider call")
+			return newPilotBudgetExceededError()
 		}
 		if b.reservedMainPromptTokens+promptTokens > b.maxMainPromptTokens {
-			return errors.New("Pilot main-model prompt Token budget exceeded before provider call")
+			return newPilotBudgetExceededError()
 		}
 	}
 	cost := (float64(promptTokens)*inputPrice + float64(outputReserve)*outputPrice) / 1_000_000
 	if b.reservedCostCNY+cost > b.maxCostCNY+1e-9 {
-		return fmt.Errorf(
-			"Pilot provider cost budget exceeded before provider call: reserved %.4f, next %.4f, max %.4f",
-			b.reservedCostCNY, cost, b.maxCostCNY,
-		)
+		return newPilotBudgetExceededError()
 	}
 	b.usedCalls++
 	if class == PilotSummaryModelCall {
