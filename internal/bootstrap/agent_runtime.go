@@ -25,6 +25,7 @@ import (
 	platformqueryrewrite "github.com/chitandabb/GoAgent/internal/platform/queryrewrite"
 	platformsearxng "github.com/chitandabb/GoAgent/internal/platform/searxng"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 
 	"github.com/cloudwego/eino/components/model"
@@ -619,6 +620,22 @@ func BuildKnowledgeSearchService(
 	}
 	rewriteConfig := cfg.Knowledge.Retrieval.QueryRewrite
 	queryRewriter := buildQueryRewriter(ctx, cfg, queryRewriteModelOverride, log)
+	var queryRewriteProvider, queryRewriteModel string
+	if rewriteConfig.Enabled {
+		if rewriteProfile, profileErr := cfg.Models.Chat.Profile(rewriteConfig.ModelProfile); profileErr == nil {
+			queryRewriteProvider = strings.TrimSpace(rewriteProfile.Provider)
+			queryRewriteModel = strings.TrimSpace(rewriteProfile.Model)
+		}
+	}
+	degradationObserver := resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+		log.Warn("knowledge retrieval degraded",
+			zap.String("operation", event.Operation), zap.String("policy", string(event.Policy)),
+			zap.String("fallback", event.Fallback), zap.String("reason_code", event.ReasonCode),
+			zap.String("run_id", event.RunID), zap.String("trace_id", event.TraceID),
+			zap.String("provider", event.Provider), zap.String("model", event.Model),
+			zap.Int64("duration_millis", event.DurationMillis),
+		)
+	})
 	service, err := knowledge.NewSearchServiceWithOptions(
 		repository, embedder, profile, retrievalCandidateN, knowledge.SearchServiceOptions{
 			Reranker: reranker, RerankCandidateN: rerankCandidateN,
@@ -632,6 +649,10 @@ func BuildKnowledgeSearchService(
 				MinScore:  cfg.Knowledge.Retrieval.ContextCompression.MinScore,
 			},
 			QueryRewriter: queryRewriter, MaxSubqueries: rewriteConfig.MaxSubqueries,
+			QueryRewriteProvider: queryRewriteProvider, QueryRewriteModel: queryRewriteModel,
+			RerankProvider:      strings.TrimSpace(cfg.Models.Rerank.Provider),
+			RerankModel:         strings.TrimSpace(cfg.Models.Rerank.Model),
+			DegradationObserver: degradationObserver,
 		},
 	)
 	if err != nil {
