@@ -1636,6 +1636,18 @@ func insertConversationRunObservation(
 		}
 		persistedErrorType = errorType
 	}
+	executionPath := observation.ExecutionPath
+	if executionPath == "" {
+		executionPath = conversation.AgentRunExecutionAgent
+	}
+	var cacheLayer any
+	if observation.CacheLayer != "" {
+		cacheLayer = observation.CacheLayer
+	}
+	var sourceRunID any
+	if observation.SourceRunID != uuid.Nil {
+		sourceRunID = observation.SourceRunID
+	}
 	channels := observation.DegradedChannels
 	if channels == nil {
 		channels = []string{}
@@ -1646,11 +1658,12 @@ func insertConversationRunObservation(
 	}
 	query := tx.Exec(`
 INSERT INTO conversation_turn_run_observations
-    (turn_id, model_provider, model_id, prompt_version, outcome,
+    (turn_id, model_provider, model_id, prompt_version, execution_path, tool_calls, answer_cache_eligible, cache_layer, source_run_id, outcome,
      model_calls, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens,
      duration_millis, degraded_channels, sources_truncated, error_type, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?)`,
-		turnID, observation.ModelProvider, observation.ModelID, observation.PromptVersion, observation.Outcome,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?)`,
+		turnID, observation.ModelProvider, observation.ModelID, observation.PromptVersion,
+		executionPath, observation.ToolCalls, observation.AnswerCacheEligible, cacheLayer, sourceRunID, observation.Outcome,
 		observation.Usage.ModelCalls, observation.Usage.PromptTokens, observation.Usage.CompletionTokens,
 		observation.Usage.TotalTokens, observation.Usage.CachedTokens, observation.Usage.ReasoningTokens,
 		observation.DurationMillis, string(degradedChannels), observation.SourcesTruncated,
@@ -1942,29 +1955,34 @@ type conversationTurnRecord struct {
 }
 
 type conversationRecordedRunRecord struct {
-	TurnID             uuid.UUID                    `gorm:"column:turn_id"`
-	ConversationID     uuid.UUID                    `gorm:"column:conversation_id"`
-	UserID             uuid.UUID                    `gorm:"column:user_id"`
-	Status             conversation.TurnStatus      `gorm:"column:status"`
-	UserMessageID      uuid.UUID                    `gorm:"column:user_message_id"`
-	AssistantMessageID *uuid.UUID                   `gorm:"column:assistant_message_id"`
-	UserQuery          string                       `gorm:"column:user_query"`
-	ModelProvider      string                       `gorm:"column:model_provider"`
-	ModelID            string                       `gorm:"column:model_id"`
-	PromptVersion      string                       `gorm:"column:prompt_version"`
-	Outcome            conversation.AgentRunOutcome `gorm:"column:outcome"`
-	ModelCalls         int                          `gorm:"column:model_calls"`
-	PromptTokens       int                          `gorm:"column:prompt_tokens"`
-	CompletionTokens   int                          `gorm:"column:completion_tokens"`
-	TotalTokens        int                          `gorm:"column:total_tokens"`
-	CachedTokens       int                          `gorm:"column:cached_tokens"`
-	ReasoningTokens    int                          `gorm:"column:reasoning_tokens"`
-	DurationMillis     int64                        `gorm:"column:duration_millis"`
-	DegradedChannels   []byte                       `gorm:"column:degraded_channels"`
-	SourcesTruncated   bool                         `gorm:"column:sources_truncated"`
-	ErrorType          *string                      `gorm:"column:error_type"`
-	CompletedAt        *time.Time                   `gorm:"column:completed_at"`
-	ObservedAt         time.Time                    `gorm:"column:observed_at"`
+	TurnID              uuid.UUID                          `gorm:"column:turn_id"`
+	ConversationID      uuid.UUID                          `gorm:"column:conversation_id"`
+	UserID              uuid.UUID                          `gorm:"column:user_id"`
+	Status              conversation.TurnStatus            `gorm:"column:status"`
+	UserMessageID       uuid.UUID                          `gorm:"column:user_message_id"`
+	AssistantMessageID  *uuid.UUID                         `gorm:"column:assistant_message_id"`
+	UserQuery           string                             `gorm:"column:user_query"`
+	ModelProvider       string                             `gorm:"column:model_provider"`
+	ModelID             string                             `gorm:"column:model_id"`
+	PromptVersion       string                             `gorm:"column:prompt_version"`
+	ExecutionPath       conversation.AgentRunExecutionPath `gorm:"column:execution_path"`
+	ToolCalls           int                                `gorm:"column:tool_calls"`
+	AnswerCacheEligible bool                               `gorm:"column:answer_cache_eligible"`
+	CacheLayer          *conversation.AgentRunCacheLayer   `gorm:"column:cache_layer"`
+	SourceRunID         *uuid.UUID                         `gorm:"column:source_run_id"`
+	Outcome             conversation.AgentRunOutcome       `gorm:"column:outcome"`
+	ModelCalls          int                                `gorm:"column:model_calls"`
+	PromptTokens        int                                `gorm:"column:prompt_tokens"`
+	CompletionTokens    int                                `gorm:"column:completion_tokens"`
+	TotalTokens         int                                `gorm:"column:total_tokens"`
+	CachedTokens        int                                `gorm:"column:cached_tokens"`
+	ReasoningTokens     int                                `gorm:"column:reasoning_tokens"`
+	DurationMillis      int64                              `gorm:"column:duration_millis"`
+	DegradedChannels    []byte                             `gorm:"column:degraded_channels"`
+	SourcesTruncated    bool                               `gorm:"column:sources_truncated"`
+	ErrorType           *string                            `gorm:"column:error_type"`
+	CompletedAt         *time.Time                         `gorm:"column:completed_at"`
+	ObservedAt          time.Time                          `gorm:"column:observed_at"`
 }
 
 type conversationRetrievedSourceRecord struct {
@@ -2032,7 +2050,10 @@ func (r *ConversationRepository) GetRecordedAgentRun(
 	query := db.Raw(`
 SELECT observation.turn_id, turn.conversation_id, turn.user_id, turn.user_message_id,
 	   turn.status, turn.assistant_message_id, user_message.content AS user_query,
-	   observation.model_provider, observation.model_id, observation.prompt_version, observation.outcome,
+	   observation.model_provider, observation.model_id, observation.prompt_version,
+	   observation.execution_path, observation.tool_calls, observation.answer_cache_eligible,
+	   observation.cache_layer, observation.source_run_id,
+	   observation.outcome,
 	   observation.model_calls, observation.prompt_tokens, observation.completion_tokens,
 	   observation.total_tokens, observation.cached_tokens, observation.reasoning_tokens,
 	   observation.duration_millis, observation.degraded_channels, observation.sources_truncated,
@@ -2063,13 +2084,21 @@ ORDER BY position`, turnID).Scan(&sources)
 	}
 	observation := conversation.AgentRunObservation{
 		ModelProvider: record.ModelProvider, ModelID: record.ModelID, PromptVersion: record.PromptVersion,
-		Outcome: record.Outcome, DegradedChannels: degradedChannels,
+		ExecutionPath: record.ExecutionPath, ToolCalls: record.ToolCalls,
+		AnswerCacheEligible: record.AnswerCacheEligible,
+		Outcome:             record.Outcome, DegradedChannels: degradedChannels,
 		Usage: conversation.AgentRunUsage{
 			ModelCalls: record.ModelCalls, PromptTokens: record.PromptTokens,
 			CompletionTokens: record.CompletionTokens, TotalTokens: record.TotalTokens,
 			CachedTokens: record.CachedTokens, ReasoningTokens: record.ReasoningTokens,
 		},
 		DurationMillis: record.DurationMillis, SourcesTruncated: record.SourcesTruncated,
+	}
+	if record.CacheLayer != nil {
+		observation.CacheLayer = *record.CacheLayer
+	}
+	if record.SourceRunID != nil {
+		observation.SourceRunID = *record.SourceRunID
 	}
 	for position, source := range sources {
 		if source.Position != position {

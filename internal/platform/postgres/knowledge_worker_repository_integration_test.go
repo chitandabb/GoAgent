@@ -23,6 +23,12 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 	defer cleanup()
 	creatorID, documentID, versionID, taskID, outboxID := insertQueuedKnowledgeTask(t, db, ctx, nil, 3)
 	repository := NewKnowledgeWorkerRepository(db)
+	var generationBefore int64
+	if err := db.WithContext(ctx).Raw(
+		"SELECT generation FROM global_knowledge_generation WHERE singleton = 1",
+	).Scan(&generationBefore).Error; err != nil {
+		t.Fatalf("load generation before publish: %v", err)
+	}
 	profile, err := knowledge.NewEmbeddingProfile(
 		"knowledge-v1", "dashscope", "text-embedding-v4", 1024, "cosine",
 		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "embedding-v1",
@@ -96,6 +102,12 @@ func TestKnowledgeWorkerRepositoryClaimsCheckpointsAndPublishesReadyVersion(t *t
 	completed, err := repository.Complete(ctx, *claim.Lease, parsedResult, now.Add(6*time.Second))
 	if err != nil || !completed {
 		t.Fatalf("Complete = %v err=%v", completed, err)
+	}
+	var generationAfter int64
+	if err := db.WithContext(ctx).Raw(
+		"SELECT generation FROM global_knowledge_generation WHERE singleton = 1",
+	).Scan(&generationAfter).Error; err != nil || generationAfter != generationBefore+1 {
+		t.Fatalf("generation after publish = %d, want %d, err=%v", generationAfter, generationBefore+1, err)
 	}
 	var facts struct {
 		TaskStatus     string

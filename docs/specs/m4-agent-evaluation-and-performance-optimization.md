@@ -4,6 +4,30 @@
 >
 > 本规格对应 MESGuard 简历第五点。现有量化数字均为验收目标，不是既成成果；最终简历必须使用当前实现、固定数据集和可复现评测得到的真实结果。
 
+## Implementation Status
+
+截至 2026-08-13，Ticket 06 的 PostgreSQL L1 精确答案缓存纵切已落地：
+
+- PostgreSQL 保存单例、单调递增的 `Global Knowledge Generation`；直接发布与 Knowledge Worker 发布新的
+  current Global 版本时，Generation 在同一事务中递增。当前代码尚不存在“撤回 current 文档”或“修改
+  Global 可见性”的业务命令；将来新增这些命令时必须复用同一事务递增函数，不能绕过该失效边界。
+- `conversation.Service` 在用户消息已经持久化、首次 Agent 调用之前执行 L1 查询；合法命中沿用正常
+  Assistant Message、引用和 Run Observation 提交链路，不构造 ReAct Agent，模型调用和 Tool 调用均为零。
+- L1 只折叠 Unicode 兼容形式、首尾空白、连续空白和英文大小写，保留数字、日期、版本、否定词及语义
+  标点，并只保存 SHA-256。第一版保守排除历史依赖、附件、工单/任务/报告引用及时效性问题。
+- 缓存资格由 Runner 根据完整 Tool Trace 确定：必须实际成功执行企业知识检索，且整条路径只能包含 Skill
+  装载、Skill 参考读取、知识检索和大结果续读；Web、诊断命令、附件、记忆恢复、失败或降级 Tool 均使
+  本轮不可缓存。Provider 还会把问题哈希重新绑定到 source run 的原始用户问题，避免键值错配。
+- 缓存写入发生在答案、引用和 Observation 成功提交之后；PostgreSQL Provider 会重新核对 source run、
+  current Global chunk 和内容摘要。Generation、TTL、记录结构、读取超时或后端故障不满足要求时，统一
+  记录 Degradation Event 并回落正常 RAG。
+- 当前安全默认值与本规格一致：24 小时 TTL 加确定性 jitter、Global 作用域最多 1000 条、答案最多
+  16 KiB、最多 8 条引用、100 ms 查询超时和 200 ms 写入超时，且均可配置。
+- Provider-free 单元测试覆盖归一化、Eligibility、同步/异步命中、写后提交和故障降级；真实 PostgreSQL
+  集成测试已覆盖 AcceptTurn → Worker → 持久化的异步命中、TTL、损坏记录、Generation 不可读、跨
+  Conversation 命中及新 Global 版本发布后的立即失效。L2、Redis Stack 与固定集指标仍属于后续 Ticket，
+  不在本切片提前实现。
+
 ## Problem Statement
 
 MESGuard 已在前四个简历阶段分别建立了 Tool 选择、Text-to-SQL、RAG 检索与回答质量、综合诊断、

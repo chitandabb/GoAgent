@@ -17,6 +17,8 @@ import (
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
+	"github.com/chitandabb/GoAgent/internal/semanticcache"
 
 	"github.com/google/uuid"
 )
@@ -211,6 +213,17 @@ type AgentRunUsage struct {
 	ReasoningTokens  int
 }
 
+type AgentRunExecutionPath string
+
+const (
+	AgentRunExecutionAgent            AgentRunExecutionPath = "agent"
+	AgentRunExecutionSemanticCacheHit AgentRunExecutionPath = "semantic_cache_hit"
+)
+
+type AgentRunCacheLayer string
+
+const AgentRunCacheLayerExact AgentRunCacheLayer = "exact"
+
 func (u AgentRunUsage) Validate() error {
 	if u.ModelCalls < 0 || u.PromptTokens < 0 || u.CompletionTokens < 0 || u.TotalTokens < 0 ||
 		u.CachedTokens < 0 || u.ReasoningTokens < 0 || u.TotalTokens < u.PromptTokens+u.CompletionTokens {
@@ -223,16 +236,21 @@ func (u AgentRunUsage) Validate() error {
 // recorded quality observations. It deliberately excludes prompts, raw tool
 // payloads, reasoning text, object-store coordinates, and user content.
 type AgentRunObservation struct {
-	ModelProvider    string
-	ModelID          string
-	PromptVersion    string
-	Outcome          AgentRunOutcome
-	RetrievedSources []AgentRunSource
-	DegradedChannels []string
-	Usage            AgentRunUsage
-	DurationMillis   int64
-	SourcesTruncated bool
-	PromptManifest   *contextgovernance.PromptManifest
+	ModelProvider       string
+	ModelID             string
+	PromptVersion       string
+	ExecutionPath       AgentRunExecutionPath
+	ToolCalls           int
+	AnswerCacheEligible bool
+	CacheLayer          AgentRunCacheLayer
+	SourceRunID         uuid.UUID
+	Outcome             AgentRunOutcome
+	RetrievedSources    []AgentRunSource
+	DegradedChannels    []string
+	Usage               AgentRunUsage
+	DurationMillis      int64
+	SourcesTruncated    bool
+	PromptManifest      *contextgovernance.PromptManifest
 }
 
 // AgentRunFailureRecord is the bounded, persistence-safe projection carried
@@ -299,11 +317,34 @@ func AgentRunFailureRecordFrom(err error) (AgentRunFailureRecord, bool) {
 }
 
 func (o AgentRunObservation) Validate() error {
+	executionPath := o.ExecutionPath
+	if executionPath == "" {
+		executionPath = AgentRunExecutionAgent
+	}
 	if !validAgentRunMachineLabel(o.ModelProvider, 64) || !validAgentRunLabel(o.ModelID, 256) ||
 		!validAgentRunMachineLabel(o.PromptVersion, 128) || !o.Outcome.Valid() ||
 		len(o.RetrievedSources) > MaxCitationSourcesPerRun ||
 		len(o.DegradedChannels) > MaxRunDegradedChannels || o.DurationMillis < 0 ||
-		o.DurationMillis > int64((5*time.Minute)/time.Millisecond) || o.Usage.Validate() != nil {
+		o.DurationMillis > int64((5*time.Minute)/time.Millisecond) || o.ToolCalls < 0 || o.ToolCalls > 128 ||
+		o.Usage.Validate() != nil {
+		return ErrAgentResponseInvalid
+	}
+	switch executionPath {
+	case AgentRunExecutionAgent:
+		if o.CacheLayer != "" || o.SourceRunID != uuid.Nil {
+			return ErrAgentResponseInvalid
+		}
+	case AgentRunExecutionSemanticCacheHit:
+		if o.CacheLayer != AgentRunCacheLayerExact || o.SourceRunID == uuid.Nil ||
+			o.Outcome != AgentRunAnswered || o.ToolCalls != 0 || o.AnswerCacheEligible || o.Usage != (AgentRunUsage{}) ||
+			len(o.DegradedChannels) != 0 || o.PromptManifest != nil {
+			return ErrAgentResponseInvalid
+		}
+	default:
+		return ErrAgentResponseInvalid
+	}
+	if o.AnswerCacheEligible && (executionPath != AgentRunExecutionAgent || o.Outcome != AgentRunAnswered ||
+		o.ToolCalls < 1 || len(o.DegradedChannels) != 0) {
 		return ErrAgentResponseInvalid
 	}
 	seenSources := make(map[string]struct{}, len(o.RetrievedSources))
@@ -598,6 +639,45 @@ type Service struct {
 	diagnosisTasks      DiagnosisTaskCreator
 	diagnosisTaskReader DiagnosisTaskReader
 	externalCases       ExternalCaseReader
+	semanticCache       semanticcache.Provider
+	semanticCacheConfig SemanticAnswerCacheConfig
+	degradationObserver resilience.Observer
+}
+
+type SemanticAnswerCacheConfig struct {
+	TTL            time.Duration
+	LookupTimeout  time.Duration
+	WriteTimeout   time.Duration
+	MaxAnswerBytes int
+	MaxCitations   int
+}
+
+func (c SemanticAnswerCacheConfig) Validate() error {
+	if c.TTL < time.Minute || c.TTL > 30*24*time.Hour ||
+		c.LookupTimeout < 10*time.Millisecond || c.LookupTimeout > 5*time.Second ||
+		c.WriteTimeout < 10*time.Millisecond || c.WriteTimeout > 5*time.Second ||
+		c.MaxAnswerBytes < 1024 || c.MaxAnswerBytes > semanticcache.MaxAnswerBytes ||
+		c.MaxCitations < 1 || c.MaxCitations > semanticcache.MaxCitations {
+		return errors.New("semantic answer cache durations are invalid")
+	}
+	return nil
+}
+
+func (s *Service) WithSemanticAnswerCache(
+	provider semanticcache.Provider,
+	cfg SemanticAnswerCacheConfig,
+	observer resilience.Observer,
+) (*Service, error) {
+	if s == nil || s.repository == nil {
+		return nil, errors.New("conversation service is unavailable")
+	}
+	if provider == nil || cfg.Validate() != nil {
+		return nil, errors.New("semantic answer cache configuration is invalid")
+	}
+	s.semanticCache = provider
+	s.semanticCacheConfig = cfg
+	s.degradationObserver = observer
+	return s, nil
 }
 
 func (s *Service) WithAgentResponder(agent AgentResponder) (*Service, error) {
@@ -780,13 +860,17 @@ func (s *Service) ExecuteTurn(
 		UserMessageID:  started.UserMessage.ID,
 		Actor:          actor,
 	})
-	response, err := s.agent.Respond(commandCtx, AgentRequest{
+	agentRequest := AgentRequest{
 		Conversation: current,
 		UserMessage:  started.UserMessage,
 		History:      history.Items,
-	})
-	if err != nil {
-		return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
+	}
+	response, cacheHit := s.lookupSemanticAnswer(commandCtx, started.TurnID, agentRequest)
+	if !cacheHit {
+		response, err = s.agent.Respond(commandCtx, agentRequest)
+		if err != nil {
+			return result, s.failTurn(ctx, actor.UserID, started.TurnID, err)
+		}
 	}
 	response, err = prepareAgentResponse(response)
 	if err != nil {
@@ -800,7 +884,203 @@ func (s *Service) ExecuteTurn(
 	}
 	result.Turn = completed
 	result.Status = TurnStatusCompleted
+	if !cacheHit {
+		s.storeSemanticAnswer(ctx, started.TurnID, agentRequest, response)
+	}
 	return result, nil
+}
+
+func (s *Service) lookupSemanticAnswer(ctx context.Context, turnID uuid.UUID, request AgentRequest) (AgentResponse, bool) {
+	if s.semanticCache == nil || !semanticcache.EligibleForLookup(cacheQuestion(request)) {
+		return AgentResponse{}, false
+	}
+	questionHash, err := semanticcache.ExactQuestionKey(request.UserMessage.Content)
+	if err != nil {
+		return AgentResponse{}, false
+	}
+	startedAt := s.clock().UTC()
+	lookupCtx, cancel := context.WithTimeout(ctx, s.semanticCacheConfig.LookupTimeout)
+	answer, hit, err := s.semanticCache.Lookup(lookupCtx, semanticcache.LookupInput{
+		QuestionHash: questionHash,
+		Now:          startedAt,
+	})
+	cancel()
+	if err != nil {
+		s.observeSemanticCacheDegradation(turnID, startedAt, "semantic_cache_lookup", "normal_rag", err, "provider_error")
+		return AgentResponse{}, false
+	}
+	if !hit {
+		return AgentResponse{}, false
+	}
+	finishedAt := s.clock().UTC()
+	response, err := cachedAgentResponse(
+		answer, finishedAt, finishedAt.Sub(startedAt),
+		s.semanticCacheConfig.MaxAnswerBytes, s.semanticCacheConfig.MaxCitations,
+	)
+	if err != nil {
+		s.observeSemanticCacheDegradation(turnID, startedAt, "semantic_cache_lookup", "normal_rag", err, "corrupt_record")
+		return AgentResponse{}, false
+	}
+	return response, true
+}
+
+func (s *Service) storeSemanticAnswer(
+	ctx context.Context,
+	turnID uuid.UUID,
+	request AgentRequest,
+	response AgentResponse,
+) {
+	if s.semanticCache == nil || !semanticcache.EligibleForLookup(cacheQuestion(request)) ||
+		response.RunObservation == nil || response.RunObservation.Outcome != AgentRunAnswered ||
+		!response.RunObservation.AnswerCacheEligible ||
+		len(response.RunObservation.DegradedChannels) != 0 || len(response.Citations) == 0 ||
+		len(response.Citations) > s.semanticCacheConfig.MaxCitations ||
+		len(response.Content) > s.semanticCacheConfig.MaxAnswerBytes ||
+		len(response.RunObservation.RetrievedSources) == 0 || len(response.ReportReferences) != 0 {
+		return
+	}
+	observation := response.RunObservation
+	if observation.ExecutionPath != "" && observation.ExecutionPath != AgentRunExecutionAgent {
+		return
+	}
+	citations := make([]semanticcache.Source, 0, len(response.Citations))
+	for _, source := range response.Citations {
+		if source.SourceType != CitationSourceKnowledgeChunk {
+			return
+		}
+		citations = append(citations, semanticcache.Source{
+			Position: source.Position, SourceType: string(source.SourceType),
+			SourceRef: source.SourceRef, ContentSHA256: source.ContentSHA256,
+		})
+	}
+	retrieved := make([]semanticcache.Source, 0, len(observation.RetrievedSources))
+	for _, source := range observation.RetrievedSources {
+		if source.SourceType != CitationSourceKnowledgeChunk {
+			return
+		}
+		retrieved = append(retrieved, semanticcache.Source{
+			SourceType: string(source.SourceType), SourceRef: source.SourceRef,
+			ContentSHA256: source.ContentSHA256,
+		})
+	}
+	questionHash, err := semanticcache.ExactQuestionKey(request.UserMessage.Content)
+	if err != nil {
+		return
+	}
+	startedAt := s.clock().UTC()
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.semanticCacheConfig.WriteTimeout)
+	err = s.semanticCache.Put(writeCtx, semanticcache.PutInput{
+		QuestionHash: questionHash,
+		TTL:          s.semanticCacheConfig.TTL,
+		Answer: semanticcache.Answer{
+			Content: response.Content, Citations: citations, RetrievedSources: retrieved,
+			SourceRunID: turnID, ModelProvider: observation.ModelProvider, ModelID: observation.ModelID,
+			PromptVersion: observation.PromptVersion, CreatedAt: startedAt,
+		},
+	})
+	cancel()
+	if err != nil {
+		s.observeSemanticCacheDegradation(
+			turnID, startedAt, "semantic_cache_put", "cache_write_skipped", err, "provider_error",
+		)
+	}
+}
+
+func cacheQuestion(request AgentRequest) semanticcache.Question {
+	priorMessages := false
+	for _, message := range request.History {
+		if message.Seq < request.UserMessage.Seq {
+			priorMessages = true
+			break
+		}
+	}
+	message := request.UserMessage
+	return semanticcache.Question{
+		Text: message.Content, HasPriorMessages: priorMessages,
+		HasAttachments: len(message.Attachments) > 0, HasCaseReferences: len(message.CaseReferences) > 0,
+		HasTaskReferences: len(message.TaskReferences) > 0, HasReportReferences: len(message.ReportReferences) > 0,
+	}
+}
+
+func cachedAgentResponse(
+	answer semanticcache.Answer,
+	now time.Time,
+	duration time.Duration,
+	maxAnswerBytes int,
+	maxCitations int,
+) (AgentResponse, error) {
+	if answer.SourceRunID == uuid.Nil || answer.Generation < 1 || answer.CreatedAt.IsZero() || answer.CreatedAt.After(now) ||
+		answer.ExpiresAt.IsZero() || !answer.ExpiresAt.After(now) || len(answer.Citations) == 0 ||
+		len(answer.Content) > maxAnswerBytes || len(answer.Citations) > maxCitations ||
+		len(answer.RetrievedSources) > semanticcache.MaxSources {
+		return AgentResponse{}, semanticcache.ErrInvalidRecord
+	}
+	citations := make([]MessageCitation, 0, len(answer.Citations))
+	for _, source := range answer.Citations {
+		if CitationSourceType(source.SourceType) != CitationSourceKnowledgeChunk {
+			return AgentResponse{}, semanticcache.ErrInvalidRecord
+		}
+		citations = append(citations, MessageCitation{
+			Position: source.Position, SourceType: CitationSourceType(source.SourceType),
+			SourceRef: source.SourceRef, ContentSHA256: source.ContentSHA256,
+		})
+	}
+	retrieved := make([]AgentRunSource, 0, len(answer.RetrievedSources))
+	for _, source := range answer.RetrievedSources {
+		if CitationSourceType(source.SourceType) != CitationSourceKnowledgeChunk {
+			return AgentResponse{}, semanticcache.ErrInvalidRecord
+		}
+		retrieved = append(retrieved, AgentRunSource{
+			SourceType: CitationSourceType(source.SourceType), SourceRef: source.SourceRef,
+			ContentSHA256: source.ContentSHA256,
+		})
+	}
+	durationMillis := duration.Milliseconds()
+	if durationMillis < 0 {
+		durationMillis = 0
+	}
+	maxDurationMillis := int64((5 * time.Minute) / time.Millisecond)
+	if durationMillis > maxDurationMillis {
+		durationMillis = maxDurationMillis
+	}
+	response := AgentResponse{
+		Content:   answer.Content,
+		Citations: citations,
+		RunObservation: &AgentRunObservation{
+			ModelProvider: answer.ModelProvider, ModelID: answer.ModelID, PromptVersion: answer.PromptVersion,
+			ExecutionPath: AgentRunExecutionSemanticCacheHit, CacheLayer: AgentRunCacheLayerExact,
+			SourceRunID: answer.SourceRunID, Outcome: AgentRunAnswered,
+			RetrievedSources: retrieved, DurationMillis: durationMillis,
+		},
+	}
+	return prepareAgentResponse(response)
+}
+
+func (s *Service) observeSemanticCacheDegradation(
+	turnID uuid.UUID,
+	startedAt time.Time,
+	operation string,
+	fallback string,
+	cause error,
+	reasonCode string,
+) {
+	if s.degradationObserver == nil {
+		return
+	}
+	if errors.Is(cause, context.DeadlineExceeded) {
+		reasonCode = "timeout"
+	}
+	durationMillis := s.clock().UTC().Sub(startedAt).Milliseconds()
+	if durationMillis < 0 {
+		durationMillis = 0
+	}
+	event := resilience.DegradationEvent{
+		Operation: operation, Policy: resilience.PolicyBestEffort,
+		Fallback: fallback, ReasonCode: reasonCode, RunID: turnID.String(), DurationMillis: durationMillis,
+	}
+	if event.Validate() == nil {
+		s.degradationObserver.ObserveDegradation(event)
+	}
 }
 
 // AcceptTurn persists a user turn and its Outbox event without invoking the
@@ -887,22 +1167,34 @@ func (s *Service) ExecuteAcceptedTurn(ctx context.Context, execution TurnExecuti
 		UserMessageID:  execution.Turn.UserMessage.ID,
 		Actor:          execution.Actor,
 	})
-	response, err := s.agent.Respond(commandCtx, AgentRequest{
+	agentRequest := AgentRequest{
 		Conversation: execution.Conversation,
 		UserMessage:  execution.Turn.UserMessage,
 		History:      execution.History,
-	})
-	if err != nil {
-		return ConversationTurn{}, err
+	}
+	response, cacheHit := s.lookupSemanticAnswer(commandCtx, execution.TurnID, agentRequest)
+	var err error
+	if !cacheHit {
+		response, err = s.agent.Respond(commandCtx, agentRequest)
+		if err != nil {
+			return ConversationTurn{}, err
+		}
 	}
 	response, err = prepareAgentResponse(response)
 	if err != nil {
 		return ConversationTurn{}, ErrAgentResponseInvalid
 	}
-	return asyncRepository.CompleteTurnExecution(
+	completed, err := asyncRepository.CompleteTurnExecution(
 		ctx, execution.Actor.UserID, execution.TurnID, workerID,
 		response, s.clock().UTC(),
 	)
+	if err != nil {
+		return ConversationTurn{}, err
+	}
+	if !cacheHit {
+		s.storeSemanticAnswer(ctx, execution.TurnID, agentRequest, response)
+	}
+	return completed, nil
 }
 
 func (s *Service) failTurn(ctx context.Context, userID, turnID uuid.UUID, cause error) error {

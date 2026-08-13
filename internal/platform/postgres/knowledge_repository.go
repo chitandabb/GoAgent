@@ -86,14 +86,14 @@ func (r *KnowledgeRepository) PublishVersion(
 	completedAt := time.Now().UTC()
 	var published knowledge.DocumentVersion
 	err := ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
-		var documentExists bool
+		var documentScope knowledge.Scope
 		if err := tx.Raw(
-			"SELECT true FROM knowledge_documents WHERE id = ? AND deleted_at IS NULL FOR UPDATE",
+			"SELECT scope FROM knowledge_documents WHERE id = ? AND deleted_at IS NULL FOR UPDATE",
 			input.DocumentID,
-		).Scan(&documentExists).Error; err != nil {
+		).Scan(&documentScope).Error; err != nil {
 			return err
 		}
-		if !documentExists {
+		if documentScope != knowledge.ScopeGlobal && documentScope != knowledge.ScopePersonal {
 			return gorm.ErrRecordNotFound
 		}
 
@@ -144,6 +144,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)`,
 				chunk.ElementType, string(sectionPath), chunk.ContentText, chunk.SearchText,
 				chunk.ContentSHA256, string(metadata),
 			).Error; err != nil {
+				return err
+			}
+		}
+		if documentScope == knowledge.ScopeGlobal {
+			if err := incrementGlobalKnowledgeGeneration(tx, completedAt); err != nil {
 				return err
 			}
 		}

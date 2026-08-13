@@ -542,14 +542,17 @@ func (r *KnowledgeWorkerRepository) Complete(
 			return err
 		}
 		publishCurrent := false
+		publicationScope := knowledge.Scope("")
 		if !result.Partial {
 			var publication struct {
-				DocumentID       uuid.UUID `gorm:"column:document_id"`
-				CandidateVersion int       `gorm:"column:candidate_version"`
-				CurrentVersion   int       `gorm:"column:current_version"`
+				DocumentID       uuid.UUID       `gorm:"column:document_id"`
+				Scope            knowledge.Scope `gorm:"column:scope"`
+				CandidateVersion int             `gorm:"column:candidate_version"`
+				CurrentVersion   int             `gorm:"column:current_version"`
 			}
 			locked := tx.Raw(`
 SELECT document.id AS document_id,
+	   document.scope AS scope,
        version.version AS candidate_version,
        COALESCE((
            SELECT MAX(current_version.version)
@@ -566,7 +569,8 @@ FOR UPDATE OF document`, lease.DocumentVersionID).Scan(&publication)
 			if locked.RowsAffected != 1 {
 				return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
 			}
-			publishCurrent = publication.CandidateVersion > publication.CurrentVersion
+			publicationScope = publication.Scope
+			publishCurrent = shouldPublishKnowledgeVersion(publication.CandidateVersion, publication.CurrentVersion)
 			if publishCurrent {
 				if err := tx.Exec(`
 UPDATE knowledge_document_versions
@@ -600,6 +604,11 @@ WHERE id = ?`, versionStatus, publishCurrent, parserVersion, string(result.Parse
 			completedAt.UTC(), lease.DocumentVersionID).Error; err != nil {
 			return TranslateError(err)
 		}
+		if publishCurrent && publicationScope == knowledge.ScopeGlobal {
+			if err := incrementGlobalKnowledgeGeneration(tx, completedAt); err != nil {
+				return err
+			}
+		}
 		if err := appendKnowledgeIngestionEvent(tx, lease.TaskID, "ingestion_completed", map[string]any{
 			"taskId": lease.TaskID.String(), "documentVersionId": lease.DocumentVersionID.String(),
 			"status": string(taskStatus), "versionStatus": versionStatus,
@@ -614,6 +623,10 @@ WHERE id = ?`, versionStatus, publishCurrent, parserVersion, string(result.Parse
 		return false, nil
 	}
 	return completed, TranslateError(err)
+}
+
+func shouldPublishKnowledgeVersion(candidateVersion, currentVersion int) bool {
+	return candidateVersion > 0 && candidateVersion >= currentVersion
 }
 
 func (r *KnowledgeWorkerRepository) ReleaseForRetry(
