@@ -79,7 +79,7 @@ func BuildConversationMemoryServiceWithModel(
 		ModelID: strings.TrimSpace(profile.Model), PromptVersion: summaryConfig.PromptVersion,
 	}
 	service, err := conversationmemory.NewService(conversationmemory.ServiceConfig{
-		Repository: repository, Compactor: compactor, SchemaVersion: conversationmemory.CurrentSchemaVersion,
+		Repository: repository, Compactor: compactor, Coordinator: conversationmemory.NewLocalCoordinator(), SchemaVersion: conversationmemory.CurrentSchemaVersion,
 		MaxPayloadBytes: summaryConfig.MaxPayloadBytes, Provenance: provenance,
 		MaxAttempts: summaryConfig.MaxAttempts, RetryBaseDelay: time.Duration(summaryConfig.RetryBaseDelayMillis) * time.Millisecond,
 		RetryJitterRatio: cfg.Agent.ContextMemory.RetryJitterRatio,
@@ -195,6 +195,7 @@ func buildConversationMemoryServiceWithCache(
 	}
 	return conversationmemory.NewService(conversationmemory.ServiceConfig{
 		Repository: platformpostgres.NewConversationMemoryRepository(db), Compactor: compactor,
+		Coordinator:   platformpostgres.NewConversationMemoryCoordinator(db),
 		SchemaVersion: conversationmemory.CurrentSchemaVersion, MaxPayloadBytes: summaryConfig.MaxPayloadBytes,
 		Provenance: conversationmemory.SummaryProvenance{
 			ModelProfile: profileName, ModelProvider: instance.Identity.Provider,

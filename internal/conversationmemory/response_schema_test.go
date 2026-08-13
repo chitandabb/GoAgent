@@ -30,12 +30,15 @@ func TestPayloadJSONSchemaPinsTheFixedTopLevelContract(t *testing.T) {
 		t.Fatalf("schema required fields = %#v, want all nine top-level fields", schema.Required)
 	}
 	for _, value := range []string{
-		`"enum":["active","superseded","open","completed","cancelled"]`,
+		`"enum":["active","open","completed","cancelled"]`,
 		`"enum":["knowledge_chunk","attachment","web","diagnosis_task","diagnosis_report"]`,
 	} {
 		if !strings.Contains(text, value) {
 			t.Fatalf("schema does not contain %s: %s", value, text)
 		}
+	}
+	if strings.Contains(text, "supersedesEntryId") || strings.Contains(text, "superseded") {
+		t.Fatalf("provider schema exposes retired Entry lineage: %s", text)
 	}
 	for _, unsupported := range []string{`"pattern":`, `"uniqueItems":`, `"minItems":`, `"maxItems":`} {
 		if strings.Contains(text, unsupported) {

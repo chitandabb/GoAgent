@@ -317,7 +317,7 @@ func (s *sourceRecoveryRunState) commit(
 func authorizedSourceSequences(payload Payload, request SourceReadRequest) ([]int64, error) {
 	if request.EntryID != "" {
 		entry, found := sourceEntryByID(payload, request.EntryID)
-		if !found || entry.Status == EntryStatusSuperseded {
+		if !found {
 			return nil, ErrSourceNotAuthorized
 		}
 		return append([]int64(nil), entry.SourceMessageSeqs...), nil
@@ -328,9 +328,6 @@ func authorizedSourceSequences(payload Payload, request SourceReadRequest) ([]in
 	}
 	allowed := make(map[int64]struct{})
 	for _, entry := range sourceEntries(payload) {
-		if entry.Status == EntryStatusSuperseded {
-			continue
-		}
 		for _, sequence := range entry.SourceMessageSeqs {
 			allowed[sequence] = struct{}{}
 		}

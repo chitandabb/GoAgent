@@ -34,6 +34,7 @@ type ConversationContextPreflightConfig struct {
 	Memory                  ConversationMemory
 	MemoryMaxRatio          float64
 	SummaryMaxRatio         float64
+	SummaryPromptMaxEntries int
 	TailMaxRatio            float64
 	SoftThresholdRatio      float64
 	HardThresholdRatio      float64
@@ -82,11 +83,19 @@ func (c ConversationContextPreflightConfig) validate(modelProvider, modelID stri
 		math.IsNaN(c.SummaryMaxRatio) || math.IsInf(c.SummaryMaxRatio, 0) ||
 		c.MemoryMaxRatio <= 0 || c.MemoryMaxRatio > contextgovernance.MaxTailWindowRatio ||
 		c.SummaryMaxRatio <= 0 || c.SummaryMaxRatio > 0.05 ||
+		c.effectiveSummaryPromptMaxEntries() < 1 ||
 		c.SummaryMaxRatio+c.TailMaxRatio > c.MemoryMaxRatio+1e-12 ||
 		c.SyncCompactionTimeout < time.Second || c.SyncCompactionTimeout > 5*time.Minute) {
 		return errors.New("conversation Summary + Tail configuration is invalid")
 	}
 	return nil
+}
+
+func (c ConversationContextPreflightConfig) effectiveSummaryPromptMaxEntries() int {
+	if c.SummaryPromptMaxEntries > 0 {
+		return c.SummaryPromptMaxEntries
+	}
+	return 24
 }
 
 func (c ConversationContextPreflightConfig) effectiveTimeout() time.Duration {

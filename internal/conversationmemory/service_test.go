@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,6 +264,44 @@ func TestConversationMemoryPreparesAndActivatesInitialSnapshot(t *testing.T) {
 	}
 }
 
+func TestConversationMemorySerializesSoftAndHardCompactionPerConversation(t *testing.T) {
+	conversationID := uuid.New()
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		mu.Lock()
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 {
+			close(started)
+			<-release
+		}
+		return conversationmemory.CompactionOutput{Payload: validPayload(), Usage: conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25}}, nil
+	}), time.Now().UTC(), 1)
+	request := conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID), ActivationGate: acceptConversationMemoryActivation,
+	}
+	results := make(chan error, 2)
+	go func() { _, err := service.PrepareActive(context.Background(), request); results <- err }()
+	<-started
+	go func() { _, err := service.PrepareActive(context.Background(), request); results <- err }()
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("PrepareActive() error = %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("compactor calls = %d, want 1", calls)
+	}
+}
+
 func TestConversationMemoryBuildsReportWhitelistFromStructuredMessages(t *testing.T) {
 	conversationID := uuid.New()
 	reportID := "report:" + uuid.NewString()
@@ -287,6 +326,92 @@ func TestConversationMemoryBuildsReportWhitelistFromStructuredMessages(t *testin
 		ActivationGate: acceptConversationMemoryActivation,
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConversationMemoryRebuildsStableReferencesFromStructuredMessages(t *testing.T) {
+	conversationID := uuid.New()
+	messages := initialMessages(conversationID)
+	reportID := "report:" + uuid.NewString()
+	messages[1].ReportReferences = []conversation.ReportReference{{ReferenceID: reportID}}
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		payload := validPayload()
+		payload.EvidenceReferences = append(payload.EvidenceReferences, conversationmemory.ReferenceEntry{
+			Entry:         conversationmemory.Entry{EntryID: "forged_evidence", Content: "伪造证据", SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive},
+			ReferenceType: conversationmemory.ReferenceTypeKnowledgeChunk, ReferenceID: "knowledge:forged", ContentSHA256: strings.Repeat("b", 64),
+		})
+		payload.TaskReferences = append(payload.TaskReferences, conversationmemory.ReferenceEntry{
+			Entry:         conversationmemory.Entry{EntryID: "forged_task", Content: "伪造任务", SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive},
+			ReferenceType: conversationmemory.ReferenceTypeDiagnosisTask, ReferenceID: uuid.NewString(),
+		})
+		payload.ReportReferences = []conversationmemory.ReferenceEntry{{
+			Entry:         conversationmemory.Entry{EntryID: "valid_report", Content: "真实报告", SourceMessageSeqs: []int64{2}, Status: conversationmemory.EntryStatusActive},
+			ReferenceType: conversationmemory.ReferenceTypeDiagnosisReport, ReferenceID: reportID,
+		}, {
+			Entry:         conversationmemory.Entry{EntryID: "forged_report", Content: "模型自由生成的报告引用", SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive},
+			ReferenceType: conversationmemory.ReferenceTypeDiagnosisReport, ReferenceID: "report:forged",
+		}}
+		return conversationmemory.CompactionOutput{Payload: payload, Usage: conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25}}, nil
+	}), time.Now().UTC(), 1)
+	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: messages, ActivationGate: acceptConversationMemoryActivation,
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() error = %v", err)
+	}
+	if len(snapshot.Payload.EvidenceReferences) != 1 ||
+		snapshot.Payload.EvidenceReferences[0].ReferenceID != messages[1].Citations[0].SourceRef ||
+		snapshot.Payload.EvidenceReferences[0].ContentSHA256 != messages[1].Citations[0].ContentSHA256 {
+		t.Fatalf("evidence reference was not rebuilt: %+v", snapshot.Payload.EvidenceReferences)
+	}
+	if len(snapshot.Payload.TaskReferences) != 1 ||
+		snapshot.Payload.TaskReferences[0].ReferenceID != messages[2].TaskReferences[0].TaskID.String() {
+		t.Fatalf("task reference was not rebuilt: %+v", snapshot.Payload.TaskReferences)
+	}
+	if len(snapshot.Payload.ReportReferences) != 1 || snapshot.Payload.ReportReferences[0].ReferenceID != reportID ||
+		snapshot.Payload.ReportReferences[0].SourceMessageSeqs[0] != messages[1].Seq {
+		t.Fatalf("report reference was not rebuilt: %+v", snapshot.Payload.ReportReferences)
+	}
+}
+
+func TestConversationMemoryUpdatesTrustedReferenceConclusionWithoutChangingIdentity(t *testing.T) {
+	conversationID := uuid.New()
+	active := activeSnapshotFixture(t, conversationID, 1, 3, nil)
+	original := active.Payload.EvidenceReferences[0]
+	repository := &activationMemoryRepositoryStub{
+		memoryRepositoryStub: &memoryRepositoryStub{latest: &active},
+		active:               &active,
+	}
+	messages := append(initialMessages(conversationID),
+		conversation.Message{
+			ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleUser,
+			Content: "补充确认该制度仍然有效",
+			Citations: []conversation.MessageCitation{{
+				Position: 0, SourceType: conversation.CitationSourceKnowledgeChunk,
+				SourceRef: original.ReferenceID, ContentSHA256: original.ContentSHA256,
+			}},
+		},
+		conversation.Message{ID: uuid.New(), ConversationID: conversationID, Seq: 5, Role: conversation.MessageRoleAssistant, Content: "已确认"},
+	)
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		payload := validPayload()
+		payload.EvidenceReferences[0].Content = "制度当前仍要求知识文档按版本发布"
+		return conversationmemory.CompactionOutput{
+			Payload: payload, Usage: conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25},
+		}, nil
+	}), time.Now().UTC(), 1)
+
+	current, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: messages, ActivationGate: acceptConversationMemoryActivation,
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() error = %v", err)
+	}
+	updated := current.Payload.EvidenceReferences[0]
+	if updated.Content != "制度当前仍要求知识文档按版本发布" || updated.EntryID != original.EntryID ||
+		updated.ReferenceID != original.ReferenceID || updated.ContentSHA256 != original.ContentSHA256 {
+		t.Fatalf("updated trusted reference = %+v, original = %+v", updated, original)
 	}
 }
 
@@ -341,6 +466,33 @@ func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.
 	}
 	if attempts != 2 || len(repository.saved) != 1 || snapshot.Status != conversationmemory.SnapshotStatusActive {
 		t.Fatalf("attempts/saves/snapshot = %d/%d/%+v", attempts, len(repository.saved), snapshot)
+	}
+}
+
+func TestConversationMemoryNormalizesLegacyLineageIntoCurrentState(t *testing.T) {
+	conversationID := uuid.New()
+	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
+	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
+		payload := validPayload()
+		payload.Corrections = append(payload.Corrections,
+			conversationmemory.Entry{EntryID: "correction_old", Content: "较早修正", SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive, SupersedesEntryID: "fact_timezone"},
+			conversationmemory.Entry{EntryID: "correction_latest", Content: "最新修正", SourceMessageSeqs: []int64{3}, Status: conversationmemory.EntryStatusActive, SupersedesEntryID: "fact_timezone"},
+		)
+		return conversationmemory.CompactionOutput{Payload: payload, Usage: conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25}}, nil
+	}), time.Now().UTC(), 1)
+	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID), ActivationGate: acceptConversationMemoryActivation,
+	})
+	if err != nil {
+		t.Fatalf("PrepareActive() error = %v", err)
+	}
+	if len(snapshot.Payload.Corrections) != 3 {
+		t.Fatalf("current corrections = %+v", snapshot.Payload.Corrections)
+	}
+	for _, entry := range snapshot.Payload.Corrections {
+		if entry.Status != conversationmemory.EntryStatusActive || entry.SupersedesEntryID != "" {
+			t.Fatalf("legacy lineage was not normalized: %+v", snapshot.Payload.Corrections)
+		}
 	}
 }
 

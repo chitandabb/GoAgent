@@ -59,10 +59,11 @@ syncCompactionTimeoutMillis = 90000
 [agent.contextMemory.summary]
 enabled = true
 promptFile = "config/prompts/conversation-memory-summary.md"
-promptVersion = "conversation-memory-v6"
+promptVersion = "conversation-memory-v9"
 maxPayloadBytes = 65536
 maxAttempts = 3
 retryBaseDelayMillis = 250
+promptMaxEntries = 64
 
 [models.chat]
 enabled = true
@@ -107,7 +108,7 @@ apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
 model = "step-3.7-flash"
 reasoningEffort = "low"
 responseFormat = "json_schema"
-responseSchema = "conversation_memory_v1"
+responseSchema = "conversation_memory_v2"
 temperature = 0.0
 timeoutMillis = 60000
 contextWindowTokens = 131072

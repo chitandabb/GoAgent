@@ -117,9 +117,6 @@ func TestSourceRecoveryAllowsOnlySequencesDeclaredByCurrentSnapshotEntries(t *te
 		"unknown entry": {
 			Actor: userActor(userID), ConversationID: conversationID, EntryID: "missing_entry",
 		},
-		"superseded entry": {
-			Actor: userActor(userID), ConversationID: conversationID, EntryID: "fact_timezone",
-		},
 		"undeclared sequence": {
 			Actor: userActor(userID), ConversationID: conversationID, SourceMessageSeqs: []int64{99},
 		},

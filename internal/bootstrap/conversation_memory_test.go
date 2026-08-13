@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
@@ -29,7 +30,7 @@ func TestBuildConversationMemoryServiceUsesTheIndependentMemoryProfile(t *testin
 	memoryProfile.ReasoningEffort = ""
 	memoryProfile.ThinkingMode = "disabled"
 	memoryProfile.ResponseFormat = "json_schema"
-	memoryProfile.ResponseSchema = "conversation_memory_v1"
+	memoryProfile.ResponseSchema = conversationmemory.ResponseSchemaName
 	memoryProfile.TimeoutMillis = 30_000
 	cfg.Models.Chat.Profiles["memory"] = memoryProfile
 	cfg.Models.Chat.ConversationMemoryProfileName = "memory"
@@ -55,7 +56,7 @@ func TestBuildConversationMemoryServiceUsesTheIndependentMemoryProfile(t *testin
 
 func TestValidateConversationMemoryProfileRequiresStrictSchemaContract(t *testing.T) {
 	valid := config.ChatModelProfileConfig{
-		ResponseFormat: "json_schema", ResponseSchema: "conversation_memory_v1",
+		ResponseFormat: "json_schema", ResponseSchema: conversationmemory.ResponseSchemaName,
 	}
 	if err := validateConversationMemoryProfile(valid); err != nil {
 		t.Fatalf("valid profile error = %v", err)

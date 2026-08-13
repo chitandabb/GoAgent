@@ -89,7 +89,7 @@ func TestConversationMemoryJobRepositoryLeaseFencingCASAndRetryAgainstPostgres(t
 		t.Fatalf("Renew(stale fencing token) = %v, %v", staleRenewed, err)
 	}
 	if _, err := repository.Complete(ctx, *firstClaim.Lease, conversationmemoryworker.ExecutionResult{
-		CandidateSnapshotID: &staleCandidate.ID, ThroughSeq: throughSeq,
+		CurrentSnapshotID: staleCandidate.ID, ThroughSeq: throughSeq,
 	}, reclaimAt.Add(time.Millisecond)); !errors.Is(err, conversationmemoryworker.ErrLeaseLost) {
 		t.Fatalf("stale Complete() error = %v, want ErrLeaseLost", err)
 	}
@@ -97,10 +97,16 @@ func TestConversationMemoryJobRepositoryLeaseFencingCASAndRetryAgainstPostgres(t
 	if err != nil {
 		t.Fatalf("Save(winner candidate): %v", err)
 	}
+	winnerCurrent, err := memoryRepository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: conversationID, CandidateSnapshotID: winnerCandidate.ID, ActivatedAt: reclaimAt.Add(time.Millisecond),
+	})
+	if err != nil {
+		t.Fatalf("Activate(winner): %v", err)
+	}
 	completed, err := repository.Complete(ctx, *reclaimed.Lease, conversationmemoryworker.ExecutionResult{
-		CandidateSnapshotID: &winnerCandidate.ID, ThroughSeq: throughSeq,
+		CurrentSnapshotID: winnerCurrent.ID, ThroughSeq: throughSeq,
 	}, reclaimAt.Add(2*time.Millisecond))
-	if err != nil || !completed.Committed || completed.ActivationResult != conversationmemoryworker.ActivationActivated {
+	if err != nil || !completed.Committed || completed.ActivationResult != conversationmemoryworker.ActivationAlreadyCurrent {
 		t.Fatalf("winner Complete() = %+v, %v", completed, err)
 	}
 	terminal, err := repository.Claim(
@@ -166,7 +172,7 @@ FROM generate_series(3, 6) AS sequence`, conversationID, reclaimAt.Add(time.Seco
 		t.Fatalf("Fail(concurrent winner) = %v, %v", failed, err)
 	}
 
-	active := winnerCandidate
+	active := winnerCurrent
 	jobThroughFour := insertIntegrationMemoryJob(t, db, conversationID, sourceTurnID, 4, 3, reclaimAt.Add(3*time.Second))
 	jobThroughSix := insertIntegrationMemoryJob(t, db, conversationID, sourceTurnID, 6, 3, reclaimAt.Add(3*time.Second))
 	leaseFour := mustClaimMemoryJob(t, ctx, repository, jobThroughFour, conversationID, "memory-worker-four", reclaimAt.Add(4*time.Second))
@@ -179,15 +185,22 @@ FROM generate_series(3, 6) AS sequence`, conversationID, reclaimAt.Add(time.Seco
 	if err != nil {
 		t.Fatalf("Save(candidate six): %v", err)
 	}
+	currentSix, err := memoryRepository.Activate(ctx, conversationmemory.ActivationRequest{
+		ConversationID: conversationID, CandidateSnapshotID: candidateSix.ID,
+		ExpectedActiveSnapshotID: &active.ID, ActivatedAt: reclaimAt.Add(4 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Activate(through six): %v", err)
+	}
 	if _, err := repository.Complete(ctx, leaseSix, conversationmemoryworker.ExecutionResult{
-		CandidateSnapshotID: &candidateSix.ID, ExpectedActiveSnapshotID: &active.ID, ThroughSeq: 6,
+		CurrentSnapshotID: currentSix.ID, ThroughSeq: 6,
 	}, reclaimAt.Add(4*time.Second+time.Millisecond)); err != nil {
 		t.Fatalf("Complete(through six): %v", err)
 	}
 	casWinner, err := repository.Complete(ctx, leaseFour, conversationmemoryworker.ExecutionResult{
-		CandidateSnapshotID: &candidateFour.ID, ExpectedActiveSnapshotID: &active.ID, ThroughSeq: 4,
+		CurrentSnapshotID: candidateFour.ID, ThroughSeq: 4,
 	}, reclaimAt.Add(4*time.Second+2*time.Millisecond))
-	if err != nil || casWinner.ActivationResult != conversationmemoryworker.ActivationCASWinner ||
+	if err != nil || casWinner.ActivationResult != conversationmemoryworker.ActivationAlreadyCurrent ||
 		casWinner.ActiveSnapshotID != candidateSix.ID {
 		t.Fatalf("Complete(overlap) = %+v, %v", casWinner, err)
 	}

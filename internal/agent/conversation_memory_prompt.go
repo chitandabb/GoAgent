@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
@@ -37,8 +38,10 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	if err != nil {
 		return conversationPromptProjection{}, nil, err
 	}
-	if err := applyConversationSummary(&pressure, active); err != nil {
-		return pressure, nil, err
+	if err := applyConversationSummary(ctx, &pressure, active, r.contextPreflight); err != nil {
+		pressure.degradedReasons = append(pressure.degradedReasons, "summary_refresh_failed")
+		fallbackManifest, _ := r.buildConversationPromptManifest(ctx, tools, pressure)
+		return pressure, fallbackManifest, err
 	}
 	pressureManifest, err := r.buildConversationPromptManifest(ctx, tools, pressure)
 	if err != nil {
@@ -88,7 +91,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 		}
 	}
 
-	summaryContent, summaryFingerprint, summarySnapshotID, err := conversationSummaryProjection(active)
+	summaryContent, summaryFingerprint, summarySnapshotID, err := conversationSummaryProjection(ctx, active, r.contextPreflight)
 	if err != nil {
 		return pressure, pressureManifest, err
 	}
@@ -155,7 +158,7 @@ func (r *ConversationRunner) summaryTailCoverageComplete(
 	request conversation.AgentRequest,
 	active conversationmemory.Snapshot,
 ) (bool, error) {
-	summaryContent, _, _, err := conversationSummaryProjection(&active)
+	summaryContent, _, _, err := conversationSummaryProjection(ctx, &active, r.contextPreflight)
 	if err != nil {
 		return false, err
 	}
@@ -208,7 +211,7 @@ func (g conversationSummaryActivationGate) ValidateForActivation(
 		snapshot.Status != conversationmemory.SnapshotStatusActive) {
 		return ErrConversationContextPreparationFailed
 	}
-	content, _, _, err := renderConversationSummary(&snapshot)
+	content, _, _, err := renderConversationSummary(ctx, &snapshot, g.preflight)
 	if err != nil {
 		return err
 	}
@@ -275,8 +278,8 @@ func buildFullConversationPromptProjection(
 	}, nil
 }
 
-func applyConversationSummary(projection *conversationPromptProjection, snapshot *conversationmemory.Snapshot) error {
-	content, fingerprint, snapshotID, err := conversationSummaryProjection(snapshot)
+func applyConversationSummary(ctx context.Context, projection *conversationPromptProjection, snapshot *conversationmemory.Snapshot, preflight ConversationContextPreflightConfig) error {
+	content, fingerprint, snapshotID, err := conversationSummaryProjection(ctx, snapshot, preflight)
 	if err != nil {
 		return err
 	}
@@ -289,29 +292,114 @@ func applyConversationSummary(projection *conversationPromptProjection, snapshot
 	return nil
 }
 
-func conversationSummaryProjection(snapshot *conversationmemory.Snapshot) (string, string, string, error) {
+func conversationSummaryProjection(ctx context.Context, snapshot *conversationmemory.Snapshot, preflight ConversationContextPreflightConfig) (string, string, string, error) {
 	if snapshot == nil {
 		return "", "", "", nil
 	}
 	if snapshot.Status != conversationmemory.SnapshotStatusActive || snapshot.Validate() != nil {
 		return "", "", "", ErrConversationContextPreparationFailed
 	}
-	return renderConversationSummary(snapshot)
+	return renderConversationSummary(ctx, snapshot, preflight)
 }
 
-func renderConversationSummary(snapshot *conversationmemory.Snapshot) (string, string, string, error) {
+func renderConversationSummary(ctx context.Context, snapshot *conversationmemory.Snapshot, preflight ConversationContextPreflightConfig) (string, string, string, error) {
 	if snapshot == nil || snapshot.Validate() != nil {
 		return "", "", "", ErrConversationContextPreparationFailed
 	}
-	payload, err := json.Marshal(snapshot.Payload)
+	maxEntries := preflight.effectiveSummaryPromptMaxEntries()
+	maxSummaryTokens := int(math.Floor(float64(preflight.ModelProfile.ContextWindowTokens) * preflight.SummaryMaxRatio))
+	low, high := 0, maxEntries
+	var content string
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate, err := renderConversationSummaryContent(snapshot, middle)
+		if err != nil {
+			return "", "", "", err
+		}
+		plan, err := preflight.plan(ctx, []contextgovernance.PromptSegment{{Kind: contextgovernance.PromptSegmentSummary, Content: candidate}})
+		if err != nil {
+			return "", "", "", fmt.Errorf("estimate conversation Summary projection: %w", err)
+		}
+		if plan.EstimatedUpperBoundTokens <= maxSummaryTokens {
+			content = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	if content == "" {
+		return "", "", "", fmt.Errorf("%w: active Summary exceeds configured Token budget", ErrConversationContextPreparationFailed)
+	}
+	return content, contextgovernance.SHA256Hex(string(schema.User) + "\x00" + content), snapshot.ID.String(), nil
+}
+
+func renderConversationSummaryContent(snapshot *conversationmemory.Snapshot, maxEntries int) (string, error) {
+	payload, err := json.Marshal(conversationSummaryPromptPayload(snapshot.Payload, maxEntries))
 	if err != nil {
-		return "", "", "", fmt.Errorf("encode active conversation Summary: %w", err)
+		return "", fmt.Errorf("encode active conversation Summary: %w", err)
 	}
 	content := fmt.Sprintf(
 		"<conversation_memory snapshot_id=%q version=%q through_seq=%q>\n%s\n</conversation_memory>",
 		snapshot.ID.String(), fmt.Sprint(snapshot.Version), fmt.Sprint(snapshot.ThroughSeq), payload,
 	)
-	return content, contextgovernance.SHA256Hex(string(schema.User) + "\x00" + content), snapshot.ID.String(), nil
+	return content, nil
+}
+
+func conversationSummaryPromptPayload(payload conversationmemory.Payload, maxEntries int) conversationmemory.Payload {
+	result := conversationmemory.Payload{
+		Facts: []conversationmemory.Entry{}, Decisions: []conversationmemory.Entry{},
+		Corrections: []conversationmemory.Entry{}, EvidenceReferences: []conversationmemory.ReferenceEntry{},
+		OpenQuestions: []conversationmemory.Entry{}, Todos: []conversationmemory.Entry{},
+		TaskReferences: []conversationmemory.ReferenceEntry{}, ReportReferences: []conversationmemory.ReferenceEntry{},
+	}
+	remaining := maxEntries
+	if payload.ConversationGoal != nil && remaining > 0 {
+		goal := *payload.ConversationGoal
+		result.ConversationGoal = &goal
+		remaining--
+	}
+	appendEntries := func(target *[]conversationmemory.Entry, source []conversationmemory.Entry, keep func(conversationmemory.Entry) bool) {
+		candidates := make([]conversationmemory.Entry, 0, len(source))
+		for _, entry := range source {
+			if keep(entry) {
+				candidates = append(candidates, entry)
+			}
+		}
+		sort.SliceStable(candidates, func(i, j int) bool { return latestSourceSeq(candidates[i]) > latestSourceSeq(candidates[j]) })
+		if len(candidates) > remaining {
+			candidates = candidates[:remaining]
+		}
+		*target = append(*target, candidates...)
+		remaining -= len(candidates)
+	}
+	appendReferences := func(target *[]conversationmemory.ReferenceEntry, source []conversationmemory.ReferenceEntry) {
+		candidates := append([]conversationmemory.ReferenceEntry(nil), source...)
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return latestSourceSeq(candidates[i].Entry) > latestSourceSeq(candidates[j].Entry)
+		})
+		if len(candidates) > remaining {
+			candidates = candidates[:remaining]
+		}
+		*target = append(*target, candidates...)
+		remaining -= len(candidates)
+	}
+	active := func(entry conversationmemory.Entry) bool { return entry.Status == conversationmemory.EntryStatusActive }
+	appendEntries(&result.Corrections, payload.Corrections, active)
+	appendEntries(&result.Facts, payload.Facts, active)
+	appendEntries(&result.Decisions, payload.Decisions, active)
+	appendEntries(&result.Todos, payload.Todos, func(entry conversationmemory.Entry) bool { return entry.Status == conversationmemory.EntryStatusOpen })
+	appendReferences(&result.EvidenceReferences, payload.EvidenceReferences)
+	appendReferences(&result.TaskReferences, payload.TaskReferences)
+	appendReferences(&result.ReportReferences, payload.ReportReferences)
+	appendEntries(&result.OpenQuestions, payload.OpenQuestions, active)
+	return result
+}
+
+func latestSourceSeq(entry conversationmemory.Entry) int64 {
+	if len(entry.SourceMessageSeqs) == 0 {
+		return 0
+	}
+	return entry.SourceMessageSeqs[len(entry.SourceMessageSeqs)-1]
 }
 
 // conversationSummaryPromptMessage deliberately keeps model-generated memory

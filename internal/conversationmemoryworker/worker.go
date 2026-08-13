@@ -88,23 +88,13 @@ func (t Task) Validate() error {
 }
 
 type ExecutionResult struct {
-	CandidateSnapshotID      *uuid.UUID
-	CurrentSnapshotID        *uuid.UUID
-	ExpectedActiveSnapshotID *uuid.UUID
-	ThroughSeq               int64
+	CurrentSnapshotID uuid.UUID
+	ThroughSeq        int64
 }
 
 func (r ExecutionResult) Validate() error {
-	hasCandidate := r.CandidateSnapshotID != nil && *r.CandidateSnapshotID != uuid.Nil
-	hasCurrent := r.CurrentSnapshotID != nil && *r.CurrentSnapshotID != uuid.Nil
-	if hasCandidate == hasCurrent || r.ThroughSeq < 1 {
-		return errors.New("conversation memory execution result is invalid")
-	}
-	if hasCurrent && r.ExpectedActiveSnapshotID != nil {
-		return errors.New("current conversation memory result cannot carry an expected Active")
-	}
-	if r.ExpectedActiveSnapshotID != nil && *r.ExpectedActiveSnapshotID == uuid.Nil {
-		return errors.New("expected Active snapshot is invalid")
+	if r.CurrentSnapshotID == uuid.Nil || r.ThroughSeq < 1 {
+		return errors.New("current conversation memory execution result is invalid")
 	}
 	return nil
 }

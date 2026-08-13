@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestServiceExecutorReturnsUnactivatedCandidate(t *testing.T) {
+func TestServiceExecutorPublishesCurrentSummary(t *testing.T) {
 	now := time.Date(2026, 8, 11, 14, 0, 0, 0, time.UTC)
 	lease := validLease(now)
 	repository := &executorMemoryRepository{}
@@ -44,8 +44,9 @@ func TestServiceExecutorReturnsUnactivatedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute(): %v", err)
 	}
-	if result.CandidateSnapshotID == nil || result.CurrentSnapshotID != nil || result.ThroughSeq != 2 ||
-		repository.active != nil || repository.saved == nil || repository.saved.ID != *result.CandidateSnapshotID {
+	if result.CurrentSnapshotID == uuid.Nil || result.ThroughSeq != 2 || repository.active == nil ||
+		repository.saved == nil || repository.saved.ID != result.CurrentSnapshotID ||
+		repository.active.ID != result.CurrentSnapshotID {
 		t.Fatalf("result/repository = %+v / %+v", result, repository)
 	}
 }
@@ -60,7 +61,7 @@ func TestServiceExecutorUsesOneModelCallPerDurableJobAttempt(t *testing.T) {
 		Compactor: executorCompactorFunc(func(_ context.Context, input conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
 			calls++
 			if input.Attempt != lease.AttemptCount {
-				t.Fatalf("compaction attempt = %d, want %d", input.Attempt, lease.AttemptCount)
+				t.Fatalf("durable compaction attempt = %d, want %d", input.Attempt, lease.AttemptCount)
 			}
 			return conversationmemory.CompactionOutput{}, errors.New("provider unavailable")
 		}),
@@ -141,8 +142,14 @@ func (r *executorMemoryRepository) ActiveIdentity(ctx context.Context, conversat
 	}, nil
 }
 
-func (r *executorMemoryRepository) Activate(context.Context, conversationmemory.ActivationRequest) (conversationmemory.Snapshot, error) {
-	panic("ServiceExecutor must not activate a candidate directly")
+func (r *executorMemoryRepository) Activate(_ context.Context, request conversationmemory.ActivationRequest) (conversationmemory.Snapshot, error) {
+	if r.saved == nil || r.saved.ID != request.CandidateSnapshotID {
+		return conversationmemory.Snapshot{}, conversationmemory.ErrSnapshotActivationConflict
+	}
+	active := *r.saved
+	active.Status = conversationmemory.SnapshotStatusActive
+	r.active = &active
+	return active, nil
 }
 
 func validExecutorPayload() conversationmemory.Payload {

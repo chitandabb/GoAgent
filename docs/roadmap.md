@@ -54,18 +54,19 @@ Ordered next slices are maintained directly in this file.
 Target design: [`design/context-governance-and-memory.md`](design/context-governance-and-memory.md).
 Implementation spec: [`specs/m3-context-governance-and-layered-memory.md`](specs/m3-context-governance-and-layered-memory.md).
 The design interview is complete. Context contract, shadow preflight, Continuous Token Tail, structured
-Snapshot, hard-threshold Summary + Tail, soft-threshold Memory Outbox/Worker, source recovery and Diagnosis
-per-call preflight are implemented. The provider-free Pilot fixture/evaluator and an explicitly enabled real
-Provider observer are also implemented; paid Pilot execution and measured Acceptance have not started. `60%+`
-remains an acceptance target and must be replaced by the fixed-set result if the measured value differs.
+Current Summary, hard-threshold Summary + Tail, soft-threshold Memory Outbox/Worker, source recovery and
+Diagnosis per-call preflight are implemented. Soft and hard compaction now share a Conversation Coordinator;
+Entry lineage and Candidate/CAS publication are retired from the runtime contract. The provider-free Pilot
+fixture/evaluator and an explicitly enabled real Provider observer are implemented. `60%+` is an original
+target, not a pass-at-all-costs gate, and must be replaced by the fixed-set result if the measured value differs.
 
 - [x] Confirm Conversation-only isolated memory; cross-conversation long-term memory remains an enhancement.
 - [x] Confirm shared Provider-independent TokenBudgetPlanner for Conversation and Diagnosis.
 - [x] Confirm local-first TokenEstimator with actual Provider Usage calibration and hard-window preflight.
 - [x] Confirm soft `70%` asynchronous and hard `85%` synchronous compaction thresholds.
-- [x] Confirm immutable structured Snapshot with source message sequences, correction and Todo semantics.
+- [x] Confirm structured Current Summary with source message sequences, correction and Todo current-state semantics.
 - [x] Confirm `Summary + Continuous Tail <= 20%`, with Summary `<=5%` and Tail `<=15%`.
-- [x] Confirm PostgreSQL facts, degradable Redis hot cache, Worker Lease/Fencing and CAS activation.
+- [x] Confirm original-message facts, degradable Redis hot cache, Worker Lease/Fencing and Conversation coordination.
 - [x] Confirm bounded `read_conversation_memory_sources`; authorized deterministic relevant-window retrieval is
       complete, while vector-semantic history retrieval remains an enhancement.
 - [x] Confirm Prompt Epoch, actual-content Fingerprints and stable TaskScope Tool Schema per Epoch.
@@ -84,8 +85,13 @@ remains an acceptance target and must be replaced by the fixed-set result if the
       candidates are persisted without a deterministic low-quality fallback.
 - [x] Add hard-threshold synchronous compaction, CAS Active publication, `Summary <= 5%` plus continuous
       `Tail <= 15%`, Prompt Epoch replacement, old-Snapshot fallback and fail-closed hard-window protection.
-- [x] Add Memory Outbox/Worker, Lease/Fencing and CAS publication; real PostgreSQL tests cover transaction
-      scheduling, concurrent Claim, expired Worker fencing, overlapping Job convergence and retry Outbox.
+- [x] Add Memory Outbox/Worker and Lease/Fencing; real PostgreSQL tests cover transaction scheduling,
+      concurrent Claim, expired Worker fencing, overlapping Job convergence and retry Outbox. Earlier CAS
+      publication remains historical implementation evidence, not the current runtime concurrency model.
+- [x] Refactor soft/hard compaction to share a PostgreSQL advisory-lock Conversation Coordinator, reload
+      `throughSeq` after lock acquisition and suppress duplicate model calls for an already-covered target.
+- [x] Retire Entry lineage, `multiple_active_entries`, and Worker Candidate/CAS publication from the runtime
+      contract. Keep schema-v1 Snapshot/Job activation columns as explicit compatibility debt for later migration.
 - [x] Add Redis Active Snapshot hot-cache fallback with PostgreSQL Active Identity as the fact source;
       TTL/jitter, strict payload validation, degraded observations and best-effort deletion are covered by
       contract plus real Redis/PostgreSQL tests. Tail Projection caching remains benchmark-gated because
@@ -111,10 +117,9 @@ remains an acceptance target and must be replaced by the fixed-set result if the
       budget, fixture/content and runtime contract drift fail before Provider access, each paid observation is
       atomically persisted with backup rollback, and stale Gate reports are invalidated until all 36
       Current/Baseline/Experiment observations are present.
-- [ ] After explicit cost approval, rerun the Provider-backed Pilot under class-specific call/Token gates; the
-      2026-08-12 exploratory run is invalid because Summary retries amplified cost and comparable pairs were
-      insufficient. Inspect quality/Token/cache/cost/latency gates, then decide whether the implementation is
-      ready for the 12-scenario Acceptance set.
+- [ ] Run one explicitly approved, bounded Provider-backed closure set under class-specific call/Token gates.
+      Report main-model input reduction, over-window continuation, summary overhead, quality, latency and cost;
+      do not require end-to-end Token reduction to reach the original 60% target.
 - [ ] Run Acceptance evaluation; update the resume metric only from measured results.
 - [ ] Hand the completed backend contract to the frontend task.
 
