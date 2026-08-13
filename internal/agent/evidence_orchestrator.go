@@ -401,7 +401,7 @@ func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceS
 		state.appendStep(InvestigationGate, "证据门禁", "报告字段与证据引用校验通过", "completed", "", 0)
 		return state, nil
 	}
-	if len(gaps) > 0 && state.agentRuns >= o.reportContract.MaxAttempts {
+	if len(gaps) > 0 && state.agentRuns >= o.reportContract.MaxAttempts && !evidenceGapsNeedRetrieval(gaps) {
 		state.nextNode = evidenceNodePartialReport
 		state.appendStep(InvestigationGate, "结构化报告门禁", strings.Join(gaps, "；"), "partial", "", 0)
 		return state, nil
@@ -441,8 +441,8 @@ func (s *evidenceState) nextAgentQuery() string {
 	if s.continueAfterGatePass {
 		s.continueAfterGatePass = false
 		return strings.TrimSpace(s.request.UserQuery) +
-			"\n\n当前是成对评测 Baseline，Early Exit 已关闭。上一轮报告已通过 Evidence Gate；" +
-			"请在剩余的原始预算内复核是否还有必要的只读调查，不要为了增加调用而重复工具。" +
+			"\n\n上一轮报告已通过 Evidence Gate；请在剩余调查预算内复核是否还有必要的只读调查，" +
+			"不要为了增加调用而重复工具。" +
 			"无新增证据时保留原结论，并重新输出完整 JSON 报告。" +
 			"\n\n<previous_report>\n" + draft + "\n</previous_report>\n\n" + s.reportContractInstruction
 	}

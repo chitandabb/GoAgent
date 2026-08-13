@@ -31,6 +31,8 @@ go run ./tools/evaluation/mesguard-evaluation-ledger `
 ```
 
 输出文件必须不存在，避免覆盖历史 Observation 或报告。本次版本化结果位于 `testdata/evidence-gate-early-exit-v1.ledger-v1.json`。
+其中 `configFingerprint` 是下列冻结配置串的 UTF-8 SHA-256，而不是对本机 `.env` 的散列：
+`evidence-gate-early-exit-v1|maxAgentRuns=2|maxToolCalls=8|maxEvidenceItems=16|maxTotalTokens=16000|prompt=diagnosis-fixture-v1|model=scripted-evidence-gate-v1`。
 
 ## 当前确定性结果
 
@@ -66,6 +68,6 @@ go run ./tools/evaluation/mesguard-agent-paired-eval `
   -max-provider-tokens <upper-bound>
 ```
 
-命令在创建模型客户端前计算并输出 Case 数、Provider 调用保守上界和双 arm Token 总预算上界；任何上限不足都会快速失败。单个 Provider 错误不会增加样本数、Agent Runs、Tool Calls 或 Token 预算。
+命令在创建模型客户端前计算并输出 Case 数、Provider 调用保守上界和双 arm Token 总预算上界；该诊断成对路径不创建 Embedding/Rerank 客户端，因此两者上限显式为 0。任何上限不足都会快速失败。命令串行执行、沿用 Evidence Orchestrator 的总超时和 Provider 的既有重试/熔断合同；单个 Provider 错误会写入该 arm 的 Observation 并继续固定数据集，不增加样本数、Agent Runs、Tool Calls 或 Token 预算。
 
 原始 Provider Observation 默认 `qualityReviewed=false`，因此不能通过质量门禁。人工需要根据 Gold 标注 `evidenceSufficientAtRun`，并逐 arm 复核 `completed`、`conclusionCorrect`、`citationCorrect` 和 `highSeverityWrongConclusion`，再生成新的版本化 Ledger。Fixture 与真实 Provider 结果必须使用不同数据集版本，不能覆盖本文件中的固定结果。

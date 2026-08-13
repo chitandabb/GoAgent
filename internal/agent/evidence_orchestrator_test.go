@@ -96,7 +96,8 @@ func TestEvidenceOrchestratorCanDisableEarlyExitForPairedEvaluation(t *testing.T
 		t.Fatalf("disabled Early Exit did not use the paired-run budget: %+v", result)
 	}
 	requests := invoker.snapshotRequests()
-	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "Early Exit 已关闭") {
+	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "在剩余调查预算内复核") ||
+		strings.Contains(requests[1].UserQuery, "Baseline") || strings.Contains(requests[1].UserQuery, "Early Exit") {
 		t.Fatalf("baseline continuation request = %+v", requests)
 	}
 }
@@ -241,7 +242,7 @@ func TestEvidenceOrchestratorBoundsMalformedReportRepair(t *testing.T) {
 	}
 }
 
-func TestEvidenceOrchestratorBoundsParsedContractRepair(t *testing.T) {
+func TestEvidenceOrchestratorContinuesEvidenceRepairWithinConfiguredRunBudget(t *testing.T) {
 	invalid := validEvidenceReport()
 	invalid.Evidence = nil
 	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
@@ -254,8 +255,8 @@ func TestEvidenceOrchestratorBoundsParsedContractRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Partial || result.AgentRuns != 2 || len(invoker.snapshotRequests()) != 2 {
-		t.Fatalf("parsed report contract repair was not bounded: %+v", result)
+	if result.Partial || result.AgentRuns != 3 || len(invoker.snapshotRequests()) != 3 {
+		t.Fatalf("evidence repair did not continue within the configured budget: %+v", result)
 	}
 }
 
