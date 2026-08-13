@@ -37,6 +37,7 @@ var (
 type ConversationRunnerConfig struct {
 	ChatModel                    model.ToolCallingChatModel
 	CitationRepairer             ConversationCitationRepairer
+	CitationRepairPolicy         resilience.Policy
 	ToolCatalog                  *ToolCatalog
 	SystemInstruction            string
 	ModelProvider                string
@@ -84,6 +85,12 @@ type ConversationRunner struct {
 func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, error) {
 	if cfg.ChatModel == nil || cfg.ToolCatalog == nil || cfg.Logger == nil {
 		return nil, errors.New("conversation runner model, catalog, and logger are required")
+	}
+	if cfg.CitationRepairer != nil && cfg.CitationRepairPolicy != resilience.PolicyRepairThenFail {
+		return nil, errors.New("conversation citation repair policy must be repair_then_fail")
+	}
+	if cfg.CitationRepairer == nil && cfg.CitationRepairPolicy != "" {
+		return nil, errors.New("conversation citation repair policy requires a repairer")
 	}
 	cfg.SystemInstruction = strings.TrimSpace(cfg.SystemInstruction)
 	cfg.ModelProvider = strings.TrimSpace(cfg.ModelProvider)

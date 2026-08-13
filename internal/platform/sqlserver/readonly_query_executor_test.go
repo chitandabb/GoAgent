@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -150,7 +151,7 @@ func TestReadonlyQueryExecutorRejectsBeforeCatalogOrDatabase(t *testing.T) {
 	executor := newReadonlyExecutorForTest(t, queryer, dataSourceID, authorizer, 10, 4096, 1)
 
 	_, err := executor.Execute(context.Background(), dataSourceID, "DELETE FROM dbo.Tickets")
-	if !errors.Is(err, ErrReadonlyQueryRejected) {
+	if !errors.Is(err, ErrReadonlyQueryRejected) || resilience.FailureDispositionOf(err) != resilience.FailureStrict {
 		t.Fatalf("Execute error = %v, want query rejection", err)
 	}
 	if authorizer.calls != 0 || queryer.calls != 0 {
@@ -164,7 +165,8 @@ func TestReadonlyQueryExecutorRejectsCatalogDenialAndSanitizesDatabaseError(t *t
 	authorizer := &stubReadonlyAuthorizer{err: repository.ErrSchemaCatalogAuthorizationDenied}
 	executor := newReadonlyExecutorForTest(t, queryer, dataSourceID, authorizer, 10, 4096, 1)
 	_, err := executor.Execute(context.Background(), dataSourceID, "SELECT * FROM dbo.Tickets")
-	if !errors.Is(err, repository.ErrSchemaCatalogAuthorizationDenied) || queryer.calls != 0 {
+	if !errors.Is(err, repository.ErrSchemaCatalogAuthorizationDenied) || queryer.calls != 0 ||
+		resilience.FailureDispositionOf(err) != resilience.FailureStrict {
 		t.Fatalf("catalog denial = %v query calls=%d", err, queryer.calls)
 	}
 
@@ -174,7 +176,8 @@ func TestReadonlyQueryExecutorRejectsCatalogDenialAndSanitizesDatabaseError(t *t
 		Objects: []repository.SchemaCatalogObjectRef{{ObjectSchema: "dbo", ObjectName: "Tickets"}},
 	}
 	_, err = executor.Execute(context.Background(), dataSourceID, "SELECT * FROM dbo.Tickets")
-	if !errors.Is(err, repository.ErrReadonlyQueryUnavailable) || strings.Contains(err.Error(), "sqlserver.internal") {
+	if !errors.Is(err, repository.ErrReadonlyQueryUnavailable) || strings.Contains(err.Error(), "sqlserver.internal") ||
+		resilience.FailureDispositionOf(err) != resilience.FailureRetryable {
 		t.Fatalf("database error = %v", err)
 	}
 }

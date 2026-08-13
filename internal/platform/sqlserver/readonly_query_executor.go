@@ -15,6 +15,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformlogger "github.com/chitandabb/GoAgent/internal/platform/logger"
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -121,14 +122,16 @@ func (e *ReadonlyQueryExecutor) Execute(
 		return repository.ReadonlyQueryResult{}, errors.New("readonly query executor is unavailable")
 	}
 	if dataSourceID == uuid.Nil || dataSourceID != e.expectedDataSource {
-		return repository.ReadonlyQueryResult{}, errors.New("data source is not configured for readonly query")
+		return repository.ReadonlyQueryResult{}, resilience.StrictFailure(
+			errors.New("data source is not configured for readonly query"),
+		)
 	}
 	if err := ctx.Err(); err != nil {
 		return repository.ReadonlyQueryResult{}, err
 	}
 	analysis, err := e.guard.Analyze(query)
 	if err != nil {
-		return repository.ReadonlyQueryResult{}, err
+		return repository.ReadonlyQueryResult{}, resilience.StrictFailure(err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, e.queryTimeout)
@@ -142,33 +145,33 @@ func (e *ReadonlyQueryExecutor) Execute(
 	authorization, err := e.authorizer.AuthorizePublishedObjects(queryCtx, dataSourceID, objects)
 	if err != nil {
 		if queryCtx.Err() != nil {
-			return repository.ReadonlyQueryResult{}, queryCtx.Err()
+			return repository.ReadonlyQueryResult{}, retryableQueryContextError(ctx, queryCtx.Err())
 		}
 		if errors.Is(err, repository.ErrSchemaCatalogAuthorizationDenied) {
-			return repository.ReadonlyQueryResult{}, err
+			return repository.ReadonlyQueryResult{}, resilience.StrictFailure(err)
 		}
 		e.logFailure(ctx, query, "catalog_authorization", err)
-		return repository.ReadonlyQueryResult{}, repository.ErrReadonlyQueryUnavailable
+		return repository.ReadonlyQueryResult{}, resilience.RetryableFailure(repository.ErrReadonlyQueryUnavailable)
 	}
 	if !sameCatalogObjects(objects, authorization.Objects) {
-		return repository.ReadonlyQueryResult{}, repository.ErrSchemaCatalogAuthorizationDenied
+		return repository.ReadonlyQueryResult{}, resilience.StrictFailure(repository.ErrSchemaCatalogAuthorizationDenied)
 	}
 
 	select {
 	case e.concurrency <- struct{}{}:
 		defer func() { <-e.concurrency }()
 	case <-queryCtx.Done():
-		return repository.ReadonlyQueryResult{}, queryCtx.Err()
+		return repository.ReadonlyQueryResult{}, retryableQueryContextError(ctx, queryCtx.Err())
 	}
 
 	startedAt := time.Now()
 	rows, err := e.queryer.QueryContext(queryCtx, query)
 	if err != nil {
 		if queryCtx.Err() != nil {
-			return repository.ReadonlyQueryResult{}, queryCtx.Err()
+			return repository.ReadonlyQueryResult{}, retryableQueryContextError(ctx, queryCtx.Err())
 		}
 		e.logFailure(ctx, query, "query", err)
-		return repository.ReadonlyQueryResult{}, repository.ErrReadonlyQueryUnavailable
+		return repository.ReadonlyQueryResult{}, resilience.RetryableFailure(repository.ErrReadonlyQueryUnavailable)
 	}
 	defer rows.Close()
 
@@ -180,13 +183,20 @@ func (e *ReadonlyQueryExecutor) Execute(
 	}
 	if err = e.scanRows(rows, &result); err != nil {
 		if queryCtx.Err() != nil {
-			return repository.ReadonlyQueryResult{}, queryCtx.Err()
+			return repository.ReadonlyQueryResult{}, retryableQueryContextError(ctx, queryCtx.Err())
 		}
 		e.logFailure(ctx, query, "scan", err)
-		return repository.ReadonlyQueryResult{}, repository.ErrReadonlyQueryUnavailable
+		return repository.ReadonlyQueryResult{}, resilience.RetryableFailure(repository.ErrReadonlyQueryUnavailable)
 	}
 	e.logSuccess(ctx, query, startedAt, result.ReturnedRows, result.Truncated)
 	return result, nil
+}
+
+func retryableQueryContextError(parent context.Context, err error) error {
+	if parent != nil && parent.Err() != nil {
+		return parent.Err()
+	}
+	return resilience.RetryableFailure(err)
 }
 
 func (e *ReadonlyQueryExecutor) scanRows(rows readonlyQueryRows, result *repository.ReadonlyQueryResult) error {

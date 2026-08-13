@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/resilience"
+
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 )
@@ -58,7 +60,9 @@ func NewDatabaseObjectDefinitionTool(reader DatabaseObjectDefinitionReader) (too
 					return DatabaseObjectDefinitionResult{}, err
 				}
 				// 数据库驱动错误可能包含主机、实例或连接参数；模型侧只接收稳定的安全错误。
-				return DatabaseObjectDefinitionResult{}, ErrDatabaseObjectDefinitionUnavailable
+				return DatabaseObjectDefinitionResult{}, resilience.RetryableFailure(
+					ErrDatabaseObjectDefinitionUnavailable,
+				)
 			}
 			return DatabaseObjectDefinitionResult{
 				Schema: schemaName, ObjectName: objectName, ObjectType: objectType,

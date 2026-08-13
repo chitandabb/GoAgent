@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 )
@@ -32,14 +33,16 @@ func NewExecuteReadonlyQueryTool(executor repository.ReadonlyQueryExecutor) (too
 				return repository.ReadonlyQueryResult{}, ErrTaskScopeRequired
 			}
 			if !scope.DependencyAvailable(ToolDependencySQLServer) {
-				return repository.ReadonlyQueryResult{}, errors.New("SQL Server dependency is unavailable")
+				return repository.ReadonlyQueryResult{}, resilience.RetryableFailure(
+					errors.New("SQL Server dependency is unavailable"),
+				)
 			}
 			if strings.TrimSpace(input.Query) == "" {
 				return repository.ReadonlyQueryResult{}, errors.New("query must be non-empty")
 			}
 			dataSourceID, err := resolveCatalogDataSource(scope, input.DataSourceID)
 			if err != nil {
-				return repository.ReadonlyQueryResult{}, err
+				return repository.ReadonlyQueryResult{}, resilience.StrictFailure(err)
 			}
 			return executor.Execute(ctx, dataSourceID, input.Query)
 		},

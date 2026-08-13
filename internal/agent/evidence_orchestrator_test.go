@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -201,6 +202,50 @@ func TestEvidenceOrchestratorReturnsPartialAtAgentRunLimit(t *testing.T) {
 	}
 }
 
+func TestEvidenceOrchestratorBoundsMalformedReportRepair(t *testing.T) {
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
+		{result: RunResult{Answer: "not-json-1"}},
+		{result: RunResult{Answer: "not-json-2"}},
+		{result: evidenceRunResult(t, validEvidenceReport())},
+	}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{MaxAgentRuns: 4})
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Partial || result.AgentRuns != 2 || len(invoker.snapshotRequests()) != 2 {
+		t.Fatalf("malformed report repair was not bounded: %+v", result)
+	}
+}
+
+func TestEvidenceOrchestratorBoundsParsedContractRepair(t *testing.T) {
+	invalid := validEvidenceReport()
+	invalid.Evidence = nil
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
+		{result: evidenceRunResult(t, invalid)},
+		{result: evidenceRunResult(t, invalid)},
+		{result: evidenceRunResult(t, validEvidenceReport())},
+	}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{MaxAgentRuns: 4})
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Partial || result.AgentRuns != 2 || len(invoker.snapshotRequests()) != 2 {
+		t.Fatalf("parsed report contract repair was not bounded: %+v", result)
+	}
+}
+
+func TestEvidenceOrchestratorRequiresRepairThenFailPolicy(t *testing.T) {
+	_, err := NewEvidenceOrchestrator(context.Background(), EvidenceOrchestratorConfig{
+		Runner: &scriptedAgentInvoker{}, Logger: zap.NewNop(),
+		ReportContractInstruction: evidenceTestReportContract,
+	})
+	if err == nil {
+		t.Fatal("NewEvidenceOrchestrator accepted a missing report policy")
+	}
+}
+
 func TestEvidenceOrchestratorStopsBeforeSecondRunAtTokenLimit(t *testing.T) {
 	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{{result: RunResult{
 		Answer: "{}", Usage: ModelUsage{ModelCalls: 1, TotalTokens: 1000},
@@ -345,6 +390,7 @@ func newEvidenceOrchestratorTest(
 	t.Helper()
 	overrides.Runner = invoker
 	overrides.Logger = zap.NewNop()
+	overrides.ReportPolicy = resilience.PolicyRepairThenFail
 	overrides.ReportContractInstruction = evidenceTestReportContract
 	orchestrator, err := NewEvidenceOrchestrator(context.Background(), overrides)
 	if err != nil {

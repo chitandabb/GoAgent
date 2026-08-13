@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -16,6 +19,8 @@ import (
 
 type ToolRegistration struct {
 	Tool                 tool.BaseTool
+	FailurePolicy        resilience.Policy
+	DegradationObserver  resilience.Observer
 	AllowedRoles         []auth.Role
 	AllowedTaskTypes     []TaskType
 	AllowedDataRoles     []DataSourceRole
@@ -27,6 +32,8 @@ type ToolRegistration struct {
 type catalogEntry struct {
 	name                 string
 	tool                 tool.BaseTool
+	failurePolicy        resilience.Policy
+	degradationObserver  resilience.Observer
 	allowedRoles         []auth.Role
 	allowedTaskTypes     []TaskType
 	allowedDataRoles     []DataSourceRole
@@ -83,8 +90,12 @@ func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalo
 	if err := validatePolicyValues(registration); err != nil {
 		return catalogEntry{}, fmt.Errorf("tool %q policy is invalid: %w", info.Name, err)
 	}
+	if registration.FailurePolicy == resilience.PolicyBestEffort && len(info.Name) > 64 {
+		return catalogEntry{}, fmt.Errorf("best-effort tool %q exceeds degradation operation limit", info.Name)
+	}
 	return catalogEntry{
-		name: info.Name, tool: registration.Tool,
+		name: info.Name, tool: registration.Tool, failurePolicy: registration.FailurePolicy,
+		degradationObserver:  registration.DegradationObserver,
 		allowedRoles:         append([]auth.Role(nil), registration.AllowedRoles...),
 		allowedTaskTypes:     append([]TaskType(nil), registration.AllowedTaskTypes...),
 		allowedDataRoles:     append([]DataSourceRole(nil), registration.AllowedDataRoles...),
@@ -95,6 +106,10 @@ func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalo
 }
 
 func validatePolicyValues(registration ToolRegistration) error {
+	if registration.FailurePolicy != resilience.PolicyStrict &&
+		registration.FailurePolicy != resilience.PolicyBestEffort {
+		return errors.New("failure policy must be strict or best_effort")
+	}
 	if len(registration.AllowedRoles) == 0 {
 		return errors.New("allowed roles are required")
 	}
@@ -247,5 +262,60 @@ func (t *scopeGuardedTool) InvokableRun(ctx context.Context, arguments string, o
 	if !t.entry.authorized(scope) {
 		return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, t.entry.name)
 	}
-	return t.inner.InvokableRun(ctx, arguments, opts...)
+	startedAt := time.Now()
+	result, err := t.inner.InvokableRun(ctx, arguments, opts...)
+	if err == nil || t.entry.failurePolicy == resilience.PolicyStrict || ctx.Err() != nil {
+		return result, err
+	}
+	disposition := resilience.FailureDispositionOf(err)
+	if disposition == resilience.FailureStrict {
+		return "", err
+	}
+	identity, ok := resilience.RunIdentityFromContext(ctx)
+	if !ok {
+		return "", fmt.Errorf("execute best-effort tool %q without run identity: %w", t.entry.name, err)
+	}
+	if disposition == resilience.FailureRejected {
+		return encodeToolFailure(t.entry.name, "tool_call_rejected", "tool_failure_not_retryable", false, nil)
+	}
+	event := resilience.DegradationEvent{
+		Operation: t.entry.name, Policy: resilience.PolicyBestEffort,
+		Fallback: "agent_selects_alternative_source", ReasonCode: "tool_execution_failed",
+		RunID: identity.RunID, TraceID: identity.TraceID,
+		DurationMillis: max(time.Since(startedAt).Milliseconds(), 0),
+	}
+	if validateErr := event.Validate(); validateErr != nil {
+		return "", fmt.Errorf("build best-effort tool degradation: %w", validateErr)
+	}
+	if t.entry.degradationObserver != nil {
+		t.entry.degradationObserver.ObserveDegradation(event)
+	}
+	return encodeToolFailure(
+		t.entry.name, "tool_unavailable", "tool_execution_failed", true,
+		[]resilience.DegradationEvent{event},
+	)
+}
+
+func encodeToolFailure(
+	toolName string,
+	errorCode string,
+	reasonCode string,
+	retryable bool,
+	degradations []resilience.DegradationEvent,
+) (string, error) {
+	encoded, marshalErr := json.Marshal(struct {
+		OK           bool                          `json:"ok"`
+		Error        string                        `json:"error"`
+		Tool         string                        `json:"tool"`
+		ReasonCode   string                        `json:"reasonCode"`
+		Retryable    bool                          `json:"retryable"`
+		Degradations []resilience.DegradationEvent `json:"degradations,omitempty"`
+	}{
+		Error: errorCode, Tool: toolName, ReasonCode: reasonCode,
+		Retryable: retryable, Degradations: degradations,
+	})
+	if marshalErr != nil {
+		return "", fmt.Errorf("encode best-effort tool failure: %w", marshalErr)
+	}
+	return string(encoded), nil
 }

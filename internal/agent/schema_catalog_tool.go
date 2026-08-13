@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/google/uuid"
@@ -54,11 +55,11 @@ func NewSearchSchemaCatalogTool(searcher SchemaCatalogSearcher) (tool.InvokableT
 				return nil, ErrTaskScopeRequired
 			}
 			if !scope.DependencyAvailable(ToolDependencySQLServer) {
-				return nil, errors.New("SQL Server dependency is unavailable")
+				return nil, resilience.RetryableFailure(errors.New("SQL Server dependency is unavailable"))
 			}
 			dataSourceID, err := resolveCatalogDataSource(scope, input.DataSourceID)
 			if err != nil {
-				return nil, err
+				return nil, resilience.StrictFailure(err)
 			}
 			keyword := strings.TrimSpace(input.Keyword)
 			if keyword == "" || keyword != input.Keyword {
@@ -76,7 +77,7 @@ func NewSearchSchemaCatalogTool(searcher SchemaCatalogSearcher) (tool.InvokableT
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil, err
 				}
-				return nil, errors.New("schema catalog is unavailable")
+				return nil, resilience.RetryableFailure(errors.New("schema catalog is unavailable"))
 			}
 			result := make([]schemaCatalogResult, 0, len(entries))
 			for _, entry := range entries {

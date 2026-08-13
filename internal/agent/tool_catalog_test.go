@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -151,7 +154,8 @@ func TestToolCatalogRechecksScopeWhenToolExecutes(t *testing.T) {
 func TestToolCatalogRequiresOneDataSourceToMatchWholeConstraint(t *testing.T) {
 	conflictingTool := newNamedToolForTest(t, "test_conflicting_source")
 	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{
-		Tool: conflictingTool, AllowedRoles: []auth.Role{auth.RoleAdmin},
+		Tool: conflictingTool, FailurePolicy: resilience.PolicyBestEffort,
+		AllowedRoles:         []auth.Role{auth.RoleAdmin},
 		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
 		AllowedDataRoles:     []DataSourceRole{DataSourceRoleProduction},
 		AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyBoundedLab},
@@ -179,6 +183,7 @@ func TestToolCatalogRejectsDuplicateNamesAndInvalidPolicy(t *testing.T) {
 	duplicateB := newNamedToolForTest(t, "test_duplicate")
 	validPolicy := ToolRegistration{
 		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+		FailurePolicy: resilience.PolicyBestEffort,
 	}
 	first := validPolicy
 	first.Tool = duplicateA
@@ -202,42 +207,161 @@ func TestToolCatalogRejectsDuplicateNamesAndInvalidPolicy(t *testing.T) {
 	}
 }
 
+func TestToolCatalogRequiresExplicitFailurePolicy(t *testing.T) {
+	_, err := NewToolCatalog(context.Background(), ToolRegistration{
+		Tool:         newNamedToolForTest(t, "test_missing_failure_policy"),
+		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+	})
+	if err == nil {
+		t.Fatal("NewToolCatalog accepted a tool without an explicit failure policy")
+	}
+}
+
+func TestScopeGuardedToolKeepsStrictFailureAsError(t *testing.T) {
+	want := errors.New("side effect failed")
+	current := scopedFailingToolForTest(t, resilience.PolicyStrict, want, nil)
+	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
+		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	))
+	if _, err := current.InvokableRun(ctx, `{}`); !errors.Is(err, want) {
+		t.Fatalf("InvokableRun error = %v, want strict failure", err)
+	}
+}
+
+func TestScopeGuardedToolReturnsStructuredBestEffortFailure(t *testing.T) {
+	var observed []resilience.DegradationEvent
+	current := scopedFailingToolForTest(
+		t, resilience.PolicyBestEffort,
+		resilience.RetryableFailure(errors.New("dial tcp secret.internal:1433")),
+		resilience.ObserverFunc(func(event resilience.DegradationEvent) { observed = append(observed, event) }),
+	)
+	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
+		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	))
+	ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: "run-1", TraceID: "trace-1"})
+	raw, err := current.InvokableRun(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var result struct {
+		OK           bool                          `json:"ok"`
+		Error        string                        `json:"error"`
+		ReasonCode   string                        `json:"reasonCode"`
+		Degradations []resilience.DegradationEvent `json:"degradations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode structured Tool error: %v", err)
+	}
+	if result.OK || result.Error != "tool_unavailable" || result.ReasonCode != "tool_execution_failed" ||
+		len(result.Degradations) != 1 || result.Degradations[0].Policy != resilience.PolicyBestEffort ||
+		result.Degradations[0].RunID != "run-1" || result.Degradations[0].TraceID != "trace-1" {
+		t.Fatalf("structured Tool failure = %+v", result)
+	}
+	if strings.Contains(raw, "secret.internal") {
+		t.Fatalf("structured Tool failure leaked provider details: %s", raw)
+	}
+	if len(observed) != 1 || observed[0] != result.Degradations[0] {
+		t.Fatalf("observed degradations = %+v, result = %+v", observed, result.Degradations)
+	}
+}
+
+func TestScopeGuardedToolDistinguishesRejectedAndStrictFailures(t *testing.T) {
+	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
+		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	))
+	ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: "run-2"})
+	rejected := scopedFailingToolForTest(t, resilience.PolicyBestEffort, errors.New("argument is invalid"), nil)
+	raw, err := rejected.InvokableRun(ctx, `{}`)
+	if err != nil || !strings.Contains(raw, `"error":"tool_call_rejected"`) ||
+		!strings.Contains(raw, `"retryable":false`) || strings.Contains(raw, `"degradations"`) {
+		t.Fatalf("rejected failure = %s, %v", raw, err)
+	}
+	strictCause := errors.New("readonly query rejected")
+	strict := scopedFailingToolForTest(
+		t, resilience.PolicyBestEffort, resilience.StrictFailure(strictCause), nil,
+	)
+	if _, err := strict.InvokableRun(ctx, `{}`); !errors.Is(err, strictCause) {
+		t.Fatalf("classified strict failure = %v", err)
+	}
+}
+
+func scopedFailingToolForTest(
+	t *testing.T,
+	policy resilience.Policy,
+	want error,
+	observer resilience.Observer,
+) tool.InvokableTool {
+	t.Helper()
+	inner, err := toolutils.InferTool("test_failing_tool", "test tool", func(context.Context, struct{}) (string, error) {
+		return "", want
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{
+		Tool: inner, FailurePolicy: policy, DegradationObserver: observer,
+		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := catalog.ToolsFor(context.Background(), mustTaskScopeWithCapabilities(
+		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	))
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("ToolsFor = %d, %v", len(tools), err)
+	}
+	return tools[0].(tool.InvokableTool)
+}
+
+func toolFailureDataSource() []ScopedDataSource {
+	return []ScopedDataSource{{
+		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
+	}}
+}
+
 func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 	t.Helper()
 	registrations := []ToolRegistration{
 		{
-			Tool:         newNamedToolForTest(t, testToolReadCase),
-			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			Tool:          newNamedToolForTest(t, testToolReadCase),
+			FailurePolicy: resilience.PolicyBestEffort,
+			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			AllowedDataRoles:     []DataSourceRole{DataSourceRoleCaseSource},
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
 		},
 		{
-			Tool:         newNamedToolForTest(t, testToolGitHub),
-			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			Tool:          newNamedToolForTest(t, testToolGitHub),
+			FailurePolicy: resilience.PolicyBestEffort,
+			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
 			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
 		},
 		{
-			Tool:         newNamedToolForTest(t, testToolReadSQL),
-			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			Tool:          newNamedToolForTest(t, testToolReadSQL),
+			FailurePolicy: resilience.PolicyBestEffort,
+			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			AllowedDataRoles:     []DataSourceRole{DataSourceRoleProduction, DataSourceRoleProductReplica},
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly, DataSourceSafetyBoundedLab},
 			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
 			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
 		},
 		{
-			Tool:         newNamedToolForTest(t, testToolLabSQL),
-			AllowedRoles: []auth.Role{auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			Tool:          newNamedToolForTest(t, testToolLabSQL),
+			FailurePolicy: resilience.PolicyBestEffort,
+			AllowedRoles:  []auth.Role{auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			AllowedDataRoles:     []DataSourceRole{DataSourceRoleProductReplica},
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyBoundedLab},
 			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
 			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
 		},
 		{
-			Tool:         newNamedToolForTest(t, testToolKnowledge),
-			AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			Tool:          newNamedToolForTest(t, testToolKnowledge),
+			FailurePolicy: resilience.PolicyBestEffort,
+			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
 		},
