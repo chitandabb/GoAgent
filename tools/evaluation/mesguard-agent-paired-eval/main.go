@@ -133,6 +133,8 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		log.Info("Evidence Gate Provider paired run authorized",
 			zap.Int("cases", budget.Cases),
 			zap.Int("estimated_provider_call_upper_bound", budget.ProviderCalls),
+			zap.Int("embedding_request_upper_bound", 0),
+			zap.Int("rerank_request_upper_bound", 0),
 			zap.Int("total_token_budget_upper_bound", budget.TotalTokens),
 		)
 	}
@@ -257,18 +259,31 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 				},
 			)
 			if invokeErr != nil {
-				return fmt.Errorf("invoke %s run for case %q: %w", variant, definition.CaseID, invokeErr)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if *comparison != "evidence-gate" {
+					return fmt.Errorf("invoke %s run for case %q: %w", variant, definition.CaseID, invokeErr)
+				}
 			}
 			duration := time.Since(startedAt)
 			if *comparison == "evidence-gate" {
 				observation := evidenceGateObservationFromResult(
-					definition, variant, cfg, pairingFingerprint, result, duration,
+					definition, variant, cfg, pairingFingerprint, result, duration, invokeErr,
 				)
 				if err := observation.Validate(); err != nil {
 					return fmt.Errorf("validate %s Evidence Gate observation for case %q: %w", variant, definition.CaseID, err)
 				}
 				if err := encoder.Encode(observation); err != nil {
 					return fmt.Errorf("write %s Evidence Gate observation for case %q: %w", variant, definition.CaseID, err)
+				}
+				if invokeErr != nil {
+					log.Warn("Evidence Gate paired arm failed and was recorded",
+						zap.String("case_id", definition.CaseID),
+						zap.String("variant", string(variant)),
+						zap.String("error_type", observation.ErrorType),
+					)
+					continue
 				}
 			} else {
 				observation := observationFromResult(definition, variant, cfg, result, duration)
@@ -420,6 +435,7 @@ func evidenceGateObservationFromResult(
 	pairingFingerprint string,
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
+	invokeErr error,
 ) mesagent.EvidenceGateEvaluationObservation {
 	profile, _ := cfg.Models.Chat.ActiveProfile()
 	reasoningEffort := strings.TrimSpace(profile.ReasoningEffort)
@@ -428,7 +444,10 @@ func evidenceGateObservationFromResult(
 	}
 	errorType := ""
 	var degradationReasons []string
-	if result.Partial {
+	if invokeErr != nil {
+		errorType = evidenceGateInvocationErrorType(invokeErr)
+		degradationReasons = []string{"invoke_failed_before_report"}
+	} else if result.Partial {
 		errorType = strings.TrimSpace(result.StopReason)
 		if errorType == "" {
 			errorType = "evidence_gate_partial"
@@ -441,10 +460,22 @@ func evidenceGateObservationFromResult(
 		EarlyExitEnabled:   variant == mesagent.EvaluationExperiment,
 		PairingFingerprint: pairingFingerprint, ModelProvider: profile.Provider, ModelID: profile.Model,
 		ModelProfile: cfg.Models.Chat.ActiveProfileName, PromptVersion: cfg.Agent.PromptVersion,
-		ReasoningEffort: reasoningEffort, AgentRuns: result.AgentRuns, Completed: !result.Partial,
+		ReasoningEffort: reasoningEffort, AgentRuns: result.AgentRuns,
+		Completed:       invokeErr == nil && !result.Partial,
 		QualityReviewed: false, Usage: result.Usage, ToolCalls: len(result.ToolExecutions),
 		DurationMillis: duration.Milliseconds(), ErrorType: errorType,
 		DegradationReasons: degradationReasons,
+	}
+}
+
+func evidenceGateInvocationErrorType(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	default:
+		return "provider_or_orchestration_error"
 	}
 }
 

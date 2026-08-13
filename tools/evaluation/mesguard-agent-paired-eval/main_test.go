@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -18,6 +19,35 @@ func TestNewEvaluationObservationUsesConfiguredPromptVersion(t *testing.T) {
 	)
 	if observation.PromptVersion != "diagnosis-v7" {
 		t.Fatalf("PromptVersion = %q, want diagnosis-v7", observation.PromptVersion)
+	}
+}
+
+func TestEvidenceGateObservationRecordsInvocationFailureWithoutQualityLabels(t *testing.T) {
+	cfg := config.Config{
+		Agent: config.AgentConfig{PromptVersion: "diagnosis-v1"},
+		Models: config.ModelsConfig{Chat: config.ChatModelConfig{
+			ActiveProfileName: "fixture",
+			Profiles: map[string]config.ChatModelProfileConfig{
+				"fixture": {Provider: "stepfun", Model: "step-3.7-flash", ReasoningEffort: "medium"},
+			},
+		}},
+	}
+	observation := evidenceGateObservationFromResult(
+		mesagent.EvaluationCase{DatasetVersion: "gate-v1", CaseID: "case-1"},
+		mesagent.EvaluationExperiment,
+		cfg,
+		"sha256:pair",
+		mesagent.OrchestrationResult{},
+		time.Second,
+		errors.New("provider unavailable"),
+	)
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if observation.Completed || observation.QualityReviewed ||
+		observation.ErrorType != "provider_or_orchestration_error" ||
+		len(observation.DegradationReasons) != 1 {
+		t.Fatalf("observation = %+v", observation)
 	}
 }
 
