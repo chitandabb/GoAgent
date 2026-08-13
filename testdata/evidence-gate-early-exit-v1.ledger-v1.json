@@ -14,7 +14,7 @@
   "source": {
     "modelProfile": "fixture-provider-free",
     "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-    "implementationRevision": "git:77b8fd1",
+    "implementationRevision": "git:80d833f",
     "datasetSha256": "sha256:5a164e358c96c80a0d5aac1d17d38f2513fa9afeee1690b4aefe0b9135c4c2c4",
     "observationSha256": "sha256:4072bafbc3794b80554422b6212da79be9386fba8e6c2da347682b8dea6151cd"
   },
@@ -42,7 +42,7 @@
       },
       "durationMillis": 900,
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     },
     {
       "domain": "evidence_gate_early_exit",
@@ -67,7 +67,7 @@
       },
       "durationMillis": 300,
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     },
     {
       "domain": "evidence_gate_early_exit",
@@ -92,7 +92,7 @@
       },
       "durationMillis": 700,
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     },
     {
       "domain": "evidence_gate_early_exit",
@@ -117,7 +117,7 @@
       },
       "durationMillis": 700,
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     },
     {
       "domain": "evidence_gate_early_exit",
@@ -146,7 +146,7 @@
         "evidence_insufficient_after_budget"
       ],
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     },
     {
       "domain": "evidence_gate_early_exit",
@@ -175,7 +175,7 @@
         "evidence_insufficient_after_budget"
       ],
       "configFingerprint": "sha256:5a5c0d5594a2d861079c51735eb5bc01173317f5e812ee3a394f5b6207eed31e",
-      "implementationRevision": "git:77b8fd1"
+      "implementationRevision": "git:80d833f"
     }
   ],
   "summary": {
