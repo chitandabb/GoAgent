@@ -556,7 +556,7 @@ toolGrowthReserveTokens = 8192
 [agent.contextMemory.summary]
 enabled = true
 promptFile = "config/prompts/conversation-memory-summary.md"
-promptVersion = "conversation-memory-v5"
+promptVersion = "conversation-memory-v6"
 maxPayloadBytes = 65536
 maxAttempts = 3
 retryBaseDelayMillis = 250
@@ -815,10 +815,18 @@ Repository 在加载历史时回读。`conversationmemory.Service` 从 `Complete
 Fixture v4 + Prompt v4 的单次 `cp2 Experiment` 探针输入 62,074、输出 3,033、缓存命中 704 Token，
 耗时 30.872 秒，未再触发容量或报告引用错误，但以 `task_reference_id_unknown` 被拒绝。模型仍把正文
 中的 `TKT-2048` 推断成任务引用，而 Fixture 没有对应结构化 `taskReferences`；应用侧拒绝是正确的。
-Prompt 因此升级为 `conversation-memory-v5`，为 evidence/task/report 的 ID、身份和来源失败增加
+Prompt 因此升级为 `conversation-memory-v6`，为 evidence/task/report 的 ID、身份和来源失败增加
 确定性修复指令：只能恢复结构化白名单值，找不到唯一合法映射就删除 Entry。该规则供生产默认的
 有界重试使用；本轮不再用远程调用验证第二次尝试，下一次仅允许一个双尝试 `cp2 Experiment`
 探针。
+
+随后使用 StepFun 对同一 `incident-correction/cp2 Experiment` 做了两次隔离探针。v5 Prompt 的两次
+摘要调用最终因 `multiple_active_entries`、`task_reference_id_unknown` 失败，摘要输入 124,479、
+输出 7,282 Token，主模型未调用；这说明问题是摘要结构约束而不是主模型窗口。v6 增加了消息投影中的
+结构化 `reportReferences`，明确 `TKT-2048` 只是业务工单号而非诊断任务 UUID，并要求无语义变化时
+保留已有 active Entry。v6 探针成功：摘要 2 次，输入 125,519、输出 8,186、缓存命中 63,232；
+主模型 1 次，输入 12,464、输出 411；总计 146,580 Token，耗时约 64 秒。该样本证明成功闭环，
+但没有同一检查点的 Baseline，不能单独推导平均 Token 降幅或宣称 60%+。
 
 进程内结构修复采用指数退避和 10% jitter，等待继承压缩阶段 `ctx`；多个会话同时遇到截断、
 Schema 错误或 Provider 瞬态失败时，不会按完全相同的间隔形成同步重试峰值。
