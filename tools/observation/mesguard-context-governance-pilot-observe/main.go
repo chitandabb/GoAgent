@@ -512,7 +512,8 @@ func buildPilotPreflight(
 		Enabled: true, SummaryTailEnabled: true, ContinuousTailEnabled: true, Planner: tokenBudget.Planner,
 		TailSelector: selector, ModelProfile: tokenBudget.Profile,
 		MemoryMaxRatio: cfg.Agent.ContextMemory.MemoryMaxRatio, SummaryMaxRatio: cfg.Agent.ContextMemory.SummaryMaxRatio,
-		TailMaxRatio: cfg.Agent.ContextMemory.TailMaxRatio, SoftThresholdRatio: cfg.Agent.ContextMemory.SoftThresholdRatio,
+		SummaryPromptMaxEntries: cfg.Agent.ContextMemory.Summary.EffectivePromptMaxEntries(),
+		TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio, SoftThresholdRatio: cfg.Agent.ContextMemory.SoftThresholdRatio,
 		HardThresholdRatio: cfg.Agent.ContextMemory.HardThresholdRatio, ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
 		SyncCompactionTimeout: time.Duration(cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis) * time.Millisecond,
 	})

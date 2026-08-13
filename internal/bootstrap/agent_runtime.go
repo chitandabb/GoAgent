@@ -398,6 +398,7 @@ func buildAgentRuntimeForRole(
 			Memory:                  conversationMemory,
 			MemoryMaxRatio:          cfg.Agent.ContextMemory.MemoryMaxRatio,
 			SummaryMaxRatio:         cfg.Agent.ContextMemory.SummaryMaxRatio,
+			SummaryPromptMaxEntries: cfg.Agent.ContextMemory.Summary.EffectivePromptMaxEntries(),
 			TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio,
 			PreflightTimeout:        time.Duration(cfg.Agent.ContextMemory.PreflightTimeoutMillis) * time.Millisecond,
 			SyncCompactionTimeout:   time.Duration(cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis) * time.Millisecond,

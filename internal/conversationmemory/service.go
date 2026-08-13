@@ -319,6 +319,7 @@ type ActivationRepository interface {
 type ServiceConfig struct {
 	Repository       ActivationRepository
 	Compactor        Compactor
+	Coordinator      Coordinator
 	SchemaVersion    int
 	MaxPayloadBytes  int
 	Provenance       SummaryProvenance
@@ -335,6 +336,7 @@ type ServiceConfig struct {
 type Service struct {
 	repository       ActivationRepository
 	compactor        Compactor
+	coordinator      Coordinator
 	schemaVersion    int
 	maxPayloadBytes  int
 	provenance       SummaryProvenance
@@ -360,6 +362,9 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if config.Cache != nil && !config.CacheExpected {
 		return nil, ErrInvalidSnapshot
 	}
+	if config.Coordinator == nil {
+		config.Coordinator = NewLocalCoordinator()
+	}
 	clock := config.Clock
 	if clock == nil {
 		clock = time.Now
@@ -369,7 +374,7 @@ func NewService(config ServiceConfig) (*Service, error) {
 		randomFloat = rand.Float64
 	}
 	return &Service{
-		repository: config.Repository, compactor: config.Compactor, schemaVersion: config.SchemaVersion,
+		repository: config.Repository, compactor: config.Compactor, coordinator: config.Coordinator, schemaVersion: config.SchemaVersion,
 		maxPayloadBytes: config.MaxPayloadBytes,
 		provenance:      config.Provenance.normalized(),
 		maxAttempts:     config.MaxAttempts, retryBaseDelay: config.RetryBaseDelay,
@@ -389,11 +394,9 @@ type PrepareActiveRequest struct {
 	ActivationGate    ActivationGate
 }
 
-// PreparedActivation separates model-backed candidate generation from the
-// final CAS publication. Async workers may persist CandidateSnapshot first,
-// then publish it only inside the transaction that verifies their lease and
-// fencing token. CurrentSnapshot is returned when the Active Snapshot already
-// covers the requested messages.
+// PreparedActivation is a compatibility shape used while Snapshot persistence
+// still stores candidate and Active rows separately. Runtime callers publish
+// through PrepareActive so generation and publication share one coordinator.
 type PreparedActivation struct {
 	CandidateSnapshot        *Snapshot
 	CurrentSnapshot          *Snapshot
@@ -409,10 +412,22 @@ type ActivationGate interface {
 
 // GenerateShadow compacts and persists a validated candidate Snapshot without
 // activating it or changing the Conversation Runner's model-visible prompt.
+// Deprecated: production callers must use PrepareActive. This compatibility
+// path is still serialized so it cannot race soft or hard compaction.
 func (s *Service) GenerateShadow(ctx context.Context, request ShadowRequest) (Snapshot, error) {
-	if s == nil || s.repository == nil || s.compactor == nil || request.ConversationID == uuid.Nil {
+	if s == nil || s.repository == nil || s.compactor == nil || s.coordinator == nil || request.ConversationID == uuid.Nil {
 		return Snapshot{}, ErrInvalidShadowInput
 	}
+	var result Snapshot
+	err := s.coordinator.WithinConversation(ctx, request.ConversationID, func(lockCtx context.Context) error {
+		generated, generateErr := s.generateShadowLocked(lockCtx, request)
+		result = generated
+		return generateErr
+	})
+	return result, err
+}
+
+func (s *Service) generateShadowLocked(ctx context.Context, request ShadowRequest) (Snapshot, error) {
 	previous, err := s.repository.Latest(ctx, request.ConversationID)
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) {
 		return Snapshot{}, fmt.Errorf("load previous conversation memory snapshot: %w", err)
@@ -532,13 +547,14 @@ func (s *Service) observeCache(ctx context.Context, observation CacheObservation
 	s.cacheObserver.Observe(ctx, observation)
 }
 
-// PrepareActivationCandidate generates and validates an immutable candidate
-// based on the current Active Snapshot, but deliberately does not activate it.
+// PrepareActivationCandidate generates and validates an immutable candidate.
+// Deprecated: production callers must use PrepareActive. Kept temporarily for
+// schema-v1 compatibility and serialized by the Conversation coordinator.
 func (s *Service) PrepareActivationCandidate(
 	ctx context.Context,
 	request PrepareActiveRequest,
 ) (PreparedActivation, error) {
-	return s.prepareActivationCandidate(ctx, request, 1, s.maxAttempts)
+	return s.prepareActivationCandidateCoordinated(ctx, request, 1, s.maxAttempts)
 }
 
 // PrepareActivationCandidateOnce performs exactly one model-backed compaction
@@ -553,7 +569,24 @@ func (s *Service) PrepareActivationCandidateOnce(
 	if attempt < 1 || attempt > 10 {
 		return PreparedActivation{}, ErrInvalidShadowInput
 	}
-	return s.prepareActivationCandidate(ctx, request, attempt, attempt)
+	return s.prepareActivationCandidateCoordinated(ctx, request, attempt, attempt)
+}
+
+func (s *Service) prepareActivationCandidateCoordinated(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	firstAttempt, lastAttempt int,
+) (PreparedActivation, error) {
+	if s == nil || s.coordinator == nil || request.ConversationID == uuid.Nil {
+		return PreparedActivation{}, ErrInvalidShadowInput
+	}
+	var result PreparedActivation
+	err := s.coordinator.WithinConversation(ctx, request.ConversationID, func(lockCtx context.Context) error {
+		prepared, prepareErr := s.prepareActivationCandidate(lockCtx, request, firstAttempt, lastAttempt)
+		result = prepared
+		return prepareErr
+	})
+	return result, err
 }
 
 func (s *Service) prepareActivationCandidate(
@@ -600,11 +633,49 @@ func (s *Service) prepareActivationCandidate(
 	return result, nil
 }
 
-// PrepareActive synchronously generates and CAS-activates a validated Snapshot.
-// A competing activation may win; an equal-or-newer winner is returned so the
-// caller can safely continue without overwriting it.
+// PrepareActive synchronously refreshes the current summary. Soft and hard
+// triggers share the same Conversation coordinator and reload the current
+// summary after acquiring it, so only one of them calls the model.
 func (s *Service) PrepareActive(ctx context.Context, request PrepareActiveRequest) (Snapshot, error) {
-	prepared, err := s.PrepareActivationCandidate(ctx, request)
+	return s.prepareActive(ctx, request, 1, s.maxAttempts)
+}
+
+// PrepareActiveOnce gives a durable async Job exactly one model call per Job
+// attempt while preserving the same coordinated publication path.
+func (s *Service) PrepareActiveOnce(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	attempt int,
+) (Snapshot, error) {
+	if attempt < 1 || attempt > 10 {
+		return Snapshot{}, ErrInvalidShadowInput
+	}
+	return s.prepareActive(ctx, request, attempt, attempt)
+}
+
+func (s *Service) prepareActive(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	firstAttempt, lastAttempt int,
+) (Snapshot, error) {
+	if s == nil || s.coordinator == nil || request.ConversationID == uuid.Nil {
+		return Snapshot{}, ErrInvalidShadowInput
+	}
+	var result Snapshot
+	err := s.coordinator.WithinConversation(ctx, request.ConversationID, func(lockCtx context.Context) error {
+		prepared, prepareErr := s.prepareActiveLocked(lockCtx, request, firstAttempt, lastAttempt)
+		result = prepared
+		return prepareErr
+	})
+	return result, err
+}
+
+func (s *Service) prepareActiveLocked(
+	ctx context.Context,
+	request PrepareActiveRequest,
+	firstAttempt, lastAttempt int,
+) (Snapshot, error) {
+	prepared, err := s.prepareActivationCandidate(ctx, request, firstAttempt, lastAttempt)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -694,6 +765,11 @@ func (s *Service) generateCandidate(
 			failureCodes = append(failureCodes, repairCode)
 			continue
 		}
+		// Stable references are an application-owned projection. The model may
+		// summarize a referenced source, but it cannot mint, remove, or rewrite
+		// the identity and provenance of a task, evidence item, or report.
+		output.Payload = normalizeCurrentPayload(output.Payload)
+		output.Payload = mergeTrustedReferences(output.Payload, previous, validation)
 		if validateErr := ValidatePayload(output.Payload, validation); validateErr != nil {
 			lastErr = validateErr
 			repairCode = validationRepairCode(validateErr)
@@ -726,6 +802,135 @@ func (s *Service) generateCandidate(
 		lastAttempt-firstAttempt+1, lastErr), failureCodes)
 }
 
+func normalizeCurrentPayload(payload Payload) Payload {
+	normalize := func(entries []Entry) []Entry {
+		result := make([]Entry, 0, len(entries))
+		for _, entry := range entries {
+			if entry.Status == EntryStatusSuperseded {
+				continue
+			}
+			entry.Status = EntryStatusActive
+			entry.SupersedesEntryID = ""
+			result = append(result, entry)
+		}
+		return result
+	}
+	if payload.ConversationGoal != nil {
+		payload.ConversationGoal.Status = EntryStatusActive
+		payload.ConversationGoal.SupersedesEntryID = ""
+	}
+	payload.Facts = normalize(payload.Facts)
+	payload.Decisions = normalize(payload.Decisions)
+	payload.Corrections = normalize(payload.Corrections)
+	payload.OpenQuestions = normalize(payload.OpenQuestions)
+	for index := range payload.Todos {
+		payload.Todos[index].SupersedesEntryID = ""
+	}
+	return payload
+}
+
+// mergeTrustedReferences rebuilds all reference sections from the structured
+// message catalog and the previous validated snapshot. Matching model entries
+// contribute only their bounded conclusion text; identity, source sequences,
+// hashes, status, and entry IDs are deterministic application data.
+func mergeTrustedReferences(payload Payload, previous *Snapshot, context ValidationContext) Payload {
+	result := payload
+	result.EvidenceReferences = mergeEvidenceReferences(payload.EvidenceReferences, previousPayload(previous), context.KnownEvidenceReferences)
+	result.TaskReferences = mergeStableReferences(payload.TaskReferences, previousPayload(previous), context.KnownTaskReferences, ReferenceTypeDiagnosisTask)
+	result.ReportReferences = mergeStableReferences(payload.ReportReferences, previousPayload(previous), context.KnownReportReferences, ReferenceTypeDiagnosisReport)
+	return result
+}
+
+func previousPayload(snapshot *Snapshot) *Payload {
+	if snapshot == nil {
+		return nil
+	}
+	payload := snapshot.Payload
+	return &payload
+}
+
+func mergeEvidenceReferences(modelEntries []ReferenceEntry, previous *Payload, trusted map[string]EvidenceReferenceIdentity) []ReferenceEntry {
+	previousEntries := make(map[string]ReferenceEntry)
+	if previous != nil {
+		for _, entry := range previous.EvidenceReferences {
+			previousEntries[entry.ReferenceID] = entry
+		}
+	}
+	modelText := referenceConclusionMap(modelEntries)
+	ids := make([]string, 0, len(modelText))
+	for id := range modelText {
+		if _, exists := trusted[id]; exists {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	result := make([]ReferenceEntry, 0, len(ids)+len(previousEntries))
+	for _, id := range ids {
+		if entry, ok := previousEntries[id]; ok {
+			entry.Content = modelText[id]
+			result = append(result, entry)
+			continue
+		}
+		identity := trusted[id]
+		result = append(result, newTrustedReferenceEntry(identity.ReferenceType, id, identity.ContentSHA256, identity.SourceMessageSeqs, modelText[id]))
+	}
+	return result
+}
+
+func mergeStableReferences(modelEntries []ReferenceEntry, previous *Payload, trusted map[string]StableReferenceIdentity, referenceType ReferenceType) []ReferenceEntry {
+	previousEntries := make(map[string]ReferenceEntry)
+	if previous != nil {
+		entries := previous.TaskReferences
+		if referenceType == ReferenceTypeDiagnosisReport {
+			entries = previous.ReportReferences
+		}
+		for _, entry := range entries {
+			previousEntries[entry.ReferenceID] = entry
+		}
+	}
+	modelText := referenceConclusionMap(modelEntries)
+	ids := make([]string, 0, len(modelText))
+	for id := range modelText {
+		if _, exists := trusted[id]; exists {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	result := make([]ReferenceEntry, 0, len(ids)+len(previousEntries))
+	for _, id := range ids {
+		if entry, ok := previousEntries[id]; ok {
+			entry.Content = modelText[id]
+			result = append(result, entry)
+			continue
+		}
+		result = append(result, newTrustedReferenceEntry(referenceType, id, "", trusted[id].SourceMessageSeqs, modelText[id]))
+	}
+	return result
+}
+
+func referenceConclusionMap(entries []ReferenceEntry) map[string]string {
+	result := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		content := strings.TrimSpace(entry.Content)
+		if content != "" && len([]rune(content)) <= MaxEntryContentRunes {
+			result[entry.ReferenceID] = content
+		}
+	}
+	return result
+}
+
+func newTrustedReferenceEntry(referenceType ReferenceType, referenceID, contentSHA256 string, sourceSeqs []int64, conclusion string) ReferenceEntry {
+	seed := sha256.Sum256([]byte(string(referenceType) + "\x00" + referenceID))
+	entryID := "ref_" + hex.EncodeToString(seed[:])[:24]
+	if conclusion == "" {
+		conclusion = "Referenced source: " + referenceID
+	}
+	return ReferenceEntry{
+		Entry:         Entry{EntryID: entryID, Content: conclusion, SourceMessageSeqs: append([]int64(nil), sourceSeqs...), Status: EntryStatusActive},
+		ReferenceType: referenceType, ReferenceID: referenceID, ContentSHA256: contentSHA256,
+	}
+}
+
 var compactionFailureCodes = map[string]struct{}{
 	"provider_http_400": {}, "provider_http_401": {}, "provider_http_403": {},
 	"provider_http_429": {}, "provider_http_5xx": {}, "provider_timeout": {},
@@ -753,7 +958,7 @@ func ValidCompactionFailureCode(code string) bool {
 func validDomainCompactionFailureCode(code string) bool {
 	switch code {
 	case "user_source_required", "source_out_of_range", "entry_reference_unknown", "stable_reference_unknown",
-		"supersede_cycle", "multiple_active_entries", "correction_target_required", "payload_too_large",
+		"payload_too_large",
 		"payload_schema_empty", "payload_schema_top_level_json", "payload_schema_top_level_extra_fields",
 		"payload_schema_null_array", "payload_schema_invalid", "entry_entry_id", "entry_content",
 		"entry_source_count", "entry_source_order", "entry_source_duplicate", "entry_invalid", "entry_status",

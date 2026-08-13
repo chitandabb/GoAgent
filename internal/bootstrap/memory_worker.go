@@ -122,11 +122,12 @@ func buildConversationMemoryActivationGate(cfg config.Config) (conversationmemor
 	}
 	return mesagent.NewConversationMemoryActivationGate(mesagent.ConversationContextPreflightConfig{
 		Enabled: true, SummaryTailEnabled: true, Planner: tokenBudget.Planner,
-		ModelProfile:       tokenBudget.Profile,
-		MemoryMaxRatio:     cfg.Agent.ContextMemory.MemoryMaxRatio,
-		SummaryMaxRatio:    cfg.Agent.ContextMemory.SummaryMaxRatio,
-		TailMaxRatio:       cfg.Agent.ContextMemory.TailMaxRatio,
-		SoftThresholdRatio: cfg.Agent.ContextMemory.SoftThresholdRatio,
-		HardThresholdRatio: cfg.Agent.ContextMemory.HardThresholdRatio,
+		ModelProfile:            tokenBudget.Profile,
+		MemoryMaxRatio:          cfg.Agent.ContextMemory.MemoryMaxRatio,
+		SummaryMaxRatio:         cfg.Agent.ContextMemory.SummaryMaxRatio,
+		SummaryPromptMaxEntries: cfg.Agent.ContextMemory.Summary.EffectivePromptMaxEntries(),
+		TailMaxRatio:            cfg.Agent.ContextMemory.TailMaxRatio,
+		SoftThresholdRatio:      cfg.Agent.ContextMemory.SoftThresholdRatio,
+		HardThresholdRatio:      cfg.Agent.ContextMemory.HardThresholdRatio,
 	})
 }

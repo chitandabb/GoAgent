@@ -201,7 +201,7 @@ duration and allocation metrics under ignored `output/evaluation/`. For one-page
 the default is also dry-run and only renders the 20M and 8M candidates:
 
 ```powershell
-go run ./cmd/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8
+go run ./tools/evaluation/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8
 ```
 
 Run the SHA-pinned, manually reviewed PPTX structure set separately:
@@ -241,19 +241,19 @@ The fixed retrieval set uses 12 industrial documents, 24 chunks and 24 literal/p
 queries. It runs inside a rolled-back PostgreSQL transaction. Compare all three retrieval paths:
 
 ```powershell
-go run ./cmd/mesguard-rag-retrieval-eval -retriever fts `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval -retriever fts `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
   -output output/evaluation/rag-retrieval-v1-fts.observations.jsonl `
   -summary output/evaluation/rag-retrieval-v1-fts.summary.json
 
-go run ./cmd/mesguard-rag-retrieval-eval -retriever vector `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval -retriever vector `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
   -output output/evaluation/rag-retrieval-v1-vector.observations.jsonl `
   -summary output/evaluation/rag-retrieval-v1-vector.summary.json
 
-go run ./cmd/mesguard-rag-retrieval-eval -retriever rrf `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval -retriever rrf `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
   -output output/evaluation/rag-retrieval-v1-rrf.observations.jsonl `
@@ -273,7 +273,7 @@ After a versioned advanced dataset and its baseline/experiment observations have
 validate and summarize them without making any provider or database call:
 
 ```powershell
-go run ./cmd/mesguard-rag-paired-eval `
+go run ./tools/evaluation/mesguard-rag-paired-eval `
   -dataset <versioned-cases.jsonl> `
   -input <paired-observations.jsonl> `
   -output output/evaluation/rag-advanced.summary.json
@@ -295,7 +295,7 @@ create PostgreSQL fixtures or call providers.
 Validate the checked-in public-source corpus and its gold Chunk hashes without a database or provider:
 
 ```powershell
-go run ./cmd/mesguard-rag-paired-observe -validate-only
+go run ./tools/observation/mesguard-rag-paired-observe -validate-only
 ```
 
 Provider execution is fail-closed and defaults to one Case. Review the printed request budget before
@@ -307,7 +307,7 @@ are in `docs/evaluations/rag-advanced-v1.md`.
 Run the production compression thresholds across the complete five-Case fixture without Rewrite or Rerank:
 
 ```powershell
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -execute-provider -axis compression -retriever rrf -max-cases 5 -timeout 3m
 ```
 
@@ -319,7 +319,7 @@ before changing thresholds or reporting a compression rate.
 Run the separate official-document pressure fixture with an acceptance gate:
 
 ```powershell
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -corpus testdata/rag-compression-pressure-v1.corpus.json `
   -dataset testdata/rag-compression-pressure-v1.jsonl `
   -execute-provider -axis compression -require-compression-acceptance `
@@ -340,7 +340,7 @@ limit, schema filtering and stable version/Chunk/content-hash detection.
 Run the real-model decision fixture only after reviewing the ChatModel budget:
 
 ```powershell
-go run ./cmd/mesguard-agentic-retrieval-eval `
+go run ./tools/evaluation/mesguard-agentic-retrieval-eval `
   -execute-provider -max-cases 3 -timeout 90s
 ```
 
@@ -365,30 +365,30 @@ source page, HTTPS download URL, usage boundary, byte length and SHA-256; the sc
 Validate the pinned public corpus without infrastructure or Provider calls:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -validate-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -validate-only -max-documents 40
 ```
 
 Run the production Parser and Chunking locally, classify text/visual readiness, and write a JSON audit
 without infrastructure or Provider calls:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -audit-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -audit-only -max-documents 40
 ```
 
 Parse locally and print the expected baseline/experiment Embedding request counts, conservative Token estimate
 and whole-run CNY cost without sending a request:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -estimate-only -max-documents 40
 ```
 
 Select a bounded low-cost subset by stable manifest ID instead of relying on manifest order:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only `
+go run ./tools/observation/mesguard-ingestion-throughput-observe -estimate-only `
   -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster"
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -estimate-only -document-concurrency-ablation `
   -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
   -repetitions 5
@@ -397,10 +397,10 @@ go run ./cmd/mesguard-ingestion-throughput-observe `
 Isolate PostgreSQL Chunk/vector staging without any Provider or object-store call:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -database-ablation -max-documents 3 -repetitions 5 -timeout 15m
 
-go run ./cmd/mesguard-ingestion-throughput-eval `
+go run ./tools/evaluation/mesguard-ingestion-throughput-eval `
   -input output/evaluation/rag-ingestion-db-ablation-v1.observations.jsonl `
   -output output/evaluation/rag-ingestion-db-ablation-v1.summary.json `
   -target-increase-percent 40
@@ -418,11 +418,11 @@ Provider starts are smoothed to 900 RPM and 600,000 estimated TPM by default. Th
 not account quota claims, and can be changed only with explicit flags:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -execute-provider -max-documents 1 -repetitions 1 -timeout 15m `
   -max-provider-cost-cny 0.05 -provider-rpm 900 -provider-tpm 600000
 
-go run ./cmd/mesguard-ingestion-throughput-eval `
+go run ./tools/evaluation/mesguard-ingestion-throughput-eval `
   -input output/evaluation/rag-ingestion-throughput-v1.observations.jsonl `
   -output output/evaluation/rag-ingestion-throughput-v1.summary.json `
   -target-increase-percent 40
@@ -444,7 +444,7 @@ in every new observation.
 Run the provider-backed document-concurrency ablation with identical Embedding/database batching on both arms:
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -execute-provider -document-concurrency-ablation `
   -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
   -repetitions 5 -timeout 15m `
@@ -465,17 +465,17 @@ hard budget. Run it only after loading the local `.env`; a local CLI also needs 
 credentials that Compose expands by default. The observer itself does not load `.env`.
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -audit-only `
   -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
   -audit-output output/evaluation/rag-ingestion-corpus-audit-resume-closure-v1.json
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -estimate-only -document-concurrency-ablation `
   -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
   -repetitions 1 -max-provider-cost-cny 0.05
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -execute-provider -document-concurrency-ablation `
   -document-ids "uspto-us4575330,icsarw-shikhaliyev-poster,nist-sp800-171r2-security-requirements,wikimedia-cnc-lathe" `
   -repetitions 1 -timeout 15m -max-provider-cost-cny 0.05 `
@@ -540,7 +540,7 @@ do not call DashScope and are not table-quality evidence. A paid observation mus
 crop and estimate cost:
 
 ```powershell
-go run ./cmd/mesguard-table-quality-eval `
+go run ./tools/evaluation/mesguard-table-quality-eval `
   -mode validate `
   -input output/evaluation/layout-routing-preview/nist-8107-page-15.png `
   -bbox 0.10691961899302364,0.11920245006831005,0.9089730455984477,0.30269819317442
@@ -684,6 +684,34 @@ StepFun maps `reasoningEffort`; DeepSeek requires explicit thinking mode and rej
 thinking is disabled; DashScope maps thinking mode to `enable_thinking`. Unsupported combinations
 fail during construction instead of being silently ignored.
 
+Structured output is capability-negotiated per Provider. StepFun and DashScope declare
+`json_object` plus strict `json_schema`; DeepSeek declares only the officially documented
+`json_object` capability. The checked-in `stepfun-conversation-memory` Profile requires
+`responseFormat = "json_schema"` and `responseSchema = "conversation_memory_v2"`. A Provider
+without strict Schema support is rejected during model construction instead of silently weakening
+the memory contract. Provider-native formatting is still followed by strict Go decoding and domain
+validation; valid JSON alone is not sufficient to activate a memory Snapshot.
+
+Use the dedicated bounded protocol Smoke before any long-input Conversation Memory Pilot:
+
+```powershell
+go run ./tools/smoke/mesguard-conversation-memory-smoke
+go run ./tools/smoke/mesguard-conversation-memory-smoke -execute-provider -timeout 60s
+```
+
+The first command is Provider-free and prints the conservative input bound. The second permits exactly
+one StepFun call, never invokes the main model, never writes or activates a Snapshot, and validates the
+same strict Schema, decoder, and domain contract used by production. Its hard conservative input limit
+is 3,000 Tokens after accounting for the complete field-level Schema; changing that limit is not part of
+ordinary debugging.
+
+The bounded Smoke passed on 2026-08-12 after separating Provider-supported Schema keywords from Go
+domain validation: one StepFun call, 224 prompt Tokens, 1,837 completion Tokens, 2,061 total Tokens,
+14.8 seconds, and `domainValidated=true`. This is a protocol/short-input acceptance, not evidence for
+long-summary latency or the 60%+ Context Governance metric. Smoke failure output is content-free and
+uses stable stages/codes such as `provider_http_400`, `provider_timeout`, `entry_entry_id`, and
+`entry_status`.
+
 Every enabled named Chat profile also declares `contextWindowTokens`, `maxOutputTokens`, absolute
 and ratio prompt safety margins, and a `tokenizerStrategy`. Validation requires output plus the
 effective safety margin to leave positive input capacity. `toolExposureStrategy` defaults to
@@ -738,23 +766,63 @@ go run ./tools/evaluation/mesguard-context-governance-pilot `
 go run ./tools/observation/mesguard-context-governance-pilot-observe
 ```
 
-The default observer prints 36 main calls, at most 12 Summary calls, 48 total calls, concurrency 1 and a
-conservative `4.716 CNY` estimate. It does not read the config or call a Provider. The estimate is not an
-invoice; retries are unknown in advance. Every actual main/Summary/retry attempt is still reserved before
-the Provider against a shared 200-call/10-CNY runtime ceiling.
+The default provider-free observer prints the full 36-main/12-Summary capacity plan and does not read the
+config or call a Provider. Provider execution has separate fail-closed defaults: one main call, one Summary
+call, 130K cumulative estimated prompt Tokens for each class, `0.50 CNY`, and concurrency 1. Summary retries
+are planned from configured `maxAttempts`; every attempt reserves class-specific calls, prompt Tokens, and
+cost before Provider access.
 
-Only after explicitly approving that budget and loading the required keys into the current shell, execute:
+Only after explicitly approving one bounded probe and loading the required key into the current shell, execute
+a single selected Experiment checkpoint:
 
 ```powershell
 go run ./tools/observation/mesguard-context-governance-pilot-observe `
   -execute-provider `
-  -output output/evaluation/context-governance-pilot-v1.observations.jsonl `
-  -summary-output output/evaluation/context-governance-pilot-v1.summary.json
+  -scenario-id incident-correction `
+  -checkpoint-id incident-cp2 `
+  -arm experiment `
+  -output output/evaluation/context-governance-pilot-v1.single-probe.jsonl
 ```
 
-The command does not load `.env` itself. It writes one strictly validated raw observation per arm/checkpoint
-and an aggregated report. `60%+` remains an Acceptance target until the real Pilot and larger Acceptance set
-produce measured results.
+The command does not load `.env` itself. A wider selection is rejected before model creation unless all
+relevant limits are explicitly raised. Do not raise them during debugging; inspect the single observation
+first. `60%+` is the original target, not a pass-at-all-costs gate. A valid, explicitly approved fixed set must
+report the measured end-to-end result including Summary usage. Also report main-model prompt reduction,
+over-window continuation, duplicate-compaction suppression, latency, cost and quality; replace the resume
+number when the measured result differs.
+
+The bounded `cp2 Experiment` probe after stable error classification made one real Summary call: 61,759
+prompt Tokens, 6,144 completion Tokens and 47.861 seconds, with zero main-model calls. The first attempt was
+`output_truncated`; the second attempt was stopped locally because two conservative 88,727-Token reservations
+were assumed to exceed the 130,000 Summary prompt limit. That wording was imprecise: 88,727 is the
+conversation Prompt preflight estimate, while the Summary request reservation is separately estimated and was
+observed to be above 100,000 and at most 130,000 Tokens. Local admission failures now use the non-retryable
+`local_budget_exceeded` code instead of being reported as Provider failures. Do not raise the budget merely to
+retry this artifact. The `conversation-memory-v3` prompt instead bounds the model's first-pass information
+selection and drops repeated timeline boilerplate. This result is diagnostic evidence, not a Token-reduction
+Pair.
+
+The v3 capacity probe reduced Summary completion from the 6,144 limit to 2,896 Tokens, but exposed an
+unclassified stable-reference validation failure. Fixture v4 now carries report references as structured
+message metadata and maps them to real message sequences. `conversation-memory-v4` states that reference-like
+text is never authority; only structured task, citation, and known-report inputs may produce Reference entries.
+Production persistence of conversation report references remains a separate migration/repository slice and is
+not implied by the Pilot fixture.
+
+The Fixture v4 + Prompt v4 probe used 62,074 Summary prompt Tokens, 3,033 completion Tokens and 704 cached
+Tokens in 30.872 seconds. Capacity and report authorization passed, but the model inferred a task reference
+from `TKT-2048` in free text and was correctly rejected as `task_reference_id_unknown`. Prompt v5 adds a
+deterministic retry instruction for evidence/task/report ID, identity and source failures: restore only exact
+structured whitelist values, otherwise delete the invalid Reference entry. No second remote attempt was made
+in this slice.
+
+The invalid 2026-08-12 exploratory runs recorded 89 DashScope Summary attempts. Provider-reported Summary
+usage was about 6.77M prompt Tokens and 42K completion Tokens, with three additional failed attempts lacking
+usage. The runs mixed a 65K-100K prompt with up to three in-process retries and repeated diagnostic batches;
+they are cost evidence, not a resume metric. The configured conversation-memory Profile now uses StepFun
+Step Plan with low reasoning. Production retains three bounded attempts; the observer must reserve the
+worst-case attempts before Provider access, so evaluation cost control never weakens the production retry
+contract. No Provider-backed retest is authorized by this configuration change alone.
 
 The evaluator does not treat a failed Provider-backed run as a zero-token success. A Baseline/Experiment
 checkpoint enters comparable Token, cost, and first-token-latency metrics only when both observations are
@@ -784,7 +852,7 @@ the same design section.
 After configuring the StepFun key, run the provider smoke test once:
 
 ```powershell
-go run ./cmd/mesguard-model-smoke
+go run ./tools/smoke/mesguard-model-smoke
 ```
 
 The command asks the model to return one harmless Tool Call and prints only the
@@ -795,7 +863,7 @@ To verify the complete non-streaming ReAct loop and multi-call Token
 aggregation against a fixed synthetic ticket, run:
 
 ```powershell
-go run ./cmd/mesguard-agent-smoke
+go run ./tools/smoke/mesguard-agent-smoke
 ```
 
 This command executes only the local read-only `read_external_case` Tool. It
@@ -806,7 +874,7 @@ To aggregate a reproducible baseline/experiment pair, keep the versioned case
 labels separate from each real run observation:
 
 ```powershell
-go run ./cmd/mesguard-agent-eval `
+go run ./tools/evaluation/mesguard-agent-eval `
   -dataset testdata/agent-evaluation.dataset.sample.jsonl `
   -input testdata/agent-evaluation.sample.jsonl
 ```
@@ -820,7 +888,7 @@ To verify the unified Conversation answer-quality contract without calling a
 Provider, run:
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-eval `
+go run ./tools/evaluation/mesguard-conversation-quality-eval `
   -dataset testdata/conversation-quality-v1.jsonl `
   -input testdata/conversation-quality-v1.seeded.observations.jsonl
 ```
@@ -836,11 +904,11 @@ To prepare and validate an independent claim-level Judge input without calling
 any model, use:
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-judge-export -overwrite
-go run ./cmd/mesguard-rag-judge `
+go run ./tools/export/mesguard-conversation-quality-judge-export -overwrite
+go run ./tools/evaluation/mesguard-rag-judge `
   -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
   -validate-only
-go run ./cmd/mesguard-rag-judge `
+go run ./tools/evaluation/mesguard-rag-judge `
   -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
   -estimate-only
 ```
@@ -865,8 +933,8 @@ The transaction-scoped real-observation command uses a pinned public corpus and
 defaults to provider-free validation or planning:
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-observe -validate-only -max-cases 5
-go run ./cmd/mesguard-conversation-quality-observe -estimate-only -max-cases 1 -chat-profile qwen-qa-eval
+go run ./tools/observation/mesguard-conversation-quality-observe -validate-only -max-cases 5
+go run ./tools/observation/mesguard-conversation-quality-observe -estimate-only -max-cases 1 -chat-profile qwen-qa-eval
 ```
 
 The checked-in set contains five knowledge Cases over four documents and 21
@@ -1043,12 +1111,12 @@ observations, prepare one strict JSONL row per dataset Case:
 Validate the mapping without database or provider access, then export to a new mode-0600 file:
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-export `
+go run ./tools/export/mesguard-conversation-quality-export `
   -dataset testdata/conversation-quality-v1.jsonl `
   -selections <recorded-run-selections.jsonl> `
   -validate-only
 
-go run ./cmd/mesguard-conversation-quality-export `
+go run ./tools/export/mesguard-conversation-quality-export `
   -dataset testdata/conversation-quality-v1.jsonl `
   -selections <recorded-run-selections.jsonl> `
   -output output/evaluation/conversation-quality-v1.recorded.observations.jsonl

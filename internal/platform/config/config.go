@@ -472,6 +472,7 @@ type ConversationMemorySummaryConfig struct {
 	MaxPayloadBytes      int    `toml:"maxPayloadBytes"`
 	MaxAttempts          int    `toml:"maxAttempts"`
 	RetryBaseDelayMillis int    `toml:"retryBaseDelayMillis"`
+	PromptMaxEntries     int    `toml:"promptMaxEntries"`
 }
 
 func (c ContextMemoryConfig) MemoryCacheDuration() (time.Duration, error) {
@@ -503,7 +504,17 @@ func (c ConversationMemorySummaryConfig) Validate() error {
 	if c.RetryBaseDelayMillis < 0 || c.RetryBaseDelayMillis > 60_000 {
 		return errors.New("agent contextMemory summary retryBaseDelayMillis must be between 0 and 60000")
 	}
+	if c.PromptMaxEntries < 0 || c.PromptMaxEntries > 256 {
+		return errors.New("agent contextMemory summary promptMaxEntries must be between 0 and 256")
+	}
 	return nil
+}
+
+func (c ConversationMemorySummaryConfig) EffectivePromptMaxEntries() int {
+	if c.PromptMaxEntries > 0 {
+		return c.PromptMaxEntries
+	}
+	return 64
 }
 
 func (c ContextMemoryConfig) Validate() error {

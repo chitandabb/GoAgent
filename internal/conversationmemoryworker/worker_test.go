@@ -35,7 +35,7 @@ func TestWorkerCompletesSoftCompactionAndAcknowledgesMessage(t *testing.T) {
 		if task.JobID != jobID || task.RequestedThroughSeq != 2 || len(task.CompletedMessages) != 2 {
 			t.Fatalf("executor task = %+v", task)
 		}
-		return ExecutionResult{CandidateSnapshotID: &snapshotID, ThroughSeq: 2}, nil
+		return ExecutionResult{CurrentSnapshotID: snapshotID, ThroughSeq: 2}, nil
 	})
 	worker, err := NewWorker(repository, executor, Config{
 		WorkerID: "memory-worker-test", LeaseDuration: time.Minute,
@@ -47,8 +47,7 @@ func TestWorkerCompletesSoftCompactionAndAcknowledgesMessage(t *testing.T) {
 
 	outcome := worker.Process(context.Background(), validIncomingMessage(t, jobID, conversationID, now))
 	if outcome.Action != ActionAck || repository.completedLease.FencingToken != 7 ||
-		repository.completedResult.CandidateSnapshotID == nil ||
-		*repository.completedResult.CandidateSnapshotID != snapshotID {
+		repository.completedResult.CurrentSnapshotID != snapshotID {
 		t.Fatalf("outcome/completion = %+v / %+v / %+v", outcome, repository.completedLease, repository.completedResult)
 	}
 }

@@ -25,17 +25,14 @@ const (
 )
 
 var (
-	ErrInvalidPayloadSchema     = errors.New("conversation memory payload schema is invalid")
-	ErrInvalidEntry             = errors.New("conversation memory entry is invalid")
-	ErrInvalidEntryStatus       = errors.New("conversation memory entry status is invalid")
-	ErrSourceOutOfRange         = errors.New("conversation memory source message is outside the covered range")
-	ErrUserSourceRequired       = errors.New("conversation memory entry requires a user message source")
-	ErrUnknownEntryReference    = errors.New("conversation memory entry reference is unknown")
-	ErrUnknownStableReference   = errors.New("conversation memory stable reference is unknown")
-	ErrSupersedeCycle           = errors.New("conversation memory supersede relation contains a cycle")
-	ErrMultipleActiveEntries    = errors.New("conversation memory lineage contains multiple active entries")
-	ErrCorrectionTargetRequired = errors.New("conversation memory correction requires an explicit target")
-	ErrPayloadTooLarge          = errors.New("conversation memory payload exceeds its size limit")
+	ErrInvalidPayloadSchema   = errors.New("conversation memory payload schema is invalid")
+	ErrInvalidEntry           = errors.New("conversation memory entry is invalid")
+	ErrInvalidEntryStatus     = errors.New("conversation memory entry status is invalid")
+	ErrSourceOutOfRange       = errors.New("conversation memory source message is outside the covered range")
+	ErrUserSourceRequired     = errors.New("conversation memory entry requires a user message source")
+	ErrUnknownEntryReference  = errors.New("conversation memory entry reference is unknown")
+	ErrUnknownStableReference = errors.New("conversation memory stable reference is unknown")
+	ErrPayloadTooLarge        = errors.New("conversation memory payload exceeds its size limit")
 )
 
 type StableReferenceValidationError struct{ code string }
@@ -126,12 +123,6 @@ func FailureCode(err error) string {
 			return stableErr.code
 		}
 		return "stable_reference_unknown"
-	case errors.Is(err, ErrSupersedeCycle):
-		return "supersede_cycle"
-	case errors.Is(err, ErrMultipleActiveEntries):
-		return "multiple_active_entries"
-	case errors.Is(err, ErrCorrectionTargetRequired):
-		return "correction_target_required"
 	case errors.Is(err, ErrPayloadTooLarge):
 		return "payload_too_large"
 	case errors.Is(err, ErrInvalidPayloadSchema):
@@ -168,9 +159,9 @@ func (s EntryStatus) isTodoStatus() bool {
 	return s == EntryStatusOpen || s == EntryStatusCompleted || s == EntryStatusCancelled
 }
 
-// Entry is the common, source-backed unit stored in a structured Snapshot.
-// EntryID remains stable across incremental merges. A replacement receives a
-// new ID and points to the entry it supersedes.
+// Entry is the common, source-backed unit stored in the current structured
+// summary. SupersedesEntryID and the superseded status are read compatibility
+// fields for schema v1; new summaries must not produce them.
 type Entry struct {
 	EntryID           string      `json:"entryId"`
 	Content           string      `json:"content"`
@@ -455,14 +446,10 @@ func ValidatePayload(payload Payload, context ValidationContext) error {
 	if len(entries) > MaxEntries {
 		return ErrInvalidEntry
 	}
-	trustedPrevious, err := validateIncrementalMerge(payload, context.PreviousPayload)
-	if err != nil {
-		return err
-	}
+	trustedSources := previousPayloadSources(context.PreviousPayload)
 	byID := make(map[string]indexedEntry, len(entries))
 	for _, current := range entries {
-		_, trusted := trustedPrevious[current.entry.EntryID]
-		if err := validateEntry(current.entry, current.section, context, trusted); err != nil {
+		if err := validateEntry(current.entry, current.section, context, trustedSources); err != nil {
 			return err
 		}
 		if _, exists := byID[current.entry.EntryID]; exists {
@@ -471,9 +458,6 @@ func ValidatePayload(payload Payload, context ValidationContext) error {
 		byID[current.entry.EntryID] = current
 	}
 	if err := validateStableReferences(payload, context); err != nil {
-		return err
-	}
-	if err := validateSupersedeGraph(byID); err != nil {
 		return err
 	}
 	return nil
@@ -507,7 +491,7 @@ func collectEntries(payload *Payload) []indexedEntry {
 	return result
 }
 
-func validateEntry(entry *Entry, section entrySection, context ValidationContext, trustedPrevious bool) error {
+func validateEntry(entry *Entry, section entrySection, context ValidationContext, trustedSources map[int64]struct{}) error {
 	if entry == nil || !entryIDPattern.MatchString(entry.EntryID) {
 		return newEntryValidationError("entry_id")
 	}
@@ -522,13 +506,10 @@ func validateEntry(entry *Entry, section entrySection, context ValidationContext
 		if !entry.Status.isTodoStatus() {
 			return ErrInvalidEntryStatus
 		}
-	} else if !entry.Status.isMemoryStatus() {
+	} else if entry.Status != EntryStatusActive {
 		return ErrInvalidEntryStatus
 	}
-	if section == sectionCorrection && entry.SupersedesEntryID == "" {
-		return ErrCorrectionTargetRequired
-	}
-	if entry.SupersedesEntryID != "" && !entryIDPattern.MatchString(entry.SupersedesEntryID) {
+	if entry.SupersedesEntryID != "" {
 		return ErrUnknownEntryReference
 	}
 	if !slices.IsSorted(entry.SourceMessageSeqs) {
@@ -541,19 +522,33 @@ func validateEntry(entry *Entry, section entrySection, context ValidationContext
 			return ErrSourceOutOfRange
 		}
 		role, exists := context.MessageRoles[seq]
-		if !exists && !trustedPrevious {
+		_, trusted := trustedSources[seq]
+		if !exists && !trusted {
 			return ErrSourceOutOfRange
 		}
 		if index > 0 && seq == previous {
 			return newEntryValidationError("source_duplicate")
 		}
 		previous = seq
-		hasUserSource = hasUserSource || role == conversation.MessageRoleUser || trustedPrevious
+		hasUserSource = hasUserSource || role == conversation.MessageRoleUser || trusted
 	}
 	if (section == sectionGoal || section == sectionFact || section == sectionCorrection) && !hasUserSource {
 		return ErrUserSourceRequired
 	}
 	return nil
+}
+
+func previousPayloadSources(previous *Payload) map[int64]struct{} {
+	result := make(map[int64]struct{})
+	if previous == nil {
+		return result
+	}
+	for _, current := range collectEntries(previous) {
+		for _, seq := range current.entry.SourceMessageSeqs {
+			result[seq] = struct{}{}
+		}
+	}
+	return result
 }
 
 type payloadEntryRecord struct {
@@ -562,83 +557,6 @@ type payloadEntryRecord struct {
 	referenceType ReferenceType
 	referenceID   string
 	contentSHA256 string
-}
-
-func validateIncrementalMerge(payload Payload, previous *Payload) (map[string]struct{}, error) {
-	trusted := make(map[string]struct{})
-	if previous == nil {
-		return trusted, nil
-	}
-	currentRecords := payloadEntryRecords(payload)
-	previousRecords := payloadEntryRecords(*previous)
-	for id, before := range previousRecords {
-		after, exists := currentRecords[id]
-		if !exists || before.section != after.section || before.entry.EntryID != after.entry.EntryID ||
-			before.entry.Content != after.entry.Content || !slices.Equal(before.entry.SourceMessageSeqs, after.entry.SourceMessageSeqs) ||
-			before.entry.SupersedesEntryID != after.entry.SupersedesEntryID || before.referenceType != after.referenceType ||
-			before.referenceID != after.referenceID || before.contentSHA256 != after.contentSHA256 {
-			return nil, ErrInvalidEntry
-		}
-		if before.entry.Status != after.entry.Status {
-			if before.entry.Status != EntryStatusActive || after.entry.Status != EntryStatusSuperseded {
-				return nil, ErrInvalidEntryStatus
-			}
-			replaced := false
-			for replacementID, replacement := range currentRecords {
-				if _, existedBefore := previousRecords[replacementID]; !existedBefore &&
-					replacement.entry.SupersedesEntryID == id && replacement.entry.Status == EntryStatusActive {
-					replaced = true
-					break
-				}
-			}
-			if !replaced {
-				return nil, ErrInvalidEntry
-			}
-		}
-		trusted[id] = struct{}{}
-	}
-	return trusted, nil
-}
-
-func payloadEntryRecords(payload Payload) map[string]payloadEntryRecord {
-	result := make(map[string]payloadEntryRecord)
-	addEntry := func(entry Entry, section entrySection) {
-		result[entry.EntryID] = payloadEntryRecord{section: section, entry: entry}
-	}
-	addReference := func(entry ReferenceEntry, section entrySection) {
-		result[entry.EntryID] = payloadEntryRecord{
-			section: section, entry: entry.Entry, referenceType: entry.ReferenceType,
-			referenceID: entry.ReferenceID, contentSHA256: entry.ContentSHA256,
-		}
-	}
-	if payload.ConversationGoal != nil {
-		addEntry(*payload.ConversationGoal, sectionGoal)
-	}
-	for _, entry := range payload.Facts {
-		addEntry(entry, sectionFact)
-	}
-	for _, entry := range payload.Decisions {
-		addEntry(entry, sectionDecision)
-	}
-	for _, entry := range payload.Corrections {
-		addEntry(entry, sectionCorrection)
-	}
-	for _, entry := range payload.EvidenceReferences {
-		addReference(entry, sectionEvidence)
-	}
-	for _, entry := range payload.OpenQuestions {
-		addEntry(entry, sectionQuestion)
-	}
-	for _, entry := range payload.Todos {
-		addEntry(entry, sectionTodo)
-	}
-	for _, entry := range payload.TaskReferences {
-		addReference(entry, sectionTask)
-	}
-	for _, entry := range payload.ReportReferences {
-		addReference(entry, sectionReport)
-	}
-	return result
 }
 
 func validateStableReferences(payload Payload, context ValidationContext) error {
@@ -700,99 +618,4 @@ func validSHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-func validateSupersedeGraph(entries map[string]indexedEntry) error {
-	for id, current := range entries {
-		if current.entry.SupersedesEntryID == "" {
-			continue
-		}
-		target, exists := entries[current.entry.SupersedesEntryID]
-		if !exists || id == current.entry.SupersedesEntryID {
-			if id == current.entry.SupersedesEntryID {
-				return ErrSupersedeCycle
-			}
-			return ErrUnknownEntryReference
-		}
-		if current.section == sectionCorrection &&
-			(target.section == sectionTodo || target.section == sectionEvidence || target.section == sectionTask || target.section == sectionReport) {
-			return ErrUnknownEntryReference
-		}
-		if (current.section == sectionTodo) != (target.section == sectionTodo) {
-			return ErrUnknownEntryReference
-		}
-	}
-
-	state := make(map[string]uint8, len(entries))
-	var visit func(string) error
-	visit = func(id string) error {
-		switch state[id] {
-		case 1:
-			return ErrSupersedeCycle
-		case 2:
-			return nil
-		}
-		state[id] = 1
-		if next := entries[id].entry.SupersedesEntryID; next != "" {
-			if err := visit(next); err != nil {
-				return err
-			}
-		}
-		state[id] = 2
-		return nil
-	}
-	for id := range entries {
-		if err := visit(id); err != nil {
-			return err
-		}
-	}
-
-	neighbors := make(map[string][]string, len(entries))
-	replacedByCount := make(map[string]int, len(entries))
-	for id, current := range entries {
-		if next := current.entry.SupersedesEntryID; next != "" {
-			replacedByCount[next]++
-			if replacedByCount[next] > 1 {
-				return ErrMultipleActiveEntries
-			}
-			neighbors[id] = append(neighbors[id], next)
-			neighbors[next] = append(neighbors[next], id)
-		}
-	}
-	seen := make(map[string]struct{}, len(entries))
-	for id := range entries {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		currentEntries := 0
-		componentIsTodo := entries[id].section == sectionTodo
-		queue := []string{id}
-		seen[id] = struct{}{}
-		for len(queue) > 0 {
-			currentID := queue[0]
-			queue = queue[1:]
-			current := entries[currentID]
-			if (current.section == sectionTodo) != componentIsTodo {
-				return ErrUnknownEntryReference
-			}
-			if replacedByCount[currentID] == 0 {
-				currentEntries++
-				if !componentIsTodo && current.entry.Status != EntryStatusActive {
-					return ErrInvalidEntryStatus
-				}
-			} else if !componentIsTodo && current.entry.Status != EntryStatusSuperseded {
-				return ErrMultipleActiveEntries
-			}
-			for _, next := range neighbors[currentID] {
-				if _, ok := seen[next]; !ok {
-					seen[next] = struct{}{}
-					queue = append(queue, next)
-				}
-			}
-		}
-		if currentEntries != 1 {
-			return ErrMultipleActiveEntries
-		}
-	}
-	return nil
 }

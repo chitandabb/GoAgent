@@ -40,32 +40,18 @@ func TestSnapshotPayloadRejectsUnsafeMemory(t *testing.T) {
 			want: conversationmemory.ErrUserSourceRequired,
 		},
 		{
-			name: "unknown superseded entry",
+			name: "entry lineage is not part of current summary",
 			mutate: func(payload *conversationmemory.Payload, _ *conversationmemory.ValidationContext) {
 				payload.Corrections[0].SupersedesEntryID = "fact_missing"
 			},
 			want: conversationmemory.ErrUnknownEntryReference,
 		},
 		{
-			name: "supersede cycle",
+			name: "superseded ordinary entry is not current state",
 			mutate: func(payload *conversationmemory.Payload, _ *conversationmemory.ValidationContext) {
-				payload.Facts[0].SupersedesEntryID = "correction_timezone"
+				payload.Facts[0].Status = conversationmemory.EntryStatusSuperseded
 			},
-			want: conversationmemory.ErrSupersedeCycle,
-		},
-		{
-			name: "multiple active entries in one lineage",
-			mutate: func(payload *conversationmemory.Payload, _ *conversationmemory.ValidationContext) {
-				payload.Facts[0].Status = conversationmemory.EntryStatusActive
-			},
-			want: conversationmemory.ErrMultipleActiveEntries,
-		},
-		{
-			name: "correction without explicit predecessor",
-			mutate: func(payload *conversationmemory.Payload, _ *conversationmemory.ValidationContext) {
-				payload.Corrections[0].SupersedesEntryID = ""
-			},
-			want: conversationmemory.ErrCorrectionTargetRequired,
+			want: conversationmemory.ErrInvalidEntryStatus,
 		},
 		{
 			name: "illegal todo state",
@@ -239,7 +225,7 @@ func TestStableReferenceValidationFailureCodeDistinguishesSectionAndReason(t *te
 	}
 }
 
-func TestIncrementalPayloadCannotDropPreviouslyValidatedEntries(t *testing.T) {
+func TestIncrementalCurrentSummaryCanDropStaleEntries(t *testing.T) {
 	previous := validPayload()
 	candidate := validPayload()
 	candidate.Facts = []conversationmemory.Entry{}
@@ -248,8 +234,8 @@ func TestIncrementalPayloadCannotDropPreviouslyValidatedEntries(t *testing.T) {
 	context.MessageRoles = map[int64]conversation.MessageRole{4: conversation.MessageRoleUser}
 	context.PreviousPayload = &previous
 
-	if err := conversationmemory.ValidatePayload(candidate, context); !errors.Is(err, conversationmemory.ErrInvalidEntry) {
-		t.Fatalf("ValidatePayload() incremental removal error = %v, want ErrInvalidEntry", err)
+	if err := conversationmemory.ValidatePayload(candidate, context); err != nil {
+		t.Fatalf("ValidatePayload() incremental current-state replacement error = %v", err)
 	}
 }
 
@@ -259,7 +245,7 @@ func TestSummaryUsageRequiresProviderAccounting(t *testing.T) {
 	}
 }
 
-func TestTodoLineageRejectsContradictoryCurrentStates(t *testing.T) {
+func TestTodoCurrentSummaryRejectsLineageField(t *testing.T) {
 	payload := validPayload()
 	payload.Todos = append(payload.Todos,
 		conversationmemory.Entry{
@@ -271,8 +257,8 @@ func TestTodoLineageRejectsContradictoryCurrentStates(t *testing.T) {
 			Status: conversationmemory.EntryStatusCancelled, SupersedesEntryID: "todo_eval",
 		},
 	)
-	if err := conversationmemory.ValidatePayload(payload, validValidationContext()); !errors.Is(err, conversationmemory.ErrMultipleActiveEntries) {
-		t.Fatalf("ValidatePayload() Todo branch error = %v, want ErrMultipleActiveEntries", err)
+	if err := conversationmemory.ValidatePayload(payload, validValidationContext()); !errors.Is(err, conversationmemory.ErrUnknownEntryReference) {
+		t.Fatalf("ValidatePayload() Todo lineage error = %v, want ErrUnknownEntryReference", err)
 	}
 }
 
@@ -285,7 +271,7 @@ func validPayload() conversationmemory.Payload {
 		Facts: []conversationmemory.Entry{
 			{
 				EntryID: "fact_timezone", Content: "服务器时区是 UTC",
-				SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusSuperseded,
+				SourceMessageSeqs: []int64{1}, Status: conversationmemory.EntryStatusActive,
 			},
 		},
 		Decisions: []conversationmemory.Entry{},
@@ -293,7 +279,6 @@ func validPayload() conversationmemory.Payload {
 			{
 				EntryID: "correction_timezone", Content: "服务器时区是 Asia/Shanghai",
 				SourceMessageSeqs: []int64{3}, Status: conversationmemory.EntryStatusActive,
-				SupersedesEntryID: "fact_timezone",
 			},
 		},
 		EvidenceReferences: []conversationmemory.ReferenceEntry{

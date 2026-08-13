@@ -227,51 +227,16 @@ func (r *ConversationMemoryJobRepository) Complete(
 		if execution.ThroughSeq < job.RequestedThroughSeq {
 			return conversation.ErrInvalidMessage
 		}
-		var active conversationmemory.Snapshot
-		activationResult := conversationmemoryworker.ActivationAlreadyCurrent
-		if execution.CurrentSnapshotID != nil {
-			active, err = loadConversationMemorySnapshotWithDB(
-				tx, conversationMemoryActiveSnapshotQuery+"\nFOR UPDATE", job.ConversationID,
-			)
-			if err != nil || active.ID != *execution.CurrentSnapshotID ||
-				active.ThroughSeq != execution.ThroughSeq || active.ThroughSeq < job.RequestedThroughSeq {
-				if err == nil {
-					err = conversationmemory.ErrSnapshotActivationConflict
-				}
-				return err
+		active, err := loadConversationMemorySnapshotWithDB(
+			tx, conversationMemoryActiveSnapshotQuery+"\nFOR UPDATE", job.ConversationID,
+		)
+		if err != nil || active.ThroughSeq < execution.ThroughSeq || active.ThroughSeq < job.RequestedThroughSeq {
+			if err == nil {
+				err = conversationmemory.ErrSnapshotActivationConflict
 			}
-		} else {
-			candidate, candidateErr := loadConversationMemorySnapshotWithDB(
-				tx, conversationMemorySnapshotByIDQuery, *execution.CandidateSnapshotID,
-			)
-			if candidateErr != nil {
-				return candidateErr
-			}
-			if candidate.ConversationID != job.ConversationID || candidate.Status != conversationmemory.SnapshotStatusCandidate ||
-				candidate.ThroughSeq != execution.ThroughSeq {
-				return conversation.ErrInvalidMessage
-			}
-			activation := conversationmemory.ActivationRequest{
-				ConversationID: job.ConversationID, CandidateSnapshotID: *execution.CandidateSnapshotID,
-				ExpectedActiveSnapshotID: execution.ExpectedActiveSnapshotID, ActivatedAt: completedAt,
-			}
-			active, err = activateConversationMemorySnapshotWithDB(tx, activation)
-			if errors.Is(err, conversationmemory.ErrSnapshotActivationConflict) {
-				winner, winnerErr := loadConversationMemorySnapshotWithDB(
-					tx, conversationMemoryActiveSnapshotQuery+"\nFOR UPDATE", job.ConversationID,
-				)
-				if winnerErr != nil || winner.FromSeq != candidate.FromSeq ||
-					winner.ThroughSeq < job.RequestedThroughSeq {
-					return conversationmemory.ErrSnapshotActivationConflict
-				}
-				active = winner
-				activationResult = conversationmemoryworker.ActivationCASWinner
-			} else if err != nil {
-				return err
-			} else {
-				activationResult = conversationmemoryworker.ActivationActivated
-			}
+			return err
 		}
+		activationResult := conversationmemoryworker.ActivationAlreadyCurrent
 		updated := tx.Exec(`
 UPDATE conversation_memory_jobs
 SET status = ?, claim_owner = NULL, lease_until = NULL, heartbeat_at = NULL,

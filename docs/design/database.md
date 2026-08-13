@@ -80,7 +80,9 @@ payload_schema_version INTEGER NOT NULL
 ```text
 users ───────────────┬─ sessions
                      ├─ conversations ── messages ── message_attachments
-                     │        └────────── conversation_summaries
+                     │        ├────────── conversation_memory_snapshots
+                     │        ├────────── conversation_memory_jobs
+                     │        └────────── conversation_prompt_manifests
                      ├─ diagnosis_tasks ── diagnosis_steps
                      │                  ├─ tool_executions
                      │                  ├─ evidence_items
@@ -726,44 +728,53 @@ M2初期消息发送后不可编辑，不支持对话分支。用户修正问题
 和模型推理内容。`turn_completed` 只携带助手消息 ID；`turn_failed` 只携带稳定的失败类别；
 `turn_retry_scheduled` 只携带尝试次数、等待秒数和安全失败类别。
 
-### conversation_summaries
+### conversation_memory_snapshots
 
-保存动态上下文治理生成的派生摘要，不覆盖原始消息。
+保存动态上下文治理生成的结构化摘要投影，不覆盖或删除原始消息。原始消息是唯一语义事实源。完整契约见
+[`context-governance-and-memory.md`](context-governance-and-memory.md)。
 
 关键字段：
 
 - `id UUID PRIMARY KEY`；
-- `conversation_id UUID NOT NULL REFERENCES conversations(id)`；
-- `range_start_seq BIGINT NOT NULL`、`range_end_seq BIGINT NOT NULL`；
-- `summary_text TEXT NULL`、`summary_data JSONB NULL`；
-- `summary_schema_version INTEGER NOT NULL`；
-- `input_token_count`、`output_token_count`；
-- `model_provider`、`model_id`、`prompt_version`；
-- `content_hash`；
-- `status`，`active`或`superseded`；
-- `created_at`。
+- `conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE`；
+- `snapshot_version BIGINT NOT NULL`，并对 `(conversation_id, snapshot_version)` 唯一；
+- `supersedes_snapshot_id UUID NULL REFERENCES conversation_memory_snapshots(id)`；
+- `from_seq BIGINT NOT NULL`、`through_seq BIGINT NOT NULL`；
+- `schema_version INTEGER NOT NULL`；
+- `summary_model_profile`、`summary_model_provider`、`summary_model_id`、`prompt_version`；
+- `payload JSONB NOT NULL`、`payload_sha256 CHAR(64) NOT NULL`；
+- `prompt_tokens`、`completion_tokens`、`total_tokens`、`cached_tokens`；
+- `status`，首版为 `candidate/active/superseded`；
+- `created_at`、`activated_at`。
 
-以下规则由goose迁移创建为PostgreSQL CHECK约束：
+`00027` 已落地该表、CHECK、单 Active 部分唯一索引和内容不可变触发器。当前这些字段是
+schema v1 的兼容持久化结构，不代表 Entry 或摘要业务版本图。Repository 锁定父
+Conversation 行分配连续版本，并已用真实 PostgreSQL 验证并发候选、内容不可变、覆盖范围、
+前驱关系和 Conversation 删除级联。每个 Conversation 同时只能有一个 Active Snapshot；
+当前运行时的软硬压缩共享 Conversation Coordinator，生产通过绑定数据库连接的 PostgreSQL
+advisory lock 串行化；获得锁后重读 Active/`through_seq`，已覆盖请求时复用当前摘要。Job
+Lease/Fencing 只保护异步任务投递和终态提交。Candidate/Active/CAS 列将在后续 migration 中
+收敛，当前不破坏旧数据。
+摘要失败或候选校验失败不能替换上一份有效 Snapshot。
 
-```sql
-CONSTRAINT conversation_summary_range_ck CHECK (
-    range_start_seq >= 1
-    AND range_end_seq >= range_start_seq
-),
-CONSTRAINT conversation_summary_content_ck CHECK (
-    NULLIF(BTRIM(summary_text), '') IS NOT NULL
-    OR summary_data IS NOT NULL
-),
-CONSTRAINT conversation_summary_data_type_ck CHECK (
-    summary_data IS NULL
-    OR jsonb_typeof(summary_data) IN ('object', 'array')
-),
-CONSTRAINT conversation_summary_schema_version_ck CHECK (
-    summary_schema_version > 0
-)
-```
+### conversation_memory_jobs
 
-应用层在写入前执行同样的校验，Repository根据约束名称把数据库错误转换成稳定的应用错误。上下文组装器只使用当前有效摘要；摘要生成失败时回退到原始消息，不能造成聊天记录丢失。
+保存软阈值异步压缩任务、重试和租约事实。关键字段包括 `conversation_id`、
+`base_snapshot_id`、`from_seq/through_seq`、`status`、`attempt_count/max_attempts`、
+`available_at`、`claim_owner`、`lease_until`、`failure_code` 和时间戳。Job 创建和 Outbox 写入
+处于同一事务；Worker 使用现有 Claim/Heartbeat/Fencing 语义，过期 Worker 可以留下候选审计，
+但不能提交 Job 终态；摘要发布由 Conversation Coordinator 串行化。
+
+### conversation_prompt_manifests
+
+保存 Prompt 组装和缓存观测元数据，不保存完整 Prompt、原始 Tool Payload 或模型推理。
+关键字段包括 `turn_id`、`preflight_status/failure_stage`、Identity/Estimate 可用性、
+`prompt_epoch_id`、模型/System/Tool/Skill/Snapshot Fingerprint、
+`summary_snapshot_id`、`hard_compaction_triggered`、
+Tail序号范围、估算/上界/实际 Prompt Token、Cache Hit/Miss、Completion Token、估算误差、
+耗时和降级标记。失败观测不会用空 Tool Contract 伪造 Epoch，也不会把未完成估算记成
+0 Token 样本。`00028` 增加 Snapshot 外键、硬压缩触发位和查询索引；Manifest 用于固定集
+评测和运维定位，不参与业务授权。
 
 ### knowledge_documents、knowledge_document_versions、knowledge_chunks
 
@@ -1031,7 +1042,7 @@ Redis或RabbitMQ丢失不能通过备份恢复任务事实。RabbitMQ丢失后�
 
 ### M2
 
-- `conversations`、`conversation_messages`、结构化引用、`conversation_turns`、回合事件和消息附件关联已落地；`conversation_summaries` 仍待上下文治理阶段；
+- `conversations`、`conversation_messages`、结构化引用、`conversation_turns`、回合事件、消息附件关联、`conversation_prompt_manifests` 和 `conversation_memory_snapshots` 已落地；同步 CAS Active 激活已完成，Memory Job/Worker 与 Redis 热缓存仍待后续切片；
 - 知识文档、解析版本、Chunk、Embedding和评测结果；
 - pgvector扩展和向量索引在实际Embedding维度确定后加入迁移。
 
