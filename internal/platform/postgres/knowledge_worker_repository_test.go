@@ -33,6 +33,24 @@ func TestDocumentVersionStatusForStage(t *testing.T) {
 	}
 }
 
+func TestShouldPublishKnowledgeVersionIncludesCurrentRepair(t *testing.T) {
+	tests := []struct {
+		candidate int
+		current   int
+		want      bool
+	}{
+		{candidate: 1, current: 0, want: true},
+		{candidate: 2, current: 1, want: true},
+		{candidate: 2, current: 2, want: true},
+		{candidate: 1, current: 2, want: false},
+	}
+	for _, test := range tests {
+		if got := shouldPublishKnowledgeVersion(test.candidate, test.current); got != test.want {
+			t.Fatalf("shouldPublishKnowledgeVersion(%d, %d) = %v, want %v", test.candidate, test.current, got, test.want)
+		}
+	}
+}
+
 func TestNewKnowledgeWorkerRepositoryWithBatchSizeRejectsUnsafeValues(t *testing.T) {
 	for _, batchSize := range []int{0, 501} {
 		if _, err := NewKnowledgeWorkerRepositoryWithBatchSize(nil, batchSize); err == nil {

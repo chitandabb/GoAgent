@@ -183,6 +183,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	traceID := ""
 	runID := ""
 	var citationTrace *conversationCitationTrace
+	var toolTrace *executionTrace
 	var reportReferenceTrace *conversationReportReferenceTrace
 	var usageTrace *modelUsageTrace
 	var promptManifest *contextgovernance.PromptManifest
@@ -192,7 +193,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		if err != nil && observeFailure {
 			if _, alreadyWrapped := conversation.AgentRunFailureRecordFrom(err); !alreadyWrapped {
 				observation := r.buildRunObservation(
-					startedAt, citationTrace, usageTrace, promptManifest, conversation.AgentRunFailed,
+					startedAt, citationTrace, toolTrace, usageTrace, promptManifest, conversation.AgentRunFailed,
 				)
 				record := conversation.AgentRunFailureRecord{
 					Observation: observation,
@@ -256,6 +257,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		ToolReadConversationMemorySources: r.memorySourceRecoveryMaxCalls,
 	}))
 	trace := &executionTrace{}
+	toolTrace = trace
 	runCtx = withExecutionTrace(runCtx, trace)
 	citationTrace = &conversationCitationTrace{}
 	runCtx = withConversationCitationTrace(runCtx, citationTrace)
@@ -395,7 +397,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	} else if sourceToolAttempted && len(citations) == 0 {
 		outcome = conversation.AgentRunInsufficientEvidence
 	}
-	observation := r.buildRunObservation(startedAt, citationTrace, usageTrace, promptManifest, outcome)
+	observation := r.buildRunObservation(startedAt, citationTrace, toolTrace, usageTrace, promptManifest, outcome)
 	if observation.Validate() != nil {
 		return conversation.AgentResponse{}, conversation.ErrAgentResponseInvalid
 	}
@@ -408,6 +410,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 func (r *ConversationRunner) buildRunObservation(
 	startedAt time.Time,
 	citationTrace *conversationCitationTrace,
+	toolTrace *executionTrace,
 	usageTrace *modelUsageTrace,
 	promptManifest *contextgovernance.PromptManifest,
 	outcome conversation.AgentRunOutcome,
@@ -421,6 +424,13 @@ func (r *ConversationRunner) buildRunObservation(
 	var usage ModelUsage
 	if usageTrace != nil {
 		usage = usageTrace.snapshot()
+	}
+	toolCalls := 0
+	answerCacheEligible := false
+	if toolTrace != nil {
+		toolExecutions := toolTrace.snapshot()
+		toolCalls = len(toolExecutions)
+		answerCacheEligible = conversationAnswerCacheEligible(toolExecutions)
 	}
 	if minimumTotal := usage.PromptTokens + usage.CompletionTokens; usage.TotalTokens < minimumTotal {
 		usage.TotalTokens = minimumTotal
@@ -446,7 +456,9 @@ func (r *ConversationRunner) buildRunObservation(
 	}
 	return conversation.AgentRunObservation{
 		ModelProvider: r.modelProvider, ModelID: r.modelID, PromptVersion: r.promptVersion,
-		Outcome: outcome, RetrievedSources: retrievedSources, DegradedChannels: degradedChannels,
+		ExecutionPath: conversation.AgentRunExecutionAgent, ToolCalls: toolCalls,
+		AnswerCacheEligible: answerCacheEligible && outcome == conversation.AgentRunAnswered,
+		Outcome:             outcome, RetrievedSources: retrievedSources, DegradedChannels: degradedChannels,
 		Usage: conversation.AgentRunUsage{
 			ModelCalls: usage.ModelCalls, PromptTokens: usage.PromptTokens,
 			CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens,
@@ -455,6 +467,23 @@ func (r *ConversationRunner) buildRunObservation(
 		DurationMillis: durationMillis, SourcesTruncated: sourcesTruncated,
 		PromptManifest: promptManifest,
 	}
+}
+
+func conversationAnswerCacheEligible(executions []ToolExecution) bool {
+	knowledgeSearchSucceeded := false
+	for _, execution := range executions {
+		if !execution.Succeeded || execution.Degraded {
+			return false
+		}
+		switch execution.Name {
+		case ToolSearchKnowledge:
+			knowledgeSearchSucceeded = true
+		case ToolSkill, ToolReadSkillReference, ToolReadConversationToolResult:
+		default:
+			return false
+		}
+	}
+	return knowledgeSearchSucceeded
 }
 
 func conversationAgentErrorType(err error) string {

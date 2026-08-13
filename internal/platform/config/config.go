@@ -31,20 +31,65 @@ import (
 // Config 是 MESGuard 的顶层配置结构，对应 config/mesguard.toml 文件的顶层键。
 // 每个字段对应 TOML 中的一个配置块（通过 toml tag 映射）。
 type Config struct {
-	HTTP          HTTPConfig          `toml:"http"`          // [http] 配置块：API 服务器监听地址
-	Auth          AuthConfig          `toml:"auth"`          // [auth] 配置块：Session、Cookie 与可信前端来源
-	Agent         AgentConfig         `toml:"agent"`         // [agent] Skill 包加载位置
-	Models        ModelsConfig        `toml:"models"`        // [models] 聊天、向量和重排模型
-	Log           LogConfig           `toml:"log"`           // [log] 配置块：结构化日志和文件轮转
-	Postgres      PostgresConfig      `toml:"postgres"`      // [postgres] 配置块：PostgreSQL 数据库连接配置
-	Redis         RedisConfig         `toml:"redis"`         // [redis] 配置块：Redis 缓存连接配置
-	RabbitMQ      RabbitMQConfig      `toml:"rabbitmq"`      // [rabbitmq] Outbox Relay 与 Worker 消息配置
-	SQLServer     SQLServerConfig     `toml:"sqlserver"`     // [sqlserver] 公司 ERP 工单库（可降级依赖）
-	GitHubMCP     GitHubMCPConfig     `toml:"githubMCP"`     // [githubMCP] 官方 GitHub MCP 只读代码调查
-	WebSearch     WebSearchConfig     `toml:"webSearch"`     // [webSearch] 公开技术资料的脱敏只读检索
-	MinIO         MinIOConfig         `toml:"minio"`         // [minio] 附件与知识原文的可降级对象存储
-	Knowledge     KnowledgeConfig     `toml:"knowledge"`     // [knowledge] 文档入库流水线版本与恢复预算
-	Observability ObservabilityConfig `toml:"observability"` // [observability] 可选 OTel 链路导出
+	HTTP                HTTPConfig                `toml:"http"`                // [http] 配置块：API 服务器监听地址
+	Auth                AuthConfig                `toml:"auth"`                // [auth] 配置块：Session、Cookie 与可信前端来源
+	Agent               AgentConfig               `toml:"agent"`               // [agent] Skill 包加载位置
+	Models              ModelsConfig              `toml:"models"`              // [models] 聊天、向量和重排模型
+	Log                 LogConfig                 `toml:"log"`                 // [log] 配置块：结构化日志和文件轮转
+	Postgres            PostgresConfig            `toml:"postgres"`            // [postgres] 配置块：PostgreSQL 数据库连接配置
+	Redis               RedisConfig               `toml:"redis"`               // [redis] 配置块：Redis 缓存连接配置
+	RabbitMQ            RabbitMQConfig            `toml:"rabbitmq"`            // [rabbitmq] Outbox Relay 与 Worker 消息配置
+	SQLServer           SQLServerConfig           `toml:"sqlserver"`           // [sqlserver] 公司 ERP 工单库（可降级依赖）
+	GitHubMCP           GitHubMCPConfig           `toml:"githubMCP"`           // [githubMCP] 官方 GitHub MCP 只读代码调查
+	WebSearch           WebSearchConfig           `toml:"webSearch"`           // [webSearch] 公开技术资料的脱敏只读检索
+	MinIO               MinIOConfig               `toml:"minio"`               // [minio] 附件与知识原文的可降级对象存储
+	Knowledge           KnowledgeConfig           `toml:"knowledge"`           // [knowledge] 文档入库流水线版本与恢复预算
+	SemanticAnswerCache SemanticAnswerCacheConfig `toml:"semanticAnswerCache"` // [semanticAnswerCache] Global 知识问答答案缓存
+	Observability       ObservabilityConfig       `toml:"observability"`       // [observability] 可选 OTel 链路导出
+}
+
+type SemanticAnswerCacheConfig struct {
+	Enabled             bool    `toml:"enabled"`
+	Provider            string  `toml:"provider"`
+	TTLSeconds          int     `toml:"ttlSeconds"`
+	TTLJitterRatio      float64 `toml:"ttlJitterRatio"`
+	MaxRecords          int     `toml:"maxRecords"`
+	MaxAnswerBytes      int     `toml:"maxAnswerBytes"`
+	MaxCitations        int     `toml:"maxCitations"`
+	LookupTimeoutMillis int     `toml:"lookupTimeoutMillis"`
+	WriteTimeoutMillis  int     `toml:"writeTimeoutMillis"`
+}
+
+func (c SemanticAnswerCacheConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(c.Provider)) != "postgres" {
+		return errors.New("semanticAnswerCache provider must be postgres")
+	}
+	if c.TTLSeconds < 60 || c.TTLSeconds > 30*24*60*60 {
+		return errors.New("semanticAnswerCache ttlSeconds must be between 60 and 2592000")
+	}
+	if math.IsNaN(c.TTLJitterRatio) || math.IsInf(c.TTLJitterRatio, 0) ||
+		c.TTLJitterRatio < 0 || c.TTLJitterRatio > 0.2 {
+		return errors.New("semanticAnswerCache ttlJitterRatio must be between 0 and 0.2")
+	}
+	if c.MaxRecords < 1 || c.MaxRecords > 100_000 {
+		return errors.New("semanticAnswerCache maxRecords must be between 1 and 100000")
+	}
+	if c.MaxAnswerBytes < 1024 || c.MaxAnswerBytes > 16*1024 {
+		return errors.New("semanticAnswerCache maxAnswerBytes must be between 1024 and 16384")
+	}
+	if c.MaxCitations < 1 || c.MaxCitations > 8 {
+		return errors.New("semanticAnswerCache maxCitations must be between 1 and 8")
+	}
+	if c.LookupTimeoutMillis < 10 || c.LookupTimeoutMillis > 5000 {
+		return errors.New("semanticAnswerCache lookupTimeoutMillis must be between 10 and 5000")
+	}
+	if c.WriteTimeoutMillis < 10 || c.WriteTimeoutMillis > 5000 {
+		return errors.New("semanticAnswerCache writeTimeoutMillis must be between 10 and 5000")
+	}
+	return nil
 }
 
 type ObservabilityConfig struct {
@@ -1814,6 +1859,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Knowledge.Validate(); err != nil {
+		return err
+	}
+	if err := c.SemanticAnswerCache.Validate(); err != nil {
 		return err
 	}
 	if c.Knowledge.Retrieval.QueryRewrite.Enabled {

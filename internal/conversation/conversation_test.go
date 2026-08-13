@@ -10,6 +10,8 @@ import (
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
+	"github.com/chitandabb/GoAgent/internal/semanticcache"
 
 	"github.com/google/uuid"
 )
@@ -250,6 +252,133 @@ func TestServiceExecuteTurnReplaysCompletedResponseWithoutCallingAgent(t *testin
 	}
 }
 
+func TestServiceExecuteTurnCommitsExactCacheHitWithoutCallingAgent(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	versionID, chunkID, sourceRunID := uuid.New(), uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+	}
+	agent := &conversationAgentResponderStub{err: errors.New("agent must not run on cache hit")}
+	cache := &semanticAnswerCacheStub{answer: semanticcache.Answer{
+		Content: "设备点检周期为 30 天。[source:" + sourceRef + "]",
+		Citations: []semanticcache.Source{{
+			Position: 0, SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("a", 64),
+		}},
+		RetrievedSources: []semanticcache.Source{{
+			SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef:  sourceRef, ContentSHA256: strings.Repeat("a", 64),
+		}},
+		SourceRunID: sourceRunID, ModelProvider: "stepfun", ModelID: "step-3.5-flash",
+		PromptVersion: "conversation-v1", Generation: 7,
+		CreatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour),
+	}, hit: true}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, _ = service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+	}, nil)
+
+	result, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "设备点检周期规范是什么？",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn(): %v", err)
+	}
+	if agent.calls != 0 || !cache.lookupCalled {
+		t.Fatalf("agent calls=%d cache lookup=%v", agent.calls, cache.lookupCalled)
+	}
+	if result.Turn.AssistantMessage.Content != cache.answer.Content ||
+		len(result.Turn.AssistantMessage.Citations) != 1 {
+		t.Fatalf("assistant = %+v", result.Turn.AssistantMessage)
+	}
+	observation := repository.completedResponse.RunObservation
+	if observation == nil || observation.ExecutionPath != AgentRunExecutionSemanticCacheHit ||
+		observation.CacheLayer != AgentRunCacheLayerExact || observation.SourceRunID != sourceRunID ||
+		observation.Usage.ModelCalls != 0 || observation.ToolCalls != 0 {
+		t.Fatalf("cache observation = %+v", observation)
+	}
+}
+
+func TestServiceExecuteTurnWritesEligibleAnswerAfterCommit(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	versionID, chunkID := uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+	}
+	observation := &AgentRunObservation{
+		ModelProvider: "stepfun", ModelID: "step-3.5-flash", PromptVersion: "conversation-v1",
+		Outcome: AgentRunAnswered, AnswerCacheEligible: true, ToolCalls: 1,
+		Usage: AgentRunUsage{ModelCalls: 1, TotalTokens: 20},
+		RetrievedSources: []AgentRunSource{{
+			SourceType: CitationSourceKnowledgeChunk, SourceRef: sourceRef, ContentSHA256: strings.Repeat("b", 64),
+		}},
+	}
+	agent := &conversationAgentResponderStub{response: AgentResponse{
+		Content: "使用新版本发布流程。[source:" + sourceRef + "]",
+		Citations: []MessageCitation{{
+			Position: 0, SourceType: CitationSourceKnowledgeChunk,
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("b", 64),
+		}},
+		RunObservation: observation,
+	}}
+	cache := &semanticAnswerCacheStub{}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, _ = service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+	}, nil)
+
+	result, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "知识文档如何发布新版本？",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn(): %v", err)
+	}
+	if agent.calls != 1 || len(cache.puts) != 1 {
+		t.Fatalf("agent calls=%d cache puts=%d", agent.calls, len(cache.puts))
+	}
+	put := cache.puts[0]
+	if put.Answer.SourceRunID != result.TurnID || put.Answer.Content != agent.response.Content ||
+		put.TTL != time.Hour || put.Answer.Generation != 0 {
+		t.Fatalf("cache put = %+v", put)
+	}
+}
+
+func TestServiceExecuteTurnFallsBackAndObservesCacheLookupFailure(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	repository := &turnRepositoryStub{
+		conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive},
+	}
+	agent := &conversationAgentResponderStub{response: AgentResponse{Content: "正常 RAG 回答"}}
+	cache := &semanticAnswerCacheStub{lookupErr: errors.New("cache unavailable")}
+	var events []resilience.DegradationEvent
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, _ = service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+	}, resilience.ObserverFunc(func(event resilience.DegradationEvent) { events = append(events, event) }))
+
+	result, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "设备点检周期规范是什么？",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn(): %v", err)
+	}
+	if agent.calls != 1 || result.Turn.AssistantMessage.Content != "正常 RAG 回答" || len(events) != 1 {
+		t.Fatalf("agent calls=%d result=%+v events=%+v", agent.calls, result, events)
+	}
+	if events[0].Operation != "semantic_cache_lookup" || events[0].Fallback != "normal_rag" ||
+		events[0].ReasonCode != "provider_error" {
+		t.Fatalf("degradation event = %+v", events[0])
+	}
+}
+
 func TestServiceExecuteTurnRejectsIdempotencyKeyReuseWithDifferentRequest(t *testing.T) {
 	userID, conversationID := uuid.New(), uuid.New()
 	repository := &turnRepositoryStub{
@@ -360,6 +489,58 @@ func TestServiceExecuteAcceptedTurnUsesDurableCommandContextAndCompletesLease(t 
 	}
 }
 
+func TestServiceExecuteAcceptedTurnUsesExactCacheBeforeAgent(t *testing.T) {
+	userID, conversationID, turnID, userMessageID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	versionID, chunkID, sourceRunID := uuid.New(), uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	userMessage := Message{
+		ID: userMessageID, ConversationID: conversationID, Seq: 1,
+		Role: MessageRoleUser, Content: "设备点检周期规范是什么？",
+	}
+	repository := &asyncTurnRepositoryStub{
+		turnRepositoryStub: &turnRepositoryStub{conversation: Conversation{
+			ID: conversationID, UserID: userID, Status: StatusActive,
+		}},
+		completed: ConversationTurn{UserMessage: userMessage, AssistantMessage: Message{
+			ID: uuid.New(), ConversationID: conversationID, Seq: 2, Role: MessageRoleAssistant,
+		}},
+	}
+	cache := &semanticAnswerCacheStub{hit: true, answer: semanticcache.Answer{
+		Content: "设备点检周期为 30 天。[source:" + sourceRef + "]",
+		Citations: []semanticcache.Source{{
+			Position: 0, SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("c", 64),
+		}},
+		RetrievedSources: []semanticcache.Source{{
+			SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef:  sourceRef, ContentSHA256: strings.Repeat("c", 64),
+		}},
+		SourceRunID: sourceRunID, ModelProvider: "stepfun", ModelID: "step-3.5-flash",
+		PromptVersion: "conversation-v1", Generation: 2,
+		CreatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour),
+	}}
+	agent := &conversationAgentResponderStub{err: errors.New("agent must not run")}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, _ = service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+	}, nil)
+	execution := TurnExecution{
+		TurnID: turnID, Turn: ConversationTurn{UserMessage: userMessage},
+		Conversation: repository.conversation, Actor: Actor{UserID: userID},
+		History: []Message{userMessage}, AttemptCount: 1,
+	}
+
+	if _, err := service.ExecuteAcceptedTurn(context.Background(), execution, "conversation-worker-test"); err != nil {
+		t.Fatalf("ExecuteAcceptedTurn(): %v", err)
+	}
+	if agent.calls != 0 || repository.completedObservation == nil ||
+		repository.completedObservation.ExecutionPath != AgentRunExecutionSemanticCacheHit {
+		t.Fatalf("agent calls=%d observation=%+v", agent.calls, repository.completedObservation)
+	}
+}
+
 func TestResolveAnswerCitationsRejectsUnknownAndDeduplicatesRepeatedMarkers(t *testing.T) {
 	knowledgeRef := "knowledge:" + uuid.NewString() + "/" + uuid.NewString()
 	attachmentRef := "attachment:" + uuid.NewString()
@@ -431,11 +612,12 @@ func (s *conversationAgentResponderStub) Respond(ctx context.Context, request Ag
 }
 
 type turnRepositoryStub struct {
-	conversation   Conversation
-	messages       []Message
-	turns          map[string]*turnRepositoryState
-	failCalls      int
-	failContextErr error
+	conversation      Conversation
+	messages          []Message
+	turns             map[string]*turnRepositoryState
+	completedResponse AgentResponse
+	failCalls         int
+	failContextErr    error
 }
 
 type turnRepositoryState struct {
@@ -558,6 +740,7 @@ func (s *turnRepositoryStub) BeginTurn(_ context.Context, userID uuid.UUID, inpu
 }
 
 func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid.UUID, response AgentResponse, completedAt time.Time) (ConversationTurn, error) {
+	s.completedResponse = response
 	for _, state := range s.turns {
 		if state.id != turnID {
 			continue
@@ -593,6 +776,25 @@ func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid
 	return ConversationTurn{}, repository.ErrNotFound
 }
 
+type semanticAnswerCacheStub struct {
+	answer       semanticcache.Answer
+	hit          bool
+	lookupErr    error
+	putErr       error
+	lookupCalled bool
+	puts         []semanticcache.PutInput
+}
+
+func (s *semanticAnswerCacheStub) Lookup(_ context.Context, _ semanticcache.LookupInput) (semanticcache.Answer, bool, error) {
+	s.lookupCalled = true
+	return s.answer, s.hit, s.lookupErr
+}
+
+func (s *semanticAnswerCacheStub) Put(_ context.Context, input semanticcache.PutInput) error {
+	s.puts = append(s.puts, input)
+	return s.putErr
+}
+
 func (s *turnRepositoryStub) FailTurn(ctx context.Context, _ uuid.UUID, turnID uuid.UUID, _ time.Time) error {
 	for _, state := range s.turns {
 		if state.id == turnID {
@@ -615,12 +817,13 @@ func (s *turnRepositoryStub) ListTurnEvents(context.Context, uuid.UUID, uuid.UUI
 
 type asyncTurnRepositoryStub struct {
 	*turnRepositoryStub
-	accepted           BeginTurnResult
-	gotAccept          BeginTurnInput
-	completed          ConversationTurn
-	completedContent   string
-	completedCitations []MessageCitation
-	completedWorker    string
+	accepted             BeginTurnResult
+	gotAccept            BeginTurnInput
+	completed            ConversationTurn
+	completedContent     string
+	completedCitations   []MessageCitation
+	completedObservation *AgentRunObservation
+	completedWorker      string
 }
 
 func (s *asyncTurnRepositoryStub) AcceptTurn(_ context.Context, _ uuid.UUID, input BeginTurnInput) (BeginTurnResult, error) {
@@ -644,6 +847,7 @@ func (s *asyncTurnRepositoryStub) CompleteTurnExecution(_ context.Context, _ uui
 	s.completedWorker = workerID
 	s.completedContent = response.Content
 	s.completedCitations = append([]MessageCitation(nil), response.Citations...)
+	s.completedObservation = response.RunObservation
 	return s.completed, nil
 }
 

@@ -1197,6 +1197,27 @@ func TestConversationRunnerUsesStreamingOnlyWhenExplicitlyEnabled(t *testing.T) 
 	}
 }
 
+func TestConversationAnswerCacheEligibilityRequiresKnowledgeOnlyToolPath(t *testing.T) {
+	if !conversationAnswerCacheEligible([]ToolExecution{
+		{Name: ToolSkill, Succeeded: true},
+		{Name: ToolReadSkillReference, Succeeded: true},
+		{Name: ToolSearchKnowledge, Succeeded: true},
+		{Name: ToolReadConversationToolResult, Succeeded: true},
+	}) {
+		t.Fatal("knowledge-only tool path should be cache eligible")
+	}
+	for _, executions := range [][]ToolExecution{
+		{{Name: ToolWebSearch, Succeeded: true}, {Name: ToolSearchKnowledge, Succeeded: true}},
+		{{Name: ToolCreateDiagnosisTask, Succeeded: true}, {Name: ToolSearchKnowledge, Succeeded: true}},
+		{{Name: ToolSearchKnowledge, Succeeded: false}},
+		{{Name: ToolSkill, Succeeded: true}},
+	} {
+		if conversationAnswerCacheEligible(executions) {
+			t.Fatalf("unsafe tool path accepted: %+v", executions)
+		}
+	}
+}
+
 func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) {
 	tests := []struct {
 		name       string

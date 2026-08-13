@@ -97,6 +97,10 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation service: %w", err)
 	}
+	if err := wireSemanticAnswerCache(conversationService, deps.db, cfg.SemanticAnswerCache, log.Named("semantic_answer_cache")); err != nil {
+		closeDependencies()
+		return nil, err
+	}
 	conversationRoutes, err := httptransport.NewConversationRoutes(
 		ctx, conversationService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
 	)
