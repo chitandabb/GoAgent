@@ -9,6 +9,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -97,7 +98,8 @@ func NewConversationMemorySourceToolRegistration(
 		return ToolRegistration{}, err
 	}
 	return ToolRegistration{
-		Tool: current, AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
+		Tool: current, FailurePolicy: resilience.PolicyBestEffort,
+		AllowedRoles:         []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
 		AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 		RequiredCapabilities: []ToolCapability{ToolCapabilityMemory},
 	}, nil

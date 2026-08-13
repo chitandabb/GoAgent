@@ -15,6 +15,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -1283,8 +1284,8 @@ func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
 		ChatModel: &conversationRunnerTestModel{state: &conversationRunnerModelState{
 			searchKnowledgeIfAvailable: true, omitKnowledgeCitation: true,
 		}},
-		CitationRepairer: repairer,
-		ToolCatalog:      catalog, SystemInstruction: "conversation citation repair test",
+		CitationRepairer: repairer, CitationRepairPolicy: resilience.PolicyRepairThenFail,
+		ToolCatalog: catalog, SystemInstruction: "conversation citation repair test",
 		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
 		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
 		MaxContextRunes: conversation.MaxContentRunes,
@@ -1302,6 +1303,24 @@ func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
 		response.RunObservation == nil || response.RunObservation.Outcome != conversation.AgentRunAnswered ||
 		response.RunObservation.Usage.TotalTokens != 32 {
 		t.Fatalf("repairer calls = %d, response = %+v", repairer.calls, response)
+	}
+}
+
+func TestConversationRunnerRequiresCitationRepairPolicy(t *testing.T) {
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewConversationRunner(ConversationRunnerConfig{
+		ChatModel:        &conversationRunnerTestModel{state: &conversationRunnerModelState{}},
+		CitationRepairer: &conversationCitationRepairerStub{}, ToolCatalog: catalog,
+		SystemInstruction: "test", ModelProvider: "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+	})
+	if err == nil {
+		t.Fatal("NewConversationRunner accepted citation repair without repair_then_fail policy")
 	}
 }
 

@@ -361,6 +361,7 @@ func buildAgentRuntimeForRole(
 		DiagnosisTaskStatus:       builders.conversationTaskStatus,
 		AttachmentReader:          builders.attachmentReader,
 		ConversationMemorySources: conversationMemorySources,
+		DegradationObserver:       mesagent.NewToolDegradationLogObserver(log, "conversation"),
 	})
 	if err != nil {
 		_ = runtime.close()
@@ -370,6 +371,7 @@ func buildAgentRuntimeForRole(
 		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyAttachment)
 	}
 	var citationRepairer mesagent.ConversationCitationRepairer
+	var citationRepairPolicy resilience.Policy
 	if cfg.Agent.ConversationCitationRepairEnabled {
 		citationRepairer, err = mesagent.NewModelConversationCitationRepairer(
 			mesagent.ModelConversationCitationRepairerConfig{
@@ -384,6 +386,7 @@ func buildAgentRuntimeForRole(
 			_ = runtime.close()
 			return nil, fmt.Errorf("build conversation citation repairer: %w", err)
 		}
+		citationRepairPolicy = resilience.PolicyRepairThenFail
 	}
 	var contextPreflight mesagent.ConversationContextPreflightConfig
 	if cfg.Agent.ContextMemory.ShadowPreflightEnabled {
@@ -410,7 +413,8 @@ func buildAgentRuntimeForRole(
 		}
 	}
 	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
-		ChatModel: chatModel, CitationRepairer: citationRepairer, ToolCatalog: conversationCatalog,
+		ChatModel: chatModel, CitationRepairer: citationRepairer,
+		CitationRepairPolicy: citationRepairPolicy, ToolCatalog: conversationCatalog,
 		SystemInstruction:            prompts.ConversationInstruction,
 		ModelProvider:                runtime.modelProvider,
 		ModelID:                      runtime.modelID,
@@ -432,6 +436,7 @@ func buildAgentRuntimeForRole(
 	}
 	runtime.orchestrator, err = mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runtime.runner, Logger: log.Named("evidence_orchestrator"),
+		ReportPolicy: resilience.PolicyRepairThenFail,
 		MaxAgentRuns: cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
 		Timeout:                   time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,

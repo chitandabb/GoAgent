@@ -8,6 +8,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -50,6 +51,7 @@ type DefaultToolCatalogDependencies struct {
 	DiagnosisTaskStatus       DiagnosisTaskStatusReader
 	AttachmentReader          attachment.Reader
 	ConversationMemorySources ConversationMemorySourceReader
+	DegradationObserver       resilience.Observer
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
@@ -73,6 +75,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		FetchPublicPage: dependencies.FetchPublicPage, CreateDiagnosisTask: dependencies.CreateDiagnosisTask,
 		AttachmentReader:          dependencies.AttachmentReader,
 		ConversationMemorySources: dependencies.ConversationMemorySources,
+		DegradationObserver:       NewToolDegradationLogObserver(dependencies.Logger, "diagnosis"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Tool catalog: %w", err)
@@ -86,6 +89,21 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
 		ContextPreflight:      dependencies.ContextPreflight,
 		Logger:                dependencies.Logger,
+	})
+}
+
+func NewToolDegradationLogObserver(log *zap.Logger, component string) resilience.Observer {
+	if log == nil {
+		return nil
+	}
+	return resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+		log.Warn("Agent Tool degraded",
+			zap.String("component", component),
+			zap.String("operation", event.Operation), zap.String("policy", string(event.Policy)),
+			zap.String("fallback", event.Fallback), zap.String("reason_code", event.ReasonCode),
+			zap.String("run_id", event.RunID), zap.String("trace_id", event.TraceID),
+			zap.Int64("duration_millis", event.DurationMillis),
+		)
 	})
 }
 
@@ -107,7 +125,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	registrations := []ToolRegistration{
 		conversationToolResultRegistration,
 		{
-			Tool: readExternalCase, AllowedRoles: roles,
+			Tool: readExternalCase, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
@@ -115,13 +133,13 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	}
 	if dependencies.SkillReference != nil {
 		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.SkillReference, AllowedRoles: roles,
+			Tool: dependencies.SkillReference, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
 		})
 	}
 	if dependencies.KnowledgeSearch != nil {
 		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.KnowledgeSearch, AllowedRoles: roles,
+			Tool: dependencies.KnowledgeSearch, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
@@ -132,7 +150,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			continue
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: webTool, AllowedRoles: roles,
+			Tool: webTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityWebSearch},
 			RequiredDependencies: []ToolDependency{ToolDependencyWebSearch},
@@ -144,7 +162,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			return nil, fmt.Errorf("build create diagnosis task Tool: %w", err)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: createDiagnosisTask, AllowedRoles: roles,
+			Tool: createDiagnosisTask, FailurePolicy: resilience.PolicyStrict, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
@@ -156,7 +174,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			return nil, fmt.Errorf("build diagnosis task status Tool: %w", err)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: getDiagnosisTaskStatus, AllowedRoles: roles,
+			Tool: getDiagnosisTaskStatus, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityTask},
 		})
@@ -167,7 +185,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			return nil, fmt.Errorf("build read attachment Tool: %w", err)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: readAttachment, AllowedRoles: roles,
+			Tool: readAttachment, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityAttachment},
 			RequiredDependencies: []ToolDependency{ToolDependencyAttachment},
@@ -187,7 +205,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			continue
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: sqlTool, AllowedRoles: roles,
+			Tool: sqlTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			AllowedDataRoles: []DataSourceRole{
 				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
@@ -212,11 +230,14 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			return nil, fmt.Errorf("github tool %q is outside the read-only allowlist", info.Name)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: githubTool, AllowedRoles: roles,
+			Tool: githubTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
 			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
 		})
+	}
+	for index := range registrations {
+		registrations[index].DegradationObserver = dependencies.DegradationObserver
 	}
 	return NewToolCatalog(ctx, registrations...)
 }

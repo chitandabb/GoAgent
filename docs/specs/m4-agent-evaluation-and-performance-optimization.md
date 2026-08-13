@@ -376,6 +376,16 @@ Degradation Event，并进入 `search_knowledge` Tool 结果和 Zap Observer。�
 部分子查询失败产生 `partial_failure -> available_results` 事件；双路基础设施全部失败则向 Agent 返回
 不含底层错误的结构化 `all_channels_failed`，不能伪装成空检索结果。
 
+Ticket 03 已把统一语义接入真实 Agent 边界。Tool 注册必须显式声明失败策略：创建诊断任务等副作用命令为
+`strict`，普通只读 Tool 为 `best_effort`；TaskScope、授权和 SQL Query Guard 仍在回退之前 fail closed。
+只读 Tool 的失败会先分类：安全/授权错误严格传播，参数错误结构化为不可重试拒绝，只有明确标记的暂时依赖故障
+才返回脱敏 Tool Error 并产生一次 `best_effort -> agent_selects_alternative_source` Degradation Event；诊断任务 ID
+或会话 User Message ID 作为 Run ID。SQL Query Guard、Catalog 授权和数据源授权保持 strict，数据库暂时不可用
+才允许降级。Evidence Orchestrator 和会话 Citation Repairer 必须显式配置 `repair_then_fail`；完整诊断报告合同最多
+初次生成加一次修复，JSON、字段或 Evidence 绑定任一仍失败时只能输出 `partial/inconclusive`，引用修复耗尽后保持
+`evidence_insufficient`，都不会接受未经校验的自由文本。知识 Worker 沿用已有 lease/attempt 状态机：OCR/VLM
+暂时失败进入 retry，且不会调用 Parsed Result/Complete 发布路径；没有为统一协议另建业务状态机。
+
 ### Resume Update Rule
 
 The final fifth resume point should describe the unified protocol and the two measured optimizations. A valid final form is:

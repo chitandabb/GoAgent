@@ -52,8 +52,10 @@ func TestKnowledgeWorkerSchedulesTransientRetry(t *testing.T) {
 		return ExecutionResult{}, errors.New("OCR temporarily unavailable")
 	}))
 	outcome := worker.Process(context.Background(), validKnowledgeIncomingMessage(t, lease.TaskID, lease.DocumentVersionID))
-	if outcome.Action != ActionRetry || outcome.RetryDelay != 2*time.Minute || repo.releaseCalls != 1 || repo.failCalls != 0 {
-		t.Fatalf("outcome=%+v release=%d fail=%d", outcome, repo.releaseCalls, repo.failCalls)
+	if outcome.Action != ActionRetry || outcome.RetryDelay != 2*time.Minute || repo.releaseCalls != 1 ||
+		repo.failCalls != 0 || repo.parsedCalls != 0 || repo.completeCalls != 0 {
+		t.Fatalf("outcome=%+v release=%d fail=%d parsed=%d complete=%d",
+			outcome, repo.releaseCalls, repo.failCalls, repo.parsedCalls, repo.completeCalls)
 	}
 }
 

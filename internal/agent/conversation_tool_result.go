@@ -11,6 +11,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -156,6 +157,7 @@ func NewConversationToolResultRegistration() (ToolRegistration, error) {
 	}
 	return ToolRegistration{
 		Tool:             reader,
+		FailurePolicy:    resilience.PolicyBestEffort,
 		AllowedRoles:     []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
 		AllowedTaskTypes: []TaskType{TaskTypeConversation},
 	}, nil

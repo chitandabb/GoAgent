@@ -2,6 +2,7 @@ package resilience_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/resilience"
@@ -44,6 +45,25 @@ func TestRunIdentityRoundTripsThroughContext(t *testing.T) {
 	}
 	if _, ok := resilience.RunIdentityFromContext(context.Background()); ok {
 		t.Fatal("empty context should not invent a correlation identity")
+	}
+}
+
+func TestClassifiedFailurePreservesCauseAndDisposition(t *testing.T) {
+	cause := errors.New("provider unavailable")
+	for _, test := range []struct {
+		name string
+		err  error
+		want resilience.FailureDisposition
+	}{
+		{name: "strict", err: resilience.StrictFailure(cause), want: resilience.FailureStrict},
+		{name: "retryable", err: resilience.RetryableFailure(cause), want: resilience.FailureRetryable},
+		{name: "unclassified", err: cause, want: resilience.FailureRejected},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !errors.Is(test.err, cause) || resilience.FailureDispositionOf(test.err) != test.want {
+				t.Fatalf("failure = %v/%s", test.err, resilience.FailureDispositionOf(test.err))
+			}
+		})
 	}
 }
 

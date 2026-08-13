@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/compose"
 	"go.uber.org/zap"
 )
@@ -41,6 +42,7 @@ type AgentInvoker interface {
 type EvidenceOrchestratorConfig struct {
 	Runner                    AgentInvoker
 	Logger                    *zap.Logger
+	ReportPolicy              resilience.Policy
 	MaxAgentRuns              int
 	MaxToolCalls              int
 	MaxEvidenceItems          int
@@ -98,6 +100,7 @@ type EvidenceOrchestrator struct {
 	maxTotalTokens            int
 	timeout                   time.Duration
 	reportContractInstruction string
+	reportContract            resilience.Contract
 	graph                     compose.Runnable[*evidenceState, *evidenceState]
 }
 
@@ -146,6 +149,7 @@ func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig
 		timeout:                   cfg.Timeout,
 		reportContractInstruction: strings.TrimSpace(cfg.ReportContractInstruction),
 	}
+	orchestrator.reportContract, _ = cfg.ReportPolicy.Contract()
 	runnable, err := orchestrator.buildGraph(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("build Evidence Gate graph: %w", err)
@@ -173,6 +177,9 @@ func applyEvidenceDefaults(cfg *EvidenceOrchestratorConfig) {
 }
 
 func validateEvidenceConfig(cfg EvidenceOrchestratorConfig) error {
+	if cfg.ReportPolicy != resilience.PolicyRepairThenFail {
+		return errors.New("evidence report policy must be repair_then_fail")
+	}
 	if strings.TrimSpace(cfg.ReportContractInstruction) == "" {
 		return errors.New("evidence report contract instruction is required")
 	}
@@ -371,6 +378,11 @@ func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceS
 	if len(gaps) == 0 && state.parsedReport != nil {
 		state.nextNode = evidenceNodeReport
 		state.appendStep(InvestigationGate, "证据门禁", "报告字段与证据引用校验通过", "completed", "", 0)
+		return state, nil
+	}
+	if len(gaps) > 0 && state.agentRuns >= o.reportContract.MaxAttempts {
+		state.nextNode = evidenceNodePartialReport
+		state.appendStep(InvestigationGate, "结构化报告门禁", strings.Join(gaps, "；"), "partial", "", 0)
 		return state, nil
 	}
 	if state.canRunAgain(o.maxAgentRuns) {

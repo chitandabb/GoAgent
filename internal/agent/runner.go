@@ -10,11 +10,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/resilience"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -215,6 +218,9 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	scope, ok := TaskScopeFromContext(ctx)
 	if !ok {
 		return RunResult{}, ErrTaskScopeRequired
+	}
+	if _, ok := resilience.RunIdentityFromContext(ctx); !ok {
+		ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: uuid.NewString()})
 	}
 	allowedTools, resolveErr := r.toolProvider.ToolsFor(ctx, scope)
 	if resolveErr != nil {

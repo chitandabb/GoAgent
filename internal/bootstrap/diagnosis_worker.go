@@ -16,6 +16,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformrabbitmq "github.com/chitandabb/GoAgent/internal/platform/rabbitmq"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 
 	"github.com/google/uuid"
@@ -177,6 +178,7 @@ func (e diagnosisAgentExecutor) Execute(
 		return diagnosisworker.ExecutionResult{}, err
 	}
 	runCtx := agent.WithTaskScope(ctx, scope)
+	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{RunID: task.ID.String()})
 	runCtx = agent.WithDiagnosisAttachmentContext(runCtx, task.ID)
 	runCtx = withExecutionCaseSnapshot(runCtx, task.CaseSnapshot)
 	if e.runtime.webResearch != nil {
