@@ -8,6 +8,9 @@ import (
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type rerankerStub struct {
@@ -306,6 +309,14 @@ func TestSearchServiceFallsBackWhenQueryRewriterTimesOutInternally(t *testing.T)
 }
 
 func TestSearchServiceReportsOneQueryRewriteDegradationThroughPublicResult(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
 	var observed []resilience.DegradationEvent
 	profile, err := NewEmbeddingProfile(
 		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
@@ -343,6 +354,22 @@ func TestSearchServiceReportsOneQueryRewriteDegradationThroughPublicResult(t *te
 		event.Provider != "dashscope" || event.Model != "qwen-flash" || event.DurationMillis < 0 {
 		t.Fatalf("event = %+v", event)
 	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "retrieval.knowledge_search" {
+		t.Fatalf("unexpected Retrieval spans: %#v", spans)
+	}
+	if got := retrievalAttribute(spans[0], "mesguard.retrieval.result_count"); got != "1" {
+		t.Fatalf("retrieval result count = %q, want 1", got)
+	}
+}
+
+func retrievalAttribute(span tracetest.SpanStub, key string) string {
+	for _, item := range span.Attributes {
+		if string(item.Key) == key {
+			return item.Value.Emit()
+		}
+	}
+	return ""
 }
 
 func TestSearchServiceDoesNotReportDegradationForNormalNoMatch(t *testing.T) {

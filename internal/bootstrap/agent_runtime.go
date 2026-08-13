@@ -14,6 +14,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
@@ -46,6 +47,7 @@ type agentRuntime struct {
 	conversationPromptVersion string
 	unavailable               error
 	closeMCP                  func() error
+	closeTracing              func() error
 	webResearch               *webresearch.Service
 }
 
@@ -153,8 +155,43 @@ func buildAgentRuntimeForRole(
 	if log == nil {
 		return nil, errors.New("agent runtime logger is nil")
 	}
+	if cfg.Observability.Enabled {
+		headers, headersErr := cfg.Observability.Headers()
+		if headersErr != nil {
+			log.Warn("OpenTelemetry exporter unavailable; continuing without trace export", zap.Error(headersErr))
+		} else {
+			traceRuntime, traceErr := observability.NewRuntime(ctx, observability.RuntimeConfig{
+				ServiceName: cfg.Observability.ServiceName, Environment: cfg.Observability.Environment,
+				Endpoint: cfg.Observability.OTLPEndpoint, Headers: headers,
+				SampleRatio:   cfg.Observability.SampleRatio,
+				ExportTimeout: time.Duration(cfg.Observability.ExportTimeoutMillis) * time.Millisecond,
+				ErrorHandler: observability.NewRateLimitedErrorHandler(
+					time.Duration(cfg.Observability.ErrorLogIntervalMillis)*time.Millisecond,
+					func(exportErr error) {
+						log.Warn("OpenTelemetry export failed", zap.Error(exportErr))
+					},
+				),
+			})
+			if traceErr != nil {
+				log.Warn("OpenTelemetry exporter unavailable; continuing without trace export", zap.Error(traceErr))
+			} else {
+				runtime.closeTracing = func() error {
+					shutdownCtx, cancel := context.WithTimeout(
+						context.Background(),
+						time.Duration(cfg.Observability.ExportTimeoutMillis)*time.Millisecond,
+					)
+					defer cancel()
+					if shutdownErr := traceRuntime.Shutdown(shutdownCtx); shutdownErr != nil {
+						log.Warn("OpenTelemetry exporter shutdown failed", zap.Error(shutdownErr))
+					}
+					return nil
+				}
+			}
+		}
+	}
 	prompts, err := cfg.Agent.LoadPrompts()
 	if err != nil {
+		_ = runtime.close()
 		return nil, fmt.Errorf("load Agent prompts: %w", err)
 	}
 	if externalCases == nil {
@@ -348,6 +385,8 @@ func buildAgentRuntimeForRole(
 		CreateDiagnosisTask:   builders.conversationCreator,
 		AttachmentReader:      builders.attachmentReader,
 		ContextPreflight:      diagnosisPreflight,
+		ModelProvider:         runtime.modelProvider,
+		ModelID:               runtime.modelID,
 		Logger:                log.Named("runner"),
 	})
 	if err != nil {
@@ -721,8 +760,15 @@ func (unavailableExternalCaseGetter) Get(context.Context, uuid.UUID) (*externalc
 }
 
 func (r *agentRuntime) close() error {
-	if r == nil || r.closeMCP == nil {
+	if r == nil {
 		return nil
 	}
-	return r.closeMCP()
+	var mcpErr, tracingErr error
+	if r.closeMCP != nil {
+		mcpErr = r.closeMCP()
+	}
+	if r.closeTracing != nil {
+		tracingErr = r.closeTracing()
+	}
+	return errors.Join(mcpErr, tracingErr)
 }

@@ -2,6 +2,16 @@
 host = "0.0.0.0"
 port = 9090
 
+[observability]
+enabled = false
+serviceName = "mesguard-api"
+environment = "development"
+otlpEndpoint = "http://localhost:3000/api/public/otel/v1/traces"
+headersEnv = "MESGUARD_OTEL_HEADERS_JSON"
+sampleRatio = 1.0
+exportTimeoutMillis = 3000
+errorLogIntervalMillis = 60000
+
 [auth]
 allowedOrigins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:9090", "http://127.0.0.1:9090"]
 cookieDomain = ""

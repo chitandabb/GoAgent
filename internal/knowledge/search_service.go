@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -203,6 +205,30 @@ func NewSearchServiceWithOptions(
 }
 
 func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query string, limit int) (HybridSearch, error) {
+	ctx, span := observability.StartRetrieval(ctx, "knowledge_search")
+	span.SetAttributes(attribute.Int("mesguard.retrieval.query_runes", len([]rune(query))))
+	result, err := s.search(ctx, actorID, query, limit)
+	span.SetAttributes(
+		attribute.Int("mesguard.retrieval.result_count", len(result.Results)),
+		attribute.Bool("mesguard.retrieval.degraded", result.Degraded),
+		attribute.StringSlice("mesguard.retrieval.sources", result.Sources),
+		attribute.StringSlice("mesguard.retrieval.missing_channels", result.MissingChannels),
+		attribute.Bool("mesguard.retrieval.context_truncated", contextGroupsTruncated(result.ContextGroups)),
+	)
+	observability.End(span, err)
+	return result, err
+}
+
+func contextGroupsTruncated(groups []SearchContextGroup) bool {
+	for _, group := range groups {
+		if group.Truncated {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *SearchService) search(ctx context.Context, actorID uuid.UUID, query string, limit int) (HybridSearch, error) {
 	if s == nil || s.repository == nil {
 		return HybridSearch{}, errors.New("knowledge search service is unavailable")
 	}
@@ -399,6 +425,7 @@ func (s *SearchService) appendDegradation(ctx context.Context, result *HybridSea
 	if s.degradationObserver != nil {
 		s.degradationObserver.ObserveDegradation(event)
 	}
+	observability.RecordDegradation(ctx, event)
 	return nil
 }
 

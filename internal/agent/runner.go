@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/adk"
@@ -104,6 +105,8 @@ type RunnerConfig struct {
 	Timeout               time.Duration
 	MaxToolResultBytes    int
 	ContextPreflight      DiagnosisContextPreflightConfig
+	ModelProvider         string
+	ModelID               string
 }
 
 // Runner 只保存可安全共享的只读依赖；ChatModelAgent 必须在每次 Invoke 时单独创建。
@@ -123,6 +126,8 @@ type Runner struct {
 	timeout               time.Duration
 	maxToolResultBytes    int
 	contextPreflight      DiagnosisContextPreflightConfig
+	modelProvider         string
+	modelID               string
 }
 
 func NewRunner(cfg RunnerConfig) (*Runner, error) {
@@ -178,6 +183,8 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 		maxIterations: cfg.MaxIterations, timeout: cfg.Timeout,
 		maxToolResultBytes: cfg.MaxToolResultBytes,
 		contextPreflight:   cfg.ContextPreflight,
+		modelProvider:      strings.TrimSpace(cfg.ModelProvider),
+		modelID:            strings.TrimSpace(cfg.ModelID),
 	}, nil
 }
 
@@ -197,6 +204,8 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		return RunResult{}, errors.New("agent runner is nil")
 	}
 	startedAt := time.Now()
+	traceID := ""
+	runID := ""
 	defer func() {
 		fields := []zap.Field{
 			zap.String("entry_skill", string(result.SkillID)),
@@ -204,6 +213,8 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 			zap.Int("tool_calls", len(result.ToolExecutions)),
 			zap.Int("model_calls", result.Usage.ModelCalls),
 			zap.Int("total_tokens", result.Usage.TotalTokens),
+			zap.String("trace_id", traceID),
+			zap.String("run_id", runID),
 		}
 		if err != nil {
 			r.log.Warn("Agent run failed", append(fields, zap.Error(err))...)
@@ -222,6 +233,13 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if _, ok := resilience.RunIdentityFromContext(ctx); !ok {
 		ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: uuid.NewString()})
 	}
+	ctx, agentSpan := observability.StartAgentRun(ctx, "diagnosis")
+	ctx = observability.BindTraceIdentity(ctx)
+	traceID = observability.TraceID(ctx)
+	if identity, ok := resilience.RunIdentityFromContext(ctx); ok {
+		runID = identity.RunID
+	}
+	defer func() { observability.End(agentSpan, err) }()
 	allowedTools, resolveErr := r.toolProvider.ToolsFor(ctx, scope)
 	if resolveErr != nil {
 		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
@@ -308,6 +326,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 			UnknownToolsHandler:  rejectUnknownTool,
 			ToolArgumentsHandler: r.rewriteToolArguments,
 			ToolCallMiddlewares: []compose.ToolMiddleware{
+				newToolObservabilityMiddleware(),
 				newToolTraceMiddleware(r.maxToolResultBytes),
 			},
 		}},
@@ -321,7 +340,10 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	iterator := adk.NewRunner(runCtx, adk.RunnerConfig{Agent: agentInstance}).Query(
 		runCtx,
 		userPrompt,
-		adk.WithCallbacks(newModelUsageHandler(usageTrace)),
+		adk.WithCallbacks(
+			newModelUsageHandler(usageTrace),
+			newModelTracingHandler(r.modelProvider, r.modelID),
+		),
 	)
 	for {
 		event, more := iterator.Next()
@@ -621,7 +643,7 @@ func newToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {
 }
 
 func truncateModelToolResult(value string, maxBytes int) string {
-	const marker = "\n[tool result truncated by MESGuard]"
+	const marker = "\n" + toolResultTruncationPrefix + "]"
 	if len(value) <= maxBytes {
 		return value
 	}

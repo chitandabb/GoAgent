@@ -33,8 +33,10 @@ func (e *OperationError) Unwrap() error {
 }
 
 type RunIdentity struct {
-	RunID   string
-	TraceID string
+	RunID          string
+	TraceID        string
+	ConversationID string
+	TaskID         string
 }
 
 type runIdentityContextKey struct{}
@@ -48,11 +50,19 @@ func RunIdentityFromContext(ctx context.Context) (RunIdentity, bool) {
 		return RunIdentity{}, false
 	}
 	identity, ok := ctx.Value(runIdentityContextKey{}).(RunIdentity)
-	if !ok || strings.TrimSpace(identity.RunID) == "" || identity.RunID != strings.TrimSpace(identity.RunID) ||
-		len(identity.RunID) > 128 || identity.TraceID != strings.TrimSpace(identity.TraceID) || len(identity.TraceID) > 128 {
+	if !ok || !validRequiredIdentity(identity.RunID) || !validOptionalIdentity(identity.TraceID) ||
+		!validOptionalIdentity(identity.ConversationID) || !validOptionalIdentity(identity.TaskID) {
 		return RunIdentity{}, false
 	}
 	return identity, true
+}
+
+func validRequiredIdentity(value string) bool {
+	return strings.TrimSpace(value) != "" && value == strings.TrimSpace(value) && len(value) <= 128
+}
+
+func validOptionalIdentity(value string) bool {
+	return value == strings.TrimSpace(value) && len(value) <= 128
 }
 
 type Policy string

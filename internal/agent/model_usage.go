@@ -5,10 +5,14 @@ import (
 	"io"
 	"sync"
 
+	"github.com/chitandabb/GoAgent/internal/observability"
+
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ModelUsage 汇总一次 Agent 执行中的全部 ChatModel 调用。
@@ -167,4 +171,105 @@ func newModelUsageHandler(trace *modelUsageTrace) callbacks.Handler {
 			return ctx
 		}).
 		Build()
+}
+
+type modelSpanContextKey struct{}
+
+type modelSpanState struct {
+	span trace.Span
+	once sync.Once
+}
+
+func newModelTracingHandler(provider, modelID string) callbacks.Handler {
+	finish := func(ctx context.Context, err error, output callbacks.CallbackOutput) context.Context {
+		state, _ := ctx.Value(modelSpanContextKey{}).(*modelSpanState)
+		if state == nil {
+			return ctx
+		}
+		state.once.Do(func() {
+			if usage := modelUsageFromOutput(output); usage != nil {
+				state.span.SetAttributes(
+					attribute.Int("gen_ai.usage.input_tokens", usage.PromptTokens),
+					attribute.Int("gen_ai.usage.output_tokens", usage.CompletionTokens),
+					attribute.Int("mesguard.model.cached_tokens", usage.CachedTokens),
+					attribute.Int("mesguard.model.reasoning_tokens", usage.ReasoningTokens),
+				)
+			}
+			observability.End(state.span, err)
+		})
+		return ctx
+	}
+	return callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
+			if info == nil || info.Component != components.ComponentOfChatModel {
+				return ctx
+			}
+			operation := info.Name
+			if operation == "" {
+				operation = "chat"
+			}
+			ctx, span := observability.StartModelCall(ctx, operation, provider, modelID)
+			return context.WithValue(ctx, modelSpanContextKey{}, &modelSpanState{span: span})
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info == nil || info.Component != components.ComponentOfChatModel {
+				return ctx
+			}
+			return finish(ctx, nil, output)
+		}).
+		OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+			if info == nil || info.Component != components.ComponentOfChatModel {
+				return ctx
+			}
+			return finish(ctx, err, nil)
+		}).
+		OnEndWithStreamOutputFn(func(
+			ctx context.Context,
+			info *callbacks.RunInfo,
+			output *schema.StreamReader[callbacks.CallbackOutput],
+		) context.Context {
+			if info == nil || info.Component != components.ComponentOfChatModel || output == nil {
+				return ctx
+			}
+			defer output.Close()
+			var last callbacks.CallbackOutput
+			for {
+				item, err := output.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return finish(ctx, err, nil)
+				}
+				if modelUsageFromOutput(item) != nil {
+					last = item
+				}
+			}
+			return finish(ctx, nil, last)
+		}).
+		Build()
+}
+
+func modelUsageFromOutput(output callbacks.CallbackOutput) *ModelUsage {
+	modelOutput := model.ConvCallbackOutput(output)
+	if modelOutput == nil {
+		return nil
+	}
+	if usage := modelOutput.TokenUsage; usage != nil {
+		return &ModelUsage{
+			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+			TotalTokens: usage.TotalTokens, CachedTokens: usage.PromptTokenDetails.CachedTokens,
+			ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens,
+		}
+	}
+	if modelOutput.Message == nil || modelOutput.Message.ResponseMeta == nil ||
+		modelOutput.Message.ResponseMeta.Usage == nil {
+		return nil
+	}
+	usage := modelOutput.Message.ResponseMeta.Usage
+	return &ModelUsage{
+		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+		TotalTokens: usage.TotalTokens, CachedTokens: usage.PromptTokenDetails.CachedTokens,
+		ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens,
+	}
 }

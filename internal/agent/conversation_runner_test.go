@@ -21,6 +21,9 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -42,6 +45,34 @@ type conversationRunnerModelState struct {
 type conversationRunnerTestModel struct {
 	state *conversationRunnerModelState
 	tools []*schema.ToolInfo
+}
+
+type conversationTracingKnowledgeRepository struct {
+	result knowledge.SearchResult
+}
+
+type rejectingSpanExporter struct{}
+
+func (rejectingSpanExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	return errors.New("fixture exporter rejected spans")
+}
+
+func (rejectingSpanExporter) Shutdown(context.Context) error { return nil }
+
+func (r conversationTracingKnowledgeRepository) CreateDocument(context.Context, knowledge.CreateDocumentInput) (knowledge.Document, error) {
+	return knowledge.Document{}, errors.New("not implemented in tracing fixture")
+}
+
+func (r conversationTracingKnowledgeRepository) PublishVersion(context.Context, knowledge.PublishVersionInput) (knowledge.DocumentVersion, error) {
+	return knowledge.DocumentVersion{}, errors.New("not implemented in tracing fixture")
+}
+
+func (r conversationTracingKnowledgeRepository) SearchFTS(context.Context, uuid.UUID, string, int) ([]knowledge.SearchResult, error) {
+	return []knowledge.SearchResult{r.result}, nil
+}
+
+func (r conversationTracingKnowledgeRepository) SearchVector(context.Context, uuid.UUID, uuid.UUID, []float32, int) ([]knowledge.SearchResult, error) {
+	return nil, errors.New("vector is disabled in tracing fixture")
 }
 
 type failingConversationTokenBudgetPlanner struct {
@@ -955,6 +986,118 @@ func TestConversationRunnerGuardsEveryReActModelCallAfterToolGrowth(t *testing.T
 		response.RunObservation.PromptManifest.ActualUsageAvailable ||
 		!slices.Contains(response.RunObservation.PromptManifest.DegradedReasons, "react_prompt_blocked") {
 		t.Fatalf("runtime guard response=%+v record=%+v present=%v", response, failure, ok)
+	}
+}
+
+func TestConversationRunnerProducesOneCorrelatedAgentTrace(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+
+	content := "连接池超时应先检查最大连接数和慢查询。"
+	searchService, err := knowledge.NewSearchService(
+		conversationTracingKnowledgeRepository{result: knowledge.SearchResult{
+			DocumentID: uuid.New(), DocumentVersionID: uuid.New(), ChunkID: uuid.New(),
+			Title: "连接池运行手册", Scope: knowledge.ScopeGlobal, Ordinal: 1,
+			ElementType: knowledge.ElementText, ContentText: content,
+			ContentSHA256: knowledge.SHA256Hex(content), Score: 0.9, FTSRank: 1,
+		}}, nil, knowledge.EmbeddingProfile{}, 5,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeTool, err := NewSearchKnowledgeTool(searchService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &conversationRunnerModelState{searchKnowledgeIfAvailable: true}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
+		SystemInstruction: "tracing fixture", ModelProvider: "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", AvailableDependencies: []ToolDependency{ToolDependencyKnowledge},
+		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil || response.Content == "" {
+		t.Fatalf("Respond() response=%+v error=%v", response, err)
+	}
+
+	spans := exporter.GetSpans()
+	var root, toolSpan tracetest.SpanStub
+	var models, retrievals int
+	var degradationSeen bool
+	for _, span := range spans {
+		switch {
+		case span.Name == "agent.conversation":
+			root = span
+		case strings.HasPrefix(span.Name, "model."):
+			models++
+		case span.Name == "tool.search_knowledge":
+			toolSpan = span
+		case span.Name == "retrieval.knowledge_search":
+			retrievals++
+			for _, event := range span.Events {
+				degradationSeen = degradationSeen || event.Name == "mesguard.degradation"
+			}
+		}
+		for _, item := range span.Attributes {
+			if strings.Contains(item.Value.Emit(), "连接池超时") || strings.Contains(item.Value.Emit(), content) {
+				t.Fatalf("span %s captured raw content in %s", span.Name, item.Key)
+			}
+		}
+	}
+	if !root.SpanContext.IsValid() || !toolSpan.SpanContext.IsValid() || models != 2 || retrievals != 1 || !degradationSeen {
+		t.Fatalf("unexpected trace spans=%#v models=%d retrievals=%d degradation=%v", spans, models, retrievals, degradationSeen)
+	}
+	for _, span := range spans {
+		if span.SpanContext.TraceID() != root.SpanContext.TraceID() {
+			t.Fatalf("span %s escaped root trace", span.Name)
+		}
+		if strings.HasPrefix(span.Name, "model.") || strings.HasPrefix(span.Name, "tool.") {
+			if span.Parent.SpanID() != root.SpanContext.SpanID() {
+				t.Fatalf("span %s parent=%s, want root=%s", span.Name, span.Parent.SpanID(), root.SpanContext.SpanID())
+			}
+		}
+		if span.Name == "retrieval.knowledge_search" && span.Parent.SpanID() != toolSpan.SpanContext.SpanID() {
+			t.Fatalf("retrieval parent=%s, want tool=%s", span.Parent.SpanID(), toolSpan.SpanContext.SpanID())
+		}
+	}
+}
+
+func TestConversationRunnerAnswerSurvivesTraceExporterFailure(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(rejectingSpanExporter{}))
+	previousProvider := otel.GetTracerProvider()
+	previousHandler := otel.GetErrorHandler()
+	otel.SetTracerProvider(provider)
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {}))
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+		otel.SetErrorHandler(previousHandler)
+	})
+
+	runner := newConversationRunnerTest(
+		t, &conversationRunnerModelState{finalContent: "仍然返回业务答案。"}, &diagnosisToolCreatorStub{},
+	)
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil || response.Content != "仍然返回业务答案。" {
+		t.Fatalf("trace export failure changed response=%+v error=%v", response, err)
 	}
 }
 
