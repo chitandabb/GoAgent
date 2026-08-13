@@ -1,0 +1,198 @@
+{
+  "schemaVersion": "evaluation_inventory_v1",
+  "artifactRoot": "..",
+  "assets": [
+    {
+      "id": "tool-selection-v1",
+      "domain": "tool_selection",
+      "observationKind": "tool_selection",
+      "status": "retest_needed",
+      "reason": "The 2026-08-03 raw observations remain replayable, but Tool Catalog, Skill loading, and conversation Tool exposure changed afterwards; current resume metrics require a selective paired retest.",
+      "entryPoint": "mesguard-tool-selection-eval",
+      "datasetArtifact": "testdata/tool-selection-v1.jsonl",
+      "observationArtifact": "testdata/tool-selection-v1.observations.jsonl",
+      "reportArtifact": "testdata/tool-selection-v1.summary.json"
+    },
+    {
+      "id": "text-to-sql-v1",
+      "domain": "text_to_sql",
+      "observationKind": "text_to_sql",
+      "status": "retest_needed",
+      "reason": "The recorded execution results remain historical evidence, but the model Profile, Agent orchestration, and SQL investigation contracts evolved after the run; current execution accuracy requires a bounded selective retest.",
+      "entryPoint": "mesguard-text2sql-eval",
+      "datasetArtifact": "testdata/text-to-sql-v1.jsonl",
+      "observationArtifact": "testdata/text-to-sql-v1.observations.jsonl",
+      "reportArtifact": "testdata/text-to-sql-v1.summary.json"
+    },
+    {
+      "id": "sql-safety-v1",
+      "domain": "text_to_sql",
+      "observationKind": "sql_safety",
+      "status": "reusable",
+      "reason": "The deterministic QueryGuard fixture remains reusable for its frozen safety rules; it is separate from model-generated SQL execution accuracy.",
+      "entryPoint": "mesguard-sql-safety-eval",
+      "datasetArtifact": "testdata/sql-safety-v1.jsonl",
+      "observationArtifact": "testdata/sql-safety-v1.observations.jsonl",
+      "reportArtifact": "testdata/sql-safety-v1.summary.json"
+    },
+    {
+      "id": "rag-retrieval-v1-fts",
+      "domain": "rag_retrieval",
+      "observationKind": "rag_retrieval",
+      "status": "reusable",
+      "reason": "The deterministic PostgreSQL FTS observations remain a valid scoped historical baseline and can be recomputed locally; they do not represent the later Vector, RRF, Rerank, or answer-generation path.",
+      "entryPoint": "mesguard-rag-retrieval-eval",
+      "datasetArtifact": "testdata/rag-retrieval-v1.jsonl",
+      "observationArtifact": "testdata/rag-retrieval-v1.observations.jsonl",
+      "reportArtifact": "testdata/rag-retrieval-v1.summary.json"
+    },
+    {
+      "id": "rag-advanced-paired-v1",
+      "domain": "rag_retrieval",
+      "observationKind": "advanced_rag_paired",
+      "status": "retest_needed",
+      "reason": "Parent expansion, rewrite, compression, and rerank observations remain historical evidence, but current Profiles and retrieval contracts require local recomputation followed by selective retesting.",
+      "entryPoint": "mesguard-rag-paired-eval",
+      "datasetArtifact": "testdata/rag-advanced-v1.jsonl",
+      "reportArtifact": "docs/evaluations/rag-advanced-v1.md"
+    },
+    {
+      "id": "agentic-retrieval-v1",
+      "domain": "rag_retrieval",
+      "observationKind": "agentic_retrieval",
+      "status": "retest_needed",
+      "reason": "The three-case decision fixture remains reusable, but current Agent orchestration and Evidence Gate behavior must be selectively retested before claiming current quality or Token gains.",
+      "entryPoint": "mesguard-agentic-retrieval-eval",
+      "datasetArtifact": "testdata/agentic-retrieval-v1.jsonl",
+      "reportArtifact": "docs/evaluations/rag-advanced-v1.md"
+    },
+    {
+      "id": "rag-judge-v2",
+      "domain": "rag_answer_quality",
+      "observationKind": "rag_judge",
+      "status": "recomputed",
+      "reason": "The Judge input contract can be replayed locally from reviewed facts; Provider-backed Judge output remains auxiliary and is not required for deterministic citation metrics.",
+      "entryPoint": "mesguard-rag-judge",
+      "datasetArtifact": "testdata/rag-judge-v2.sample.jsonl",
+      "reportArtifact": "docs/evaluations/conversation-quality-v1.md"
+    },
+    {
+      "id": "conversation-quality-v1",
+      "domain": "rag_answer_quality",
+      "observationKind": "conversation_quality",
+      "status": "retest_needed",
+      "reason": "The seeded and recorded observations remain usable for contract replay, but the Conversation Runner, citation repair, context governance, and model Profiles changed; current answer-quality claims require selective recorded-run retesting.",
+      "entryPoint": "mesguard-conversation-quality-eval",
+      "datasetArtifact": "testdata/conversation-quality-v1.jsonl",
+      "observationArtifact": "testdata/conversation-quality-v1.seeded.observations.jsonl",
+      "reportArtifact": "docs/evaluations/conversation-quality-v1.md"
+    },
+    {
+      "id": "agent-evaluation-sample",
+      "domain": "comprehensive_diagnosis",
+      "observationKind": "agent_evaluation",
+      "status": "obsolete",
+      "reason": "The sample fixture remains useful for evaluator contract tests but does not represent the current production Agent path or a resume-quality benchmark.",
+      "entryPoint": "mesguard-agent-eval",
+      "datasetArtifact": "testdata/agent-evaluation.dataset.sample.jsonl",
+      "observationArtifact": "testdata/agent-evaluation.sample.jsonl"
+    },
+    {
+      "id": "agent-real-v4",
+      "domain": "comprehensive_diagnosis",
+      "observationKind": "agent_paired",
+      "status": "obsolete",
+      "reason": "The recorded set contains one early SQL-focused pair from before the current Conversation-driven diagnosis, Evidence Gate, knowledge, and context-governance paths; retain it for history but do not use it as the M4 comprehensive baseline.",
+      "entryPoint": "mesguard-agent-paired-eval",
+      "datasetArtifact": "testdata/agent-evaluation.real-v4.jsonl",
+      "observationArtifact": "testdata/agent-evaluation.real-v4.observations.jsonl"
+    },
+    {
+      "id": "ingestion-throughput-v1",
+      "domain": "document_processing",
+      "observationKind": "ingestion_throughput",
+      "status": "retest_needed",
+      "reason": "The frozen throughput corpus and historical report remain useful, but current parser and worker changes require local validation and a bounded selective rerun before current throughput claims.",
+      "entryPoint": "mesguard-ingestion-throughput-eval",
+      "datasetArtifact": "testdata/rag-ingestion-throughput-v1.corpus.json",
+      "reportArtifact": "docs/evaluations/rag-ingestion-throughput-v1.md"
+    },
+    {
+      "id": "document-parse-eval",
+      "domain": "document_processing",
+      "observationKind": "document_parse",
+      "status": "retest_needed",
+      "reason": "The parser evaluator remains current as an entry point, but its external corpus inputs and parser implementations must be revalidated before current quality claims.",
+      "entryPoint": "mesguard-document-parse-eval",
+      "reportArtifact": "docs/evaluations/knowledge-ingestion-quality-v1.md"
+    },
+    {
+      "id": "layout-routing-public-v1",
+      "domain": "document_processing",
+      "observationKind": "layout_routing",
+      "status": "reusable",
+      "reason": "The frozen public layout corpus remains reusable for its documented routing-only boundary and must not be presented as OCR, VLM, or end-to-end RAG quality.",
+      "entryPoint": "mesguard-layout-routing-eval",
+      "datasetArtifact": "testdata/layout-routing-public-v1.jsonl",
+      "reportArtifact": "docs/evaluations/layout-routing-public-v1.md"
+    },
+    {
+      "id": "ocr-quality-eval",
+      "domain": "document_processing",
+      "observationKind": "ocr_quality",
+      "status": "retest_needed",
+      "reason": "Historical OCR pairs remain scoped evidence, but cloud model versions and provider behavior are time-sensitive; only explicitly budgeted cases may be retested.",
+      "entryPoint": "mesguard-ocr-quality-eval",
+      "reportArtifact": "docs/evaluations/knowledge-ingestion-quality-v1.md"
+    },
+    {
+      "id": "vlm-quality-local-v1",
+      "domain": "document_processing",
+      "observationKind": "vlm_quality",
+      "status": "retest_needed",
+      "reason": "The local VLM fixture remains reusable for schema validation, while Provider quality and latency are time-sensitive and require explicit bounded retesting.",
+      "entryPoint": "mesguard-vlm-quality-eval",
+      "datasetArtifact": "testdata/vlm-quality-local-v1.json",
+      "reportArtifact": "docs/evaluations/knowledge-ingestion-quality-v1.md"
+    },
+    {
+      "id": "pptx-element-quality-local-v1",
+      "domain": "document_processing",
+      "observationKind": "pptx_element_quality",
+      "status": "reusable",
+      "reason": "The frozen local PPTX element corpus remains reusable for deterministic element extraction and routing checks within its documented scope.",
+      "entryPoint": "mesguard-pptx-element-eval",
+      "datasetArtifact": "testdata/pptx-element-quality-local-v1.jsonl",
+      "reportArtifact": "docs/evaluations/knowledge-ingestion-quality-v1.md"
+    },
+    {
+      "id": "table-quality-eval",
+      "domain": "document_processing",
+      "observationKind": "table_quality",
+      "status": "retest_needed",
+      "reason": "The table evaluator remains valid, but current parser and recovery changes require corpus validation before reusing aggregate quality claims.",
+      "entryPoint": "mesguard-table-quality-eval",
+      "reportArtifact": "docs/evaluations/table-recovery-v1.md"
+    },
+    {
+      "id": "github-code-search-v2",
+      "domain": "tool_selection",
+      "observationKind": "github_search_stability",
+      "status": "retest_needed",
+      "reason": "The historical GitHub Code Search incomplete-result observations remain useful, but the external service and current MCP adapter are time-sensitive and require selective retesting.",
+      "entryPoint": "mesguard-github-search-eval",
+      "datasetArtifact": "testdata/github-code-search-v2.jsonl",
+      "reportArtifact": "docs/design/diagnostic-tools.md"
+    },
+    {
+      "id": "context-governance-pilot-v1",
+      "domain": "context_governance",
+      "observationKind": "context_governance_pilot",
+      "status": "retest_needed",
+      "reason": "The fixture and historical report remain useful, but Current Summary coordination and the controlled long-conversation sequence changed after earlier pilot runs; local replay and the bounded current acceptance sequence must be rerun before reusing metrics.",
+      "entryPoint": "mesguard-context-governance-pilot",
+      "datasetArtifact": "testdata/context-governance-pilot-v1.json",
+      "reportArtifact": "docs/evaluations/conversation-quality-v1.md"
+    }
+  ]
+}
