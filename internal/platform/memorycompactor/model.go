@@ -205,13 +205,14 @@ type previousSnapshotProjection struct {
 }
 
 type messageProjection struct {
-	Seq            int64                    `json:"seq"`
-	Role           conversation.MessageRole `json:"role"`
-	Content        string                   `json:"content"`
-	CaseReferences []string                 `json:"caseReferences"`
-	TaskReferences []string                 `json:"taskReferences"`
-	Attachments    []attachmentProjection   `json:"attachments"`
-	Citations      []citationProjection     `json:"citations"`
+	Seq              int64                    `json:"seq"`
+	Role             conversation.MessageRole `json:"role"`
+	Content          string                   `json:"content"`
+	CaseReferences   []string                 `json:"caseReferences"`
+	TaskReferences   []string                 `json:"taskReferences"`
+	ReportReferences []string                 `json:"reportReferences"`
+	Attachments      []attachmentProjection   `json:"attachments"`
+	Citations        []citationProjection     `json:"citations"`
 }
 
 type attachmentProjection struct {
@@ -262,16 +263,20 @@ func compactionRequest(input conversationmemory.CompactionInput, promptVersion s
 	for _, message := range input.NewMessages {
 		projection := messageProjection{
 			Seq: message.Seq, Role: message.Role, Content: message.Content,
-			CaseReferences: make([]string, 0, len(message.CaseReferences)),
-			TaskReferences: make([]string, 0, len(message.TaskReferences)),
-			Attachments:    make([]attachmentProjection, 0, len(message.Attachments)),
-			Citations:      make([]citationProjection, 0, len(message.Citations)),
+			CaseReferences:   make([]string, 0, len(message.CaseReferences)),
+			TaskReferences:   make([]string, 0, len(message.TaskReferences)),
+			ReportReferences: make([]string, 0, len(message.ReportReferences)),
+			Attachments:      make([]attachmentProjection, 0, len(message.Attachments)),
+			Citations:        make([]citationProjection, 0, len(message.Citations)),
 		}
 		for _, reference := range message.CaseReferences {
 			projection.CaseReferences = append(projection.CaseReferences, reference.ExternalCaseID.String())
 		}
 		for _, reference := range message.TaskReferences {
 			projection.TaskReferences = append(projection.TaskReferences, reference.TaskID.String())
+		}
+		for _, reference := range message.ReportReferences {
+			projection.ReportReferences = append(projection.ReportReferences, reference.ReferenceID)
 		}
 		for _, attachment := range message.Attachments {
 			projection.Attachments = append(projection.Attachments, attachmentProjection{
