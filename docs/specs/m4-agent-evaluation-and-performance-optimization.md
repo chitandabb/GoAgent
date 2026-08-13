@@ -165,6 +165,13 @@ MESGuard 将在现有领域评测器和运行 Observation 之上增加统一评�
 - Early Exit acceptance requires quality non-regression: completion and aggregate conclusion/citation correctness cannot
   decrease, no new high-severity wrong conclusion may appear, and every regressed Case must be listed for review.
 
+Current implementation (2026-08-13): the production zero value keeps Early Exit enabled, while the paired Baseline alone
+sets `DisableEarlyExit`. Both arms otherwise use the same production Runner mode, Prompt, Tool contracts, budgets and
+fixture fingerprint. The first Provider-free reviewed fixture contains 3/30 target Cases and writes its six raw
+Observations plus domain summary into `evaluation_ledger_v1`. Its deterministic call/Token/latency deltas validate the
+evaluation path only; they are not Provider performance evidence and cannot be copied into the resume. Provider-backed
+runs remain opt-in and require explicit Case, call and Token caps before any model client is created.
+
 ### Semantic Answer Cache Eligibility
 
 - The first release serves enterprise Global knowledge only. Personal knowledge remains outside the cache path.

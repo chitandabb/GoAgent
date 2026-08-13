@@ -40,9 +40,13 @@ type AgentInvoker interface {
 }
 
 type EvidenceOrchestratorConfig struct {
-	Runner                    AgentInvoker
-	Logger                    *zap.Logger
-	ReportPolicy              resilience.Policy
+	Runner       AgentInvoker
+	Logger       *zap.Logger
+	ReportPolicy resilience.Policy
+	// DisableEarlyExit is an evaluation control. Production keeps the zero value so a
+	// report that passes the Evidence Gate stops immediately; paired baselines set it
+	// to true to consume the same configured run budget without adding another gate.
+	DisableEarlyExit          bool
 	MaxAgentRuns              int
 	MaxToolCalls              int
 	MaxEvidenceItems          int
@@ -94,6 +98,7 @@ type OrchestrationResult struct {
 type EvidenceOrchestrator struct {
 	runner                    AgentInvoker
 	log                       *zap.Logger
+	disableEarlyExit          bool
 	maxAgentRuns              int
 	maxToolCalls              int
 	maxEvidenceItems          int
@@ -132,6 +137,7 @@ type evidenceState struct {
 	reportContractInstruction     string
 	contextObservation            DiagnosisContextObservation
 	contextPreparationStopped     bool
+	continueAfterGatePass         bool
 }
 
 func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig) (*EvidenceOrchestrator, error) {
@@ -144,7 +150,8 @@ func NewEvidenceOrchestrator(ctx context.Context, cfg EvidenceOrchestratorConfig
 	}
 	orchestrator := &EvidenceOrchestrator{
 		runner: cfg.Runner, log: cfg.Logger,
-		maxAgentRuns: cfg.MaxAgentRuns, maxToolCalls: cfg.MaxToolCalls,
+		disableEarlyExit: cfg.DisableEarlyExit,
+		maxAgentRuns:     cfg.MaxAgentRuns, maxToolCalls: cfg.MaxToolCalls,
 		maxEvidenceItems: cfg.MaxEvidenceItems, maxTotalTokens: cfg.MaxTotalTokens,
 		timeout:                   cfg.Timeout,
 		reportContractInstruction: strings.TrimSpace(cfg.ReportContractInstruction),
@@ -376,6 +383,20 @@ func (o *EvidenceOrchestrator) checkEvidence(_ context.Context, state *evidenceS
 	gaps = append(gaps, validateEvidenceReferences(state.parsedReport, state.evidenceItems)...)
 	state.gaps = uniqueStrings(append(state.gaps, gaps...))
 	if len(gaps) == 0 && state.parsedReport != nil {
+		if o.disableEarlyExit && state.canRunAgain(o.maxAgentRuns) {
+			state.continueAfterGatePass = true
+			state.nextNode = evidenceNodeAgentLoop
+			state.appendStep(
+				InvestigationGate,
+				"证据门禁",
+				"报告已通过；成对评测 Baseline 关闭 Early Exit，继续使用剩余调查预算",
+				"continued",
+				"",
+				0,
+			)
+			return state, nil
+		}
+		state.continueAfterGatePass = false
 		state.nextNode = evidenceNodeReport
 		state.appendStep(InvestigationGate, "证据门禁", "报告字段与证据引用校验通过", "completed", "", 0)
 		return state, nil
@@ -417,6 +438,14 @@ func (s *evidenceState) nextAgentQuery() string {
 		return strings.TrimSpace(s.request.UserQuery) + "\n\n" + s.reportContractInstruction
 	}
 	draft := truncatePromptValue(s.draft, defaultEvidenceMaxPromptBytes)
+	if s.continueAfterGatePass {
+		s.continueAfterGatePass = false
+		return strings.TrimSpace(s.request.UserQuery) +
+			"\n\n当前是成对评测 Baseline，Early Exit 已关闭。上一轮报告已通过 Evidence Gate；" +
+			"请在剩余的原始预算内复核是否还有必要的只读调查，不要为了增加调用而重复工具。" +
+			"无新增证据时保留原结论，并重新输出完整 JSON 报告。" +
+			"\n\n<previous_report>\n" + draft + "\n</previous_report>\n\n" + s.reportContractInstruction
+	}
 	retrievalInstruction := "本轮只修正报告结构与已有证据引用，不要重新检索企业知识。"
 	if s.agentRuns == 2 && s.agenticRetrievalEligible {
 		retrievalInstruction = "如现有证据仍不足，可以调用 search_knowledge，但最多一次；若没有新增证据，必须明确保留限制。"

@@ -90,10 +90,6 @@ func replay(opts options) (evaluationledger.Report, error) {
 	if err != nil {
 		return evaluationledger.Report{}, err
 	}
-	if asset.Domain != "tool_selection" || asset.ObservationKind != "tool_selection" {
-		return evaluationledger.Report{}, fmt.Errorf("asset %q observation kind %q is not supported by the first ledger slice", asset.ID, asset.ObservationKind)
-	}
-
 	if asset.DatasetArtifact == "" || asset.ObservationArtifact == "" {
 		return evaluationledger.Report{}, fmt.Errorf("asset %q does not declare both dataset and observation artifacts", asset.ID)
 	}
@@ -108,6 +104,33 @@ func replay(opts options) (evaluationledger.Report, error) {
 	if err != nil {
 		return evaluationledger.Report{}, fmt.Errorf("read observations: %w", err)
 	}
+	metadata := evaluationledger.SourceMetadata{
+		ModelProfile: opts.modelProfile, ConfigFingerprint: opts.configFingerprint,
+		ImplementationRevision: opts.implementationRevision,
+		DatasetSHA256:          datasetHash, ObservationSHA256: observationHash,
+	}
+	switch asset.ObservationKind {
+	case "tool_selection":
+		if asset.Domain != "tool_selection" {
+			return evaluationledger.Report{}, fmt.Errorf("asset %q domain %q does not match observation kind %q", asset.ID, asset.Domain, asset.ObservationKind)
+		}
+		return replayToolSelection(asset, metadata, datasetContents, observationContents)
+	case "evidence_gate_early_exit":
+		if asset.Domain != "evidence_gate_early_exit" {
+			return evaluationledger.Report{}, fmt.Errorf("asset %q domain %q does not match observation kind %q", asset.ID, asset.Domain, asset.ObservationKind)
+		}
+		return replayEvidenceGateEarlyExit(asset, metadata, datasetContents, observationContents)
+	default:
+		return evaluationledger.Report{}, fmt.Errorf("asset %q observation kind %q is not supported by the ledger replayer", asset.ID, asset.ObservationKind)
+	}
+}
+
+func replayToolSelection(
+	asset evaluationledger.Asset,
+	metadata evaluationledger.SourceMetadata,
+	datasetContents []byte,
+	observationContents []byte,
+) (evaluationledger.Report, error) {
 	cases, err := readJSONLines(bytes.NewReader(datasetContents), "dataset", func() mesagent.ToolSelectionCase {
 		return mesagent.ToolSelectionCase{}
 	})
@@ -132,11 +155,41 @@ func replay(opts options) (evaluationledger.Report, error) {
 		}
 	}
 
-	return mesagent.BuildToolSelectionLedger(asset, evaluationledger.SourceMetadata{
-		ModelProfile: opts.modelProfile, ConfigFingerprint: opts.configFingerprint,
-		ImplementationRevision: opts.implementationRevision,
-		DatasetSHA256:          datasetHash, ObservationSHA256: observationHash,
-	}, cases, observations)
+	return mesagent.BuildToolSelectionLedger(asset, metadata, cases, observations)
+}
+
+func replayEvidenceGateEarlyExit(
+	asset evaluationledger.Asset,
+	metadata evaluationledger.SourceMetadata,
+	datasetContents []byte,
+	observationContents []byte,
+) (evaluationledger.Report, error) {
+	cases, err := readJSONLines(bytes.NewReader(datasetContents), "dataset", func() mesagent.EvidenceGateEvaluationCase {
+		return mesagent.EvidenceGateEvaluationCase{}
+	})
+	if err != nil {
+		return evaluationledger.Report{}, err
+	}
+	for index, definition := range cases {
+		if err := definition.Validate(); err != nil {
+			return evaluationledger.Report{}, fmt.Errorf("dataset item %d: %w", index, err)
+		}
+	}
+	observations, err := readJSONLines(
+		bytes.NewReader(observationContents),
+		"observations",
+		func() mesagent.EvidenceGateEvaluationObservation { return mesagent.EvidenceGateEvaluationObservation{} },
+		"usage", "durationMillis", "qualityReviewed", "earlyExitEnabled",
+	)
+	if err != nil {
+		return evaluationledger.Report{}, err
+	}
+	for index, observation := range observations {
+		if err := observation.Validate(); err != nil {
+			return evaluationledger.Report{}, fmt.Errorf("observations item %d: %w", index, err)
+		}
+	}
+	return mesagent.BuildEvidenceGateEarlyExitLedger(asset, metadata, cases, observations)
 }
 
 func resolveInventoryArtifact(inventoryDir, artifact string) string {

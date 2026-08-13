@@ -75,6 +75,65 @@ func TestRunReplaysToolSelectionWithoutProviderAndRefusesOverwrite(t *testing.T)
 	}
 }
 
+func TestRunReplaysEvidenceGateEarlyExitWithoutProvider(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	inventoryPath := filepath.Join(dir, "inventory.json")
+	datasetPath := filepath.Join(dir, "dataset.jsonl")
+	observationsPath := filepath.Join(dir, "observations.jsonl")
+	outputPath := filepath.Join(dir, "ledger.json")
+	writeJSONFile(t, inventoryPath, evaluationledger.Inventory{
+		SchemaVersion: evaluationledger.InventorySchemaVersion, ArtifactRoot: ".",
+		Assets: []evaluationledger.Asset{{
+			ID: "evidence-gate-early-exit-v1", Domain: "evidence_gate_early_exit",
+			ObservationKind: "evidence_gate_early_exit", Status: evaluationledger.AssetRecomputed,
+			Reason: "Deterministic paired fixture.", EntryPoint: "mesguard-evaluation-ledger",
+			DatasetArtifact: "dataset.jsonl", ObservationArtifact: "observations.jsonl",
+		}},
+	})
+	writeJSONLines(t, datasetPath, []mesagent.EvidenceGateEvaluationCase{{
+		DatasetVersion: "evidence-gate-v1", CaseID: "case-1", EvidenceSufficientAtRun: 1,
+	}})
+	makeObservation := func(variant mesagent.EvaluationVariant, runs int) mesagent.EvidenceGateEvaluationObservation {
+		return mesagent.EvidenceGateEvaluationObservation{
+			DatasetVersion: "evidence-gate-v1", CaseID: "case-1", Variant: variant,
+			RunID: "case-1-" + string(variant), EarlyExitEnabled: variant == mesagent.EvaluationExperiment,
+			PairingFingerprint: "sha256:pair", ModelProvider: "fixture", ModelID: "scripted-v1",
+			ModelProfile: "fixture", PromptVersion: "diagnosis-v1", ReasoningEffort: "none",
+			AgentRuns: runs, Completed: true, QualityReviewed: true,
+			ConclusionCorrect: true, CitationCorrect: true,
+			Usage:     mesagent.ModelUsage{ModelCalls: runs, PromptTokens: runs * 90, CompletionTokens: runs * 10, TotalTokens: runs * 100},
+			ToolCalls: runs, DurationMillis: int64(runs * 100),
+		}
+	}
+	writeJSONLines(t, observationsPath, []mesagent.EvidenceGateEvaluationObservation{
+		makeObservation(mesagent.EvaluationBaseline, 2),
+		makeObservation(mesagent.EvaluationExperiment, 1),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"-inventory", inventoryPath, "-asset", "evidence-gate-early-exit-v1", "-output", outputPath,
+		"-model-profile", "fixture", "-config-fingerprint", "sha256:config",
+		"-implementation-revision", "git:revision-1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() code=%d stderr=%s", code, stderr.String())
+	}
+	var report evaluationledger.Report
+	contents, err := os.ReadFile(outputPath)
+	if err != nil || json.Unmarshal(contents, &report) != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var summary mesagent.EvidenceGateEarlyExitSummary
+	if err := report.DecodeDomainSummary(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if !summary.PerformanceClaimsAllowed || summary.PairedCases != 1 || report.Summary.Usage.ModelCalls != 3 {
+		t.Fatalf("report = %+v domain=%+v", report, summary)
+	}
+}
+
 func TestEvaluationInventoryCoversExistingEvaluationEntryPoints(t *testing.T) {
 	t.Parallel()
 
