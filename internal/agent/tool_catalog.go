@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -290,6 +291,7 @@ func (t *scopeGuardedTool) InvokableRun(ctx context.Context, arguments string, o
 	if t.entry.degradationObserver != nil {
 		t.entry.degradationObserver.ObserveDegradation(event)
 	}
+	observability.RecordDegradation(ctx, event)
 	return encodeToolFailure(
 		t.entry.name, "tool_unavailable", "tool_execution_failed", true,
 		[]resilience.DegradationEvent{event},

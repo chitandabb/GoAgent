@@ -35,6 +35,8 @@ type DefaultRunnerDependencies struct {
 	ConversationMemorySources ConversationMemorySourceReader
 	ContextPreflight          DiagnosisContextPreflightConfig
 	Logger                    *zap.Logger
+	ModelProvider             string
+	ModelID                   string
 }
 
 type DefaultToolCatalogDependencies struct {
@@ -88,6 +90,8 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		Mode:                  dependencies.Mode,
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
 		ContextPreflight:      dependencies.ContextPreflight,
+		ModelProvider:         dependencies.ModelProvider,
+		ModelID:               dependencies.ModelID,
 		Logger:                dependencies.Logger,
 	})
 }

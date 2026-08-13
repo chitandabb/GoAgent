@@ -178,7 +178,9 @@ func (e diagnosisAgentExecutor) Execute(
 		return diagnosisworker.ExecutionResult{}, err
 	}
 	runCtx := agent.WithTaskScope(ctx, scope)
-	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{RunID: task.ID.String()})
+	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
+		RunID: task.ID.String(), TaskID: task.ID.String(),
+	})
 	runCtx = agent.WithDiagnosisAttachmentContext(runCtx, task.ID)
 	runCtx = withExecutionCaseSnapshot(runCtx, task.CaseSnapshot)
 	if e.runtime.webResearch != nil {

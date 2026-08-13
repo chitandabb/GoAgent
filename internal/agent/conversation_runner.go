@@ -13,6 +13,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
+	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/adk"
@@ -179,6 +180,8 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, conversation.ErrAgentUnavailable
 	}
 	startedAt := time.Now()
+	traceID := ""
+	runID := ""
 	var citationTrace *conversationCitationTrace
 	var reportReferenceTrace *conversationReportReferenceTrace
 	var usageTrace *modelUsageTrace
@@ -201,7 +204,11 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 				}
 			}
 		}
-		fields := []zap.Field{zap.Duration("duration", time.Since(startedAt))}
+		fields := []zap.Field{
+			zap.Duration("duration", time.Since(startedAt)),
+			zap.String("trace_id", traceID),
+			zap.String("run_id", runID),
+		}
 		if err != nil {
 			r.log.Warn("conversation Agent run failed", append(fields, zap.Error(err))...)
 			return
@@ -223,7 +230,14 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, err
 	}
 	runCtx := WithTaskScope(ctx, scope)
-	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{RunID: request.UserMessage.ID.String()})
+	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
+		RunID: request.UserMessage.ID.String(), ConversationID: request.Conversation.ID.String(),
+	})
+	runCtx, agentSpan := observability.StartAgentRun(runCtx, "conversation")
+	runCtx = observability.BindTraceIdentity(runCtx)
+	traceID = observability.TraceID(runCtx)
+	runID = request.UserMessage.ID.String()
+	defer func() { observability.End(agentSpan, err) }()
 	if r.memorySourceRecoveryEnabled {
 		runCtx = conversationmemory.WithSourceRecoveryRun(runCtx)
 	}
@@ -303,7 +317,10 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 			Tools:               tools,
 			ExecuteSequentially: true,
 			UnknownToolsHandler: rejectUnknownTool,
-			ToolCallMiddlewares: []compose.ToolMiddleware{newConversationToolTraceMiddleware(r.maxToolResultBytes)},
+			ToolCallMiddlewares: []compose.ToolMiddleware{
+				newToolObservabilityMiddleware(),
+				newConversationToolTraceMiddleware(r.maxToolResultBytes),
+			},
 		}},
 		MaxIterations: r.maxIterations,
 	})
@@ -315,7 +332,10 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	}).Run(
 		runCtx,
 		messages,
-		adk.WithCallbacks(newModelUsageHandler(usageTrace)),
+		adk.WithCallbacks(
+			newModelUsageHandler(usageTrace),
+			newModelTracingHandler(r.modelProvider, r.modelID),
+		),
 	)
 	answer := ""
 	for {

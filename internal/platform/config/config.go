@@ -31,19 +31,82 @@ import (
 // Config 是 MESGuard 的顶层配置结构，对应 config/mesguard.toml 文件的顶层键。
 // 每个字段对应 TOML 中的一个配置块（通过 toml tag 映射）。
 type Config struct {
-	HTTP      HTTPConfig      `toml:"http"`      // [http] 配置块：API 服务器监听地址
-	Auth      AuthConfig      `toml:"auth"`      // [auth] 配置块：Session、Cookie 与可信前端来源
-	Agent     AgentConfig     `toml:"agent"`     // [agent] Skill 包加载位置
-	Models    ModelsConfig    `toml:"models"`    // [models] 聊天、向量和重排模型
-	Log       LogConfig       `toml:"log"`       // [log] 配置块：结构化日志和文件轮转
-	Postgres  PostgresConfig  `toml:"postgres"`  // [postgres] 配置块：PostgreSQL 数据库连接配置
-	Redis     RedisConfig     `toml:"redis"`     // [redis] 配置块：Redis 缓存连接配置
-	RabbitMQ  RabbitMQConfig  `toml:"rabbitmq"`  // [rabbitmq] Outbox Relay 与 Worker 消息配置
-	SQLServer SQLServerConfig `toml:"sqlserver"` // [sqlserver] 公司 ERP 工单库（可降级依赖）
-	GitHubMCP GitHubMCPConfig `toml:"githubMCP"` // [githubMCP] 官方 GitHub MCP 只读代码调查
-	WebSearch WebSearchConfig `toml:"webSearch"` // [webSearch] 公开技术资料的脱敏只读检索
-	MinIO     MinIOConfig     `toml:"minio"`     // [minio] 附件与知识原文的可降级对象存储
-	Knowledge KnowledgeConfig `toml:"knowledge"` // [knowledge] 文档入库流水线版本与恢复预算
+	HTTP          HTTPConfig          `toml:"http"`          // [http] 配置块：API 服务器监听地址
+	Auth          AuthConfig          `toml:"auth"`          // [auth] 配置块：Session、Cookie 与可信前端来源
+	Agent         AgentConfig         `toml:"agent"`         // [agent] Skill 包加载位置
+	Models        ModelsConfig        `toml:"models"`        // [models] 聊天、向量和重排模型
+	Log           LogConfig           `toml:"log"`           // [log] 配置块：结构化日志和文件轮转
+	Postgres      PostgresConfig      `toml:"postgres"`      // [postgres] 配置块：PostgreSQL 数据库连接配置
+	Redis         RedisConfig         `toml:"redis"`         // [redis] 配置块：Redis 缓存连接配置
+	RabbitMQ      RabbitMQConfig      `toml:"rabbitmq"`      // [rabbitmq] Outbox Relay 与 Worker 消息配置
+	SQLServer     SQLServerConfig     `toml:"sqlserver"`     // [sqlserver] 公司 ERP 工单库（可降级依赖）
+	GitHubMCP     GitHubMCPConfig     `toml:"githubMCP"`     // [githubMCP] 官方 GitHub MCP 只读代码调查
+	WebSearch     WebSearchConfig     `toml:"webSearch"`     // [webSearch] 公开技术资料的脱敏只读检索
+	MinIO         MinIOConfig         `toml:"minio"`         // [minio] 附件与知识原文的可降级对象存储
+	Knowledge     KnowledgeConfig     `toml:"knowledge"`     // [knowledge] 文档入库流水线版本与恢复预算
+	Observability ObservabilityConfig `toml:"observability"` // [observability] 可选 OTel 链路导出
+}
+
+type ObservabilityConfig struct {
+	Enabled                bool    `toml:"enabled"`
+	ServiceName            string  `toml:"serviceName"`
+	Environment            string  `toml:"environment"`
+	OTLPEndpoint           string  `toml:"otlpEndpoint"`
+	HeadersEnv             string  `toml:"headersEnv"`
+	SampleRatio            float64 `toml:"sampleRatio"`
+	ExportTimeoutMillis    int     `toml:"exportTimeoutMillis"`
+	ErrorLogIntervalMillis int     `toml:"errorLogIntervalMillis"`
+}
+
+func (c ObservabilityConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.ServiceName)) {
+		return errors.New("observability serviceName is invalid")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.Environment)) {
+		return errors.New("observability environment is invalid")
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(c.OTLPEndpoint))
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return errors.New("observability otlpEndpoint must be an absolute HTTP(S) URL")
+	}
+	if c.HeadersEnv != "" && !environmentVariableName.MatchString(strings.TrimSpace(c.HeadersEnv)) {
+		return errors.New("observability headersEnv is invalid")
+	}
+	if math.IsNaN(c.SampleRatio) || math.IsInf(c.SampleRatio, 0) || c.SampleRatio <= 0 || c.SampleRatio > 1 {
+		return errors.New("observability sampleRatio must be greater than 0 and at most 1")
+	}
+	if c.ExportTimeoutMillis < 100 || c.ExportTimeoutMillis > 30_000 {
+		return errors.New("observability exportTimeoutMillis must be between 100 and 30000")
+	}
+	if c.ErrorLogIntervalMillis < 1_000 || c.ErrorLogIntervalMillis > 3_600_000 {
+		return errors.New("observability errorLogIntervalMillis must be between 1000 and 3600000")
+	}
+	return nil
+}
+
+func (c ObservabilityConfig) Headers() (map[string]string, error) {
+	name := strings.TrimSpace(c.HeadersEnv)
+	if name == "" {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil, fmt.Errorf("observability headers environment variable %s is empty", name)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(raw), &headers); err != nil {
+		return nil, fmt.Errorf("decode observability headers: %w", err)
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(key) == "" || key != strings.TrimSpace(key) || strings.ContainsAny(key, "\r\n") ||
+			value != strings.TrimSpace(value) || strings.ContainsAny(value, "\r\n") {
+			return nil, errors.New("observability headers contain an invalid name or value")
+		}
+	}
+	return headers, nil
 }
 
 // ModelsConfig 为不同模型职责保留独立配置，避免聊天模型和向量模型共享错误参数。
@@ -1662,6 +1725,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Agent.Validate(); err != nil {
+		return err
+	}
+	if err := c.Observability.Validate(); err != nil {
 		return err
 	}
 	if err := c.Models.Chat.Validate(); err != nil {

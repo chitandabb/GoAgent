@@ -13,7 +13,12 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 const (
@@ -229,6 +234,14 @@ func TestScopeGuardedToolKeepsStrictFailureAsError(t *testing.T) {
 }
 
 func TestScopeGuardedToolReturnsStructuredBestEffortFailure(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
 	var observed []resilience.DegradationEvent
 	current := scopedFailingToolForTest(
 		t, resilience.PolicyBestEffort,
@@ -239,10 +252,19 @@ func TestScopeGuardedToolReturnsStructuredBestEffortFailure(t *testing.T) {
 		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
 	))
 	ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: "run-1", TraceID: "trace-1"})
-	raw, err := current.InvokableRun(ctx, `{}`)
+	endpoint := newToolObservabilityMiddleware().Invokable(func(
+		ctx context.Context, input *compose.ToolInput,
+	) (*compose.ToolOutput, error) {
+		result, err := current.InvokableRun(ctx, input.Arguments)
+		return &compose.ToolOutput{Result: result}, err
+	})
+	output, err := endpoint(ctx, &compose.ToolInput{
+		Name: "test_failing_tool", CallID: "tool-call-1", Arguments: `{}`,
+	})
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
+	raw := output.Result
 	var result struct {
 		OK           bool                          `json:"ok"`
 		Error        string                        `json:"error"`
@@ -262,6 +284,51 @@ func TestScopeGuardedToolReturnsStructuredBestEffortFailure(t *testing.T) {
 	}
 	if len(observed) != 1 || observed[0] != result.Degradations[0] {
 		t.Fatalf("observed degradations = %+v, result = %+v", observed, result.Degradations)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || spans[0].Name != "tool.test_failing_tool" {
+		t.Fatalf("unexpected Tool spans: %#v", spans)
+	}
+	callID := ""
+	for _, item := range spans[0].Attributes {
+		if string(item.Key) == "mesguard.tool_call.id" {
+			callID = item.Value.AsString()
+		}
+	}
+	if callID != "tool-call-1" {
+		t.Fatalf("toolCallId = %q, want tool-call-1", callID)
+	}
+	if spans[0].Status.Code != codes.Error {
+		t.Fatalf("degraded Tool status = %s, want Error", spans[0].Status.Code)
+	}
+	foundDegradation := false
+	for _, event := range spans[0].Events {
+		if event.Name == "mesguard.degradation" {
+			foundDegradation = true
+			break
+		}
+	}
+	if !foundDegradation {
+		t.Fatalf("Tool span events = %#v, want degradation", spans[0].Events)
+	}
+}
+
+func TestToolResultDegradedRecognizesBothTruncationFormats(t *testing.T) {
+	for _, result := range []string{
+		"value\n[tool result truncated by MESGuard]",
+		"value\n[tool result truncated by MESGuard; ref=result-1; original_bytes=999]",
+		`{"ok":false,"error":"tool_unavailable","degradations":[{"reasonCode":"timeout"}]}`,
+	} {
+		if !inspectToolResult(result).Degraded {
+			t.Fatalf("inspectToolResult(%q) did not report degradation", result)
+		}
+	}
+	if inspectToolResult(`{"ok":true,"result":"normal"}`).Degraded {
+		t.Fatal("normal Tool result must not be degraded")
+	}
+	structured := inspectToolResult(`{"truncated":true}`)
+	if !structured.Truncated || structured.Status != "degraded" {
+		t.Fatalf("structured truncation = %+v", structured)
 	}
 }
 
