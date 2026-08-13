@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,8 @@ import (
 )
 
 var pairedEvalCaseID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+const evidenceGateReviewedCaseTargetForProviderRun = 30
 
 type pairedEvalCaseGetter struct{}
 
@@ -73,11 +76,19 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	outputPath := flags.String("output", "testdata/agent-evaluation.real-v1.observations.jsonl", "output JSONL observations")
 	reasoningEffort := flags.String("reasoning-effort", "", "provider-supported effort; defaults to config")
 	maxTotalTokens := flags.Int("max-total-tokens", 0, "override the Evidence Gate total token budget; defaults to config")
+	comparison := flags.String("comparison", "tool-selection", "paired variable: tool-selection or evidence-gate")
+	allowProviderCalls := flags.Bool("allow-provider-calls", false, "explicitly authorize Provider calls for evidence-gate comparison")
+	maxCases := flags.Int("max-cases", 0, "maximum evidence-gate cases authorized for this Provider run")
+	maxProviderCalls := flags.Int("max-provider-calls", 0, "maximum estimated Provider calls authorized for this evidence-gate run")
+	maxProviderTokens := flags.Int("max-provider-tokens", 0, "maximum total Token budget authorized across both evidence-gate arms")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-reasoning-effort provider-value]: %w", err)
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if *comparison != "tool-selection" && *comparison != "evidence-gate" {
+		return errors.New("comparison must be tool-selection or evidence-gate")
 	}
 
 	cases, err := readEvaluationCases(*datasetPath)
@@ -110,6 +121,20 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			return errors.New("max-total-tokens must be between 1000 and 1000000")
 		}
 		cfg.Agent.MaxTotalTokens = *maxTotalTokens
+	}
+	if *comparison == "evidence-gate" {
+		budget, budgetErr := validateEvidenceGateProviderBudget(
+			len(cases), cfg.Agent.MaxAgentRuns, cfg.Agent.MaxToolCalls, cfg.Agent.MaxTotalTokens,
+			*allowProviderCalls, *maxCases, *maxProviderCalls, *maxProviderTokens,
+		)
+		if budgetErr != nil {
+			return budgetErr
+		}
+		log.Info("Evidence Gate Provider paired run authorized",
+			zap.Int("cases", budget.Cases),
+			zap.Int("estimated_provider_call_upper_bound", budget.ProviderCalls),
+			zap.Int("total_token_budget_upper_bound", budget.TotalTokens),
+		)
 	}
 	prompts, err := cfg.Agent.LoadPrompts()
 	if err != nil {
@@ -188,7 +213,12 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		}
 	}
 
-	output, err := os.Create(*outputPath)
+	var output *os.File
+	if *comparison == "evidence-gate" {
+		output, err = os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	} else {
+		output, err = os.Create(*outputPath)
+	}
 	if err != nil {
 		return fmt.Errorf("create observations output: %w", err)
 	}
@@ -203,13 +233,17 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		if scopeErr != nil {
 			return fmt.Errorf("build scope for case %q: %w", definition.CaseID, scopeErr)
 		}
+		pairingFingerprint, fingerprintErr := evidenceGatePairingFingerprint(definition, cfg)
+		if fingerprintErr != nil {
+			return fmt.Errorf("fingerprint case %q: %w", definition.CaseID, fingerprintErr)
+		}
 		for _, variant := range []mesagent.EvaluationVariant{mesagent.EvaluationBaseline, mesagent.EvaluationExperiment} {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			orchestrator, buildErr := buildPairedEvaluationRun(
 				ctx, cfg, prompts, chatModel, githubConnection.Tools, sqlObjectDefinition,
-				schemaCatalog, readonlyQuery, log, variant,
+				schemaCatalog, readonlyQuery, log, variant, *comparison,
 			)
 			if buildErr != nil {
 				return fmt.Errorf("build %s run for case %q: %w", variant, definition.CaseID, buildErr)
@@ -225,12 +259,25 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			if invokeErr != nil {
 				return fmt.Errorf("invoke %s run for case %q: %w", variant, definition.CaseID, invokeErr)
 			}
-			observation := observationFromResult(definition, variant, cfg, result, time.Since(startedAt))
-			if err := observation.Validate(); err != nil {
-				return fmt.Errorf("validate %s observation for case %q: %w", variant, definition.CaseID, err)
-			}
-			if err := encoder.Encode(observation); err != nil {
-				return fmt.Errorf("write %s observation for case %q: %w", variant, definition.CaseID, err)
+			duration := time.Since(startedAt)
+			if *comparison == "evidence-gate" {
+				observation := evidenceGateObservationFromResult(
+					definition, variant, cfg, pairingFingerprint, result, duration,
+				)
+				if err := observation.Validate(); err != nil {
+					return fmt.Errorf("validate %s Evidence Gate observation for case %q: %w", variant, definition.CaseID, err)
+				}
+				if err := encoder.Encode(observation); err != nil {
+					return fmt.Errorf("write %s Evidence Gate observation for case %q: %w", variant, definition.CaseID, err)
+				}
+			} else {
+				observation := observationFromResult(definition, variant, cfg, result, duration)
+				if err := observation.Validate(); err != nil {
+					return fmt.Errorf("validate %s observation for case %q: %w", variant, definition.CaseID, err)
+				}
+				if err := encoder.Encode(observation); err != nil {
+					return fmt.Errorf("write %s observation for case %q: %w", variant, definition.CaseID, err)
+				}
 			}
 			log.Info("Agent paired evaluation run completed",
 				zap.String("case_id", definition.CaseID), zap.String("variant", string(variant)),
@@ -253,9 +300,10 @@ func buildPairedEvaluationRun(
 	readonlyQuery tool.BaseTool,
 	log *zap.Logger,
 	variant mesagent.EvaluationVariant,
+	comparison string,
 ) (*mesagent.EvidenceOrchestrator, error) {
 	mode := mesagent.RunnerModeExperiment
-	if variant == mesagent.EvaluationBaseline {
+	if comparison == "tool-selection" && variant == mesagent.EvaluationBaseline {
 		mode = mesagent.RunnerModeBaseline
 	}
 	runner, err := mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
@@ -274,7 +322,8 @@ func buildPairedEvaluationRun(
 	}
 	orchestrator, err := mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runner, Logger: log.Named("evidence_" + string(variant)),
-		MaxAgentRuns: cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
+		DisableEarlyExit: comparison == "evidence-gate" && variant == mesagent.EvaluationBaseline,
+		MaxAgentRuns:     cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
 		Timeout:                   time.Duration(cfg.Agent.TimeoutMillis) * time.Millisecond,
 		ReportContractInstruction: prompts.ReportContractInstruction,
@@ -283,6 +332,120 @@ func buildPairedEvaluationRun(
 		return nil, fmt.Errorf("build Evidence orchestrator: %w", err)
 	}
 	return orchestrator, nil
+}
+
+type evidenceGateProviderBudget struct {
+	Cases         int
+	ProviderCalls int
+	TotalTokens   int
+}
+
+func validateEvidenceGateProviderBudget(
+	cases int,
+	maxAgentRuns int,
+	maxToolCalls int,
+	maxTotalTokens int,
+	allowed bool,
+	caseLimit int,
+	providerCallLimit int,
+	totalTokenLimit int,
+) (evidenceGateProviderBudget, error) {
+	if !allowed {
+		return evidenceGateProviderBudget{}, errors.New("evidence-gate Provider run requires -allow-provider-calls")
+	}
+	if cases < 1 || caseLimit < 1 || providerCallLimit < 1 || totalTokenLimit < 1 {
+		return evidenceGateProviderBudget{}, errors.New("evidence-gate Provider run requires positive -max-cases, -max-provider-calls, and -max-provider-tokens")
+	}
+	if cases > evidenceGateReviewedCaseTargetForProviderRun || caseLimit > evidenceGateReviewedCaseTargetForProviderRun {
+		return evidenceGateProviderBudget{}, fmt.Errorf("evidence-gate Provider run is capped at %d reviewed cases", evidenceGateReviewedCaseTargetForProviderRun)
+	}
+	if cases > caseLimit {
+		return evidenceGateProviderBudget{}, fmt.Errorf("dataset has %d cases, exceeds authorized max-cases %d", cases, caseLimit)
+	}
+	if maxAgentRuns < 1 || maxToolCalls < 1 || maxTotalTokens < 1 {
+		return evidenceGateProviderBudget{}, errors.New("effective Agent run, Tool call, and Token budgets must be positive")
+	}
+	budget := evidenceGateProviderBudget{
+		Cases: cases,
+		// One model turn produces either a final answer or one Tool call. This is a
+		// conservative upper bound across both paired arms.
+		ProviderCalls: cases * 2 * (maxAgentRuns + maxToolCalls),
+		TotalTokens:   cases * 2 * maxTotalTokens,
+	}
+	if budget.ProviderCalls > providerCallLimit {
+		return evidenceGateProviderBudget{}, fmt.Errorf("estimated Provider call upper bound %d exceeds authorized max-provider-calls %d", budget.ProviderCalls, providerCallLimit)
+	}
+	if budget.TotalTokens > totalTokenLimit {
+		return evidenceGateProviderBudget{}, fmt.Errorf("total Token budget upper bound %d exceeds authorized max-provider-tokens %d", budget.TotalTokens, totalTokenLimit)
+	}
+	return budget, nil
+}
+
+func evidenceGatePairingFingerprint(definition mesagent.EvaluationCase, cfg config.Config) (string, error) {
+	profile, err := cfg.Models.Chat.ActiveProfile()
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		Case             mesagent.EvaluationCase `json:"case"`
+		ModelProvider    string                  `json:"modelProvider"`
+		ModelID          string                  `json:"modelId"`
+		ModelProfile     string                  `json:"modelProfile"`
+		ReasoningEffort  string                  `json:"reasoningEffort"`
+		PromptVersion    string                  `json:"promptVersion"`
+		MaxAgentRuns     int                     `json:"maxAgentRuns"`
+		MaxToolCalls     int                     `json:"maxToolCalls"`
+		MaxEvidenceItems int                     `json:"maxEvidenceItems"`
+		MaxTotalTokens   int                     `json:"maxTotalTokens"`
+		TimeoutMillis    int                     `json:"timeoutMillis"`
+	}{
+		Case: definition, ModelProvider: profile.Provider, ModelID: profile.Model,
+		ModelProfile: cfg.Models.Chat.ActiveProfileName, ReasoningEffort: profile.ReasoningEffort,
+		PromptVersion: cfg.Agent.PromptVersion, MaxAgentRuns: cfg.Agent.MaxAgentRuns,
+		MaxToolCalls: cfg.Agent.MaxToolCalls, MaxEvidenceItems: cfg.Agent.MaxEvidenceItems,
+		MaxTotalTokens: cfg.Agent.MaxTotalTokens, TimeoutMillis: cfg.Agent.TimeoutMillis,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", digest[:]), nil
+}
+
+func evidenceGateObservationFromResult(
+	definition mesagent.EvaluationCase,
+	variant mesagent.EvaluationVariant,
+	cfg config.Config,
+	pairingFingerprint string,
+	result mesagent.OrchestrationResult,
+	duration time.Duration,
+) mesagent.EvidenceGateEvaluationObservation {
+	profile, _ := cfg.Models.Chat.ActiveProfile()
+	reasoningEffort := strings.TrimSpace(profile.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = "none"
+	}
+	errorType := ""
+	var degradationReasons []string
+	if result.Partial {
+		errorType = strings.TrimSpace(result.StopReason)
+		if errorType == "" {
+			errorType = "evidence_gate_partial"
+		}
+		degradationReasons = append(degradationReasons, result.MissingEvidence...)
+	}
+	return mesagent.EvidenceGateEvaluationObservation{
+		DatasetVersion: definition.DatasetVersion, CaseID: definition.CaseID,
+		Variant: variant, RunID: fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
+		EarlyExitEnabled:   variant == mesagent.EvaluationExperiment,
+		PairingFingerprint: pairingFingerprint, ModelProvider: profile.Provider, ModelID: profile.Model,
+		ModelProfile: cfg.Models.Chat.ActiveProfileName, PromptVersion: cfg.Agent.PromptVersion,
+		ReasoningEffort: reasoningEffort, AgentRuns: result.AgentRuns, Completed: !result.Partial,
+		QualityReviewed: false, Usage: result.Usage, ToolCalls: len(result.ToolExecutions),
+		DurationMillis: duration.Milliseconds(), ErrorType: errorType,
+		DegradationReasons: degradationReasons,
+	}
 }
 
 func newPairedEvaluationScope(definition mesagent.EvaluationCase, cfg config.Config) (mesagent.TaskScope, error) {

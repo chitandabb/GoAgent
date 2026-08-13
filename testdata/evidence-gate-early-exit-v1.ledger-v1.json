@@ -1,0 +1,271 @@
+{
+  "schemaVersion": "evaluation_ledger_v1",
+  "asset": {
+    "id": "evidence-gate-early-exit-v1",
+    "domain": "evidence_gate_early_exit",
+    "observationKind": "evidence_gate_early_exit",
+    "status": "recomputed",
+    "reason": "The deterministic reviewed fixture validates the Early Exit switch, quality gate, per-case issue reporting, and zero-Provider Ledger replay; Provider-backed latency and quality claims still require an explicitly budgeted selective run.",
+    "entryPoint": "mesguard-evaluation-ledger",
+    "datasetArtifact": "testdata/evidence-gate-early-exit-v1.jsonl",
+    "observationArtifact": "testdata/evidence-gate-early-exit-v1.observations.jsonl",
+    "reportArtifact": "testdata/evidence-gate-early-exit-v1.ledger-v1.json"
+  },
+  "source": {
+    "modelProfile": "fixture-provider-free",
+    "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "implementationRevision": "git:61c8273a392a",
+    "datasetSha256": "sha256:5a164e358c96c80a0d5aac1d17d38f2513fa9afeee1690b4aefe0b9135c4c2c4",
+    "observationSha256": "sha256:4072bafbc3794b80554422b6212da79be9386fba8e6c2da347682b8dea6151cd"
+  },
+  "records": [
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "ticket-evidence-sufficient-first-run",
+      "variant": "baseline",
+      "runId": "ticket-evidence-sufficient-first-run-baseline-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "succeeded",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 4,
+        "promptTokens": 720,
+        "completionTokens": 80,
+        "totalTokens": 800,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 900,
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    },
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "ticket-evidence-sufficient-first-run",
+      "variant": "experiment",
+      "runId": "ticket-evidence-sufficient-first-run-experiment-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "succeeded",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 2,
+        "promptTokens": 360,
+        "completionTokens": 40,
+        "totalTokens": 400,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 300,
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    },
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "knowledge-gap-repaired-second-run",
+      "variant": "baseline",
+      "runId": "knowledge-gap-repaired-second-run-baseline-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "succeeded",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 4,
+        "promptTokens": 900,
+        "completionTokens": 100,
+        "totalTokens": 1000,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 700,
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    },
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "knowledge-gap-repaired-second-run",
+      "variant": "experiment",
+      "runId": "knowledge-gap-repaired-second-run-experiment-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "succeeded",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 4,
+        "promptTokens": 900,
+        "completionTokens": 100,
+        "totalTokens": 1000,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 700,
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    },
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "dependency-missing-remains-insufficient",
+      "variant": "baseline",
+      "runId": "dependency-missing-remains-insufficient-baseline-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "failed",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 4,
+        "promptTokens": 810,
+        "completionTokens": 90,
+        "totalTokens": 900,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 800,
+      "errorType": "evidence_gate_partial",
+      "degradationReasons": [
+        "evidence_insufficient_after_budget"
+      ],
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    },
+    {
+      "domain": "evidence_gate_early_exit",
+      "datasetVersion": "evidence-gate-early-exit-v1",
+      "caseId": "dependency-missing-remains-insufficient",
+      "variant": "experiment",
+      "runId": "dependency-missing-remains-insufficient-experiment-fixture-v1",
+      "operation": "evidence_gate_early_exit",
+      "outcome": "failed",
+      "modelProvider": "fixture",
+      "modelId": "scripted-evidence-gate-v1",
+      "modelProfile": "fixture-provider-free",
+      "promptVersion": "diagnosis-fixture-v1",
+      "reasoningEffort": "none",
+      "usage": {
+        "modelCalls": 4,
+        "promptTokens": 810,
+        "completionTokens": 90,
+        "totalTokens": 900,
+        "cachedTokens": 0,
+        "reasoningTokens": 0
+      },
+      "durationMillis": 800,
+      "errorType": "evidence_gate_partial",
+      "degradationReasons": [
+        "evidence_insufficient_after_budget"
+      ],
+      "configFingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "implementationRevision": "git:61c8273a392a"
+    }
+  ],
+  "summary": {
+    "runs": 6,
+    "succeededRuns": 4,
+    "failedRuns": 2,
+    "usageAvailableRuns": 6,
+    "usageUnavailableRuns": 0,
+    "usage": {
+      "modelCalls": 22,
+      "promptTokens": 4500,
+      "completionTokens": 500,
+      "totalTokens": 5000,
+      "cachedTokens": 0,
+      "reasoningTokens": 0
+    },
+    "usageBreakdown": [
+      {
+        "modelProvider": "fixture",
+        "modelId": "scripted-evidence-gate-v1",
+        "operation": "evidence_gate_early_exit",
+        "usageAvailableRuns": 6,
+        "usageUnavailableRuns": 0,
+        "usage": {
+          "modelCalls": 22,
+          "promptTokens": 4500,
+          "completionTokens": 500,
+          "totalTokens": 5000,
+          "cachedTokens": 0,
+          "reasoningTokens": 0
+        }
+      }
+    ]
+  },
+  "domainSummary": {
+    "datasetVersion": "evidence-gate-early-exit-v1",
+    "cases": 3,
+    "pairedCases": 3,
+    "unpairedRuns": 0,
+    "reviewedCaseTarget": 30,
+    "reviewedCaseGap": 27,
+    "baseline": {
+      "runs": 3,
+      "completedRuns": 2,
+      "completionRate": 0.6666666666666666,
+      "qualityReviewedRuns": 3,
+      "conclusionCorrectness": 1,
+      "citationCorrectness": 1,
+      "highSeverityWrongConclusions": 0,
+      "agentRuns": 6,
+      "modelCalls": 12,
+      "toolCalls": 6,
+      "promptTokens": 2430,
+      "completionTokens": 270,
+      "totalTokens": 2700,
+      "p50DurationMillis": 800,
+      "p95DurationMillis": 900
+    },
+    "experiment": {
+      "runs": 3,
+      "completedRuns": 2,
+      "completionRate": 0.6666666666666666,
+      "qualityReviewedRuns": 3,
+      "conclusionCorrectness": 1,
+      "citationCorrectness": 1,
+      "highSeverityWrongConclusions": 0,
+      "agentRuns": 5,
+      "modelCalls": 10,
+      "toolCalls": 5,
+      "promptTokens": 2070,
+      "completionTokens": 230,
+      "totalTokens": 2300,
+      "p50DurationMillis": 700,
+      "p95DurationMillis": 800
+    },
+    "qualityGatePassed": true,
+    "performanceClaimsAllowed": true,
+    "pairedModelCallReduction": 0.16666666666666666,
+    "pairedToolCallReduction": 0.16666666666666666,
+    "pairedTokenReduction": 0.14814814814814814,
+    "caseIssues": [
+      {
+        "caseId": "dependency-missing-remains-insufficient",
+        "reasons": [
+          "baseline: failed: evidence_gate_partial",
+          "baseline: degraded: evidence_insufficient_after_budget",
+          "experiment: failed: evidence_gate_partial",
+          "experiment: degraded: evidence_insufficient_after_budget"
+        ]
+      }
+    ]
+  }
+}

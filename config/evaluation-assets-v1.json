@@ -108,6 +108,17 @@
       "observationArtifact": "testdata/agent-evaluation.real-v4.observations.jsonl"
     },
     {
+      "id": "evidence-gate-early-exit-v1",
+      "domain": "evidence_gate_early_exit",
+      "observationKind": "evidence_gate_early_exit",
+      "status": "recomputed",
+      "reason": "The deterministic reviewed fixture validates the Early Exit switch, quality gate, per-case issue reporting, and zero-Provider Ledger replay; Provider-backed latency and quality claims still require an explicitly budgeted selective run.",
+      "entryPoint": "mesguard-evaluation-ledger",
+      "datasetArtifact": "testdata/evidence-gate-early-exit-v1.jsonl",
+      "observationArtifact": "testdata/evidence-gate-early-exit-v1.observations.jsonl",
+      "reportArtifact": "testdata/evidence-gate-early-exit-v1.ledger-v1.json"
+    },
+    {
       "id": "ingestion-throughput-v1",
       "domain": "document_processing",
       "observationKind": "ingestion_throughput",

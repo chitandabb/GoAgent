@@ -1,0 +1,3 @@
+{"datasetVersion":"evidence-gate-early-exit-v1","caseId":"ticket-evidence-sufficient-first-run","evidenceSufficientAtRun":1}
+{"datasetVersion":"evidence-gate-early-exit-v1","caseId":"knowledge-gap-repaired-second-run","evidenceSufficientAtRun":2}
+{"datasetVersion":"evidence-gate-early-exit-v1","caseId":"dependency-missing-remains-insufficient","evidenceSufficientAtRun":0}

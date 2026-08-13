@@ -78,6 +78,29 @@ func TestEvidenceOrchestratorAcceptsValidReport(t *testing.T) {
 	}
 }
 
+func TestEvidenceOrchestratorCanDisableEarlyExitForPairedEvaluation(t *testing.T) {
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
+		{result: evidenceRunResult(t, validEvidenceReport())},
+		{result: evidenceRunResult(t, validEvidenceReport())},
+	}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{
+		DisableEarlyExit: true,
+		MaxAgentRuns:     2,
+	})
+
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if result.Partial || result.AgentRuns != 2 {
+		t.Fatalf("disabled Early Exit did not use the paired-run budget: %+v", result)
+	}
+	requests := invoker.snapshotRequests()
+	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "Early Exit 已关闭") {
+		t.Fatalf("baseline continuation request = %+v", requests)
+	}
+}
+
 func TestEvidenceOrchestratorRetriesOnlyForEvidenceGaps(t *testing.T) {
 	invalid := validEvidenceReport()
 	invalid.Evidence = nil
