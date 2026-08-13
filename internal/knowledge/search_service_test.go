@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/resilience"
+
 	"github.com/google/uuid"
 )
 
@@ -12,6 +14,7 @@ type rerankerStub struct {
 	request RerankRequest
 	result  RerankResult
 	err     error
+	calls   int
 }
 
 type contextExpanderStub struct {
@@ -26,9 +29,17 @@ type queryRewriterStub struct {
 	query  string
 	result QueryRewriteResult
 	err    error
+	calls  int
+}
+
+type embedderFunc func(context.Context, EmbeddingRequest) (EmbeddingResult, error)
+
+func (f embedderFunc) Embed(ctx context.Context, request EmbeddingRequest) (EmbeddingResult, error) {
+	return f(ctx, request)
 }
 
 func (s *queryRewriterStub) Rewrite(_ context.Context, query string) (QueryRewriteResult, error) {
+	s.calls++
 	s.query = query
 	return s.result, s.err
 }
@@ -42,6 +53,7 @@ func (s *contextExpanderStub) ExpandContext(
 }
 
 func (s *rerankerStub) Rerank(_ context.Context, request RerankRequest) (RerankResult, error) {
+	s.calls++
 	s.request = request
 	return s.result, s.err
 }
@@ -80,8 +92,16 @@ func TestSearchServiceKeepsRetrievalOrderWhenRerankFails(t *testing.T) {
 	repository := &hybridRepositoryStub{fts: []SearchResult{
 		{ChunkID: first, ContentText: "first"}, {ChunkID: second, ContentText: "second"},
 	}}
-	service, err := NewSearchServiceWithReranker(
-		repository, nil, EmbeddingProfile{}, 2, &rerankerStub{err: errors.New("provider unavailable")}, 2,
+	var observed []resilience.DegradationEvent
+	reranker := &rerankerStub{err: errors.New("provider unavailable")}
+	service, err := NewSearchServiceWithOptions(
+		repository, nil, EmbeddingProfile{}, 2, SearchServiceOptions{
+			Reranker: reranker, RerankCandidateN: 2,
+			RerankProvider: "dashscope", RerankModel: "gte-rerank-v2",
+			DegradationObserver: resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+				observed = append(observed, event)
+			}),
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +113,14 @@ func TestSearchServiceKeepsRetrievalOrderWhenRerankFails(t *testing.T) {
 	if len(result.Results) != 1 || result.Results[0].ChunkID != first || !result.Degraded ||
 		len(result.MissingChannels) != 2 || result.MissingChannels[1] != "rerank" {
 		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Degradations) != 2 || len(observed) != 2 || reranker.calls != 1 {
+		t.Fatalf("degradations=%+v observed=%+v", result.Degradations, observed)
+	}
+	event := result.Degradations[1]
+	if event.Operation != "rerank" || event.Fallback != "retrieval_order" ||
+		event.ReasonCode != "provider_error" || event.Provider != "dashscope" || event.Model != "gte-rerank-v2" {
+		t.Fatalf("rerank degradation = %+v", event)
 	}
 }
 
@@ -271,7 +299,287 @@ func TestSearchServiceFallsBackWhenQueryRewriterTimesOutInternally(t *testing.T)
 		t.Fatal(err)
 	}
 	if result.QueryRewriteStatus != QueryRewriteProviderFailed || result.QueryPlan.RewriteAttempted || !result.Degraded ||
-		len(repository.ftsQueries) != 1 || repository.ftsQueries[0] != "connection timeout" {
+		len(repository.ftsQueries) != 1 || repository.ftsQueries[0] != "connection timeout" || rewriter.calls != 1 ||
+		len(result.Degradations) != 2 || result.Degradations[0].ReasonCode != "timeout" {
 		t.Fatalf("result=%+v queries=%v", result, repository.ftsQueries)
+	}
+}
+
+func TestSearchServiceReportsOneQueryRewriteDegradationThroughPublicResult(t *testing.T) {
+	var observed []resilience.DegradationEvent
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{fts: []SearchResult{{ChunkID: uuid.New(), ContentText: "命中"}}},
+		&recordingEmbedder{}, profile, 5,
+		SearchServiceOptions{
+			QueryRewriter: &queryRewriterStub{err: errors.New("provider unavailable")}, MaxSubqueries: 2,
+			QueryRewriteProvider: "dashscope", QueryRewriteModel: "qwen-flash",
+			DegradationObserver: resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+				observed = append(observed, event)
+			}),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := resilience.WithRunIdentity(context.Background(), resilience.RunIdentity{RunID: "turn-42", TraceID: "trace-7"})
+	result, err := service.Search(ctx, uuid.New(), "connection timeout", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Degradations) != 1 || len(observed) != 1 || result.Degradations[0] != observed[0] {
+		t.Fatalf("result events=%+v observed=%+v", result.Degradations, observed)
+	}
+	event := result.Degradations[0]
+	if event.Operation != "query_rewrite" || event.Policy != resilience.PolicyBestEffort ||
+		event.Fallback != "original_query" || event.ReasonCode != "provider_error" ||
+		event.RunID != "turn-42" || event.TraceID != "trace-7" ||
+		event.Provider != "dashscope" || event.Model != "qwen-flash" || event.DurationMillis < 0 {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestSearchServiceDoesNotReportDegradationForNormalNoMatch(t *testing.T) {
+	var observed []resilience.DegradationEvent
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{}, &recordingEmbedder{}, profile, 5,
+		SearchServiceOptions{DegradationObserver: resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+			observed = append(observed, event)
+		})},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "no matching handbook", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 0 || result.Degraded || len(result.Degradations) != 0 || len(observed) != 0 {
+		t.Fatalf("result=%+v observed=%+v", result, observed)
+	}
+}
+
+func TestSearchServiceReportsEmbeddingFailureWhenFallingBackToFTS(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed []resilience.DegradationEvent
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{fts: []SearchResult{{ChunkID: uuid.New(), ContentText: "FTS 命中"}}},
+		failingEmbedder{}, profile, 5,
+		SearchServiceOptions{DegradationObserver: resilience.ObserverFunc(func(event resilience.DegradationEvent) {
+			observed = append(observed, event)
+		})},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "connection timeout", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || len(result.Degradations) != 1 || len(observed) != 1 {
+		t.Fatalf("result=%+v observed=%+v", result, observed)
+	}
+	event := result.Degradations[0]
+	if event.Operation != "vector_retrieval" || event.Fallback != "fts" ||
+		event.ReasonCode != "provider_error" || event.Provider != profile.Provider || event.Model != profile.Model {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestSearchServiceTreatsInternalEmbeddingTimeoutAsChannelDegradation(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{fts: []SearchResult{{ChunkID: uuid.New(), ContentText: "FTS 命中"}}},
+		embedderFunc(func(context.Context, EmbeddingRequest) (EmbeddingResult, error) {
+			return EmbeddingResult{}, context.DeadlineExceeded
+		}),
+		profile, 5, SearchServiceOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "connection timeout", 2)
+	if err != nil || len(result.Results) != 1 || len(result.Degradations) != 1 ||
+		result.Degradations[0].Fallback != "fts" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestSearchServicePropagatesCallerCancellationWithoutFallback(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{}, &recordingEmbedder{}, profile, 5, SearchServiceOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := service.Search(ctx, uuid.New(), "connection timeout", 2)
+	if !errors.Is(err, context.Canceled) || len(result.Degradations) != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestSearchServiceTreatsInternalRerankTimeoutAsBestEffort(t *testing.T) {
+	repository := &hybridRepositoryStub{fts: []SearchResult{{ChunkID: uuid.New(), ContentText: "FTS 命中"}}}
+	service, err := NewSearchServiceWithOptions(
+		repository, nil, EmbeddingProfile{}, 2,
+		SearchServiceOptions{Reranker: &rerankerStub{err: context.DeadlineExceeded}, RerankCandidateN: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "connection timeout", 1)
+	if err != nil || len(result.Results) != 1 || len(result.Degradations) != 2 ||
+		result.Degradations[1].Operation != "rerank" || result.Degradations[1].ReasonCode != "timeout" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestSearchServiceDistinguishesAllChannelFailureFromNoMatch(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewSearchServiceWithOptions(
+		&hybridRepositoryStub{ftsErr: errors.New("postgres unavailable")}, failingEmbedder{}, profile, 5,
+		SearchServiceOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Search(context.Background(), uuid.New(), "connection timeout", 2)
+	var operationErr *resilience.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Operation != "knowledge_retrieval" ||
+		operationErr.Policy != resilience.PolicyBestEffort || operationErr.ReasonCode != "all_channels_failed" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSearchServiceReportsFTSFailureWhenFallingBackToVector(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vectorHit := SearchResult{ChunkID: uuid.New(), ContentText: "Vector 命中"}
+	repository := &hybridRepositoryStub{
+		ftsErr: errors.New("postgres FTS unavailable"), vectorResults: [][]SearchResult{{vectorHit}},
+	}
+	service, err := NewSearchServiceWithOptions(repository, &recordingEmbedder{}, profile, 5, SearchServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Search(context.Background(), uuid.New(), "connection timeout", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 1 || result.Results[0].ChunkID != vectorHit.ChunkID || len(result.Degradations) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	event := result.Degradations[0]
+	if event.Operation != "fts_retrieval" || event.Fallback != "vector" || event.ReasonCode != "repository_error" {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestSearchServiceReportsPartialChannelFallbacksExactlyOnce(t *testing.T) {
+	profile, err := NewEmbeddingProfile(
+		"knowledge-test", "dashscope", "text-embedding-v4", 2, "cosine",
+		EmbeddingInputQuery, EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrite := QueryRewriteResult{
+		LexicalQuery: "connection pool", SemanticQuery: "database connection pool exhaustion",
+		Subqueries: []string{"pool exhaustion cause"}, PromptVersion: "query-rewrite-v1",
+	}
+	hit := SearchResult{ChunkID: uuid.New(), ContentText: "命中", ContentSHA256: SHA256Hex("命中")}
+	tests := []struct {
+		name       string
+		repository *hybridRepositoryStub
+		channel    string
+	}{
+		{
+			name: "fts partial", channel: "fts_partial",
+			repository: &hybridRepositoryStub{
+				ftsByQuery:    map[string][]SearchResult{"pool timeout": {hit}, "connection pool": {hit}},
+				ftsErrByQuery: map[string]error{"pool exhaustion cause": errors.New("fts subquery failed")},
+				vectorResults: [][]SearchResult{{hit}, {hit}, {hit}},
+			},
+		},
+		{
+			name: "vector partial", channel: "vector_partial",
+			repository: &hybridRepositoryStub{
+				ftsByQuery: map[string][]SearchResult{
+					"pool timeout": {hit}, "connection pool": {hit}, "pool exhaustion cause": {hit},
+				},
+				vectorResults: [][]SearchResult{{hit}, nil, {hit}},
+				vectorErrors:  []error{nil, errors.New("vector subquery failed"), nil},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, serviceErr := NewSearchServiceWithOptions(
+				test.repository, &recordingEmbedder{}, profile, 5,
+				SearchServiceOptions{
+					QueryRewriter: &queryRewriterStub{result: rewrite}, MaxSubqueries: 2,
+					QueryRewriteProvider: "dashscope", QueryRewriteModel: "qwen-flash",
+				},
+			)
+			if serviceErr != nil {
+				t.Fatal(serviceErr)
+			}
+			result, searchErr := service.Search(context.Background(), uuid.New(), "pool timeout", 2)
+			if searchErr != nil {
+				t.Fatal(searchErr)
+			}
+			if len(result.Degradations) != 1 || result.MissingChannels[0] != test.channel {
+				t.Fatalf("result = %+v", result)
+			}
+			event := result.Degradations[0]
+			if event.Fallback != "available_results" || event.ReasonCode != "partial_failure" {
+				t.Fatalf("event = %+v", event)
+			}
+		})
 	}
 }

@@ -137,10 +137,13 @@ func (e *recordingEmbedder) Embed(_ context.Context, request EmbeddingRequest) (
 
 type hybridRepositoryStub struct {
 	fts           []SearchResult
+	ftsErr        error
+	ftsErrByQuery map[string]error
 	ftsByQuery    map[string][]SearchResult
 	ftsQueries    []string
 	vectorCalls   [][]float32
 	vectorResults [][]SearchResult
+	vectorErrors  []error
 }
 
 func (r *hybridRepositoryStub) CreateDocument(context.Context, CreateDocumentInput) (Document, error) {
@@ -152,6 +155,12 @@ func (r *hybridRepositoryStub) PublishVersion(context.Context, PublishVersionInp
 
 func (r *hybridRepositoryStub) SearchFTS(_ context.Context, _ uuid.UUID, query string, _ int) ([]SearchResult, error) {
 	r.ftsQueries = append(r.ftsQueries, query)
+	if r.ftsErr != nil {
+		return nil, r.ftsErr
+	}
+	if err := r.ftsErrByQuery[query]; err != nil {
+		return nil, err
+	}
 	if r.ftsByQuery != nil {
 		return r.ftsByQuery[query], nil
 	}
@@ -160,6 +169,9 @@ func (r *hybridRepositoryStub) SearchFTS(_ context.Context, _ uuid.UUID, query s
 func (r *hybridRepositoryStub) SearchVector(_ context.Context, _ uuid.UUID, _ uuid.UUID, vector []float32, _ int) ([]SearchResult, error) {
 	r.vectorCalls = append(r.vectorCalls, vector)
 	index := len(r.vectorCalls) - 1
+	if index < len(r.vectorErrors) && r.vectorErrors[index] != nil {
+		return nil, r.vectorErrors[index]
+	}
 	if index < len(r.vectorResults) {
 		return r.vectorResults[index], nil
 	}

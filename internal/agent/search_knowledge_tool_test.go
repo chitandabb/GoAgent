@@ -9,6 +9,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/google/uuid"
 )
 
@@ -56,6 +57,10 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 		},
 		Degraded: true,
 		Sources:  []string{"fts"}, MissingChannels: []string{"vector"},
+		Degradations: []resilience.DegradationEvent{{
+			Operation: "vector_retrieval", Policy: resilience.PolicyBestEffort,
+			Fallback: "fts", ReasonCode: "dependency_unavailable", RunID: "retrieval-42",
+		}},
 	}}
 	tool, err := NewSearchKnowledgeTool(searcher)
 	if err != nil {
@@ -78,12 +83,13 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 		QueryPlan struct {
 			OriginalQuery string `json:"originalQuery"`
 		} `json:"queryPlan"`
-		Results            []map[string]any `json:"results"`
-		Degraded           bool             `json:"degraded"`
-		Sources            []string         `json:"sources"`
-		MissingChannels    []string         `json:"missingChannels"`
-		ContextExpanded    bool             `json:"contextExpanded"`
-		ContextGroups      []map[string]any `json:"contextGroups"`
+		Results            []map[string]any              `json:"results"`
+		Degraded           bool                          `json:"degraded"`
+		Sources            []string                      `json:"sources"`
+		MissingChannels    []string                      `json:"missingChannels"`
+		Degradations       []resilience.DegradationEvent `json:"degradations"`
+		ContextExpanded    bool                          `json:"contextExpanded"`
+		ContextGroups      []map[string]any              `json:"contextGroups"`
 		ContextCompression struct {
 			Enabled       bool `json:"enabled"`
 			Applied       bool `json:"applied"`
@@ -98,7 +104,8 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 		len(response.Sources) != 1 || response.Sources[0] != "fts" || len(response.MissingChannels) != 1 ||
 		!response.ContextExpanded || len(response.ContextGroups) != 1 ||
 		!response.ContextCompression.Enabled || !response.ContextCompression.Applied ||
-		response.ContextCompression.OmittedChunks != 1 {
+		response.ContextCompression.OmittedChunks != 1 || len(response.Degradations) != 1 ||
+		response.Degradations[0].Operation != "vector_retrieval" {
 		t.Fatalf("response = %s", encoded)
 	}
 	if searcher.actorID != actorID || searcher.query != "事务超时" || searcher.limit != 3 {
@@ -165,6 +172,39 @@ func TestSearchKnowledgeToolRequiresKnowledgeDependency(t *testing.T) {
 	}
 	if _, err := tool.InvokableRun(context.Background(), `{"query":"问题"}`); !errors.Is(err, ErrTaskScopeRequired) {
 		t.Fatalf("unscoped InvokableRun error = %v, want ErrTaskScopeRequired", err)
+	}
+}
+
+func TestSearchKnowledgeToolPreservesSafeStructuredOperationFailure(t *testing.T) {
+	tool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{err: &resilience.OperationError{
+		Operation: "knowledge_retrieval", Policy: resilience.PolicyBestEffort,
+		ReasonCode: "all_channels_failed", Err: errors.New("database host is secret"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeKnowledge, nil,
+		[]ToolCapability{ToolCapabilityKnowledge}, ToolDependencyKnowledge)
+	_, err = tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"连接池超时"}`)
+	if err == nil {
+		t.Fatal("expected structured Tool failure")
+	}
+	var payload struct {
+		Error      string            `json:"error"`
+		Operation  string            `json:"operation"`
+		Policy     resilience.Policy `json:"policy"`
+		ReasonCode string            `json:"reasonCode"`
+	}
+	encodedError := err.Error()
+	payloadStart := strings.IndexByte(encodedError, '{')
+	if payloadStart < 0 {
+		t.Fatalf("error has no structured payload: %v", err)
+	}
+	if decodeErr := json.Unmarshal([]byte(encodedError[payloadStart:]), &payload); decodeErr != nil ||
+		payload.Error != "tool_operation_failed" || payload.Operation != "knowledge_retrieval" ||
+		payload.Policy != resilience.PolicyBestEffort || payload.ReasonCode != "all_channels_failed" ||
+		strings.Contains(err.Error(), "database host is secret") {
+		t.Fatalf("error = %v decodeErr=%v payload=%+v", err, decodeErr, payload)
 	}
 }
 

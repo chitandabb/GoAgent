@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/google/uuid"
@@ -92,11 +93,19 @@ type searchKnowledgeResponse struct {
 	Degraded           bool                              `json:"degraded"`
 	Sources            []string                          `json:"sources"`
 	MissingChannels    []string                          `json:"missingChannels,omitempty"`
+	Degradations       []resilience.DegradationEvent     `json:"degradations,omitempty"`
 	RerankApplied      bool                              `json:"rerankApplied"`
 	RerankTokens       int                               `json:"rerankTotalTokens,omitempty"`
 	EmbeddingTokens    int                               `json:"embeddingTotalTokens,omitempty"`
 	ContextExpanded    bool                              `json:"contextExpanded"`
 	ContextCompression searchKnowledgeContextCompression `json:"contextCompression"`
+}
+
+type searchKnowledgeOperationFailure struct {
+	Error      string            `json:"error"`
+	Operation  string            `json:"operation"`
+	Policy     resilience.Policy `json:"policy"`
+	ReasonCode string            `json:"reasonCode"`
 }
 
 func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, error) {
@@ -123,6 +132,17 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return searchKnowledgeResponse{}, err
 				}
+				var operationErr *resilience.OperationError
+				if errors.As(err, &operationErr) {
+					payload, encodeErr := json.Marshal(searchKnowledgeOperationFailure{
+						Error: "tool_operation_failed", Operation: operationErr.Operation,
+						Policy: operationErr.Policy, ReasonCode: operationErr.ReasonCode,
+					})
+					if encodeErr != nil {
+						return searchKnowledgeResponse{}, errors.New("knowledge search failure encoding failed")
+					}
+					return searchKnowledgeResponse{}, errors.New(string(payload))
+				}
 				return searchKnowledgeResponse{}, errors.New("knowledge search is unavailable")
 			}
 			for index, item := range result.Results {
@@ -143,6 +163,11 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 			for index, group := range result.ContextGroups {
 				if err := group.Validate(result.Results); err != nil {
 					return searchKnowledgeResponse{}, fmt.Errorf("knowledge search context group %d is invalid", index)
+				}
+			}
+			for index, event := range result.Degradations {
+				if err := event.Validate(); err != nil {
+					return searchKnowledgeResponse{}, fmt.Errorf("knowledge degradation event %d is invalid", index)
 				}
 			}
 			if err := result.QueryPlan.Validate(); err != nil || result.QueryPlan.OriginalQuery != query ||
@@ -168,6 +193,7 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 				},
 				Sources:         append([]string(nil), result.Sources...),
 				MissingChannels: append([]string(nil), result.MissingChannels...),
+				Degradations:    append([]resilience.DegradationEvent(nil), result.Degradations...),
 				RerankApplied:   result.RerankApplied, RerankTokens: result.RerankUsage.TotalTokens,
 				EmbeddingTokens: result.EmbeddingUsage.TotalTokens,
 				ContextExpanded: result.ContextExpanded,

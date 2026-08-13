@@ -367,6 +367,15 @@ Ticket 01 已建立 `evaluation_inventory_v1`，逐项登记当前 19 个评测�
 `evaluation_ledger_v1`；领域 Summary 保持原始 wide `95.56%`、filtered `97.78%` 和 45 个 paired Case。
 该结果只证明历史数据可审计重放，不代表当前 Tool Contract 已复测，清单仍将其标为 `retest_needed`。
 
+Ticket 02 已建立最小统一 Resilience 合同和企业知识检索纵向样板。`strict`、
+`repair_then_fail`、`best_effort` 分别固定为一次后失败、最多两次后失败、一次后进入调用方声明的
+基础路径；未引入没有真实调用方的通用执行器或重试状态机。本纵向样板只在知识检索真实接入
+`best_effort`，另外两种策略将在 Ticket 03 的具体安全校验和结构化输出边界接入。Query Rewrite、Embedding/Vector、FTS 和 Rerank 的实际回退会
+产生一条带 operation、policy、fallback、reason code、Run/Trace、Provider/Model 和耗时的标准
+Degradation Event，并进入 `search_knowledge` Tool 结果和 Zap Observer。双路正常零命中不产生事件，
+部分子查询失败产生 `partial_failure -> available_results` 事件；双路基础设施全部失败则向 Agent 返回
+不含底层错误的结构化 `all_channels_failed`，不能伪装成空检索结果。
+
 ### Resume Update Rule
 
 The final fifth resume point should describe the unified protocol and the two measured optimizations. A valid final form is:

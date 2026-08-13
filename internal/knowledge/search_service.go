@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
+
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/google/uuid"
 )
@@ -81,27 +84,39 @@ type Reranker interface {
 // SearchService 是高层知识检索边界。调用方不需要知道 FTS、Vector 或 RRF 的选择。
 // Embedding 不可用时保留 FTS 结果并显式标记降级。
 type SearchService struct {
-	repository         Repository
-	retriever          *HybridRetriever
-	reranker           Reranker
-	rerankCandidateN   int
-	contextExpander    ContextExpander
-	contextWindow      int
-	contextMaxRunes    int
-	contextCompression ContextCompressionConfig
-	queryRewriter      QueryRewriter
-	maxSubqueries      int
+	repository           Repository
+	retriever            *HybridRetriever
+	reranker             Reranker
+	rerankCandidateN     int
+	contextExpander      ContextExpander
+	contextWindow        int
+	contextMaxRunes      int
+	contextCompression   ContextCompressionConfig
+	queryRewriter        QueryRewriter
+	maxSubqueries        int
+	queryRewriteProvider string
+	queryRewriteModel    string
+	rerankProvider       string
+	rerankModel          string
+	embeddingProvider    string
+	embeddingModel       string
+	degradationObserver  resilience.Observer
 }
 
 type SearchServiceOptions struct {
-	Reranker           Reranker
-	RerankCandidateN   int
-	ContextExpander    ContextExpander
-	ContextWindow      int
-	ContextMaxRunes    int
-	ContextCompression ContextCompressionConfig
-	QueryRewriter      QueryRewriter
-	MaxSubqueries      int
+	Reranker             Reranker
+	RerankCandidateN     int
+	ContextExpander      ContextExpander
+	ContextWindow        int
+	ContextMaxRunes      int
+	ContextCompression   ContextCompressionConfig
+	QueryRewriter        QueryRewriter
+	MaxSubqueries        int
+	QueryRewriteProvider string
+	QueryRewriteModel    string
+	RerankProvider       string
+	RerankModel          string
+	DegradationObserver  resilience.Observer
 }
 
 func NewSearchService(repository Repository, embedder Embedder, profile EmbeddingProfile, vectorTopN int) (*SearchService, error) {
@@ -151,12 +166,29 @@ func NewSearchServiceWithOptions(
 	if options.QueryRewriter != nil && (options.MaxSubqueries < 0 || options.MaxSubqueries > MaxQuerySubqueries) {
 		return nil, errors.New("knowledge query rewrite config is invalid")
 	}
+	if (strings.TrimSpace(options.QueryRewriteProvider) == "") != (strings.TrimSpace(options.QueryRewriteModel) == "") ||
+		options.QueryRewriteProvider != strings.TrimSpace(options.QueryRewriteProvider) ||
+		options.QueryRewriteModel != strings.TrimSpace(options.QueryRewriteModel) ||
+		len(options.QueryRewriteProvider) > 128 || len(options.QueryRewriteModel) > 128 {
+		return nil, errors.New("knowledge query rewrite model identity is invalid")
+	}
+	if (strings.TrimSpace(options.RerankProvider) == "") != (strings.TrimSpace(options.RerankModel) == "") ||
+		options.RerankProvider != strings.TrimSpace(options.RerankProvider) ||
+		options.RerankModel != strings.TrimSpace(options.RerankModel) ||
+		len(options.RerankProvider) > 128 || len(options.RerankModel) > 128 {
+		return nil, errors.New("knowledge rerank model identity is invalid")
+	}
 	service := &SearchService{
 		repository: repository, reranker: options.Reranker, rerankCandidateN: options.RerankCandidateN,
 		contextExpander: options.ContextExpander, contextWindow: options.ContextWindow,
 		contextMaxRunes: options.ContextMaxRunes, contextCompression: options.ContextCompression,
-		queryRewriter: options.QueryRewriter,
-		maxSubqueries: options.MaxSubqueries,
+		queryRewriter:        options.QueryRewriter,
+		maxSubqueries:        options.MaxSubqueries,
+		queryRewriteProvider: options.QueryRewriteProvider,
+		queryRewriteModel:    options.QueryRewriteModel,
+		rerankProvider:       options.RerankProvider,
+		rerankModel:          options.RerankModel,
+		degradationObserver:  options.DegradationObserver,
 	}
 	if embedder != nil {
 		retriever, err := NewHybridRetriever(repository, embedder, profile, vectorTopN)
@@ -164,6 +196,8 @@ func NewSearchServiceWithOptions(
 			return nil, err
 		}
 		service.retriever = retriever
+		service.embeddingProvider = profile.Provider
+		service.embeddingModel = profile.Model
 	}
 	return service, nil
 }
@@ -171,6 +205,9 @@ func NewSearchServiceWithOptions(
 func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query string, limit int) (HybridSearch, error) {
 	if s == nil || s.repository == nil {
 		return HybridSearch{}, errors.New("knowledge search service is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return HybridSearch{}, err
 	}
 	if actorID == uuid.Nil {
 		return HybridSearch{}, errors.New("knowledge search actor is required")
@@ -184,6 +221,9 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 	if limit > MaxKnowledgeSearchLimit {
 		limit = MaxKnowledgeSearchLimit
 	}
+	if _, ok := resilience.RunIdentityFromContext(ctx); !ok {
+		ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: uuid.NewString()})
+	}
 	plan, err := OriginalQueryPlan(query)
 	if err != nil {
 		return HybridSearch{}, err
@@ -192,20 +232,38 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 	var rewritePromptVersion string
 	var rewriteUsage QueryRewriteUsage
 	rewriteDegraded := false
+	var result HybridSearch
 	if s.queryRewriter != nil {
 		rewriteStatus = QueryRewriteProviderFailed
+		rewriteStartedAt := time.Now()
 		rewrite, rewriteErr := s.queryRewriter.Rewrite(ctx, query)
 		if rewriteErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return HybridSearch{}, ctxErr
 			}
 			rewriteDegraded = true
+			if eventErr := s.appendDegradation(ctx, &result, resilience.DegradationEvent{
+				Operation: "query_rewrite", Policy: resilience.PolicyBestEffort,
+				Fallback: "original_query", ReasonCode: providerFailureReason(rewriteErr),
+				Provider: s.queryRewriteProvider, Model: s.queryRewriteModel,
+				DurationMillis: elapsedMillis(rewriteStartedAt),
+			}); eventErr != nil {
+				return HybridSearch{}, eventErr
+			}
 		} else {
 			rewritePromptVersion = rewrite.PromptVersion
 			rewriteUsage = rewrite.Usage
 			if rewrittenPlan, planErr := BuildQueryPlan(query, rewrite, s.maxSubqueries); planErr != nil {
 				rewriteStatus = QueryRewritePolicyRejected
 				rewriteDegraded = true
+				if eventErr := s.appendDegradation(ctx, &result, resilience.DegradationEvent{
+					Operation: "query_rewrite", Policy: resilience.PolicyBestEffort,
+					Fallback: "original_query", ReasonCode: "policy_rejected",
+					Provider: s.queryRewriteProvider, Model: s.queryRewriteModel,
+					DurationMillis: elapsedMillis(rewriteStartedAt),
+				}); eventErr != nil {
+					return HybridSearch{}, eventErr
+				}
 			} else {
 				plan = rewrittenPlan
 				rewriteStatus = QueryRewriteAccepted
@@ -216,7 +274,8 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 	if s.reranker != nil && s.rerankCandidateN > candidateLimit {
 		candidateLimit = s.rerankCandidateN
 	}
-	var result HybridSearch
+	rewriteDegradations := append([]resilience.DegradationEvent(nil), result.Degradations...)
+	retrievalStartedAt := time.Now()
 	if s.retriever != nil {
 		result, err = s.retriever.SearchPlan(ctx, actorID, plan, candidateLimit)
 	} else {
@@ -230,8 +289,12 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 			result.MissingChannels = appendMissingChannel(result.MissingChannels, "fts_partial")
 		}
 	}
+	result.Degradations = append(rewriteDegradations, result.Degradations...)
 	if err != nil {
 		return result, err
+	}
+	if eventErr := s.appendRetrievalDegradations(ctx, &result, elapsedMillis(retrievalStartedAt)); eventErr != nil {
+		return result, eventErr
 	}
 	result.QueryPlan = plan
 	result.QueryRewriteStatus = rewriteStatus
@@ -249,13 +312,22 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 		}
 		return result, nil
 	}
+	rerankStartedAt := time.Now()
 	reranked, usage, err := s.rerank(ctx, query, result.Results, limit)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return result, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, ctxErr
 		}
 		result.Degraded = true
 		result.MissingChannels = appendMissingChannel(result.MissingChannels, "rerank")
+		if eventErr := s.appendDegradation(ctx, &result, resilience.DegradationEvent{
+			Operation: "rerank", Policy: resilience.PolicyBestEffort,
+			Fallback: "retrieval_order", ReasonCode: providerFailureReason(err),
+			Provider: s.rerankProvider, Model: s.rerankModel,
+			DurationMillis: elapsedMillis(rerankStartedAt),
+		}); eventErr != nil {
+			return result, eventErr
+		}
 		result.Results = limitResults(result.Results, limit)
 		if err := s.expandContext(ctx, actorID, &result); err != nil {
 			return result, err
@@ -269,6 +341,84 @@ func (s *SearchService) Search(ctx context.Context, actorID uuid.UUID, query str
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *SearchService) appendRetrievalDegradations(ctx context.Context, result *HybridSearch, durationMillis int64) error {
+	for _, channel := range result.MissingChannels {
+		switch channel {
+		case "vector":
+			reason := "dependency_unavailable"
+			if s.retriever != nil {
+				reason = "provider_error"
+			}
+			if err := s.appendDegradation(ctx, result, resilience.DegradationEvent{
+				Operation: "vector_retrieval", Policy: resilience.PolicyBestEffort,
+				Fallback: "fts", ReasonCode: reason,
+				Provider: s.embeddingProvider, Model: s.embeddingModel, DurationMillis: durationMillis,
+			}); err != nil {
+				return err
+			}
+		case "fts":
+			if err := s.appendDegradation(ctx, result, resilience.DegradationEvent{
+				Operation: "fts_retrieval", Policy: resilience.PolicyBestEffort,
+				Fallback: "vector", ReasonCode: "repository_error", DurationMillis: durationMillis,
+			}); err != nil {
+				return err
+			}
+		case "fts_partial":
+			if err := s.appendDegradation(ctx, result, resilience.DegradationEvent{
+				Operation: "fts_retrieval", Policy: resilience.PolicyBestEffort,
+				Fallback: "available_results", ReasonCode: "partial_failure", DurationMillis: durationMillis,
+			}); err != nil {
+				return err
+			}
+		case "vector_partial":
+			if err := s.appendDegradation(ctx, result, resilience.DegradationEvent{
+				Operation: "vector_retrieval", Policy: resilience.PolicyBestEffort,
+				Fallback: "available_results", ReasonCode: "partial_failure",
+				Provider: s.embeddingProvider, Model: s.embeddingModel, DurationMillis: durationMillis,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *SearchService) appendDegradation(ctx context.Context, result *HybridSearch, event resilience.DegradationEvent) error {
+	identity, ok := resilience.RunIdentityFromContext(ctx)
+	if !ok {
+		identity.RunID = uuid.NewString()
+	}
+	event.RunID = identity.RunID
+	event.TraceID = identity.TraceID
+	if err := event.Validate(); err != nil {
+		return fmt.Errorf("build knowledge degradation event: %w", err)
+	}
+	result.Degradations = append(result.Degradations, event)
+	if s.degradationObserver != nil {
+		s.degradationObserver.ObserveDegradation(event)
+	}
+	return nil
+}
+
+func elapsedMillis(startedAt time.Time) int64 {
+	duration := time.Since(startedAt).Milliseconds()
+	if duration < 0 {
+		return 0
+	}
+	return duration
+}
+
+func providerFailureReason(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "provider_cancelled"
+	default:
+		return "provider_error"
+	}
 }
 
 func (s *SearchService) expandContext(ctx context.Context, actorID uuid.UUID, result *HybridSearch) error {

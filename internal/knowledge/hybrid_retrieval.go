@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/chitandabb/GoAgent/internal/resilience"
+
 	"github.com/google/uuid"
 )
 
@@ -29,6 +31,7 @@ type HybridSearch struct {
 	QueryRewriteStatus        QueryRewriteStatus
 	QueryRewritePromptVersion string
 	QueryRewriteUsage         QueryRewriteUsage
+	Degradations              []resilience.DegradationEvent
 }
 
 type HybridRetriever struct {
@@ -93,14 +96,15 @@ func (r *HybridRetriever) SearchPlan(ctx context.Context, actorID uuid.UUID, pla
 	}()
 	group.Wait()
 
-	if errors.Is(ftsErr, context.Canceled) || errors.Is(ftsErr, context.DeadlineExceeded) {
-		return HybridSearch{}, ftsErr
-	}
-	if errors.Is(vectorErr, context.Canceled) || errors.Is(vectorErr, context.DeadlineExceeded) {
-		return HybridSearch{}, vectorErr
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return HybridSearch{}, ctxErr
 	}
 	if ftsErr != nil && vectorErr != nil {
-		return HybridSearch{}, fmt.Errorf("hybrid retrieval failed: fts=%v vector=%v", ftsErr, vectorErr)
+		return HybridSearch{}, &resilience.OperationError{
+			Operation: "knowledge_retrieval", Policy: resilience.PolicyBestEffort,
+			ReasonCode: "all_channels_failed",
+			Err:        fmt.Errorf("hybrid retrieval failed: fts=%v vector=%v", ftsErr, vectorErr),
+		}
 	}
 	if ftsErr != nil {
 		return HybridSearch{
@@ -140,8 +144,8 @@ func searchFTSQueries(
 	for _, query := range queries {
 		results, err := repository.SearchFTS(ctx, actorID, query, limit)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, false, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, false, ctxErr
 			}
 			failures = append(failures, err)
 			continue
@@ -162,6 +166,9 @@ func (r *HybridRetriever) searchVectorQueries(
 	}
 	embedding, err := r.embedder.Embed(ctx, EmbeddingRequest{Texts: queries, InputType: r.profile.QueryInputType})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, false, EmbeddingUsage{}, ctxErr
+		}
 		return nil, false, EmbeddingUsage{}, err
 	}
 	if err := embedding.Validate(len(queries), r.profile.Dimensions, r.profile.Normalize); err != nil {
@@ -174,8 +181,8 @@ func (r *HybridRetriever) searchVectorQueries(
 			ctx, actorID, r.profile.ID, embedding.Vectors[index], r.vectorTopN,
 		)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, false, embedding.Usage, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, false, embedding.Usage, ctxErr
 			}
 			failures = append(failures, err)
 			continue

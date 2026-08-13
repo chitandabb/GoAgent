@@ -13,6 +13,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -215,6 +216,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		return conversation.AgentResponse{}, err
 	}
 	runCtx := WithTaskScope(ctx, scope)
+	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{RunID: request.UserMessage.ID.String()})
 	if r.memorySourceRecoveryEnabled {
 		runCtx = conversationmemory.WithSourceRecoveryRun(runCtx)
 	}
