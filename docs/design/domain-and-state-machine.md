@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 本文描述 MESGuard 的目标领域模型和状态转换规则。
-- 当前仓库已实现认证与统一 ExternalCase 领域模型；诊断任务及后续状态机尚未全部实现。
+- 当前仓库已实现认证、ExternalCase、Conversation、DiagnosisTask/Worker、Evidence、Report、知识文档与上下文治理主链路；本文同时记录仍在迁移中的统一 Agent Runtime 目标合同。
 - 本文先确定业务语义，不绑定具体 PostgreSQL 表名、ORM 模型或 HTTP 字段。
 - 数据库字段、索引和迁移方式在后续 database.md 中单独确定。
 
@@ -76,6 +76,20 @@ CaseSnapshot 创建后不随外部工单变化而修改。需要重新诊断时�
 表示可以被 MESGuard 访问的外部数据源元信息。一期模型支持多个数据源，用于区分工单库、生产库和产品库，但实际只启用一个配置。
 
 数据源连接必须使用只读账号，凭证由配置或密钥管理系统提供，不进入业务日志和模型上下文。一次 DiagnosisTask 保存它实际使用过的数据源集合，不能只依赖当前默认数据源。
+
+### RuntimeKind、ToolProfile 与 RunAccess
+
+RuntimeKind 只区分 Conversation 和 Diagnosis 两种执行模式，不代表业务能力。SQL、知识、代码、附件、工单和 Web 都是可被不同 Runtime 复用的 Tool。
+
+ToolProfile 表示某个部署内一种 Runtime 的稳定模型可见 Tool 合同。用户、消息引用、角色和临时依赖故障不能改变同一部署内的 Profile；只有启动配置变化才允许产生新的 Tool Schema 指纹。
+
+RunAccess 表示一次执行的有效访问上下文，由 Actor、Permission 和 ResourceGrants 组成。Permission 表达允许做什么，ResourceGrants 表达允许访问哪些具体数据源、工单、附件、任务和代码仓库。Tool Schema 可见不等于可执行；没有 RunAccess 或调用超出 Permission/Grant 时必须拒绝。
+
+### InvestigationPolicy
+
+InvestigationPolicy 是 DiagnosisTask 创建时冻结的权限上限。Worker 每次执行时把它与当前紧急撤权和资源禁用上限求交集，生成 Diagnosis RunAccess。有效权限和资源集合只能少于或等于冻结 Policy，不能被模型、Skill、Tool 参数或后续部署配置扩大。
+
+Conversation 不持久化 InvestigationPolicy。每个 Turn 根据认证用户、会话归属和当前消息的结构化引用生成 RunAccess；引用只授权该次 Turn 访问对应资源，不改变会话身份或 Tool Profile。
 
 ### DiagnosisTask
 

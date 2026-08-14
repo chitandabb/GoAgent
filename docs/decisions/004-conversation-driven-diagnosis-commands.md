@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as a target architecture on 2026-08-07. The current HTTP diagnosis-task
+Accepted as a target architecture on 2026-08-07. The conversation/task ownership decision remains active; its dynamic Tool-Schema and `TaskScope` authorization wording is superseded for the v2 target by [ADR 005](005-unified-agent-runtime-and-stable-tool-profiles.md). The current HTTP diagnosis-task
 creation path remains implemented. The first server-side conversation slice is now implemented:
 user-scoped conversations, user messages, structured case/task references and cursor-based reads.
 The guarded `create_diagnosis_task` command service and its narrow model-visible Tool
@@ -91,8 +91,9 @@ command may freeze a bounded subset, or all attachments by default, into a new
 an existing task; later evidence always creates a new task rather than appending to an old frozen input.
 
 The Tool is a controlled command with an internal side effect, not an evidence-reading Tool.
-It is exposed only to the conversation Agent and must not be available inside the Diagnosis
-Worker's ReAct loop. Existing `TaskScope`, role checks, rate limits, active-task limits and
+It belongs only to the Conversation Tool Profile and must not be available inside the Diagnosis
+Worker's ReAct loop. The legacy implementation still uses `TaskScope`; the v2 target uses
+`RunAccess`, while role checks, message-reference guards, rate limits, active-task limits and
 audit logs remain mandatory.
 
 The idempotency key is derived by the server from the actor, user message, command kind and
@@ -132,8 +133,8 @@ It does not append arbitrary instructions to an already running task.
 The `/turns` API is a durable asynchronous command. Its PostgreSQL transaction writes the user
 message, a `queued` `conversation_turns` row and a `conversation.turn.execute` Outbox event, then
 returns without invoking a model. The independent Conversation Worker claims `queued`, `failed`,
-or expired `running` turns, loads only bounded persisted user/assistant history, applies a rune budget, and dynamically exposes
-case/knowledge/web/task-status Tools according to the current message references and dependency health.
+or expired `running` turns and loads only bounded persisted user/assistant history. The current implementation applies a rune budget and dynamically exposes
+case/knowledge/web/task-status Tools according to current references and dependency health; ADR 005 replaces that target behavior with a stable Conversation Tool Profile plus per-turn `RunAccess`.
 The model-visible command Tool is limited to one invocation per turn. Tool results and model
 reasoning are transient; only the final assistant content and structured created-task references
 are persisted. `conversation_turns` binds a client UUID key to a canonical request fingerprint,
