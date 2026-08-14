@@ -18,12 +18,14 @@ const SemanticNormalizationVersion = "semantic-question-v1"
 type ConflictKind string
 
 const (
-	ConflictEntity   ConflictKind = "entity"
-	ConflictNumber   ConflictKind = "number"
-	ConflictDate     ConflictKind = "date"
-	ConflictVersion  ConflictKind = "version"
-	ConflictNegation ConflictKind = "negation"
-	ConflictIntent   ConflictKind = "intent"
+	ConflictEntity    ConflictKind = "entity"
+	ConflictNumber    ConflictKind = "number"
+	ConflictDate      ConflictKind = "date"
+	ConflictVersion   ConflictKind = "version"
+	ConflictNegation  ConflictKind = "negation"
+	ConflictIntent    ConflictKind = "intent"
+	ConflictDirection ConflictKind = "direction"
+	ConflictAction    ConflictKind = "action"
 )
 
 type QuestionComparison struct {
@@ -64,16 +66,24 @@ func CompareQuestions(question, candidate string) QuestionComparison {
 	if left.intent != "" && right.intent != "" && left.intent != right.intent {
 		conflicts = append(conflicts, ConflictIntent)
 	}
+	if left.direction != "" && right.direction != "" && left.direction != right.direction {
+		conflicts = append(conflicts, ConflictDirection)
+	}
+	if left.action != "" && right.action != "" && left.action != right.action {
+		conflicts = append(conflicts, ConflictAction)
+	}
 	return QuestionComparison{Compatible: len(conflicts) == 0, Conflicts: conflicts}
 }
 
 type questionFacts struct {
-	entities []string
-	numbers  []string
-	dates    []string
-	versions []string
-	negated  bool
-	intent   string
+	entities  []string
+	numbers   []string
+	dates     []string
+	versions  []string
+	negated   bool
+	intent    string
+	direction string
+	action    string
 }
 
 func protectedQuestionFacts(value string) questionFacts {
@@ -86,7 +96,59 @@ func protectedQuestionFacts(value string) questionFacts {
 		versions: normalizedMatches(normalized, semanticVersionPattern, false),
 		negated: containsAnyTerm(normalized, []string{"不", "未", "没有", "无法", "不能", "禁止", "否认"}) ||
 			containsBoundedAny(normalized, []string{"not", "no", "never", "without", "cannot", "can't", "mustn't"}),
-		intent: questionIntent(normalized),
+		intent:    questionIntent(normalized),
+		direction: fallbackDirection(normalized),
+		action:    questionAction(normalized),
+	}
+}
+
+func fallbackDirection(value string) string {
+	failure := containsAnyTerm(value, []string{"失败", "不可用", "超时", "异常"}) ||
+		containsBoundedAny(value, []string{"fail", "unavailable", "timeout"})
+	transition := containsAnyTerm(value, []string{"降级", "回退", "调用"}) ||
+		containsBoundedAny(value, []string{"fallback", "fall back", "call"})
+	if !failure || !transition {
+		return ""
+	}
+	type componentPosition struct {
+		name  string
+		index int
+	}
+	components := make([]componentPosition, 0, 4)
+	for name, aliases := range map[string][]string{
+		"fts":    {"fts"},
+		"vector": {"向量检索", "vector search"},
+		"ocr":    {"ocr"},
+		"vlm":    {"vlm"},
+	} {
+		index := -1
+		for _, alias := range aliases {
+			current := strings.Index(value, alias)
+			if current >= 0 && (index < 0 || current < index) {
+				index = current
+			}
+		}
+		if index >= 0 {
+			components = append(components, componentPosition{name: name, index: index})
+		}
+	}
+	if len(components) != 2 {
+		return ""
+	}
+	slices.SortFunc(components, func(left, right componentPosition) int { return left.index - right.index })
+	return components[0].name + "_to_" + components[1].name
+}
+
+func questionAction(value string) string {
+	switch {
+	case containsAnyTerm(value, []string{"关闭", "禁用", "停用"}) ||
+		containsBoundedAny(value, []string{"disable", "close", "deactivate"}):
+		return "disable"
+	case containsAnyTerm(value, []string{"开启", "启用", "打开"}) ||
+		containsBoundedAny(value, []string{"enable", "open", "activate"}):
+		return "enable"
+	default:
+		return ""
 	}
 }
 
@@ -135,6 +197,9 @@ func questionIntent(value string) string {
 	switch {
 	case strings.Contains(value, "为什么") || strings.Contains(value, "为何") || containsBoundedAny(value, []string{"why"}):
 		return "reason"
+	case strings.Contains(value, "有什么作用") || strings.Contains(value, "作用是什么") ||
+		containsBoundedAny(value, []string{"purpose", "effect"}):
+		return "effect"
 	case strings.Contains(value, "如何") || strings.Contains(value, "怎样") || strings.Contains(value, "怎么") ||
 		containsBoundedAny(value, []string{"how"}):
 		return "procedure"

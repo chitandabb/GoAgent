@@ -10,10 +10,10 @@ func TestSelectSemanticThresholdUsesCalibrationOnlyAndPrioritizesPrecision(t *te
 	t.Parallel()
 
 	pairs := []semanticcache.EvaluationPair{
-		{ID: "positive-high", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true},
-		{ID: "positive-low", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true},
-		{ID: "negative-close", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: false},
-		{ID: "holdout-negative", Split: semanticcache.EvaluationSplitHoldout, Reviewed: true, Reusable: false},
+		{ID: "positive-high", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true, AnchorQuestion: "文档如何发布？", CandidateQuestion: "怎样发布文档？"},
+		{ID: "positive-low", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true, AnchorQuestion: "缓存如何失效？", CandidateQuestion: "怎样让缓存失效？"},
+		{ID: "negative-close", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: false, AnchorQuestion: "文档发布流程是什么？", CandidateQuestion: "文档上传流程是什么？"},
+		{ID: "holdout-negative", Split: semanticcache.EvaluationSplitHoldout, Reviewed: true, Reusable: false, AnchorQuestion: "制度是什么？", CandidateQuestion: "当前制度是什么？"},
 	}
 	observations := []semanticcache.SimilarityObservation{
 		{PairID: "positive-high", Similarity: 0.97, Compatible: true},
@@ -25,7 +25,7 @@ func TestSelectSemanticThresholdUsesCalibrationOnlyAndPrioritizesPrecision(t *te
 	if err != nil {
 		t.Fatalf("SelectThreshold() error = %v", err)
 	}
-	if !selection.Enabled || selection.Threshold != 0.97 || selection.Calibration.TruePositives != 1 ||
+	if !selection.Enabled || selection.Threshold != 0.96 || selection.Calibration.TruePositives != 1 ||
 		selection.Calibration.FalsePositives != 0 || selection.Calibration.FalseNegatives != 1 ||
 		selection.Calibration.Precision != 1 || selection.Calibration.Recall != 0.5 {
 		t.Fatalf("selection = %+v", selection)
@@ -36,8 +36,8 @@ func TestSelectSemanticThresholdStaysDisabledWithoutPrecisionGate(t *testing.T) 
 	t.Parallel()
 
 	pairs := []semanticcache.EvaluationPair{
-		{ID: "positive", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true},
-		{ID: "negative", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: false},
+		{ID: "positive", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true, AnchorQuestion: "发布流程是什么？", CandidateQuestion: "发布步骤是什么？"},
+		{ID: "negative", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: false, AnchorQuestion: "发布流程是什么？", CandidateQuestion: "上传流程是什么？"},
 	}
 	observations := []semanticcache.SimilarityObservation{
 		{PairID: "positive", Similarity: 0.9, Compatible: true},
@@ -49,6 +49,28 @@ func TestSelectSemanticThresholdStaysDisabledWithoutPrecisionGate(t *testing.T) 
 	}
 	if selection.Enabled {
 		t.Fatalf("selection unexpectedly enabled: %+v", selection)
+	}
+}
+
+func TestSelectSemanticThresholdRecomputesCurrentDeterministicGate(t *testing.T) {
+	t.Parallel()
+
+	pairs := []semanticcache.EvaluationPair{
+		{ID: "positive", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: true,
+			AnchorQuestion: "知识制度包含什么？", CandidateQuestion: "知识制度有哪些内容？"},
+		{ID: "temporal", Split: semanticcache.EvaluationSplitCalibration, Reviewed: true, Reusable: false,
+			AnchorQuestion: "知识制度包含什么？", CandidateQuestion: "当前线上知识制度包含什么？"},
+	}
+	observations := []semanticcache.SimilarityObservation{
+		{PairID: "positive", Similarity: 0.9, Compatible: false},
+		{PairID: "temporal", Similarity: 0.99, Compatible: true},
+	}
+	selection, err := semanticcache.SelectThreshold(pairs, observations, 0.98)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.Enabled || selection.Threshold != 0.9 || selection.Calibration.Precision != 1 {
+		t.Fatalf("selection = %+v", selection)
 	}
 }
 

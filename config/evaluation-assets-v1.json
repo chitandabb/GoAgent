@@ -209,11 +209,21 @@
       "id": "semantic-cache-v1",
       "domain": "semantic_answer_cache",
       "observationKind": "semantic_cache_calibration",
-      "status": "retest_needed",
-      "reason": "The stratified 120-pair draft and provider-free calibration contract are implemented, but every Gold label still requires human review and current Embedding observations plus Holdout acceptance have not run.",
+      "status": "recomputed",
+      "reason": "All 120 pairs are human-reviewed and the current text-embedding-v4 profile passed the 98 percent Precision gate on Calibration and Holdout. The Holdout accepted only one hit, so the result remains a conservative fixed-set release gate rather than a production-wide accuracy claim.",
       "entryPoint": "mesguard-semantic-cache-eval",
       "datasetArtifact": "testdata/semantic-cache-v1.json",
-      "reportArtifact": ".scratch/m4-agent-evaluation-performance/issues/07-pgvector-semantic-cache-and-calibration.md"
+      "reportArtifact": "docs/evaluations/semantic-answer-cache-v1.md"
+    },
+    {
+      "id": "semantic-cache-latency-v1",
+      "domain": "semantic_answer_cache",
+      "observationKind": "semantic_cache_performance",
+      "status": "recomputed",
+      "reason": "The five-question fixed traffic replay measured current pgvector lookup and configured-provider full-chain latency under a 21-call hard budget; it is an acceptance replay, not a production traffic percentile.",
+      "entryPoint": "mesguard-semantic-cache-observe",
+      "datasetArtifact": "testdata/semantic-cache-latency-v1.json",
+      "reportArtifact": "docs/evaluations/semantic-answer-cache-v1.md"
     }
   ]
 }

@@ -147,6 +147,7 @@ func SelectThreshold(
 		if _, duplicate := observationByID[observation.PairID]; duplicate {
 			return ThresholdSelection{}, errors.New("semantic cache similarity observation is duplicated")
 		}
+		observation.Compatible = evaluationPairCompatible(pair)
 		observationByID[observation.PairID] = observation
 		if pair.Split == EvaluationSplitCalibration && observation.Compatible {
 			thresholds = append(thresholds, observation.Similarity)
@@ -161,7 +162,16 @@ func SelectThreshold(
 	thresholds = slices.Compact(thresholds)
 	selection := ThresholdSelection{PrecisionGate: precisionGate}
 	bestRecall := -1.0
-	for _, threshold := range thresholds {
+	for index, observedThreshold := range thresholds {
+		threshold := observedThreshold
+		if index > 0 {
+			// Any value inside this score gap classifies the calibration set identically;
+			// the midpoint avoids binding runtime behavior to Provider float jitter.
+			threshold = (thresholds[index-1] + observedThreshold) / 2
+		}
+		if threshold < 0.5 {
+			continue
+		}
 		metrics := evaluateThreshold(pairs, observationByID, EvaluationSplitCalibration, threshold)
 		if metrics.Hits == 0 || metrics.Precision < precisionGate {
 			continue
@@ -196,8 +206,16 @@ func EvaluateThreshold(
 		if _, exists := observationByID[pair.ID]; !exists {
 			return CacheMetrics{}, errors.New("semantic cache similarity observation is missing")
 		}
+		observation := observationByID[pair.ID]
+		observation.Compatible = evaluationPairCompatible(pair)
+		observationByID[pair.ID] = observation
 	}
 	return evaluateThreshold(pairs, observationByID, split, threshold), nil
+}
+
+func evaluationPairCompatible(pair EvaluationPair) bool {
+	return EligibleForLookup(Question{Text: pair.CandidateQuestion}) &&
+		CompareQuestions(pair.AnchorQuestion, pair.CandidateQuestion).Compatible
 }
 
 func evaluateThreshold(
