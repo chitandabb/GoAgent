@@ -1,10 +1,23 @@
 # M4 Agent 评测与性能优化规格
 
-> 状态：规格已确认并进入实现；Ticket 01-08 已完成，下一步执行 M4 选择性复测与收口。
+> 状态：已完成；Ticket 01-09 已实现并通过选择性零 Provider 验收。
 >
 > 本规格对应 MESGuard 简历第五点。现有量化数字均为验收目标，不是既成成果；最终简历必须使用当前实现、固定数据集和可复现评测得到的真实结果。
 
 ## Implementation Status
+
+Ticket 09 已完成 M4 收口：
+
+- `mesguard-m4-acceptance` 对 23 项版本化资产执行路径、存在性和 SHA-256 审计，并从显式白名单 JSON
+  制品提取当前指标；`retest_needed/obsolete` 资产不能进入当前证据，命令固定为零 Provider 调用。
+  `testdata/m4-acceptance-v1.json` 将每项资产绑定到实现提交和运行配置指纹，并汇总 5 项当前证据。
+- 本轮零成本重放了 Tool Selection 90 条历史 Observation、Evidence Gate 6 条 Fixture Observation、
+  QueryGuard 52 条确定性 Case，并从已记录向量重算 120 对语义缓存 Calibration/Holdout；语义缓存阈值和
+  混淆矩阵与原报告完全一致。
+- 当前简历第五点只使用语义缓存人工标注集和固定命中链路的真实结果；历史 Tool、Text-to-SQL、RAG 和
+  综合诊断指标按清单状态保留，不冒充当前复测。
+- 原 `P95 200 ms`、`平均模型调用成本降低 35%+` 目标未被当前证据支持，已从简历删除；`MPR` 已更正为
+  标准 `MRR`。完整方法和边界见 `docs/evaluations/m4-acceptance-v1.md`。
 
 截至 2026-08-14，Ticket 06 的 PostgreSQL L1 与 Ticket 07 的 pgvector L2 语义答案缓存已通过验收：
 
@@ -410,8 +423,8 @@ Text-to-SQL and SQL safety, FTS/Vector/RRF retrieval, Advanced RAG variants, con
 document ingestion and visual processing, and context governance. M4 treats these as prior art and input assets.
 Their historical results remain scoped to the implementation, model, Prompt, data and date recorded at the time.
 
-Ticket 01 已建立 `evaluation_inventory_v1`；Ticket 07 增加语义缓存真实性能 Observation 后，当前逐项登记
-20 个评测/观测入口，并使用
+Ticket 01 已建立 `evaluation_inventory_v1`；Ticket 08 增加语义缓存 Provider 消融 Observation 后，当前逐项登记
+23 项评测/观测资产，并使用
 `reusable / recomputed / retest_needed / obsolete` 标记历史资产。首个 Tool Selection tracer bullet
 以零 Provider 调用重放 45 Case、90 条历史 Observation，生成绑定 Dataset/Observation SHA-256 的
 `evaluation_ledger_v1`；领域 Summary 保持原始 wide `95.56%`、filtered `97.78%` 和 45 个 paired Case。
