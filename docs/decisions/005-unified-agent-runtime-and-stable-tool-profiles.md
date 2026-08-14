@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as the target architecture on 2026-08-14. The first domain contracts and profile definitions are implemented, while production wiring still uses the legacy `TaskScope` path until the compatibility migration is complete.
+Accepted as the target architecture on 2026-08-14. Domain contracts, profile definitions, the legacy `TaskScope -> RunAccess` adapter and the execution-time Permission Guard are implemented. Production Schema selection still uses `ToolsFor(TaskScope)` until the fixed-Profile migration is complete.
 
 ## Decision
 

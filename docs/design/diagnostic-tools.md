@@ -12,7 +12,7 @@
 
 ~~~text
 模型生成调用意图
-  -> TaskScope 运行时 Tool 授权
+  -> 当前生产：TaskScope 动态选 Schema + RunAccess Guard；目标 v2：固定 ToolProfile + RunAccess Guard
   -> 任务数据源授权
   -> Tool 参数 Schema 校验
   -> SQL/路径/查询策略校验
@@ -91,7 +91,7 @@ Connector 只实现版本化的窄动作，例如读取对象定义、执行受�
 
 ## SQL Skill 与 Tool
 
-SQL 能力放在独立的 `sql-investigation` Skill，不把全部 SQL Tool 塞给工单诊断 Skill。
+SQL Tool 是 Conversation 与 Diagnosis 共享的只读业务能力，不属于某一个 Skill。Conversation 可以直接把用户的自然语言数据问题转换为受控 SQL 调用；Diagnosis 则按 `sql-investigation` SOP 把对象检索、只读查询和结果引用组织成诊断证据。Skill 只说明调查步骤，不授予或隐藏 SQL Tool。
 
 首批 Tool 规划为：
 
@@ -122,7 +122,7 @@ SQL 能力放在独立的 `sql-investigation` Skill，不把全部 SQL Tool 塞�
 T-SQL Parser。项目参考 [Bytebase Omni](https://github.com/bytebase/omni) 的语句分类、
 对象提取和对抗测试思路，自行实现一个默认拒绝的窄 `QueryGuard`：词法层必须正确处理
 注释、字符串和带引号标识符；策略层只接受单条 `SELECT` 或只读 CTE，识别 `UNION`、
-拒绝 `SELECT INTO`，并提取引用对象供 TaskScope 和已发布 Catalog 复核。
+拒绝 `SELECT INTO`，并提取引用对象供 `RunAccess.ResourceGrants` 和已发布 Catalog 复核。生产迁移完成前仍由旧 `TaskScope` 承担同一检查。
 
 首版明确拒绝变量、临时表、动态 SQL、跨库/链接服务器、危险系统对象和无法可靠分析的
 方言结构。它不是通用 T-SQL AST，不负责格式化或执行计划分析。当前执行器先复核
@@ -201,7 +201,7 @@ search_repositories
 当前提供一个不依赖模型的评测命令：
 
 ~~~text
-go run ./cmd/mesguard-github-search-eval -cases testdata/github-code-search-v2.jsonl
+go run ./tools/evaluation/mesguard-github-search-eval -cases testdata/github-code-search-v2.jsonl
 ~~~
 
 命令顺序执行 Code Search、树候选和固定 SHA 文件读取，最多接受 20 条样本；凭据只从现有 `.env`/配置读取，不输出 Token、不写仓库、不创建本地缓存。输出中的 `fallbackRecoveryRate` 只有在实际观察到 `searchStatus=incomplete` 的样本时才有分母；没有不完整样本时必须保留为未测量，不能解释为“fallback 失败”。评测器会保留每条样本的多个阶段错误；取消时停止新样本，并输出已经完成样本的部分汇总，`requestedCases` 与 `cases` 分别表示请求数和已完成数。
@@ -214,22 +214,22 @@ go run ./cmd/mesguard-github-search-eval -cases testdata/github-code-search-v2.j
 Evidence、报告状态和耗时写入 observation：
 
 ~~~text
-go run ./cmd/mesguard-agent-paired-eval \
+go run ./tools/evaluation/mesguard-agent-paired-eval \
   -dataset testdata/agent-evaluation.real-v1.jsonl \
   -output testdata/agent-evaluation.real-v1.observations.jsonl
-go run ./cmd/mesguard-agent-eval \
+go run ./tools/evaluation/mesguard-agent-eval \
   -dataset testdata/agent-evaluation.real-v1.jsonl \
   -input testdata/agent-evaluation.real-v1.observations.jsonl
 
 # 扩展样本；SQL v3/v4 仅为观察完整 SQL 链路临时提高预算
-go run ./cmd/mesguard-agent-paired-eval \
+go run ./tools/evaluation/mesguard-agent-paired-eval \
   -dataset testdata/agent-evaluation.real-v2.jsonl \
   -output testdata/agent-evaluation.real-v2.observations.jsonl
-go run ./cmd/mesguard-agent-paired-eval \
+go run ./tools/evaluation/mesguard-agent-paired-eval \
   -dataset testdata/agent-evaluation.real-v3.jsonl \
   -output testdata/agent-evaluation.real-v3.observations.jsonl \
   -max-total-tokens 32000
-go run ./cmd/mesguard-agent-paired-eval \
+go run ./tools/evaluation/mesguard-agent-paired-eval \
   -dataset testdata/agent-evaluation.real-v4.jsonl \
   -output testdata/agent-evaluation.real-v4.observations.jsonl \
   -max-total-tokens 32000
@@ -268,7 +268,8 @@ SQL v4 使用同样的临时预算观察 Catalog 搜索和受限只读查询：b
 prepare_context
   -> ChatModelAgent
        - 按需读取 Skill 指南
-       - 调用本次 TaskScope 授权的 SQL/代码/RAG/附件/Web Tool
+       - 从固定 Diagnosis Profile 中选择 SQL/代码/RAG/附件/Web Tool
+       - RunAccess Guard 在执行前校验 Permission 与资源 Grant
   -> evidence_gate
        -> 证据不足且有预算：回 ChatModelAgent
        -> 证据充分：report
@@ -277,7 +278,7 @@ prepare_context
 
 普通 SQL、代码、RAG、附件和 Web 调查不离开当前 Agent 循环。外层 Graph 只校验总预算、取消状态、Evidence 引用和报告完整性。大型代码调查或必须先脱敏再联网的 Web Research 如果确实需要隔离上下文，才单独使用 Handoff/Fork。
 
-Tool 的最终授权来自用户角色、任务类型、数据源、生产/产品库环境和依赖可用状态。Skill 只提供 SOP，不授予权限。具体迁移顺序见 [`agent-implementation-plan.md`](agent-implementation-plan.md)。
+Tool Schema 来自部署内稳定 Profile；最终执行授权来自 `RunAccess.Permission + ResourceGrants`，底层继续叠加只读账号、Catalog、QueryGuard、超时、截断和脱敏。依赖临时不可用返回结构化降级，不通过删除 Schema 表达。Skill 只提供 SOP，不授予权限。当前状态和后续切片见 [`../roadmap.md`](../roadmap.md)。
 
 ## Skill 与 Tool 规划
 
@@ -287,10 +288,11 @@ Tool 的最终授权来自用户角色、任务类型、数据源、生产/产�
 | `sql-investigation` | 对象定义、`search_schema_catalog`、`execute_readonly_query`（窄版本当前） | 核对业务数据和数据库执行证据 |
 | `code-investigation` | GitHub MCP 只读 Tool | 定位代码与提交 |
 | `attachment-investigation` | `read_attachment`、OCR/VLM 结果读取 | 按需分析截图、PDF和日志附件 |
-| `knowledge-qa` | `search_knowledge` | 全局与个人知识库问答；不获得诊断数据源能力，结果必须携带文档/版本/Chunk/哈希定位 |
 | `web-research` | `web_search`、`fetch_public_page` | 只查询公开、脱敏问题并保留引用 |
 | `log-investigation` | `search_logs`、`get_log_context` | 接入可用的只读日志源 |
 | `sql-optimization-lab` | LAB 查询、计划比较和清理流程 | 后续受控优化实验 |
+
+主会话的知识问答和直接 Text-to-SQL 不依赖 Skill Runtime；它们使用 Conversation System Prompt 与稳定 Tool Profile。表中 Skill 只服务需要明确证据 SOP 的 Diagnosis Runtime。
 
 Web Search 不默认获得工单原文。进入 `web-research` 前必须把公司名、客户名、工单号、内部地址、SQL/日志原文和代码片段移除，只允许搜索通用产品概念、公开错误码和公开依赖资料。
 
@@ -316,7 +318,7 @@ ContentProvider 只能接收策略构造的 `PublicQuery` 和 `PublicURL`，不�
 
 ## 前端与 API 交接
 
-诊断后端稳定后同步更新 `docs/design/openapi.json` 和前端交接说明，至少覆盖：
+诊断后端稳定后同步更新 `api/openapi.yaml` 和前端交接说明，至少覆盖：
 
 - 创建、查询、取消和重试 DiagnosisTask；
 - TaskEvent SSE、`Last-Event-ID` 断线补读和心跳；

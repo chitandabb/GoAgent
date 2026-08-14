@@ -90,11 +90,11 @@ provider/model 完全相同时，执行会在 Provider 调用前拒绝；证据�
 3 个实际引用证据，其中额外概述来源只存在于 `cited_evidence`。以下命令均未调用模型：
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-judge-export -overwrite
-go run ./cmd/mesguard-rag-judge `
+go run ./tools/export/mesguard-conversation-quality-judge-export -overwrite
+go run ./tools/evaluation/mesguard-rag-judge `
   -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
   -validate-only
-go run ./cmd/mesguard-rag-judge `
+go run ./tools/evaluation/mesguard-rag-judge `
   -input output/evaluation/conversation-quality-recorded-v1.judge-inputs.jsonl `
   -estimate-only
 ```
@@ -142,7 +142,7 @@ Judge 只影响 `judgedRuns` 和三个辅助均值，不覆盖确定性 pass/fai
 命令：
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-eval `
+go run ./tools/evaluation/mesguard-conversation-quality-eval `
   -dataset testdata/conversation-quality-v1.jsonl `
   -input testdata/conversation-quality-v1.seeded.observations.jsonl
 ```
@@ -160,8 +160,8 @@ Answer Term Recall、Expected Degraded Channel Recall 和可预览引用一致�
 当前包含 5 个知识问答 Case、4 份文档、21 个 Chunk。先做零 Provider 校验和费用规划：
 
 ```powershell
-go run ./cmd/mesguard-conversation-quality-observe -validate-only -max-cases 5
-go run ./cmd/mesguard-conversation-quality-observe -estimate-only -max-cases 1
+go run ./tools/observation/mesguard-conversation-quality-observe -validate-only -max-cases 5
+go run ./tools/observation/mesguard-conversation-quality-observe -estimate-only -max-cases 1
 ```
 
 单 Case 规划输出为 1 份文档、6 个 Chunk、至多 1 个文档 Embedding 请求、估算 Embedding Token
@@ -283,7 +283,7 @@ Faithfulness 或回答质量样本，只是会话附件 `HTTP -> MinIO -> Postgr
 2. 对真实产品回合仍使用 `caseId -> turnId` 选择清单和离线导出器：
 
    ```powershell
-   go run ./cmd/mesguard-conversation-quality-export `
+   go run ./tools/export/mesguard-conversation-quality-export `
      -dataset testdata/conversation-quality-v1.jsonl `
      -selections <recorded-run-selections.jsonl> `
      -output output/evaluation/conversation-quality-v1.recorded.observations.jsonl

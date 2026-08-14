@@ -141,29 +141,29 @@ Total 16453 Token。正向 Case 的实际 Tool 序列为 `read_external_case -> 
 
 ```powershell
 # 完全离线校验
-go run ./cmd/mesguard-rag-paired-observe -validate-only
+go run ./tools/observation/mesguard-rag-paired-observe -validate-only
 
 # 会调用 Embedding；单 Case、单变量、显式授权
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -execute-provider -axis context -case-id pool-limit-wait-risk -timeout 3m
 
 # 会调用 Embedding 和 ChatModel；Query Rewrite 仍不会修改生产配置
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -execute-provider -axis rewrite -case-id pool-limit-wait-risk -timeout 3m
 
 # 会调用 Embedding，不调用 Rewrite/Rerank/主聊天模型；当前运行全部 5 Case
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -execute-provider -axis compression -retriever rrf -max-cases 5 -timeout 3m
 
 # 单 Case 生产阈值压力门禁；没有真实省略或 Gold Context Recall 下降时失败
-go run ./cmd/mesguard-rag-paired-observe `
+go run ./tools/observation/mesguard-rag-paired-observe `
   -corpus testdata/rag-compression-pressure-v1.corpus.json `
   -dataset testdata/rag-compression-pressure-v1.jsonl `
   -execute-provider -axis compression -require-compression-acceptance `
   -max-cases 1 -timeout 3m
 
 # 三 Case Agentic 二次检索决策固定集；只在前两个 Case 产生真实 ChatModel 调用
-go run ./cmd/mesguard-agentic-retrieval-eval `
+go run ./tools/evaluation/mesguard-agentic-retrieval-eval `
   -execute-provider -max-cases 3 -timeout 90s
 ```
 

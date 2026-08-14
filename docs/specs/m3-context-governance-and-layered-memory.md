@@ -46,11 +46,15 @@ schema v1 Snapshot/Job 表中的 predecessor、candidate/active、activation 字
 1. 获取 Conversation 级锁；生产使用 PostgreSQL session advisory lock，本地测试使用进程锁。
 2. 锁内重读 Current Summary。
 3. 若 `throughSeq` 已覆盖目标，直接复用，不调用模型。
-4. 否则基于上一摘要和新增消息生成、严格解码、归一化、认证引用、确定性校验并发布。
+4. 否则基于上一摘要和新增消息生成、严格解码、认证引用、确定性校验并发布。
 5. 释放锁后继续主模型或提交异步 Job 终态。
 
 Job Lease/Fencing 只保护投递、重试、重复消费和终态提交，不仲裁摘要发布。异步 Job 每个 durable
 attempt 只调用模型一次；同步硬压缩按 Summary `maxAttempts` 做有界结构修复重试。
+
+Provider 若输出 schema v1 lineage 字段，必须校验失败并进入上述有界重试；不得通过静默删除
+superseded 条目来伪造成功。Job 提交成功时，同一摘要 ID 必须与 Worker 结果边界一致；不同摘要 ID
+只有在其边界严格更新且已覆盖 Job 目标时，才能视为并发路径已经完成工作。
 
 ## 存储与恢复
 
@@ -86,12 +90,20 @@ attempt 只调用模型一次；同步硬压缩按 Summary `maxAttempts` 做有�
 软硬路径协调、本地 race 并发测试、Worker 单次调用边界、全仓测试。真实 PostgreSQL 双连接 advisory
 lock 测试已加入 integration suite。
 
-最小真实实验 `incident-correction` 中，cp2 主模型输入相对 Baseline 下降约 79.0%；共同成功的 cp1+cp2
-下降约 52.4%；Experiment 使 Baseline 预估 132,621 Token、超过 128K 的 cp3 继续回答。但三轮
-Experiment 端到端总 Token 为 158,706，其中 Summary 为 102,074，不能支撑端到端降低 60% 的说法。
+受控真实序列 `incident-correction` 中，cp2 主模型输入从 59,386 降至 12,434，下降约 79.1%；共同
+成功的 cp1+cp2 主模型输入从 89,558 降至 42,606，下降约 52.4%。Baseline 的 cp3 预估输入为
+132,621，超过 128K 并在调用前拒绝；Experiment 三个 checkpoint 均成功继续执行。三轮 Experiment
+端到端总 Token 为 160,377，其中 Summary 为 101,534，不能支撑端到端平均降低 60%。
 
-待办：运行一次明确批准、严格限额的闭环固定集；按实测更新简历；后续 migration 收敛 schema v1
-兼容列；前端联调放到整体功能闭环阶段。
+待办：可选地扩展到全量固定集；按实测更新简历；后续 migration 收敛 schema v1 兼容列；前端联调
+放到整体功能闭环阶段。
+
+## 已知工程约束
+
+生产 Coordinator 在摘要远程调用期间持有 PostgreSQL session advisory lock，因此同时占用一个数据库
+连接，等待同一 Conversation 的请求也会占连接。当前 Memory Worker `QoS=1` 且数据库池默认上限
+100，现阶段可控。上线需观测锁等待、持锁时间、压缩并发和连接池等待；达到容量边界后优先限制压缩
+并发或使用独立小连接池，不预先引入 Redis 锁、额外租约状态机或第二套协调基础设施。
 
 ## 非目标
 

@@ -457,7 +457,7 @@ The budget-protected 2026-08-07 five-pair run changed only document concurrency 
 and approximately CNY 0.04803, with no OCR/VLM calls. Median duration changed from 2124 ms to 1450 ms and median
 document throughput increased 46.48%, while every arm retained 42 searchable Elements, 70 Chunks, 8 Embedding
 requests, 9606 Tokens and 2+2 Chunk/vector batches. `IntegrityPreserved=true` and temporary actor/document residue
-was `0|0`. This supports the bounded worker-core 40%+ claim, but remains ineligible for the 40-document/eight-format
+was `0|0`. This supports the bounded worker-core 46.48% claim, but remains ineligible for the 40-document/eight-format
 full-scale gate because the selected workload contains only two documents and two format classes.
 
 The 2026-08-09 resume-closure pair adds scanned PDF, PPTX, XLSX and PNG under the unchanged default CNY 0.05

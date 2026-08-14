@@ -57,14 +57,14 @@ Vector 和 RRF 的 796 Token 均由 604 个文档 Token 与 192 个查询 Token 
 ## 重跑命令
 
 ```powershell
-go run ./cmd/mesguard-rag-retrieval-eval `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval `
   -retriever fts `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
   -output output/evaluation/rag-retrieval-v1-fts.observations.jsonl `
   -summary output/evaluation/rag-retrieval-v1-fts.summary.json
 
-go run ./cmd/mesguard-rag-retrieval-eval `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval `
   -retriever vector `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
@@ -72,7 +72,7 @@ go run ./cmd/mesguard-rag-retrieval-eval `
   -summary output/evaluation/rag-retrieval-v1-vector.summary.json `
   -embedding-price-cny-per-million <current-provider-price>
 
-go run ./cmd/mesguard-rag-retrieval-eval `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval `
   -retriever rrf `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
@@ -80,7 +80,7 @@ go run ./cmd/mesguard-rag-retrieval-eval `
   -summary output/evaluation/rag-retrieval-v1-rrf.summary.json `
   -embedding-price-cny-per-million <current-provider-price>
 
-go run ./cmd/mesguard-rag-retrieval-eval `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval `
   -retriever rrf-rerank `
   -corpus testdata/rag-retrieval-v1.corpus.jsonl `
   -dataset testdata/rag-retrieval-v1.jsonl `
@@ -90,7 +90,7 @@ go run ./cmd/mesguard-rag-retrieval-eval `
   -rerank-price-cny-per-million <current-provider-price>
 
 # 成本受控冒烟：只评测一条查询，仍会重建固定集文档和 Embedding。
-go run ./cmd/mesguard-rag-retrieval-eval `
+go run ./tools/evaluation/mesguard-rag-retrieval-eval `
   -retriever rrf-rerank -case-id rag-transaction-timeout-paraphrase `
   -output $env:TEMP\mesguard-rerank-smoke.observations.jsonl `
   -summary $env:TEMP\mesguard-rerank-smoke.summary.json

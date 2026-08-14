@@ -6,6 +6,7 @@
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
+- Agent 授权口径：本文后续出现的 `TaskScope/Capability` 描述保留为当前 v1 实现与历史决策记录；统一 Runtime v2 目标以 [`../decisions/005-unified-agent-runtime-and-stable-tool-profiles.md`](../decisions/005-unified-agent-runtime-and-stable-tool-profiles.md) 为准，知识检索作为 Conversation/Diagnosis 共享 Tool，由 `RunAccess` 授权。
 
 ## 当前已验证基线
 
@@ -887,7 +888,7 @@ Retriever、Embedding profile、Rerank profile 和 K；Query 轴记录 `original
 `child/parent`，压缩轴固定 Parent 并记录 enabled、maxChunks、maxRunes 和 minScore，因此可以做
 original-child、rewrite-child、original-parent、rewrite-parent 和 parent-compression 的受控对照。
 
-离线汇总器 `cmd/mesguard-rag-paired-eval` 严格读取 JSONL，拒绝未知字段、混合 K、缺失 pair、重复
+离线汇总器 `tools/evaluation/mesguard-rag-paired-eval` 严格读取 JSONL，拒绝未知字段、混合 K、缺失 pair、重复
 Chunk 位置、底层 profile 漂移以及同时改变两个实验轴的混杂 pair。每对实验只能按固定方向比较
 `original -> rewrite`、`child -> parent` 或 `uncompressed parent -> bounded parent`。输出 Hit Rate@K、
 Document Recall@K/MRR、Context Precision/Recall、查询放大倍数、压缩输入/输出 Chunk 与 rune、
@@ -900,7 +901,7 @@ Document Recall@K/MRR、Context Precision/Recall、查询放大倍数、压缩�
 基础检索成功时保留回退结果；检索本身失败时写入 `search_failed/not_observed` 并按零质量进入汇总，
 避免只统计成功请求；调用方取消或超时仍立即中止。Observer 只依赖稳定 Search 接口，不创建具体模型。
 
-离线命令本身不连接数据库或模型。真实命令 `cmd/mesguard-rag-paired-observe` 已固定 4 份公开官方
+离线命令本身不连接数据库或模型。真实命令 `tools/observation/mesguard-rag-paired-observe` 已固定 4 份公开官方
 文档、21 个 Chunk 和 5 个 Case，在 PostgreSQL 事务内构造临时知识数据、调用生产
 `BuildKnowledgeSearchService`，结束后整体回滚；默认最多一个 Case，并要求显式
 `-execute-provider`。Query Embedding、Rewrite 和 Rerank Token 分开记录。

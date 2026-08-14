@@ -6,7 +6,7 @@
 40%”。当前完成了一个公开原生 PDF 的 `worker-core pilot`、三文档 PostgreSQL 批写消融、双文档
 文档并发五轮消融、四格式低成本代表集 pair，以及四十文档的零成本 Parser/Chunking corpus audit。
 五轮并发消融可以支撑
-“受控 Worker-core 吞吐提升 40%+”的简历口径；其余结果用于验证链路、扩充语料和定位瓶颈，不能
+“受控 Worker-core 吞吐提升 46.48%（五轮配对）”的简历口径；其余结果用于验证链路、扩充语料和定位瓶颈，不能
 把局部结果外推成四十文档混合视觉端到端指标。
 
 当前真实观测覆盖：
@@ -197,7 +197,7 @@ baseline/experiment 交替顺序 pair。预检估算 80 次请求、100,830 Toke
 
 五轮均无失败回退，`IntegrityPreserved=true`，临时用户/文档残留为 `0|0`。这个结果在相同批处理、
 Embedding 并发和数据库写入策略下，只改变文档并发 `1 -> 2`，因此可以支持“受控 Worker-core
-文档处理吞吐提升 40%+”的简历口径。它仍只有 2 文档/2 格式，当前全规模门禁继续给出
+文档处理吞吐提升 46.48%（五轮配对）”的简历口径。它仍只有 2 文档/2 格式，当前全规模门禁继续给出
 `AcceptanceEligible=false`、`MeetsTarget=false`；不能表述成 40 文档混合视觉端到端提升 46.48%。
 
 ## 2026-08-09 四格式低成本代表集配对
@@ -292,34 +292,34 @@ Token 和费用，并取得人工确认。
 ```powershell
 .\scripts\evaluation\fetch_rag_ingestion_corpus.ps1
 
-go run ./cmd/mesguard-ingestion-throughput-observe -validate-only -max-documents 40
-go run ./cmd/mesguard-ingestion-throughput-observe -audit-only -max-documents 40
-go run ./cmd/mesguard-ingestion-throughput-observe -estimate-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -validate-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -audit-only -max-documents 40
+go run ./tools/observation/mesguard-ingestion-throughput-observe -estimate-only -max-documents 40
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -estimate-only -document-concurrency-ablation `
   -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
   -repetitions 5
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -database-ablation -max-documents 3 -repetitions 5 -timeout 15m
 ```
 
 真实 Provider pair 必须显式授权，并要求 PostgreSQL、MinIO、配置的 Embedding API Key 可用：
 
 ```powershell
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -execute-provider -max-documents 1 -repetitions 1 -timeout 15m `
   -max-provider-cost-cny 0.05 -provider-rpm 900 -provider-tpm 600000
 
-go run ./cmd/mesguard-ingestion-throughput-observe `
+go run ./tools/observation/mesguard-ingestion-throughput-observe `
   -execute-provider -document-concurrency-ablation `
   -document-ids "nist-ir-8108,icsarw-shikhaliyev-poster" `
   -repetitions 5 -timeout 15m `
   -max-provider-cost-cny 0.06 -provider-rpm 900 -provider-tpm 600000 `
   -output output/evaluation/rag-ingestion-document-concurrency-budgeted-v1.observations.jsonl
 
-go run ./cmd/mesguard-ingestion-throughput-eval `
+go run ./tools/evaluation/mesguard-ingestion-throughput-eval `
   -input output/evaluation/rag-ingestion-document-concurrency-budgeted-v1.observations.jsonl `
   -output output/evaluation/rag-ingestion-document-concurrency-budgeted-v1.summary.json `
   -target-increase-percent 40
