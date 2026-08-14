@@ -70,7 +70,7 @@ var temporalOrContextEnglishTerms = []string{
 // cache optimization; false positives can return an answer for the wrong
 // conversational or temporal context.
 func EligibleForLookup(question Question) bool {
-	if question.HasPriorMessages || question.HasAttachments || question.HasCaseReferences ||
+	if question.HasAttachments || question.HasCaseReferences ||
 		question.HasTaskReferences || question.HasReportReferences {
 		return false
 	}
@@ -125,7 +125,14 @@ type Answer struct {
 	Generation       int64
 	CreatedAt        time.Time
 	ExpiresAt        time.Time
+	Layer            string
+	Similarity       float64
 }
+
+const (
+	LayerExact    = "exact"
+	LayerSemantic = "semantic"
+)
 
 type LookupInput struct {
 	QuestionHash string

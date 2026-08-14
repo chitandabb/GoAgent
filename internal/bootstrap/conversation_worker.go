@@ -63,7 +63,7 @@ func NewConversationWorkerApp(
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation service: %w", err)
 	}
-	if err := wireSemanticAnswerCache(conversationService, deps.db, cfg.SemanticAnswerCache, log.Named("semantic_answer_cache")); err != nil {
+	if err := wireSemanticAnswerCache(ctx, conversationService, deps.db, cfg, log.Named("semantic_answer_cache")); err != nil {
 		closeDependencies()
 		return nil, err
 	}

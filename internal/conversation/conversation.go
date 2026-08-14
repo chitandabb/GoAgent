@@ -16,6 +16,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
@@ -222,7 +223,10 @@ const (
 
 type AgentRunCacheLayer string
 
-const AgentRunCacheLayerExact AgentRunCacheLayer = "exact"
+const (
+	AgentRunCacheLayerExact    AgentRunCacheLayer = "exact"
+	AgentRunCacheLayerSemantic AgentRunCacheLayer = "semantic"
+)
 
 func (u AgentRunUsage) Validate() error {
 	if u.ModelCalls < 0 || u.PromptTokens < 0 || u.CompletionTokens < 0 || u.TotalTokens < 0 ||
@@ -335,7 +339,7 @@ func (o AgentRunObservation) Validate() error {
 			return ErrAgentResponseInvalid
 		}
 	case AgentRunExecutionSemanticCacheHit:
-		if o.CacheLayer != AgentRunCacheLayerExact || o.SourceRunID == uuid.Nil ||
+		if (o.CacheLayer != AgentRunCacheLayerExact && o.CacheLayer != AgentRunCacheLayerSemantic) || o.SourceRunID == uuid.Nil ||
 			o.Outcome != AgentRunAnswered || o.ToolCalls != 0 || o.AnswerCacheEligible || o.Usage != (AgentRunUsage{}) ||
 			len(o.DegradedChannels) != 0 || o.PromptManifest != nil {
 			return ErrAgentResponseInvalid
@@ -650,6 +654,24 @@ type SemanticAnswerCacheConfig struct {
 	WriteTimeout   time.Duration
 	MaxAnswerBytes int
 	MaxCitations   int
+	Semantic       *SemanticAnswerCacheSemanticConfig
+}
+
+type SemanticAnswerCacheSemanticConfig struct {
+	Embedder          knowledge.Embedder
+	Profile           knowledge.EmbeddingProfile
+	MinimumSimilarity float64
+	CandidateLimit    int
+	EmbeddingTimeout  time.Duration
+}
+
+func (c SemanticAnswerCacheSemanticConfig) Validate() error {
+	if c.Embedder == nil || c.Profile.Validate() != nil || !c.Profile.Normalize ||
+		c.MinimumSimilarity < 0.5 || c.MinimumSimilarity > 1 || c.CandidateLimit < 1 || c.CandidateLimit > 20 ||
+		c.EmbeddingTimeout < 10*time.Millisecond || c.EmbeddingTimeout > 30*time.Second {
+		return errors.New("semantic answer cache L2 configuration is invalid")
+	}
+	return nil
 }
 
 func (c SemanticAnswerCacheConfig) Validate() error {
@@ -659,6 +681,9 @@ func (c SemanticAnswerCacheConfig) Validate() error {
 		c.MaxAnswerBytes < 1024 || c.MaxAnswerBytes > semanticcache.MaxAnswerBytes ||
 		c.MaxCitations < 1 || c.MaxCitations > semanticcache.MaxCitations {
 		return errors.New("semantic answer cache durations are invalid")
+	}
+	if c.Semantic != nil && c.Semantic.Validate() != nil {
+		return errors.New("semantic answer cache L2 configuration is invalid")
 	}
 	return nil
 }
@@ -673,6 +698,11 @@ func (s *Service) WithSemanticAnswerCache(
 	}
 	if provider == nil || cfg.Validate() != nil {
 		return nil, errors.New("semantic answer cache configuration is invalid")
+	}
+	if cfg.Semantic != nil {
+		if _, ok := provider.(semanticcache.SemanticProvider); !ok {
+			return nil, errors.New("semantic answer cache provider does not support L2")
+		}
 	}
 	s.semanticCache = provider
 	s.semanticCacheConfig = cfg
@@ -865,7 +895,7 @@ func (s *Service) ExecuteTurn(
 		UserMessage:  started.UserMessage,
 		History:      history.Items,
 	}
-	response, cacheHit := s.lookupSemanticAnswer(commandCtx, started.TurnID, agentRequest)
+	response, cacheHit, cacheLookup := s.lookupSemanticAnswer(commandCtx, started.TurnID, agentRequest)
 	if !cacheHit {
 		response, err = s.agent.Respond(commandCtx, agentRequest)
 		if err != nil {
@@ -885,18 +915,26 @@ func (s *Service) ExecuteTurn(
 	result.Turn = completed
 	result.Status = TurnStatusCompleted
 	if !cacheHit {
-		s.storeSemanticAnswer(ctx, started.TurnID, agentRequest, response)
+		s.storeSemanticAnswer(ctx, started.TurnID, agentRequest, response, cacheLookup)
 	}
 	return result, nil
 }
 
-func (s *Service) lookupSemanticAnswer(ctx context.Context, turnID uuid.UUID, request AgentRequest) (AgentResponse, bool) {
+type semanticCacheLookupState struct {
+	vector []float32
+}
+
+func (s *Service) lookupSemanticAnswer(
+	ctx context.Context,
+	turnID uuid.UUID,
+	request AgentRequest,
+) (AgentResponse, bool, semanticCacheLookupState) {
 	if s.semanticCache == nil || !semanticcache.EligibleForLookup(cacheQuestion(request)) {
-		return AgentResponse{}, false
+		return AgentResponse{}, false, semanticCacheLookupState{}
 	}
 	questionHash, err := semanticcache.ExactQuestionKey(request.UserMessage.Content)
 	if err != nil {
-		return AgentResponse{}, false
+		return AgentResponse{}, false, semanticCacheLookupState{}
 	}
 	startedAt := s.clock().UTC()
 	lookupCtx, cancel := context.WithTimeout(ctx, s.semanticCacheConfig.LookupTimeout)
@@ -907,10 +945,14 @@ func (s *Service) lookupSemanticAnswer(ctx context.Context, turnID uuid.UUID, re
 	cancel()
 	if err != nil {
 		s.observeSemanticCacheDegradation(turnID, startedAt, "semantic_cache_lookup", "normal_rag", err, "provider_error")
-		return AgentResponse{}, false
+		return AgentResponse{}, false, semanticCacheLookupState{}
+	}
+	var lookupState semanticCacheLookupState
+	if !hit && s.semanticCacheConfig.Semantic != nil {
+		answer, hit, lookupState = s.lookupSemanticAnswerL2(ctx, turnID, request.UserMessage.Content, startedAt)
 	}
 	if !hit {
-		return AgentResponse{}, false
+		return AgentResponse{}, false, lookupState
 	}
 	finishedAt := s.clock().UTC()
 	response, err := cachedAgentResponse(
@@ -919,9 +961,51 @@ func (s *Service) lookupSemanticAnswer(ctx context.Context, turnID uuid.UUID, re
 	)
 	if err != nil {
 		s.observeSemanticCacheDegradation(turnID, startedAt, "semantic_cache_lookup", "normal_rag", err, "corrupt_record")
-		return AgentResponse{}, false
+		return AgentResponse{}, false, lookupState
 	}
-	return response, true
+	return response, true, lookupState
+}
+
+func (s *Service) lookupSemanticAnswerL2(
+	ctx context.Context,
+	turnID uuid.UUID,
+	question string,
+	startedAt time.Time,
+) (semanticcache.Answer, bool, semanticCacheLookupState) {
+	cfg := s.semanticCacheConfig.Semantic
+	provider, ok := s.semanticCache.(semanticcache.SemanticProvider)
+	if cfg == nil || !ok {
+		return semanticcache.Answer{}, false, semanticCacheLookupState{}
+	}
+	embeddingCtx, cancel := context.WithTimeout(ctx, cfg.EmbeddingTimeout)
+	result, err := cfg.Embedder.Embed(embeddingCtx, knowledge.EmbeddingRequest{
+		Texts: []string{question}, InputType: cfg.Profile.QueryInputType,
+	})
+	cancel()
+	if err == nil {
+		err = result.Validate(1, cfg.Profile.Dimensions, cfg.Profile.Normalize)
+	}
+	if err != nil {
+		s.observeSemanticCacheDegradation(
+			turnID, startedAt, "semantic_cache_embedding", "normal_rag", err, "provider_error",
+		)
+		return semanticcache.Answer{}, false, semanticCacheLookupState{}
+	}
+	lookupState := semanticCacheLookupState{vector: append([]float32(nil), result.Vectors[0]...)}
+	lookupCtx, cancel := context.WithTimeout(ctx, s.semanticCacheConfig.LookupTimeout)
+	answer, hit, err := provider.LookupSemantic(lookupCtx, semanticcache.SemanticLookupInput{
+		Question: question, Vector: result.Vectors[0], ProfileID: cfg.Profile.ID,
+		ProfileFingerprint: cfg.Profile.Fingerprint, NormalizationVersion: semanticcache.SemanticNormalizationVersion,
+		MinimumSimilarity: cfg.MinimumSimilarity, CandidateLimit: cfg.CandidateLimit, Now: startedAt,
+	})
+	cancel()
+	if err != nil {
+		s.observeSemanticCacheDegradation(
+			turnID, startedAt, "semantic_cache_lookup", "normal_rag", err, "provider_error",
+		)
+		return semanticcache.Answer{}, false, lookupState
+	}
+	return answer, hit, lookupState
 }
 
 func (s *Service) storeSemanticAnswer(
@@ -929,6 +1013,7 @@ func (s *Service) storeSemanticAnswer(
 	turnID uuid.UUID,
 	request AgentRequest,
 	response AgentResponse,
+	lookupState semanticCacheLookupState,
 ) {
 	if s.semanticCache == nil || !semanticcache.EligibleForLookup(cacheQuestion(request)) ||
 		response.RunObservation == nil || response.RunObservation.Outcome != AgentRunAnswered ||
@@ -982,6 +1067,35 @@ func (s *Service) storeSemanticAnswer(
 	if err != nil {
 		s.observeSemanticCacheDegradation(
 			turnID, startedAt, "semantic_cache_put", "cache_write_skipped", err, "provider_error",
+		)
+		return
+	}
+	s.indexSemanticAnswer(ctx, turnID, request.UserMessage.Content, questionHash, lookupState)
+}
+
+func (s *Service) indexSemanticAnswer(
+	ctx context.Context,
+	turnID uuid.UUID,
+	question string,
+	questionHash string,
+	lookupState semanticCacheLookupState,
+) {
+	cfg := s.semanticCacheConfig.Semantic
+	provider, ok := s.semanticCache.(semanticcache.SemanticProvider)
+	if cfg == nil || !ok || len(lookupState.vector) == 0 {
+		return
+	}
+	startedAt := s.clock().UTC()
+	indexCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.semanticCacheConfig.WriteTimeout)
+	err := provider.IndexSemantic(indexCtx, semanticcache.SemanticIndexInput{
+		QuestionHash: questionHash, Question: question, Vector: lookupState.vector,
+		ProfileID: cfg.Profile.ID, ProfileFingerprint: cfg.Profile.Fingerprint,
+		NormalizationVersion: semanticcache.SemanticNormalizationVersion, SourceRunID: turnID,
+	})
+	cancel()
+	if err != nil {
+		s.observeSemanticCacheDegradation(
+			turnID, startedAt, "semantic_cache_index", "exact_cache_only", err, "provider_error",
 		)
 	}
 }
@@ -1043,12 +1157,19 @@ func cachedAgentResponse(
 	if durationMillis > maxDurationMillis {
 		durationMillis = maxDurationMillis
 	}
+	layer := AgentRunCacheLayer(answer.Layer)
+	if layer == "" {
+		layer = AgentRunCacheLayerExact
+	}
+	if layer != AgentRunCacheLayerExact && layer != AgentRunCacheLayerSemantic {
+		return AgentResponse{}, semanticcache.ErrInvalidRecord
+	}
 	response := AgentResponse{
 		Content:   answer.Content,
 		Citations: citations,
 		RunObservation: &AgentRunObservation{
 			ModelProvider: answer.ModelProvider, ModelID: answer.ModelID, PromptVersion: answer.PromptVersion,
-			ExecutionPath: AgentRunExecutionSemanticCacheHit, CacheLayer: AgentRunCacheLayerExact,
+			ExecutionPath: AgentRunExecutionSemanticCacheHit, CacheLayer: layer,
 			SourceRunID: answer.SourceRunID, Outcome: AgentRunAnswered,
 			RetrievedSources: retrieved, DurationMillis: durationMillis,
 		},
@@ -1172,7 +1293,7 @@ func (s *Service) ExecuteAcceptedTurn(ctx context.Context, execution TurnExecuti
 		UserMessage:  execution.Turn.UserMessage,
 		History:      execution.History,
 	}
-	response, cacheHit := s.lookupSemanticAnswer(commandCtx, execution.TurnID, agentRequest)
+	response, cacheHit, cacheLookup := s.lookupSemanticAnswer(commandCtx, execution.TurnID, agentRequest)
 	var err error
 	if !cacheHit {
 		response, err = s.agent.Respond(commandCtx, agentRequest)
@@ -1192,7 +1313,7 @@ func (s *Service) ExecuteAcceptedTurn(ctx context.Context, execution TurnExecuti
 		return ConversationTurn{}, err
 	}
 	if !cacheHit {
-		s.storeSemanticAnswer(ctx, execution.TurnID, agentRequest, response)
+		s.storeSemanticAnswer(ctx, execution.TurnID, agentRequest, response, cacheLookup)
 	}
 	return completed, nil
 }

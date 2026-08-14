@@ -15,6 +15,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
 	"github.com/google/uuid"
+	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 )
 
@@ -63,6 +64,8 @@ type semanticAnswerCacheLookupRecord struct {
 	PromptVersion    *string    `gorm:"column:prompt_version"`
 	CreatedAt        *time.Time `gorm:"column:created_at"`
 	ExpiresAt        *time.Time `gorm:"column:expires_at"`
+	QuestionText     *string    `gorm:"column:question_text"`
+	Similarity       float64    `gorm:"column:similarity"`
 }
 
 func (r *SemanticAnswerCacheRepository) Lookup(
@@ -109,8 +112,126 @@ WHERE generation.singleton = 1`, input.QuestionHash, input.Now.UTC()).Scan(&reco
 		Content: *record.AnswerContent, Citations: citations, RetrievedSources: retrievedSources,
 		SourceRunID: *record.SourceRunID, ModelProvider: *record.ModelProvider, ModelID: *record.ModelID,
 		PromptVersion: *record.PromptVersion, Generation: record.Generation,
-		CreatedAt: record.CreatedAt.UTC(), ExpiresAt: record.ExpiresAt.UTC(),
+		CreatedAt: record.CreatedAt.UTC(), ExpiresAt: record.ExpiresAt.UTC(), Layer: semanticcache.LayerExact,
 	}, true, nil
+}
+
+func (r *SemanticAnswerCacheRepository) LookupSemantic(
+	ctx context.Context,
+	input semanticcache.SemanticLookupInput,
+) (semanticcache.Answer, bool, error) {
+	if r == nil || r.db == nil {
+		return semanticcache.Answer{}, false, errors.New("semantic answer cache repository is unavailable")
+	}
+	if err := input.Validate(1024, true); err != nil {
+		return semanticcache.Answer{}, false, err
+	}
+	vector := pgvector.NewVector(input.Vector)
+	var records []semanticAnswerCacheLookupRecord
+	result := ResolveDB(ctx, r.db).Raw(`
+SELECT cache.generation, cache.answer_content, cache.citations, cache.retrieved_sources,
+       cache.source_run_id, cache.model_provider, cache.model_id, cache.prompt_version,
+       cache.created_at, cache.expires_at, cache.question_text,
+       1 - (cache.question_embedding <=> ?) AS similarity
+FROM global_knowledge_generation generation
+JOIN semantic_answer_cache cache ON cache.generation = generation.generation
+JOIN knowledge_embedding_profiles profile
+  ON profile.id = cache.embedding_profile_id AND profile.status = 'active'
+WHERE generation.singleton = 1
+  AND cache.expires_at > ?
+  AND cache.embedding_profile_id = ?
+  AND cache.embedding_profile_fingerprint = ?
+  AND profile.fingerprint = cache.embedding_profile_fingerprint
+  AND cache.normalization_version = ?
+  AND cache.question_embedding IS NOT NULL
+  AND 1 - (cache.question_embedding <=> ?) >= ?
+ORDER BY cache.question_embedding <=> ?, cache.created_at DESC, cache.question_hash
+LIMIT ?`, vector, input.Now.UTC(), input.ProfileID, input.ProfileFingerprint,
+		input.NormalizationVersion, vector, input.MinimumSimilarity, vector, input.CandidateLimit).Scan(&records)
+	if result.Error != nil {
+		return semanticcache.Answer{}, false, TranslateError(result.Error)
+	}
+	for _, record := range records {
+		if record.QuestionText == nil || !semanticcache.CompareQuestions(input.Question, *record.QuestionText).Compatible {
+			continue
+		}
+		answer, err := semanticAnswerFromRecord(record, semanticcache.LayerSemantic)
+		if err != nil {
+			return semanticcache.Answer{}, false, err
+		}
+		answer.Similarity = record.Similarity
+		return answer, true, nil
+	}
+	return semanticcache.Answer{}, false, nil
+}
+
+func (r *SemanticAnswerCacheRepository) IndexSemantic(
+	ctx context.Context,
+	input semanticcache.SemanticIndexInput,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("semantic answer cache repository is unavailable")
+	}
+	if err := input.Validate(1024, true); err != nil {
+		return err
+	}
+	boundQuestionHash, err := semanticcache.ExactQuestionKey(input.Question)
+	if err != nil || boundQuestionHash != input.QuestionHash {
+		return semanticcache.ErrInvalidRecord
+	}
+	vector := pgvector.NewVector(input.Vector)
+	return TranslateError(ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var generation int64
+		if result := tx.Raw(`
+SELECT generation FROM global_knowledge_generation WHERE singleton = 1 FOR UPDATE`).Scan(&generation); result.Error != nil {
+			return result.Error
+		} else if result.RowsAffected != 1 || generation < 1 {
+			return errors.New("global knowledge generation is unavailable")
+		}
+		var profileMatches bool
+		if result := tx.Raw(`
+SELECT true FROM knowledge_embedding_profiles
+WHERE id = ? AND fingerprint = ? AND status = 'active' AND dimensions = 1024
+  AND distance_metric = 'cosine' AND normalized = true`, input.ProfileID, input.ProfileFingerprint).Scan(&profileMatches); result.Error != nil {
+			return result.Error
+		} else if result.RowsAffected != 1 || !profileMatches {
+			return semanticcache.ErrInvalidRecord
+		}
+		result := tx.Exec(`
+UPDATE semantic_answer_cache
+SET question_text = ?, embedding_profile_id = ?, embedding_profile_fingerprint = ?,
+    normalization_version = ?, question_embedding = ?
+WHERE question_hash = ? AND generation = ? AND source_run_id = ?`,
+			strings.TrimSpace(input.Question), input.ProfileID, input.ProfileFingerprint,
+			input.NormalizationVersion, vector, input.QuestionHash, generation, input.SourceRunID)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return semanticcache.ErrInvalidRecord
+		}
+		return nil
+	}))
+}
+
+func semanticAnswerFromRecord(record semanticAnswerCacheLookupRecord, layer string) (semanticcache.Answer, error) {
+	if record.AnswerContent == nil || record.SourceRunID == nil || record.ModelProvider == nil || record.ModelID == nil ||
+		record.PromptVersion == nil || record.CreatedAt == nil || record.ExpiresAt == nil {
+		return semanticcache.Answer{}, semanticcache.ErrInvalidRecord
+	}
+	var citations, retrievedSources []semanticcache.Source
+	if err := decodeSemanticCacheJSON(record.Citations, &citations); err != nil {
+		return semanticcache.Answer{}, err
+	}
+	if err := decodeSemanticCacheJSON(record.RetrievedSources, &retrievedSources); err != nil {
+		return semanticcache.Answer{}, err
+	}
+	return semanticcache.Answer{
+		Content: *record.AnswerContent, Citations: citations, RetrievedSources: retrievedSources,
+		SourceRunID: *record.SourceRunID, ModelProvider: *record.ModelProvider, ModelID: *record.ModelID,
+		PromptVersion: *record.PromptVersion, Generation: record.Generation,
+		CreatedAt: record.CreatedAt.UTC(), ExpiresAt: record.ExpiresAt.UTC(), Layer: layer,
+	}, nil
 }
 
 func (r *SemanticAnswerCacheRepository) Put(ctx context.Context, input semanticcache.PutInput) error {

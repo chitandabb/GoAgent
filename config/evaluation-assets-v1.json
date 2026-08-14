@@ -204,6 +204,16 @@
       "entryPoint": "mesguard-context-governance-pilot",
       "datasetArtifact": "testdata/context-governance-pilot-v1.json",
       "reportArtifact": "docs/evaluations/conversation-quality-v1.md"
+    },
+    {
+      "id": "semantic-cache-v1",
+      "domain": "semantic_answer_cache",
+      "observationKind": "semantic_cache_calibration",
+      "status": "retest_needed",
+      "reason": "The stratified 120-pair draft and provider-free calibration contract are implemented, but every Gold label still requires human review and current Embedding observations plus Holdout acceptance have not run.",
+      "entryPoint": "mesguard-semantic-cache-eval",
+      "datasetArtifact": "testdata/semantic-cache-v1.json",
+      "reportArtifact": ".scratch/m4-agent-evaluation-performance/issues/07-pgvector-semantic-cache-and-calibration.md"
     }
   ]
 }

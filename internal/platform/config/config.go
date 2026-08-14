@@ -49,15 +49,20 @@ type Config struct {
 }
 
 type SemanticAnswerCacheConfig struct {
-	Enabled             bool    `toml:"enabled"`
-	Provider            string  `toml:"provider"`
-	TTLSeconds          int     `toml:"ttlSeconds"`
-	TTLJitterRatio      float64 `toml:"ttlJitterRatio"`
-	MaxRecords          int     `toml:"maxRecords"`
-	MaxAnswerBytes      int     `toml:"maxAnswerBytes"`
-	MaxCitations        int     `toml:"maxCitations"`
-	LookupTimeoutMillis int     `toml:"lookupTimeoutMillis"`
-	WriteTimeoutMillis  int     `toml:"writeTimeoutMillis"`
+	Enabled                        bool    `toml:"enabled"`
+	Provider                       string  `toml:"provider"`
+	TTLSeconds                     int     `toml:"ttlSeconds"`
+	TTLJitterRatio                 float64 `toml:"ttlJitterRatio"`
+	MaxRecords                     int     `toml:"maxRecords"`
+	MaxAnswerBytes                 int     `toml:"maxAnswerBytes"`
+	MaxCitations                   int     `toml:"maxCitations"`
+	LookupTimeoutMillis            int     `toml:"lookupTimeoutMillis"`
+	WriteTimeoutMillis             int     `toml:"writeTimeoutMillis"`
+	SemanticEnabled                bool    `toml:"semanticEnabled"`
+	SemanticMinimumSimilarity      float64 `toml:"semanticMinimumSimilarity"`
+	SemanticCandidateLimit         int     `toml:"semanticCandidateLimit"`
+	SemanticEmbeddingTimeoutMillis int     `toml:"semanticEmbeddingTimeoutMillis"`
+	SemanticProfileFingerprint     string  `toml:"semanticProfileFingerprint"`
 }
 
 func (c SemanticAnswerCacheConfig) Validate() error {
@@ -88,6 +93,21 @@ func (c SemanticAnswerCacheConfig) Validate() error {
 	}
 	if c.WriteTimeoutMillis < 10 || c.WriteTimeoutMillis > 5000 {
 		return errors.New("semanticAnswerCache writeTimeoutMillis must be between 10 and 5000")
+	}
+	if c.SemanticEnabled {
+		if math.IsNaN(c.SemanticMinimumSimilarity) || math.IsInf(c.SemanticMinimumSimilarity, 0) ||
+			c.SemanticMinimumSimilarity < 0.5 || c.SemanticMinimumSimilarity > 1 {
+			return errors.New("semanticAnswerCache semanticMinimumSimilarity must be between 0.5 and 1")
+		}
+		if c.SemanticCandidateLimit < 1 || c.SemanticCandidateLimit > 20 {
+			return errors.New("semanticAnswerCache semanticCandidateLimit must be between 1 and 20")
+		}
+		if c.SemanticEmbeddingTimeoutMillis < 10 || c.SemanticEmbeddingTimeoutMillis > 30000 {
+			return errors.New("semanticAnswerCache semanticEmbeddingTimeoutMillis must be between 10 and 30000")
+		}
+		if !validLowerSHA256(strings.TrimSpace(c.SemanticProfileFingerprint)) {
+			return errors.New("semanticAnswerCache semanticProfileFingerprint must identify the calibrated embedding profile")
+		}
 	}
 	return nil
 }
@@ -1863,6 +1883,18 @@ func (c Config) Validate() error {
 	}
 	if err := c.SemanticAnswerCache.Validate(); err != nil {
 		return err
+	}
+	if c.SemanticAnswerCache.SemanticEnabled {
+		if !c.Models.Embedding.Enabled {
+			return errors.New("semanticAnswerCache semantic matching requires models.embedding")
+		}
+		profile, err := c.Models.Embedding.Profile()
+		if err != nil {
+			return err
+		}
+		if profile.Fingerprint != strings.TrimSpace(c.SemanticAnswerCache.SemanticProfileFingerprint) {
+			return errors.New("semanticAnswerCache semanticProfileFingerprint must match models.embedding")
+		}
 	}
 	if c.Knowledge.Retrieval.QueryRewrite.Enabled {
 		if _, err := c.Models.Chat.Profile(c.Knowledge.Retrieval.QueryRewrite.ModelProfile); err != nil {
