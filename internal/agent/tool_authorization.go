@@ -11,6 +11,10 @@ import (
 
 var ErrTaskScopeRequired = errors.New("task scope is required")
 
+// ErrRunAccessRequired 是执行期第二层 Guard 的 fail-closed 错误：
+// Tool 可见（Schema 层已通过）但本次执行没有合法 RunAccess 时返回。
+var ErrRunAccessRequired = errors.New("run access is required")
+
 // ToolAuthorizationMiddleware 必须放在 Skill Middleware 之前：它先注入业务 Tool，
 // Skill Middleware 再追加框架自己的 skill Tool，二者不会重复注册。
 type ToolAuthorizationMiddleware struct {

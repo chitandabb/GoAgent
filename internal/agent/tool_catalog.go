@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
@@ -28,6 +29,7 @@ type ToolRegistration struct {
 	AllowedSafetyModes   []DataSourceSafetyMode
 	RequiredCapabilities []ToolCapability
 	RequiredDependencies []ToolDependency
+	RequiredPermissions  []agentruntime.Permission
 }
 
 type catalogEntry struct {
@@ -41,6 +43,7 @@ type catalogEntry struct {
 	allowedSafetyModes   []DataSourceSafetyMode
 	requiredCapabilities []ToolCapability
 	requiredDependencies []ToolDependency
+	requiredPermissions  []agentruntime.Permission
 }
 
 // AgentToolProvider 根据一次任务的授权快照返回模型实际可见的 Tool。
@@ -103,6 +106,7 @@ func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalo
 		allowedSafetyModes:   append([]DataSourceSafetyMode(nil), registration.AllowedSafetyModes...),
 		requiredCapabilities: append([]ToolCapability(nil), registration.RequiredCapabilities...),
 		requiredDependencies: append([]ToolDependency(nil), registration.RequiredDependencies...),
+		requiredPermissions:  append([]agentruntime.Permission(nil), registration.RequiredPermissions...),
 	}, nil
 }
 
@@ -147,10 +151,16 @@ func validatePolicyValues(registration ToolRegistration) error {
 			return fmt.Errorf("invalid dependency %q", dependency)
 		}
 	}
+	for _, permission := range registration.RequiredPermissions {
+		if !permission.Valid() {
+			return fmt.Errorf("invalid permission %q", permission)
+		}
+	}
 	if hasDuplicate(registration.AllowedRoles) || hasDuplicate(registration.AllowedTaskTypes) ||
 		hasDuplicate(registration.AllowedDataRoles) || hasDuplicate(registration.AllowedSafetyModes) ||
 		hasDuplicate(registration.RequiredCapabilities) ||
-		hasDuplicate(registration.RequiredDependencies) {
+		hasDuplicate(registration.RequiredDependencies) ||
+		hasDuplicate(registration.RequiredPermissions) {
 		return errors.New("policy contains duplicate values")
 	}
 	return nil
@@ -243,25 +253,30 @@ func (entry catalogEntry) scopedTool() (tool.BaseTool, error) {
 	if !ok {
 		return nil, fmt.Errorf("registered tool %q is not invokable", entry.name)
 	}
-	return &scopeGuardedTool{inner: invokable, entry: entry}, nil
+	return &accessGuardedTool{inner: invokable, entry: entry}, nil
 }
 
-type scopeGuardedTool struct {
+// accessGuardedTool 是执行期第二层授权 Guard：Schema 可见性仍由 ToolsFor 的
+// v1 过滤决定，执行时它只读取 v2 RunAccess 做粗粒度 Permission 校验。
+// Tool 内部仍负责具体资源（数据源、工单、附件）归属校验。
+type accessGuardedTool struct {
 	inner tool.InvokableTool
 	entry catalogEntry
 }
 
-func (t *scopeGuardedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *accessGuardedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return t.inner.Info(ctx)
 }
 
-func (t *scopeGuardedTool) InvokableRun(ctx context.Context, arguments string, opts ...tool.Option) (string, error) {
-	scope, ok := TaskScopeFromContext(ctx)
+func (t *accessGuardedTool) InvokableRun(ctx context.Context, arguments string, opts ...tool.Option) (string, error) {
+	access, ok := agentruntime.RunAccessFromContext(ctx)
 	if !ok {
-		return "", ErrTaskScopeRequired
+		return "", ErrRunAccessRequired
 	}
-	if !t.entry.authorized(scope) {
-		return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, t.entry.name)
+	for _, permission := range t.entry.requiredPermissions {
+		if !access.Allows(permission) {
+			return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, t.entry.name)
+		}
 	}
 	startedAt := time.Now()
 	result, err := t.inner.InvokableRun(ctx, arguments, opts...)
