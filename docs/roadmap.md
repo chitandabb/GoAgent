@@ -6,7 +6,7 @@ domain, database, API, system-architecture, code-organization and
 context-governance design documents.
 Ordered next slices are maintained directly in this file.
 
-## Current Stage: Resume Point 3 Backend Closure Complete; Point 4 Design Locked
+## Current Stage: Resume Points 1-5 Backend Closure Complete; Frontend Integration Pending
 
 - [x] Production `cmd/`, classified `tools/`, and private `internal/` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -49,7 +49,36 @@ Ordered next slices are maintained directly in this file.
       task-id fence, producing `attachment` evidence.
 - [ ] Frontend adoption of turn SSE, attachment upload/read traces, and citation preview.
 
-## Current Next Slice: M3 Dynamic Context Governance and Layered Memory
+## Completed Slice: M4 Agent Evaluation and Performance Optimization
+
+Implementation spec: [`specs/m4-agent-evaluation-and-performance-optimization.md`](specs/m4-agent-evaluation-and-performance-optimization.md).
+The design and nine-ticket delivery graph are complete. A strict
+`evaluation_inventory_v1` audits 23 versioned evaluation/observation assets, and the first
+`evaluation_ledger_v1` tracer bullet replays the 45-case/90-observation Tool Selection fixed set
+without Provider access. The report binds exact Dataset/Observation SHA-256 values, preserves the
+domain summary and marks unknown historical configuration identity explicitly. Tool Selection remains
+`retest_needed`; the replay proves auditability, not current Tool-contract accuracy.
+
+- [x] Audit existing evaluation entry points and classify historical assets as reusable, recomputed,
+      retest-needed or obsolete.
+- [x] Implement the domain-neutral Evaluation Ledger envelope and one Tool Selection replay path while
+      preserving domain-owned metrics.
+- [x] Reject missing historical fields, contradictory outcomes, duplicate/conflicting records, Usage
+      overflow and source-file substitution; publish reports atomically without overwriting history.
+- [x] Implement the Resilience Policy and Degradation Event tracer bullet.
+- [x] Adopt the policy across the agreed critical Agent, Tool and structured-output paths.
+- [x] Add OpenTelemetry Agent spans, default-safe OTLP export and the isolated optional Langfuse development profile;
+      full local Langfuse UI smoke remains an explicit resource-gated acceptance step.
+- [x] Add the existing Evidence Gate Early Exit paired evaluation.
+- [x] Add Global Knowledge Generation plus L1 exact answer caching.
+- [x] Add pgvector L2 semantic answer caching, reviewed calibration/holdout data and the Precision gate;
+      Holdout Precision is 100% on one accepted hit, while the five-question configured-provider replay P95 is 244.743 ms.
+- [x] Compare the optional Redis Stack cache Provider under the same contract; retain the adapter but keep PostgreSQL as default.
+- [x] Run zero-Provider selective current-state retests and update the fifth resume point only from measured evidence;
+      the final claim uses the 120-pair reviewed semantic-cache set and fixed five-question hit replay, while stale
+      Tool, Text-to-SQL, RAG and diagnosis observations remain explicitly excluded from current evidence.
+
+## Completed Slice: M3 Dynamic Context Governance and Layered Memory
 
 Target design: [`design/context-governance-and-memory.md`](design/context-governance-and-memory.md).
 Implementation spec: [`specs/m3-context-governance-and-layered-memory.md`](specs/m3-context-governance-and-layered-memory.md).

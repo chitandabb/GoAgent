@@ -1,0 +1,841 @@
+{
+  "schemaVersion": "m4_acceptance_v1",
+  "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+  "inventorySha256": "sha256:5427cc29081f9b55798ca3c9d71e0797901bc246450c688ea0c38a2ee973d9b8",
+  "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+  "providerCalls": 0,
+  "summary": {
+    "totalAssets": 23,
+    "reusableAssets": 5,
+    "recomputedAssets": 4,
+    "retestNeededAssets": 12,
+    "obsoleteAssets": 2,
+    "currentEvidenceAssets": 5
+  },
+  "assets": [
+    {
+      "id": "tool-selection-v1",
+      "domain": "tool_selection",
+      "status": "retest_needed",
+      "reason": "The 2026-08-03 raw observations remain replayable, but Tool Catalog, Skill loading, and conversation Tool exposure changed afterwards; current resume metrics require a selective paired retest.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/tool-selection-v1.jsonl",
+          "sha256": "sha256:0affee10853bc3c2fc8e154662d3e464ae6f6b0e36fe8ab0748ac090e5f430d2",
+          "bytes": 9318
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/tool-selection-v1.observations.jsonl",
+          "sha256": "sha256:c8339d098b66c74b61f67cb6d4d14a64dc3bf4d6e0df73928e46447be67af2f6",
+          "bytes": 77812
+        },
+        {
+          "kind": "report",
+          "path": "testdata/tool-selection-v1.summary.json",
+          "sha256": "sha256:2f9b9c3c6025a3bea1ea6a34d21c7c1b2b9e9130fb929d0eef0097a3ba1ff115",
+          "bytes": 1080
+        }
+      ]
+    },
+    {
+      "id": "text-to-sql-v1",
+      "domain": "text_to_sql",
+      "status": "retest_needed",
+      "reason": "The recorded execution results remain historical evidence, but the model Profile, Agent orchestration, and SQL investigation contracts evolved after the run; current execution accuracy requires a bounded selective retest.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/text-to-sql-v1.jsonl",
+          "sha256": "sha256:fdd1e9f7e2370ebf0bb9d59d0a0c5e38d49c6ebcf317df35b6fe50c99bdeded2",
+          "bytes": 5034
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/text-to-sql-v1.observations.jsonl",
+          "sha256": "sha256:43f000f34185f2415cd5b04fe9b74bb8612cf85831c46d412ef904b80ea9fadc",
+          "bytes": 14588
+        },
+        {
+          "kind": "report",
+          "path": "testdata/text-to-sql-v1.summary.json",
+          "sha256": "sha256:89fcf2a3cd0a9711239bdbb342a261cf602d0771c05670397343ea402d7d0aaf",
+          "bytes": 310
+        }
+      ]
+    },
+    {
+      "id": "sql-safety-v1",
+      "domain": "text_to_sql",
+      "status": "reusable",
+      "reason": "The deterministic QueryGuard fixture remains reusable for its frozen safety rules; it is separate from model-generated SQL execution accuracy.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/sql-safety-v1.jsonl",
+          "sha256": "sha256:b28d4fcd400e9ee9d3d4e593562060f65a6def50a7cb2ad5a77c704772a5e9f3",
+          "bytes": 11597
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/sql-safety-v1.observations.jsonl",
+          "sha256": "sha256:b0a50617427da0527400917a48c2982d1d83aed78bf365dd0737085f4cb8513f",
+          "bytes": 17519
+        },
+        {
+          "kind": "report",
+          "path": "testdata/sql-safety-v1.summary.json",
+          "sha256": "sha256:478c08c869c11e41ba002b4bd6d1c85c79583fd69ff41617e4f1d24bab01cd1c",
+          "bytes": 548
+        }
+      ]
+    },
+    {
+      "id": "rag-retrieval-v1-fts",
+      "domain": "rag_retrieval",
+      "status": "reusable",
+      "reason": "The deterministic PostgreSQL FTS observations remain a valid scoped historical baseline and can be recomputed locally; they do not represent the later Vector, RRF, Rerank, or answer-generation path.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/rag-retrieval-v1.jsonl",
+          "sha256": "sha256:4395236cd4099abeb8c74c77e32c342608dcde9cfa83e02a1419a7579b5f0f16",
+          "bytes": 4176
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/rag-retrieval-v1.observations.jsonl",
+          "sha256": "sha256:c1cef82ee607037d0ef16e135d85a8cb7a5f826493b46669095252db39ae26a6",
+          "bytes": 10162
+        },
+        {
+          "kind": "report",
+          "path": "testdata/rag-retrieval-v1.summary.json",
+          "sha256": "sha256:deae2a019c0d33ec5ebf387ff88ff43589cc2b8d4594919b7eeee0181548a6e2",
+          "bytes": 404
+        }
+      ]
+    },
+    {
+      "id": "rag-advanced-paired-v1",
+      "domain": "rag_retrieval",
+      "status": "retest_needed",
+      "reason": "Parent expansion, rewrite, compression, and rerank observations remain historical evidence, but current Profiles and retrieval contracts require local recomputation followed by selective retesting.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/rag-advanced-v1.jsonl",
+          "sha256": "sha256:9f1a9e15c28956bb84ce588583c8876f31abac0c9e61c16eea8161697652d23f",
+          "bytes": 3299
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/rag-advanced-v1.md",
+          "sha256": "sha256:06260bb844ec76480eb3974d587579b81fc101105f01927a2f1b3aab9a8121a7",
+          "bytes": 10819
+        }
+      ]
+    },
+    {
+      "id": "agentic-retrieval-v1",
+      "domain": "rag_retrieval",
+      "status": "retest_needed",
+      "reason": "The three-case decision fixture remains reusable, but current Agent orchestration and Evidence Gate behavior must be selectively retested before claiming current quality or Token gains.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/agentic-retrieval-v1.jsonl",
+          "sha256": "sha256:d7d868ebec655b72469d85b827205aebdb34d3e7dd602359a85bdec8668617cc",
+          "bytes": 956
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/rag-advanced-v1.md",
+          "sha256": "sha256:06260bb844ec76480eb3974d587579b81fc101105f01927a2f1b3aab9a8121a7",
+          "bytes": 10819
+        }
+      ]
+    },
+    {
+      "id": "rag-judge-v2",
+      "domain": "rag_answer_quality",
+      "status": "reusable",
+      "reason": "The reviewed Judge input fixture remains reusable for schema and deterministic citation-contract validation; Provider-backed Judge output is auxiliary and is not a current M4 metric.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/rag-judge-v2.sample.jsonl",
+          "sha256": "sha256:88d38f717334a177fd4519857e839d7b35897972f6ec6fb447b85d89d41998b3",
+          "bytes": 991
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/conversation-quality-v1.md",
+          "sha256": "sha256:65e42d23447892266d207b6e45b2baff3c150df8611f45cb9efb1859d4ae1a39",
+          "bytes": 24034
+        }
+      ]
+    },
+    {
+      "id": "conversation-quality-v1",
+      "domain": "rag_answer_quality",
+      "status": "retest_needed",
+      "reason": "The seeded and recorded observations remain usable for contract replay, but the Conversation Runner, citation repair, context governance, and model Profiles changed; current answer-quality claims require selective recorded-run retesting.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/conversation-quality-v1.jsonl",
+          "sha256": "sha256:5ae3c1a6f8140e8f572141fe5fe7df3d8ce2ee7cfe8eb02e82202b8b47effaff",
+          "bytes": 1656
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/conversation-quality-v1.seeded.observations.jsonl",
+          "sha256": "sha256:e024aade66fd8dff8f98806766c1fe4397c03bbd261679faaf3025d9ec277bde",
+          "bytes": 2784
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/conversation-quality-v1.md",
+          "sha256": "sha256:65e42d23447892266d207b6e45b2baff3c150df8611f45cb9efb1859d4ae1a39",
+          "bytes": 24034
+        }
+      ]
+    },
+    {
+      "id": "agent-evaluation-sample",
+      "domain": "comprehensive_diagnosis",
+      "status": "obsolete",
+      "reason": "The sample fixture remains useful for evaluator contract tests but does not represent the current production Agent path or a resume-quality benchmark.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/agent-evaluation.dataset.sample.jsonl",
+          "sha256": "sha256:2cf4dcf66b5b4d4507490e367a9eb3a3e0673eb638e73082a843622a048c5c58",
+          "bytes": 731
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/agent-evaluation.sample.jsonl",
+          "sha256": "sha256:5747a2c8eda68817cca9558f7240f8ff8a6a97d05ce4f9c2398a42485e81575c",
+          "bytes": 2640
+        }
+      ]
+    },
+    {
+      "id": "agent-real-v4",
+      "domain": "comprehensive_diagnosis",
+      "status": "obsolete",
+      "reason": "The recorded set contains one early SQL-focused pair from before the current Conversation-driven diagnosis, Evidence Gate, knowledge, and context-governance paths; retain it for history but do not use it as the M4 comprehensive baseline.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/agent-evaluation.real-v4.jsonl",
+          "sha256": "sha256:767875092742862c494cefa1205eb80935dd6399240d187a427b109169720fe6",
+          "bytes": 1249
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/agent-evaluation.real-v4.observations.jsonl",
+          "sha256": "sha256:4655eaff36e2ccd6b54654516fc2af9fd78a28cc3725a898b0f755ca3c5b491d",
+          "bytes": 2293
+        }
+      ]
+    },
+    {
+      "id": "evidence-gate-early-exit-v1",
+      "domain": "evidence_gate_early_exit",
+      "status": "recomputed",
+      "reason": "The deterministic reviewed fixture validates the Early Exit switch, quality gate, per-case issue reporting, and zero-Provider Ledger replay; Provider-backed latency and quality claims still require an explicitly budgeted selective run.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/evidence-gate-early-exit-v1.jsonl",
+          "sha256": "sha256:5a164e358c96c80a0d5aac1d17d38f2513fa9afeee1690b4aefe0b9135c4c2c4",
+          "bytes": 375
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/evidence-gate-early-exit-v1.observations.jsonl",
+          "sha256": "sha256:4072bafbc3794b80554422b6212da79be9386fba8e6c2da347682b8dea6151cd",
+          "bytes": 4803
+        },
+        {
+          "kind": "report",
+          "path": "testdata/evidence-gate-early-exit-v1.ledger-v1.json",
+          "sha256": "sha256:f9d27dcb3ef3886f8041360e4a73eef8743b993f8dd2a02388cc2797994cb2b6",
+          "bytes": 9544
+        }
+      ]
+    },
+    {
+      "id": "ingestion-throughput-v1",
+      "domain": "document_processing",
+      "status": "retest_needed",
+      "reason": "The frozen throughput corpus and historical report remain useful, but current parser and worker changes require local validation and a bounded selective rerun before current throughput claims.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/rag-ingestion-throughput-v1.corpus.json",
+          "sha256": "sha256:c941a8d86d47c3e6da995b49eea9e93037ee5ca0f319a4ccd3f4499965d54d43",
+          "bytes": 32834
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/rag-ingestion-throughput-v1.md",
+          "sha256": "sha256:4ee40cf95d60a74edda6fc93083e46883137e0585a0ada96f79e4d2e963f73a7",
+          "bytes": 21302
+        }
+      ]
+    },
+    {
+      "id": "document-parse-eval",
+      "domain": "document_processing",
+      "status": "retest_needed",
+      "reason": "The parser evaluator remains current as an entry point, but its external corpus inputs and parser implementations must be revalidated before current quality claims.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "report",
+          "path": "docs/evaluations/knowledge-ingestion-quality-v1.md",
+          "sha256": "sha256:0fb307ee0a75b486dfb11d728cdcf8af85e590b067fed8bbfe4e1c83a3a394c7",
+          "bytes": 16417
+        }
+      ]
+    },
+    {
+      "id": "layout-routing-public-v1",
+      "domain": "document_processing",
+      "status": "reusable",
+      "reason": "The frozen public layout corpus remains reusable for its documented routing-only boundary and must not be presented as OCR, VLM, or end-to-end RAG quality.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/layout-routing-public-v1.jsonl",
+          "sha256": "sha256:a0aaa2cfface88c27b2ae7f599ec236726f962e33817084670911737ec1c36d9",
+          "bytes": 3361
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/layout-routing-public-v1.md",
+          "sha256": "sha256:d45d94addd6ceb39cf8c533282dc8b2e112c5e3f4daa70b97ef07e56586a0567",
+          "bytes": 9961
+        }
+      ]
+    },
+    {
+      "id": "ocr-quality-eval",
+      "domain": "document_processing",
+      "status": "retest_needed",
+      "reason": "Historical OCR pairs remain scoped evidence, but cloud model versions and provider behavior are time-sensitive; only explicitly budgeted cases may be retested.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "report",
+          "path": "docs/evaluations/knowledge-ingestion-quality-v1.md",
+          "sha256": "sha256:0fb307ee0a75b486dfb11d728cdcf8af85e590b067fed8bbfe4e1c83a3a394c7",
+          "bytes": 16417
+        }
+      ]
+    },
+    {
+      "id": "vlm-quality-local-v1",
+      "domain": "document_processing",
+      "status": "retest_needed",
+      "reason": "The local VLM fixture remains reusable for schema validation, while Provider quality and latency are time-sensitive and require explicit bounded retesting.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/vlm-quality-local-v1.json",
+          "sha256": "sha256:f111ef589da3f01fdace96902296b672ae28af20648693f41d61af7ce54d2038",
+          "bytes": 3183
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/knowledge-ingestion-quality-v1.md",
+          "sha256": "sha256:0fb307ee0a75b486dfb11d728cdcf8af85e590b067fed8bbfe4e1c83a3a394c7",
+          "bytes": 16417
+        }
+      ]
+    },
+    {
+      "id": "pptx-element-quality-local-v1",
+      "domain": "document_processing",
+      "status": "reusable",
+      "reason": "The frozen local PPTX element corpus remains reusable for deterministic element extraction and routing checks within its documented scope.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/pptx-element-quality-local-v1.jsonl",
+          "sha256": "sha256:00f7b3e9004f8fc73b3f5cd3449437a9e3ea9f537ab30b312186cfc71f872651",
+          "bytes": 2373
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/knowledge-ingestion-quality-v1.md",
+          "sha256": "sha256:0fb307ee0a75b486dfb11d728cdcf8af85e590b067fed8bbfe4e1c83a3a394c7",
+          "bytes": 16417
+        }
+      ]
+    },
+    {
+      "id": "table-quality-eval",
+      "domain": "document_processing",
+      "status": "retest_needed",
+      "reason": "The table evaluator remains valid, but current parser and recovery changes require corpus validation before reusing aggregate quality claims.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "report",
+          "path": "docs/evaluations/table-recovery-v1.md",
+          "sha256": "sha256:50c8068b0b01c752c0116546ae7eb653cd9c0882f14bda65f1c4ce5218fdd3c3",
+          "bytes": 5488
+        }
+      ]
+    },
+    {
+      "id": "github-code-search-v2",
+      "domain": "tool_selection",
+      "status": "retest_needed",
+      "reason": "The historical GitHub Code Search incomplete-result observations remain useful, but the external service and current MCP adapter are time-sensitive and require selective retesting.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/github-code-search-v2.jsonl",
+          "sha256": "sha256:a3c103eea77b6af9fc47896b0fbe30ac8d682cff50862421b9467bd943d8ca8d",
+          "bytes": 1796
+        },
+        {
+          "kind": "report",
+          "path": "docs/design/diagnostic-tools.md",
+          "sha256": "sha256:289552830e4e77fc32350b0bc8988053a007501ffd44c9ea3ed396d388579f42",
+          "bytes": 23993
+        }
+      ]
+    },
+    {
+      "id": "context-governance-pilot-v1",
+      "domain": "context_governance",
+      "status": "retest_needed",
+      "reason": "The fixture and historical report remain useful, but Current Summary coordination and the controlled long-conversation sequence changed after earlier pilot runs; local replay and the bounded current acceptance sequence must be rerun before reusing metrics.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": false,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/context-governance-pilot-v1.json",
+          "sha256": "sha256:ea62c472f006a3873fe01fc76cf84ad8a579ee60c97e7b71711c860d2cff2322",
+          "bytes": 1639534
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/conversation-quality-v1.md",
+          "sha256": "sha256:65e42d23447892266d207b6e45b2baff3c150df8611f45cb9efb1859d4ae1a39",
+          "bytes": 24034
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-v1",
+      "domain": "semantic_answer_cache",
+      "status": "recomputed",
+      "reason": "All 120 pairs are human-reviewed and the current text-embedding-v4 profile passed the 98 percent Precision gate on Calibration and Holdout. The Holdout accepted only one hit, so the result remains a conservative fixed-set release gate rather than a production-wide accuracy claim.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/semantic-cache-v1.json",
+          "sha256": "sha256:4ca2fbf95fd12a00c5d524d37074f1210c281605d6c60d11504469ec520940d3",
+          "bytes": 45745
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/semantic-answer-cache-v1.md",
+          "sha256": "sha256:4c3e68a568f4ae29f7905b2006d314afc4f3d4a21117de90bc6b88499cc7db88",
+          "bytes": 9117
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-latency-v1",
+      "domain": "semantic_answer_cache",
+      "status": "recomputed",
+      "reason": "The five-question fixed traffic replay measured current pgvector lookup and configured-provider full-chain latency under a 21-call hard budget; it is an acceptance replay, not a production traffic percentile.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/semantic-cache-latency-v1.json",
+          "sha256": "sha256:a501e84d9254ac657d00b2395a09060560f1f5a7317dd6a88d1156651b926383",
+          "bytes": 1169
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/semantic-answer-cache-v1.md",
+          "sha256": "sha256:4c3e68a568f4ae29f7905b2006d314afc4f3d4a21117de90bc6b88499cc7db88",
+          "bytes": 9117
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-provider-ablation-v1",
+      "domain": "semantic_answer_cache",
+      "status": "recomputed",
+      "reason": "PostgreSQL and Redis Stack were evaluated behind the same semantic-cache contract, dataset, threshold, candidate limit, conflict filter, and fixed traffic boundary. Redis Stack remains optional because its faster isolated lookup did not improve the full-chain P95 enough to justify another required service.",
+      "implementationRevision": "git:4ae71a063435522e1cda89e5d157d2c87071eb51",
+      "runtimeConfigSha256": "sha256:57225fa1c6474c8e0a6549c05e45411c0ada51df53a3ff18fe5537d29328a56b",
+      "currentEvidenceAllowed": true,
+      "artifacts": [
+        {
+          "kind": "dataset",
+          "path": "testdata/semantic-cache-v1.json",
+          "sha256": "sha256:4ca2fbf95fd12a00c5d524d37074f1210c281605d6c60d11504469ec520940d3",
+          "bytes": 45745
+        },
+        {
+          "kind": "observations",
+          "path": "testdata/semantic-cache-v1.provider-ablation.observations.json",
+          "sha256": "sha256:2992b77d8f0c6e56bb70d5169d93a8135559837dfcc4f9e511a924be8539ccb6",
+          "bytes": 15028
+        },
+        {
+          "kind": "report",
+          "path": "docs/evaluations/semantic-answer-cache-v1.md",
+          "sha256": "sha256:4c3e68a568f4ae29f7905b2006d314afc4f3d4a21117de90bc6b88499cc7db88",
+          "bytes": 9117
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "query-guard-safety",
+      "assetId": "sql-safety-v1",
+      "artifact": {
+        "kind": "acceptance_evidence",
+        "path": "testdata/sql-safety-v1.summary.json",
+        "sha256": "sha256:478c08c869c11e41ba002b4bd6d1c85c79583fd69ff41617e4f1d24bab01cd1c",
+        "bytes": 548
+      },
+      "artifactSchemaVersion": "sql_safety_summary_v1",
+      "metrics": [
+        {
+          "name": "dataset_version",
+          "value": "sql-safety-v1"
+        },
+        {
+          "name": "policy_version",
+          "value": "tsql-readonly-v1"
+        },
+        {
+          "name": "cases",
+          "value": 52
+        },
+        {
+          "name": "accuracy",
+          "value": 1
+        },
+        {
+          "name": "high_risk_cases",
+          "value": 40
+        },
+        {
+          "name": "high_risk_blocking_rate",
+          "value": 1
+        },
+        {
+          "name": "safe_read_cases",
+          "value": 12
+        },
+        {
+          "name": "safe_read_acceptance_rate",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "evidence-gate-fixture",
+      "assetId": "evidence-gate-early-exit-v1",
+      "artifact": {
+        "kind": "acceptance_evidence",
+        "path": "testdata/evidence-gate-early-exit-v1.ticket09.ledger-v1.json",
+        "sha256": "sha256:829d5b6719fc871eef9f39e26339e6a892faacd62b3224bb2350d5ce89427c6b",
+        "bytes": 9775
+      },
+      "artifactSchemaVersion": "evaluation_ledger_v1",
+      "metrics": [
+        {
+          "name": "dataset_version",
+          "value": "evidence-gate-early-exit-v1"
+        },
+        {
+          "name": "paired_cases",
+          "value": 3
+        },
+        {
+          "name": "reviewed_case_gap",
+          "value": 27
+        },
+        {
+          "name": "quality_gate_passed",
+          "value": true
+        },
+        {
+          "name": "baseline_model_calls",
+          "value": 12
+        },
+        {
+          "name": "experiment_model_calls",
+          "value": 10
+        },
+        {
+          "name": "baseline_tool_calls",
+          "value": 6
+        },
+        {
+          "name": "experiment_tool_calls",
+          "value": 5
+        },
+        {
+          "name": "baseline_total_tokens",
+          "value": 2700
+        },
+        {
+          "name": "experiment_total_tokens",
+          "value": 2300
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-calibration",
+      "assetId": "semantic-cache-v1",
+      "artifact": {
+        "kind": "acceptance_evidence",
+        "path": "testdata/semantic-cache-v1.calibration.json",
+        "sha256": "sha256:a7d9c3ead911df594e424abbd27dddcf2d2a3f54d2bc1124c2cd412de994d30f",
+        "bytes": 950
+      },
+      "artifactSchemaVersion": "semantic_cache_calibration_v1",
+      "metrics": [
+        {
+          "name": "embedding_profile",
+          "value": "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
+        },
+        {
+          "name": "knowledge_generation",
+          "value": 4
+        },
+        {
+          "name": "threshold",
+          "value": 0.8721208486635312
+        },
+        {
+          "name": "calibration_total",
+          "value": 80
+        },
+        {
+          "name": "calibration_precision",
+          "value": 1
+        },
+        {
+          "name": "calibration_recall",
+          "value": 0.16
+        },
+        {
+          "name": "calibration_hit_rate",
+          "value": 0.05
+        },
+        {
+          "name": "holdout_total",
+          "value": 40
+        },
+        {
+          "name": "holdout_precision",
+          "value": 1
+        },
+        {
+          "name": "holdout_recall",
+          "value": 0.07692307692307693
+        },
+        {
+          "name": "holdout_hit_rate",
+          "value": 0.025
+        },
+        {
+          "name": "embedding_requests",
+          "value": 24
+        },
+        {
+          "name": "embedding_tokens",
+          "value": 2526
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-postgres-performance",
+      "assetId": "semantic-cache-latency-v1",
+      "artifact": {
+        "kind": "acceptance_evidence",
+        "path": "testdata/semantic-cache-v1.performance.json",
+        "sha256": "sha256:9534c9e107affb5c8485ea163bc57392b6c99e11cd5993a6f6106be5f0f722ef",
+        "bytes": 1167
+      },
+      "artifactSchemaVersion": "semantic_cache_performance_v1",
+      "metrics": [
+        {
+          "name": "embedding_profile",
+          "value": "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
+        },
+        {
+          "name": "knowledge_generation",
+          "value": 5
+        },
+        {
+          "name": "lookup_samples",
+          "value": 200
+        },
+        {
+          "name": "lookup_p50_millis",
+          "value": 2.1014
+        },
+        {
+          "name": "lookup_p95_millis",
+          "value": 3.1992
+        },
+        {
+          "name": "full_chain_samples",
+          "value": 20
+        },
+        {
+          "name": "full_chain_p50_millis",
+          "value": 225.0963
+        },
+        {
+          "name": "full_chain_p95_millis",
+          "value": 244.7431
+        },
+        {
+          "name": "main_model_calls",
+          "value": 0
+        },
+        {
+          "name": "tool_calls",
+          "value": 0
+        },
+        {
+          "name": "degradation_rate",
+          "value": 0
+        },
+        {
+          "name": "measurement_boundary",
+          "value": "query embedding, pgvector lookup, user/assistant message and run-observation commit; excludes browser network/rendering"
+        }
+      ]
+    },
+    {
+      "id": "semantic-cache-provider-ablation",
+      "assetId": "semantic-cache-provider-ablation-v1",
+      "artifact": {
+        "kind": "acceptance_evidence",
+        "path": "testdata/semantic-cache-v1.provider-ablation.observations.json",
+        "sha256": "sha256:2992b77d8f0c6e56bb70d5169d93a8135559837dfcc4f9e511a924be8539ccb6",
+        "bytes": 15028
+      },
+      "artifactSchemaVersion": "semantic_cache_provider_ablation_v1",
+      "metrics": [
+        {
+          "name": "embedding_profile",
+          "value": "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
+        },
+        {
+          "name": "knowledge_generation",
+          "value": 5
+        },
+        {
+          "name": "postgres_lookup_p50_millis",
+          "value": 3.2011
+        },
+        {
+          "name": "postgres_lookup_p95_millis",
+          "value": 3.9364
+        },
+        {
+          "name": "redis_stack_lookup_p50_millis",
+          "value": 1.4948
+        },
+        {
+          "name": "redis_stack_lookup_p95_millis",
+          "value": 1.9338
+        },
+        {
+          "name": "postgres_cross_candidate_hits",
+          "value": 1
+        },
+        {
+          "name": "redis_stack_cross_candidate_hits",
+          "value": 1
+        }
+      ]
+    }
+  ]
+}
