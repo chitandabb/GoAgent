@@ -21,7 +21,7 @@ Conversation Runner
 ```
 
 `TokenBudgetPlanner` 只计算预算，不读数据库、不授权 Tool、不调用模型。`ConversationMemoryService`
-隐藏压缩、校验、发布和缓存细节。`TaskScope/ToolCatalog` 仍是唯一 Tool 授权边界；记忆模块不能扩权。
+隐藏压缩、校验、发布和缓存细节。记忆模块永远不能扩权：当前生产由 `TaskScope` 过滤 Tool Schema、`RunAccess Guard` 校验执行 Permission，后续再把 Schema 选择切换为固定 `ToolProfile`；任何阶段都不读取摘要内容决定权限。
 
 ## 为什么只有 Current Summary
 
@@ -43,14 +43,15 @@ active/superseded 和唯一叶子，把自然变化的会话事实变成模型�
 避免两个模型调用。不同 Conversation 不共享锁，可并行压缩。
 
 Worker 先在 Coordinator 内发布摘要，再提交 Job 成功。若锁释放后另一路又发布了更靠后的摘要，
-Job Complete 按“当前 `throughSeq` 已覆盖目标”成功，不要求 Snapshot ID 仍完全相同。Job Lease 与
-Fencing 只防止旧 Worker 提交任务状态。
+Job Complete 可以按覆盖关系成功；同一 Snapshot ID 必须边界完全一致，不同 Snapshot ID 必须比
+Worker 结果更靠后，不能用同边界的另一份摘要冒充成功。Job Lease 与 Fencing 只防止旧 Worker
+提交任务状态。
 
 ## Provider 输出与引用
 
 Provider-facing Schema `conversation_memory_v2` 不包含 `supersedesEntryId` 或 superseded 枚举。
-持久化 `Payload` 类型暂保留 schema v1 只读兼容字段，Service 会归一化旧式输出，领域校验拒绝残留
-lineage。Prompt `conversation-memory-v9` 明确只输出当前状态。
+持久化 `Payload` 类型暂保留 schema v1 只读兼容字段，但 Provider 若输出 lineage，Service 会拒绝并
+进入现有有界结构重试，不会静默删除条目。Prompt `conversation-memory-v9` 明确只输出当前状态。
 
 模型可以选择保留哪些 Evidence/Task/Report，并给出简短当前结论；应用侧从结构化消息 catalog
 认证并重建引用 ID、类型、哈希、来源和 Entry ID。已有引用的身份保持稳定，但模型可更新结论文字。
@@ -62,8 +63,7 @@ lineage。Prompt `conversation-memory-v9` 明确只输出当前状态。
 Skill、Summary、Tail、引用、当前消息和 Tool Growth 做保守估算。Summary/Tail 默认占窗口 5%/15%；
 Summary 先按业务优先级排序，再用 Planner 二分选择预算内最大 Entry 前缀。
 
-TaskScope 在 Prompt Epoch 开始时冻结 Tool Schema。Skill 渐进加载只追加 SOP，不动态授予 Tool。
-授权变化时安全优先开启新 Epoch；缓存命中只影响成本/延迟，不改变窗口 Token 计算。
+旧 v1 在 Prompt Epoch 开始时冻结 TaskScope 过滤后的 Tool Schema；统一 Runtime v2 改为部署内固定 Tool Profile，同一部署内的当前消息引用和依赖瞬时健康不再开启新 Schema Epoch。Skill 渐进加载只追加 SOP，不动态授予 Tool。部署配置导致 Profile 变化时必须产生新的 Tool Schema 指纹与 Prompt Epoch；缓存命中只影响成本/延迟，不改变窗口 Token 计算。
 
 ## 持久化兼容边界
 
@@ -73,6 +73,19 @@ PostgreSQL schema v1 仍保存不可变 Snapshot 行、candidate/active 状态�
 
 Redis 只缓存 PostgreSQL 认定的 Current Summary，miss、超时、脏数据和写失败均回源；不参与锁、
 授权或发布。删除 Conversation 时 PostgreSQL 级联，Redis 尽力清理并依赖 TTL 兜底。
+
+## 工程风险与取舍
+
+PostgreSQL session advisory lock 必须绑定同一个连接，因此远程摘要调用期间会占用一个连接；同一
+Conversation 的等待者在等锁时也会占连接。当前 Memory Worker 使用 `QoS=1` 串行消费，默认数据库
+池上限为 100，单实例异步路径的连接压力可控；API 硬压缩和未来横向扩容仍可能放大占用。
+
+当前不为这个容量风险引入 Redis 锁、新租约状态机或第二套协调器。上线观测应至少记录锁等待时长、
+持锁时长、压缩并发和数据库池等待。只有这些指标逼近容量边界时，再选择限制压缩并发、给压缩使用
+独立小连接池，或缩短持锁区间；最后一种方案必须先解决锁外模型调用导致的重复计算问题。
+
+schema v1 的 candidate/active、predecessor 和旧公开方法仍会增加认知成本，但它们被限制在兼容层，
+生产入口统一使用 `PrepareActive`。在固定集闭环前物理迁移数据库或删除兼容 API，收益低于回归风险。
 
 ## 失败策略
 
@@ -85,9 +98,11 @@ Redis 只缓存 PostgreSQL 认定的 Current Summary，miss、超时、脏数据
 
 ## 指标与实验教训
 
-最小真实序列已得到：cp2 主模型输入下降约 79.0%，cp1+cp2 共同成功轮次下降约 52.4%，并使
-Baseline 超过 128K 的 cp3 继续执行；但三轮 Experiment 端到端总 Token 158,706，其中摘要 102,074。
-因此不能宣称端到端降低 60%。
+受控真实序列 `incident-correction` 已完成：cp2 主模型输入从 59,386 降至 12,434，下降约 79.1%；
+Baseline 的 cp3 预估输入为 132,621，超过 128K 而在调用前拒绝，Experiment 三个 checkpoint 均成功
+继续执行。共同成功的 cp1+cp2 主模型输入从 89,558 降至 42,606，下降约 52.4%。Experiment
+三轮端到端总 Token 为 160,377，其中 Summary 为 101,534；首次摘要成本尚未被短序列摊薄，
+因此不能宣称端到端平均降低 60%。
 
 这次踩坑形成三条工程规则：
 
@@ -102,7 +117,8 @@ Baseline 超过 128K 的 cp3 继续执行；但三轮 Experiment 端到端总 To
 
 已完成 Planner、Token Tail、Prompt Manifest、Summary + Tail、软硬阈值、Conversation Coordinator、
 Memory Worker、Redis 缓存、稳定引用、原文恢复、Diagnosis preflight、Provider-free Pilot 和成本门禁。
-本地 coordinator race 测试与全仓测试通过，真实 PostgreSQL 双连接测试已纳入 integration suite。
+Provider lineage 会被严格拒绝，Job 完成条件已防止同边界错误摘要冒充成功。本地 coordinator race
+测试与全仓测试通过，真实 PostgreSQL 双连接测试已纳入 integration suite。
 
-剩余工作是一次受控固定集闭环、按实测更新简历，以及后续 schema v1 兼容列 migration；前端展示在
+剩余工作是可选的全量固定集复测、按实测更新简历，以及后续 schema v1 兼容列 migration；前端展示在
 后端整体闭环后统一联调。

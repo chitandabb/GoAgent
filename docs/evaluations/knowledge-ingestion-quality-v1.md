@@ -205,10 +205,10 @@ accuracy and not enough evidence to switch the production raster limit.
 
 ```powershell
 # local render only
-go run ./cmd/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8
+go run ./tools/evaluation/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8
 
 # exactly two configured OCR calls
-go run ./cmd/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8 -execute-provider
+go run ./tools/evaluation/mesguard-ocr-quality-eval -input '<approved PDF>' -page 8 -execute-provider
 ```
 
 Sources:

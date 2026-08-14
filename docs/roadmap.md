@@ -6,7 +6,7 @@ domain, database, API, system-architecture, code-organization and
 context-governance design documents.
 Ordered next slices are maintained directly in this file.
 
-## Current Stage: Resume Points 1-5 Backend Closure Complete; Frontend Integration Pending
+## Current Stage: Resume Points 1-5 Backend Closure Complete; Unified Agent Runtime v2 In Progress
 
 - [x] Production `cmd/`, classified `tools/`, and private `internal/` project layout.
 - [x] Typed TOML and `.env` configuration.
@@ -48,6 +48,23 @@ Ordered next slices are maintained directly in this file.
       owner-scoped attachment metadata and exposes the same bounded `read_attachment` Tool through a
       task-id fence, producing `attachment` evidence.
 - [ ] Frontend adoption of turn SSE, attachment upload/read traces, and citation preview.
+
+## Active Slice: Unified Agent Runtime v2 and Production-Entry Re-evaluation
+
+Decision: [`decisions/005-unified-agent-runtime-and-stable-tool-profiles.md`](decisions/005-unified-agent-runtime-and-stable-tool-profiles.md).
+This slice resolves the mismatch between the unified conversation product entry and the legacy task-scoped Tool model. It changes orchestration contracts only; QueryGuard, RAG, Worker state machines, Evidence Gate and context compaction remain in place.
+
+- [x] Retire `Capability` from the target domain language; define `RuntimeKind`, `Permission`, `ResourceGrants`, `InvestigationPolicy`, `RunAccess` and `ToolProfile`.
+- [x] Record the invariant that Diagnosis `RunAccess` is the intersection of frozen Policy and the current access ceiling, so an old task can only lose permissions/resources.
+- [x] Add immutable Permission/Grant contracts and default Conversation/Diagnosis Tool Profile definitions with tests.
+- [x] Confirm Conversation Profile includes knowledge and safe Text-to-SQL, while Diagnosis Profile excludes `create_diagnosis_task` and keeps Diagnosis Skills.
+- [x] Add the legacy `TaskScope -> RunAccess` compatibility adapter, move Tool execution guards to the new context value without changing current callers, and remove `create_diagnosis_task` from the Diagnosis Schema.
+- [ ] Refactor ToolCatalog from dynamic `ToolsFor(TaskScope)` filtering to fixed `Tools(profileID)` resolution; retain the guarded-wrapper seam and strict/best-effort behavior.
+- [ ] Wire Conversation to a stable Profile across case/task/attachment references, append `turn_context` to the current user message, and enable production Text-to-SQL through RunAccess resource grants.
+- [ ] Persist Diagnosis InvestigationPolicy v2, derive Worker RunAccess from it and append stable `task_context` to the Diagnosis system instruction; task-creation Tool exposure has already been removed by the compatibility slice.
+- [ ] Update `sql-investigation` SOP to include `execute_readonly_query`, evidence citation and stop conditions; keep Skill as SOP rather than authorization.
+- [ ] Retire `TaskTypeKnowledge`, `ToolCapability`, `RequestedSkill` and dependency-health-driven Schema deletion after compatibility coverage passes.
+- [ ] Run v2 production-entry fixed sets. Record `toolProfileId`, Tool Schema fingerprint/names, System Prompt version, model Profile fingerprint and implementation revision. Re-measure resume item 1 and trigger Text-to-SQL from natural-language Conversation input for resume item 2.
 
 ## Completed Slice: M4 Agent Evaluation and Performance Optimization
 
@@ -146,10 +163,13 @@ target, not a pass-at-all-costs gate, and must be replaced by the fixed-set resu
       budget, fixture/content and runtime contract drift fail before Provider access, each paid observation is
       atomically persisted with backup rollback, and stale Gate reports are invalidated until all 36
       Current/Baseline/Experiment observations are present.
-- [ ] Run one explicitly approved, bounded Provider-backed closure set under class-specific call/Token gates.
-      Report main-model input reduction, over-window continuation, summary overhead, quality, latency and cost;
-      do not require end-to-end Token reduction to reach the original 60% target.
-- [ ] Run Acceptance evaluation; update the resume metric only from measured results.
+- [x] Run one explicitly approved, bounded Provider-backed closure sequence under class-specific call/Token gates.
+      The three-checkpoint `incident-correction` sequence completed with 2/3 Baseline continuation and 3/3
+      Experiment continuation; cp2 main-model input reduction was 79.1%, cp1+cp2 was 52.4%, and the
+      end-to-end reduction target was rejected because Summary overhead dominated the short sequence.
+- [ ] Optionally expand the same gates to the full 4-scenario/12-checkpoint set; update the resume metric only
+      from measured results, using main-model input reduction and over-window continuation rather than an
+      unsupported end-to-end 60% claim.
 - [ ] Hand the completed backend contract to the frontend task.
 
 ## M0: Before Business Code
@@ -957,7 +977,7 @@ persists per-document outcome diagnostics. After adding cost preflight and rate 
 single-variable ablation changed only document concurrency `1 -> 2`; median duration fell from 2124 ms to 1450 ms
 and median throughput increased 46.48%, with identical 42 Elements/70 Chunks/requests/Tokens/batches. The whole
 run used 80 requests, 96,060 Tokens and approximately CNY 0.04803, with zero temporary actor/document residue.
-This supports the bounded worker-core 40%+ claim; the two-document/two-class scope remains explicit and is not the
+This supports the bounded worker-core 46.48% claim; the two-document/two-class scope remains explicit and is not the
 40-document mixed-visual acceptance result.
 
 ## M2 Milestone Status and Remaining Work

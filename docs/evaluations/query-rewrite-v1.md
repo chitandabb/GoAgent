@@ -48,7 +48,7 @@ go test -tags=integration ./internal/platform/queryrewrite `
 
 ## 2026-08-06 首个真实 paired Case
 
-`cmd/mesguard-rag-paired-observe` 已使用版本化公开语料和生产 SearchService 完成一个
+`tools/observation/mesguard-rag-paired-observe` 已使用版本化公开语料和生产 SearchService 完成一个
 `original -> rewrite` Case。Rewrite 被接受，但 Hit Rate@3、Document Recall@3、MRR 和 Context
 Precision/Recall 均没有变化；FTS/Vector 查询数从 `1/1` 增加到 `4/3`，Query Embedding 从 21
 增加到 54 Token，Rewrite 本身消耗 1152 Token，耗时从 185.615 ms 增加到 8432.964 ms。

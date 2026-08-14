@@ -555,7 +555,7 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 | MinIO与附件 | 已实现附件/知识原文/Element Artifact引用与有界对象访问 | M1持续扩展 |
 | Diagnosis Worker | RabbitMQ Consumer、严格 ACK/重试、Claim/续租/fencing、Agent 执行、取消收尾、EvidenceItem/ReportEvidence/DiagnosisReport 持久化已实现并通过真实 PostgreSQL 联调；进程崩溃演练仍是后续质量门 | M1 |
 | React + Nginx | 未实现 | M1 |
-| Eino Agent 与 StepFun | 单ADK Agent、TaskScope/Catalog授权、Skill渐进加载、usage和Evidence Gate已通过测试与真实烟雾验证；paired 已覆盖工单、代码、GitHub 降级、SQL 对象定义和 SQL Catalog/只读查询；P7 已接入正式 Worker 执行、报告生成/读取、TaskEvent 补读、SSE、取消、恢复和报告反馈基础链路 | M1 |
+| Eino Agent 与 StepFun | 当前单 ADK Agent、TaskScope/Catalog 授权、Skill 渐进加载、usage 和 Evidence Gate 已通过测试与真实烟雾验证；统一 Runtime v2 已确定固定 ToolProfile + RunAccess Guard 合同并进入兼容迁移，旧 paired 指标待生产入口复测；P7 已接入正式 Worker 执行、报告生成/读取、TaskEvent 补读、SSE、取消、恢复和报告反馈基础链路 | M1 |
 | 知识助手与pgvector RAG | M2-A1 至 M2-A8 已实现版本化文档、MinIO 入库、PDF/Office 解析、ONNX 页面/区域路由、Embedding、FTS/Vector/RRF、可选 Rerank、`search_knowledge` 和知识 Chunk 引用门禁；Query 改写、Agentic 二次检索、Web Search 和公开知识问答 API 仍待实现 | M2 |
 | Ingestion Worker与ONNX | Knowledge Worker、云OCR/VLM、独立Table Processor、PDFium-WASM、PP-DocLayout-M ONNX Router、区域显式路由、自适应DPI、确定性Element合并和Artifact v6 provenance已实现；公开路由集、Windows/Linux资源、OCR像素对照、三图VLM成对测评、NIST真实表格单区smoke和非root专用镜像已记录，精确merged-cell与扩充合并质量测评为增强项 | M2 |
 | GitHub MCP代码调查工具 | 已实现只读接入、凭据握手、仓库搜索、仓库树候选读取、固定SHA文件读取、提交追溯和不完整搜索降级；v2 工具级评测覆盖私有C#、GoAgent、GoChat和公开仓库共6条样本，2条真实不完整响应均恢复成功；Agent paired 已覆盖工单、代码调查和 GitHub 降级三类样本，完整数据集仍待扩展 | M1 |
@@ -567,8 +567,8 @@ RabbitMQ和Redis不作为核心事实备份来源。RabbitMQ丢失后，根据Po
 本文确定组件边界，后续文档继续展开：
 
 ~~~text
-agent-implementation-plan.md
-  Agent 迁移顺序、依赖关系和验收门槛
+code-organization.md
+  生产与研发工具目录、包依赖方向和待处理结构债务
 
 database.md
   PostgreSQL表、约束、索引和迁移
