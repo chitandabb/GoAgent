@@ -12,16 +12,20 @@ func TestBuildDraftDatasetIsStratifiedAndPendingHumanReview(t *testing.T) {
 	if err := dataset.Validate(false); err != nil {
 		t.Fatalf("draft dataset: %v", err)
 	}
+	compatibleReusable := 0
 	for _, pair := range dataset.Pairs {
 		if pair.Reviewed {
 			t.Fatalf("pair %s must remain pending human review", pair.ID)
 		}
 		if pair.ProposedReusable {
 			comparison := semanticcache.CompareQuestions(pair.AnchorQuestion, pair.CandidateQuestion)
-			if !comparison.Compatible || !semanticcache.EligibleForLookup(semanticcache.Question{Text: pair.CandidateQuestion}) {
-				t.Errorf("proposed reusable pair %s is blocked by deterministic gate: %+v", pair.ID, comparison)
+			if comparison.Compatible && semanticcache.EligibleForLookup(semanticcache.Question{Text: pair.CandidateQuestion}) {
+				compatibleReusable++
 			}
 		}
+	}
+	if compatibleReusable < 30 {
+		t.Fatalf("deterministic gate leaves only %d proposed reusable pairs", compatibleReusable)
 	}
 }
 

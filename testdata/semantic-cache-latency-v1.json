@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "semantic_cache_latency_fixture_v1",
+  "datasetVersion": "semantic-cache-latency-v1",
+  "repetitions": 4,
+  "pairs": [
+    {
+      "id": "reuse-04",
+      "anchorQuestion": "DOCX 文档进入知识库时如何解析？",
+      "candidateQuestion": "DOCX 格式的 Word 文件入库会经过哪些解析步骤？"
+    },
+    {
+      "id": "reuse-19",
+      "anchorQuestion": "Outbox Relay 如何可靠投递任务事件？",
+      "candidateQuestion": "Outbox Relay 怎样在数据库事务完成后发送任务消息？"
+    },
+    {
+      "id": "reuse-22",
+      "anchorQuestion": "QueryGuard 会检查哪些 SQL 风险？",
+      "candidateQuestion": "QueryGuard 作为 SQL 执行前安全门禁负责什么？"
+    },
+    {
+      "id": "reuse-23",
+      "anchorQuestion": "GitHub Code Search 返回 incomplete_results 时如何降级？",
+      "candidateQuestion": "GitHub Code Search 返回 incomplete_results 后系统怎么办？"
+    },
+    {
+      "id": "reuse-32",
+      "anchorQuestion": "TaskScope 如何限制 Agent Tool？",
+      "candidateQuestion": "TaskScope 在运行时怎样只向 Agent 暴露被授权的 Tool？"
+    }
+  ]
+}

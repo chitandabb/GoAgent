@@ -1,13 +1,12 @@
 # M4 Agent 评测与性能优化规格
 
-> 状态：规格已确认并进入实现；Ticket 01 评测资产审计与 Evaluation Ledger 最小闭环已完成。
+> 状态：规格已确认并进入实现；Ticket 01-07 已完成，下一步执行 Redis Stack 消融。
 >
 > 本规格对应 MESGuard 简历第五点。现有量化数字均为验收目标，不是既成成果；最终简历必须使用当前实现、固定数据集和可复现评测得到的真实结果。
 
 ## Implementation Status
 
-截至 2026-08-14，Ticket 06 的 PostgreSQL L1 精确答案缓存纵切已落地，Ticket 07 的 L2 运行时与
-待人工复核评测资产已进入实现：
+截至 2026-08-14，Ticket 06 的 PostgreSQL L1 与 Ticket 07 的 pgvector L2 语义答案缓存已通过验收：
 
 - PostgreSQL 保存单例、单调递增的 `Global Knowledge Generation`；直接发布与 Knowledge Worker 发布新的
   current Global 版本时，Generation 在同一事务中递增。当前代码尚不存在“撤回 current 文档”或“修改
@@ -29,18 +28,21 @@
   Conversation 命中及新 Global 版本发布后的立即失效。
 - L2 以可选 `SemanticProvider` 扩展 L1 合同：L1 miss 后才调用当前 Query Embedding Profile，PostgreSQL
   只查询同 Generation、同 Profile 指纹、同 `semantic-question-v1` 规范化版本且未过期的向量记录；
-  应用侧再拒绝实体、数字、日期、版本、否定和意图冲突。Embedding 或向量索引失败不会删除 L1。
-- L2 阈值必须同时配置 `semanticEnabled`、Calibration 选择出的相似度阈值和对应 Profile 指纹；默认
-  `semanticEnabled=false`。Profile 变化、指纹不匹配或未通过 98% Precision 门禁时，服务保持 L1-only。
-- 已生成 `testdata/semantic-cache-v1.json`：40 可复用改写、40 困难负样本、20 时效/版本负样本、
-  20 上下文依赖负样本，固定种子分层为 80 Calibration/40 Holdout。全部仍为 `reviewed=false`，必须
-  人工确认后才能校准；系统不把建议标签或在线 LLM Judge 当作 Gold。
-- 评测命令支持零 Provider 的 draft/validate/calibrate，以及显式 observe 模式。observe 对 240 条问题文本
-  默认预计 24 次批量 Embedding 调用，并由调用上限保护。当前尚未执行付费 Observation、人工标注、
-  Holdout 或延迟测试，故不能报告 L2 Precision/Recall/Hit Rate；Redis Stack 仍属于后续 Ticket。
-- migration 00032 与真实 PostgreSQL 事务集成测试已验证 pgvector 候选、Profile/规范化版本隔离、
-  semantic cache hit、冲突拒绝、问题哈希绑定和 Generation 失效；该测试使用本地固定向量，不代表真实
-  Embedding Profile 的 Precision、Recall 或延迟。
+  应用侧再拒绝实体、数字、日期、版本、否定、意图、故障转移方向和启停动作冲突。Embedding 或向量
+  索引失败不会删除 L1。
+- `testdata/semantic-cache-v1.json` 的 120 对已全部人工复核为 38 reusable / 82 non-reusable，并按固定种子
+  分层为 80 Calibration/40 Holdout；系统不把建议标签或在线 LLM Judge 当作 Gold。
+- DashScope `text-embedding-v4` Observation 使用 24 次批量请求、2526 Token。阈值
+  `0.8721208486635312` 在 Calibration 达到 Precision 100%、Recall 16%、Hit Rate 5%，在独立 Holdout
+  达到 Precision 100%、Recall 7.69%、Hit Rate 2.5%，通过 98% Precision 发布门禁。
+- 运行配置已将阈值绑定到 Profile 指纹
+  `98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667`；Profile 变化或指纹不匹配时启动
+  校验拒绝使用旧阈值。
+- 5 问题、20 请求的版本化固定流量重放中，pgvector lookup 的 P50/P95 为 2.101/3.199 ms；含 DashScope
+  Query Embedding、消息与 Observation 提交的完整命中链路 P50/P95 为 225.096/244.743 ms，20 次命中均为零主模型、零 Tool、
+  零降级。原 P95 200 ms 目标未达到，最终简历必须改用真实结果或更换指标口径。
+- 方法、边界和原始制品见 `docs/evaluations/semantic-answer-cache-v1.md` 与
+  `testdata/semantic-cache-v1.{observations,calibration,performance}.json`；Redis Stack 仍属于后续 Ticket 08。
 
 ## Problem Statement
 
@@ -231,7 +233,7 @@ runs remain opt-in and require explicit Case, call and Token caps before any mod
   versions, negations or semantic punctuation.
 - L2 embeds the independent user question and performs semantic nearest-neighbor lookup using the active Embedding Profile.
 - L2 candidates must pass the calibrated similarity threshold and deterministic conflict checks for entity, number, date,
-  version, negation and intent differences.
+  version, negation, intent, fallback direction and enable/disable action differences.
 - Embedding unavailability disables L2 for that request but preserves L1. Cache lookup failure or timeout falls through to
   normal RAG.
 - A valid hit directly commits the cached answer and citations as a normal Assistant Message. It also creates a lightweight
@@ -271,7 +273,8 @@ runs remain opt-in and require explicit Case, call and Token caps before any mod
 ### Evaluation Dataset and Metrics
 
 - The semantic cache fixed set contains 120 reviewed query pairs:
-  - 40 reusable semantic paraphrases;
+  - 40 pairs were drafted as proposed reusable semantic paraphrases; human review relabeled two of them, so the final Gold
+    Label contains 38 reusable and 82 non-reusable pairs;
   - 40 difficult negatives with overlapping terms but different constraints or answers;
   - 20 temporal/version-sensitive negatives;
   - 20 conversation, attachment, Personal or Web-dependent negatives.
@@ -406,7 +409,8 @@ Text-to-SQL and SQL safety, FTS/Vector/RRF retrieval, Advanced RAG variants, con
 document ingestion and visual processing, and context governance. M4 treats these as prior art and input assets.
 Their historical results remain scoped to the implementation, model, Prompt, data and date recorded at the time.
 
-Ticket 01 已建立 `evaluation_inventory_v1`，逐项登记当前 19 个评测入口，并使用
+Ticket 01 已建立 `evaluation_inventory_v1`；Ticket 07 增加语义缓存真实性能 Observation 后，当前逐项登记
+20 个评测/观测入口，并使用
 `reusable / recomputed / retest_needed / obsolete` 标记历史资产。首个 Tool Selection tracer bullet
 以零 Provider 调用重放 45 Case、90 条历史 Observation，生成绑定 Dataset/Observation SHA-256 的
 `evaluation_ledger_v1`；领域 Summary 保持原始 wide `95.56%`、filtered `97.78%` 和 45 个 paired Case。

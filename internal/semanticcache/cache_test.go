@@ -54,6 +54,10 @@ func TestSemanticQuestionsCompatibleProtectsMeaningChangingFacts(t *testing.T) {
 		{name: "negation", original: "管理员可以删除制度吗？", candidate: "管理员不可以删除制度吗？", want: semanticcache.ConflictNegation},
 		{name: "entity", original: "MESGuard 的发布流程是什么？", candidate: "GoChat 的发布流程是什么？", want: semanticcache.ConflictEntity},
 		{name: "intent", original: "为什么需要发布知识文档？", candidate: "如何发布知识文档？", want: semanticcache.ConflictIntent},
+		{name: "purpose versus reason", original: "Early Exit 有什么作用？", candidate: "为什么 Early Exit 能提前结束？", want: semanticcache.ConflictIntent},
+		{name: "fallback direction", original: "FTS 失败后能否降级向量检索？", candidate: "向量检索失败后能否降级 FTS？", want: semanticcache.ConflictDirection},
+		{name: "provider fallback direction", original: "OCR 失败时是否调用 VLM？", candidate: "VLM 失败时是否调用 OCR？", want: semanticcache.ConflictDirection},
+		{name: "opposite action", original: "如何开启语义缓存？", candidate: "如何关闭语义缓存？", want: semanticcache.ConflictAction},
 		{name: "chinese entity", original: "甲车间点检流程是什么？", candidate: "乙车间点检流程是什么？", want: semanticcache.ConflictEntity},
 		{name: "chinese number", original: "点检周期是三十天吗？", candidate: "点检周期是六十天吗？", want: semanticcache.ConflictNumber},
 	}
@@ -165,5 +169,21 @@ func TestQuestionEligibilityRejectsContextDependentAndTemporalQuestions(t *testi
 		Text: "这个规范是什么？", HasPriorMessages: true,
 	}) {
 		t.Fatal("context-dependent question should not be cache eligible")
+	}
+	for _, question := range []string{
+		"当前线上 VLM 的模型 ID 是什么？",
+		"当前知识制度包含什么？",
+		"当前设备点检规范是什么？",
+		"根据我个人知识库里的文档回答。",
+		"去网上查一下这个报错。",
+	} {
+		if semanticcache.EligibleForLookup(semanticcache.Question{Text: question}) {
+			t.Fatalf("context-sensitive question is cache eligible: %q", question)
+		}
+	}
+	if !semanticcache.EligibleForLookup(semanticcache.Question{
+		Text: "知识文档换版处理中，当前版本是否仍可搜索？",
+	}) {
+		t.Fatal("stable current-version mechanism question should remain cache eligible")
 	}
 }

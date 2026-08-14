@@ -343,6 +343,22 @@ parserMaxTotalVisualBytes = 67108864
 maxVisualEnrichments = 30
 minVisualPixels = 4096
 
+[semanticAnswerCache]
+enabled = true
+provider = "postgres"
+ttlSeconds = 86400
+ttlJitterRatio = 0.1
+maxRecords = 1000
+maxAnswerBytes = 16384
+maxCitations = 8
+lookupTimeoutMillis = 100
+writeTimeoutMillis = 200
+semanticEnabled = true
+semanticMinimumSimilarity = 0.8721208486635312
+semanticCandidateLimit = 5
+semanticEmbeddingTimeoutMillis = 1500
+semanticProfileFingerprint = "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
+
 [knowledge.retrieval]
 contextExpansionEnabled = true
 contextWindow = 1

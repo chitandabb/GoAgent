@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -59,8 +60,11 @@ type Question struct {
 }
 
 var temporalOrContextChineseTerms = []string{
-	"今天", "现在", "目前", "最新", "实时", "最近", "截至", "刚才", "上面", "下面", "继续", "这个", "那个", "它",
+	"今天", "现在", "目前", "最新", "实时", "最近", "截至", "刚才", "上面", "下面", "前面", "继续", "这个", "那个", "它",
+	"个人知识库", "网上查", "网络搜索",
 }
+
+var stableCurrentVersionMechanismPattern = regexp.MustCompile(`当前版本.*(?:是否|能否|还能|仍).*(?:搜索|检索|可用)`)
 
 var temporalOrContextEnglishTerms = []string{
 	"today", "now", "current", "latest", "real-time", "realtime", "recent", "as of", "above", "previous", "continue", "this", "that", "it",
@@ -82,6 +86,9 @@ func EligibleForLookup(question Question) bool {
 		if strings.Contains(text, term) {
 			return false
 		}
+	}
+	if strings.Contains(text, "当前") && !stableCurrentVersionMechanismPattern.MatchString(text) {
+		return false
 	}
 	for _, term := range temporalOrContextEnglishTerms {
 		if containsBoundedEnglishTerm(text, term) {
