@@ -469,7 +469,7 @@ func TestConversationMemoryRetriesInvalidHardCompactionThenActivates(t *testing.
 	}
 }
 
-func TestConversationMemoryNormalizesLegacyLineageIntoCurrentState(t *testing.T) {
+func TestConversationMemoryRejectsLineageInsteadOfSilentlyDroppingHistory(t *testing.T) {
 	conversationID := uuid.New()
 	repository := &activationMemoryRepositoryStub{memoryRepositoryStub: &memoryRepositoryStub{}}
 	service := newMemoryService(t, repository, compactorFunc(func(_ context.Context, _ conversationmemory.CompactionInput) (conversationmemory.CompactionOutput, error) {
@@ -480,19 +480,14 @@ func TestConversationMemoryNormalizesLegacyLineageIntoCurrentState(t *testing.T)
 		)
 		return conversationmemory.CompactionOutput{Payload: payload, Usage: conversationmemory.SummaryUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25}}, nil
 	}), time.Now().UTC(), 1)
-	snapshot, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
+	_, err := service.PrepareActive(context.Background(), conversationmemory.PrepareActiveRequest{
 		ConversationID: conversationID, CompletedMessages: initialMessages(conversationID), ActivationGate: acceptConversationMemoryActivation,
 	})
-	if err != nil {
-		t.Fatalf("PrepareActive() error = %v", err)
+	if !errors.Is(err, conversationmemory.ErrCompactionFailed) || len(repository.saved) != 0 {
+		t.Fatalf("PrepareActive() error/saves = %v/%d, want compaction failure/0", err, len(repository.saved))
 	}
-	if len(snapshot.Payload.Corrections) != 3 {
-		t.Fatalf("current corrections = %+v", snapshot.Payload.Corrections)
-	}
-	for _, entry := range snapshot.Payload.Corrections {
-		if entry.Status != conversationmemory.EntryStatusActive || entry.SupersedesEntryID != "" {
-			t.Fatalf("legacy lineage was not normalized: %+v", snapshot.Payload.Corrections)
-		}
+	if got := conversationmemory.CompactionAttemptFailureCodes(err); !reflect.DeepEqual(got, []string{"entry_reference_unknown"}) {
+		t.Fatalf("failure codes = %#v, want entry_reference_unknown", got)
 	}
 }
 

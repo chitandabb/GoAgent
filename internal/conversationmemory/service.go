@@ -768,7 +768,6 @@ func (s *Service) generateCandidate(
 		// Stable references are an application-owned projection. The model may
 		// summarize a referenced source, but it cannot mint, remove, or rewrite
 		// the identity and provenance of a task, evidence item, or report.
-		output.Payload = normalizeCurrentPayload(output.Payload)
 		output.Payload = mergeTrustedReferences(output.Payload, previous, validation)
 		if validateErr := ValidatePayload(output.Payload, validation); validateErr != nil {
 			lastErr = validateErr
@@ -800,33 +799,6 @@ func (s *Service) generateCandidate(
 	}
 	return Snapshot{}, NewCompactionAttemptsError(fmt.Errorf("%w after %d attempts: %w", ErrCompactionFailed,
 		lastAttempt-firstAttempt+1, lastErr), failureCodes)
-}
-
-func normalizeCurrentPayload(payload Payload) Payload {
-	normalize := func(entries []Entry) []Entry {
-		result := make([]Entry, 0, len(entries))
-		for _, entry := range entries {
-			if entry.Status == EntryStatusSuperseded {
-				continue
-			}
-			entry.Status = EntryStatusActive
-			entry.SupersedesEntryID = ""
-			result = append(result, entry)
-		}
-		return result
-	}
-	if payload.ConversationGoal != nil {
-		payload.ConversationGoal.Status = EntryStatusActive
-		payload.ConversationGoal.SupersedesEntryID = ""
-	}
-	payload.Facts = normalize(payload.Facts)
-	payload.Decisions = normalize(payload.Decisions)
-	payload.Corrections = normalize(payload.Corrections)
-	payload.OpenQuestions = normalize(payload.OpenQuestions)
-	for index := range payload.Todos {
-		payload.Todos[index].SupersedesEntryID = ""
-	}
-	return payload
 }
 
 // mergeTrustedReferences rebuilds all reference sections from the structured

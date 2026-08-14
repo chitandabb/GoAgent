@@ -27,9 +27,10 @@ type conversationMemoryModelFactory func(
 	string,
 ) (*chatmodel.Instance, error)
 
-// BuildConversationMemoryService composes the shared Shadow and Active Summary
-// implementation. Constructing the service has no side effects; callers must
-// explicitly generate a candidate or CAS-activate it for a Conversation turn.
+// BuildConversationMemoryService composes the Current Summary implementation.
+// Constructing the service has no side effects; callers explicitly prepare the
+// latest summary for a Conversation turn. Candidate/CAS storage fields remain
+// an internal schema-v1 compatibility detail.
 func BuildConversationMemoryService(
 	ctx context.Context,
 	db *gorm.DB,
