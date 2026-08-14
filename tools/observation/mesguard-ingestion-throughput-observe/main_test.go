@@ -73,7 +73,7 @@ func TestRunEstimateOnlyDoesNotRequireProviderAuthorization(t *testing.T) {
 	if err := os.WriteFile(manifestPath, manifestBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("MESGUARD_CONFIG_FILE", filepath.Join("..", "..", "config", "mesguard.toml"))
+	t.Setenv("MESGUARD_CONFIG_FILE", filepath.Join("..", "..", "..", "config", "mesguard.toml"))
 	if err := run(context.Background(), []string{
 		"-estimate-only", "-corpus", manifestPath, "-source-root", directory,
 	}, zap.NewNop()); err != nil {
@@ -95,7 +95,7 @@ func TestRunRequiresExplicitProviderExecution(t *testing.T) {
 }
 
 func TestPinnedThroughputCorpusKeepsAcceptanceCoverage(t *testing.T) {
-	manifest, err := readCorpus(filepath.Join("..", "..", "testdata", "rag-ingestion-throughput-v1.corpus.json"))
+	manifest, err := readCorpus(filepath.Join("..", "..", "..", "testdata", "rag-ingestion-throughput-v1.corpus.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestRunAuditOnlyWritesProviderFreeClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	outputPath := filepath.Join(directory, "audit.json")
-	t.Setenv("MESGUARD_CONFIG_FILE", filepath.Join("..", "..", "config", "mesguard.toml"))
+	t.Setenv("MESGUARD_CONFIG_FILE", filepath.Join("..", "..", "..", "config", "mesguard.toml"))
 	if err := run(context.Background(), []string{
 		"-audit-only", "-corpus", manifestPath, "-source-root", directory, "-audit-output", outputPath,
 	}, zap.NewNop()); err != nil {

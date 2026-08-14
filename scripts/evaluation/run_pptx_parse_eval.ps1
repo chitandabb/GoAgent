@@ -30,7 +30,7 @@ if ($files.Count -gt $MaxFiles) {
     throw "PPTX file count $($files.Count) exceeds MaxFiles $MaxFiles"
 }
 
-$arguments = @("run", "./cmd/mesguard-document-parse-eval", "-output", $outputPath)
+$arguments = @("run", "./tools/evaluation/mesguard-document-parse-eval", "-output", $outputPath)
 foreach ($file in $files) {
     $arguments += @("-input", $file.FullName)
 }

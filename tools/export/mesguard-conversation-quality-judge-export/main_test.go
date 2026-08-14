@@ -12,13 +12,13 @@ import (
 
 func TestBuildJudgeInputsKeepsActualCitationOutsideGoldSources(t *testing.T) {
 	corpus, err := readStrictJSON[knowledge.AdvancedRetrievalEvaluationCorpus](
-		"../../testdata/rag-advanced-v1.corpus.json",
+		"../../../testdata/rag-advanced-v1.corpus.json",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rawCases, err := readStrictJSONL(
-		"../../testdata/conversation-quality-recorded-v1.jsonl",
+		"../../../testdata/conversation-quality-recorded-v1.jsonl",
 		func(value rawQualityCase) error { return value.Validate() },
 	)
 	if err != nil {

@@ -28,7 +28,7 @@ func TestRunRequiresExplicitProviderExecution(t *testing.T) {
 }
 
 func TestCheckedInCompressionPressureFixtureCanExceedProductionChunkLimit(t *testing.T) {
-	root := filepath.Join("..", "..")
+	root := filepath.Join("..", "..", "..")
 	corpus, err := readStrictJSON[knowledge.AdvancedRetrievalEvaluationCorpus](
 		filepath.Join(root, "testdata", "rag-compression-pressure-v1.corpus.json"),
 	)

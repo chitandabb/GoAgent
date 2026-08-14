@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $arguments = @(
-    "run", "./cmd/mesguard-vlm-quality-eval",
+    "run", "./tools/evaluation/mesguard-vlm-quality-eval",
     "-config", $Config,
     "-fixture", $Fixture,
     "-root", $InputRoot,
