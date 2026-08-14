@@ -230,7 +230,7 @@ func (r *ConversationMemoryJobRepository) Complete(
 		active, err := loadConversationMemorySnapshotWithDB(
 			tx, conversationMemoryActiveSnapshotQuery+"\nFOR UPDATE", job.ConversationID,
 		)
-		if err != nil || active.ThroughSeq < execution.ThroughSeq || active.ThroughSeq < job.RequestedThroughSeq {
+		if err != nil || !currentSummaryCompletesExecution(active, execution, job.RequestedThroughSeq) {
 			if err == nil {
 				err = conversationmemory.ErrSnapshotActivationConflict
 			}
@@ -263,6 +263,20 @@ WHERE id = ? AND status = ? AND claim_owner = ? AND fencing_token = ? AND lease_
 		return conversationmemoryworker.CompletionResult{}, err
 	}
 	return result, nil
+}
+
+func currentSummaryCompletesExecution(
+	active conversationmemory.Snapshot,
+	execution conversationmemoryworker.ExecutionResult,
+	requestedThroughSeq int64,
+) bool {
+	if active.ThroughSeq < requestedThroughSeq {
+		return false
+	}
+	if active.ID == execution.CurrentSnapshotID {
+		return active.ThroughSeq == execution.ThroughSeq
+	}
+	return active.ThroughSeq > execution.ThroughSeq
 }
 
 func (r *ConversationMemoryJobRepository) ReleaseForRetry(
