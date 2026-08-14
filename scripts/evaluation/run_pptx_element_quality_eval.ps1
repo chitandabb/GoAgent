@@ -11,7 +11,7 @@ $resolvedInputRoot = (Resolve-Path -LiteralPath $InputRoot).Path
 
 Push-Location $repositoryRoot
 try {
-    & go run ./cmd/mesguard-pptx-element-eval `
+    & go run ./tools/evaluation/mesguard-pptx-element-eval `
         -root $resolvedInputRoot `
         -output $Output `
         -summary $Summary

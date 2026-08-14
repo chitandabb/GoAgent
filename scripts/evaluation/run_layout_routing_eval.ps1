@@ -20,7 +20,7 @@ if (-not $resourcePath.StartsWith($evaluationRoot + [IO.Path]::DirectorySeparato
 }
 
 New-Item -ItemType Directory -Force -Path $binaryDirectory | Out-Null
-& go build -o $binaryPath ./cmd/mesguard-layout-routing-eval
+& go build -o $binaryPath ./tools/evaluation/mesguard-layout-routing-eval
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to build mesguard-layout-routing-eval"
 }

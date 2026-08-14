@@ -48,11 +48,11 @@ func TestValidEvaluationProfileName(t *testing.T) {
 }
 
 func TestCheckedInConversationQualityFixtureIsPinnedAndBudgeted(t *testing.T) {
-	corpus, err := readStrictJSON[knowledge.AdvancedRetrievalEvaluationCorpus]("../../testdata/rag-advanced-v1.corpus.json")
+	corpus, err := readStrictJSON[knowledge.AdvancedRetrievalEvaluationCorpus]("../../../testdata/rag-advanced-v1.corpus.json")
 	if err != nil {
 		t.Fatalf("read corpus: %v", err)
 	}
-	definitions, err := readStrictJSONL("../../testdata/conversation-quality-recorded-v1.jsonl", func(value qualityCaseDefinition) error {
+	definitions, err := readStrictJSONL("../../../testdata/conversation-quality-recorded-v1.jsonl", func(value qualityCaseDefinition) error {
 		return value.Validate()
 	})
 	if err != nil {
