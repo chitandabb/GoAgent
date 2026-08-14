@@ -49,28 +49,75 @@ type Config struct {
 }
 
 type SemanticAnswerCacheConfig struct {
-	Enabled                        bool    `toml:"enabled"`
-	Provider                       string  `toml:"provider"`
-	TTLSeconds                     int     `toml:"ttlSeconds"`
-	TTLJitterRatio                 float64 `toml:"ttlJitterRatio"`
-	MaxRecords                     int     `toml:"maxRecords"`
-	MaxAnswerBytes                 int     `toml:"maxAnswerBytes"`
-	MaxCitations                   int     `toml:"maxCitations"`
-	LookupTimeoutMillis            int     `toml:"lookupTimeoutMillis"`
-	WriteTimeoutMillis             int     `toml:"writeTimeoutMillis"`
-	SemanticEnabled                bool    `toml:"semanticEnabled"`
-	SemanticMinimumSimilarity      float64 `toml:"semanticMinimumSimilarity"`
-	SemanticCandidateLimit         int     `toml:"semanticCandidateLimit"`
-	SemanticEmbeddingTimeoutMillis int     `toml:"semanticEmbeddingTimeoutMillis"`
-	SemanticProfileFingerprint     string  `toml:"semanticProfileFingerprint"`
+	Enabled                        bool                                `toml:"enabled"`
+	Provider                       string                              `toml:"provider"`
+	TTLSeconds                     int                                 `toml:"ttlSeconds"`
+	TTLJitterRatio                 float64                             `toml:"ttlJitterRatio"`
+	MaxRecords                     int                                 `toml:"maxRecords"`
+	MaxAnswerBytes                 int                                 `toml:"maxAnswerBytes"`
+	MaxCitations                   int                                 `toml:"maxCitations"`
+	LookupTimeoutMillis            int                                 `toml:"lookupTimeoutMillis"`
+	WriteTimeoutMillis             int                                 `toml:"writeTimeoutMillis"`
+	SemanticEnabled                bool                                `toml:"semanticEnabled"`
+	SemanticMinimumSimilarity      float64                             `toml:"semanticMinimumSimilarity"`
+	SemanticCandidateLimit         int                                 `toml:"semanticCandidateLimit"`
+	SemanticEmbeddingTimeoutMillis int                                 `toml:"semanticEmbeddingTimeoutMillis"`
+	SemanticProfileFingerprint     string                              `toml:"semanticProfileFingerprint"`
+	RedisStack                     SemanticAnswerCacheRedisStackConfig `toml:"redisStack"`
+}
+
+type SemanticAnswerCacheRedisStackConfig struct {
+	Host        string `toml:"host"`
+	Port        int    `toml:"port"`
+	PasswordEnv string `toml:"passwordEnv"`
+	Database    int    `toml:"database"`
+	IndexName   string `toml:"indexName"`
+	KeyPrefix   string `toml:"keyPrefix"`
+}
+
+func (c SemanticAnswerCacheRedisStackConfig) Address() string {
+	return net.JoinHostPort(strings.TrimSpace(c.Host), strconv.Itoa(c.Port))
+}
+
+func (c SemanticAnswerCacheRedisStackConfig) Password() (string, error) {
+	if strings.TrimSpace(c.PasswordEnv) == "" {
+		return "", nil
+	}
+	return requiredEnv(c.PasswordEnv)
+}
+
+func (c SemanticAnswerCacheRedisStackConfig) Validate() error {
+	if strings.TrimSpace(c.Host) == "" || c.Port < 1 || c.Port > 65535 {
+		return errors.New("semanticAnswerCache redisStack host and port are required")
+	}
+	if c.Database < 0 || c.Database > 15 {
+		return errors.New("semanticAnswerCache redisStack database must be between 0 and 15")
+	}
+	if c.PasswordEnv != "" && !environmentVariableName.MatchString(strings.TrimSpace(c.PasswordEnv)) {
+		return errors.New("semanticAnswerCache redisStack passwordEnv must name an environment variable")
+	}
+	if !modelName.MatchString(strings.TrimSpace(c.IndexName)) {
+		return errors.New("semanticAnswerCache redisStack indexName is invalid")
+	}
+	prefix := strings.TrimSpace(c.KeyPrefix)
+	if prefix == "" || len(prefix) > 128 || strings.ContainsAny(prefix, " \t\r\n") {
+		return errors.New("semanticAnswerCache redisStack keyPrefix is invalid")
+	}
+	return nil
 }
 
 func (c SemanticAnswerCacheConfig) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if strings.ToLower(strings.TrimSpace(c.Provider)) != "postgres" {
-		return errors.New("semanticAnswerCache provider must be postgres")
+	provider := strings.ToLower(strings.TrimSpace(c.Provider))
+	if provider != "postgres" && provider != "redis-stack" {
+		return errors.New("semanticAnswerCache provider must be postgres or redis-stack")
+	}
+	if provider == "redis-stack" {
+		if err := c.RedisStack.Validate(); err != nil {
+			return err
+		}
 	}
 	if c.TTLSeconds < 60 || c.TTLSeconds > 30*24*60*60 {
 		return errors.New("semanticAnswerCache ttlSeconds must be between 60 and 2592000")

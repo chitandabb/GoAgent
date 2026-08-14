@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "semantic_cache_provider_ablation_v1",
+  "cacheProvider": "redis-stack",
+  "datasetVersion": "semantic-cache-latency-v1",
+  "embeddingProfile": "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667",
+  "generation": 5,
+  "threshold": 0.8721208486635312,
+  "pairObservations": [
+    {
+      "id": "reuse-04",
+      "similarity": 0.8775621530599049
+    },
+    {
+      "id": "reuse-19",
+      "similarity": 0.900885466779726
+    },
+    {
+      "id": "reuse-22",
+      "similarity": 0.9227355983967409
+    },
+    {
+      "id": "reuse-23",
+      "similarity": 0.9686150166539054
+    },
+    {
+      "id": "reuse-32",
+      "similarity": 0.9083249541974567
+    }
+  ],
+  "lookupSamples": 200,
+  "lookupP50Millis": 2.624,
+  "lookupP95Millis": 3.2151,
+  "fullChainSamples": 20,
+  "fullChainP50Millis": 215.2601,
+  "fullChainP95Millis": 253.7144,
+  "providerCalls": 21,
+  "embeddingTokens": 439,
+  "mainModelCalls": 0,
+  "toolCalls": 0,
+  "degradationEvents": 0,
+  "degradationRate": 0,
+  "measuredAt": "2026-08-14T04:24:17.9394347Z",
+  "measurementBoundary": "query embedding, redis-stack lookup, user/assistant message and run-observation commit; excludes browser network/rendering"
+}

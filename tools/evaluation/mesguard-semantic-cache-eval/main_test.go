@@ -1,11 +1,41 @@
 package main
 
 import (
+	"context"
 	"math"
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
 )
+
+func TestEvaluateFullIndexQualityCountsReturnedCandidateIdentity(t *testing.T) {
+	dataset := semanticcache.EvaluationDataset{
+		Version: "fixture-v1",
+		Pairs: []semanticcache.EvaluationPair{
+			{ID: "reuse", CandidateQuestion: "设备点检周期如何规定？", Reusable: true, Split: semanticcache.EvaluationSplitCalibration},
+			{ID: "negative", CandidateQuestion: "设备点检周期是 60 天吗？", Reusable: false, Split: semanticcache.EvaluationSplitHoldout},
+		},
+	}
+	lookups := map[string]fullIndexLookupResult{
+		"设备点检周期如何规定？":    {PairID: "reuse", Similarity: 0.95, Hit: true},
+		"设备点检周期是 60 天吗？": {PairID: "reuse", Similarity: 0.94, Hit: true},
+	}
+	report, err := evaluateFullIndexQuality(context.Background(), dataset, func(
+		_ context.Context,
+		pair semanticcache.EvaluationPair,
+	) (fullIndexLookupResult, error) {
+		return lookups[pair.CandidateQuestion], nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.StrictPairIdentityCalibration.TruePositives != 1 || report.StrictPairIdentityCalibration.Precision != 1 {
+		t.Fatalf("calibration = %+v", report.StrictPairIdentityCalibration)
+	}
+	if report.StrictPairIdentityHoldout.FalsePositives != 1 || report.StrictPairIdentityHoldout.Precision != 0 || report.CrossCandidateHits != 1 {
+		t.Fatalf("holdout=%+v cross=%d", report.StrictPairIdentityHoldout, report.CrossCandidateHits)
+	}
+}
 
 func TestBuildDraftDatasetIsStratifiedAndPendingHumanReview(t *testing.T) {
 	dataset := buildDraftDataset()

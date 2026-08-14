@@ -14,8 +14,11 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationworker"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
+	"github.com/chitandabb/GoAgent/internal/semanticcache/contracttest"
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -24,7 +27,17 @@ import (
 func TestSemanticAnswerCacheAcrossConversationsAndGenerationInvalidation(t *testing.T) {
 	dsn := os.Getenv("MESGUARD_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("MESGUARD_TEST_POSTGRES_DSN is not configured")
+		_ = godotenv.Load("../../../.env")
+		t.Setenv("MESGUARD_CONFIG_FILE", "../../../config/mesguard.toml")
+		cfg, configErr := config.Load()
+		if configErr != nil {
+			t.Skipf("load local PostgreSQL test config: %v", configErr)
+		}
+		var dsnErr error
+		dsn, dsnErr = ConnectionString(cfg.Postgres)
+		if dsnErr != nil {
+			t.Skipf("build local PostgreSQL test DSN: %v", dsnErr)
+		}
 	}
 	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -203,11 +216,12 @@ WHERE document_version_id = ? ORDER BY ordinal LIMIT 1`, versionID).Scan(&chunkR
 	}); !errors.Is(err, semanticcache.ErrInvalidRecord) {
 		t.Fatalf("mismatched semantic index question error = %v", err)
 	}
-	if err := cacheRepository.IndexSemantic(ctx, semanticcache.SemanticIndexInput{
+	semanticIndexInput := semanticcache.SemanticIndexInput{
 		QuestionHash: questionHash, Question: question, Vector: vector,
 		ProfileID: profile.ID, ProfileFingerprint: profile.Fingerprint,
 		NormalizationVersion: semanticcache.SemanticNormalizationVersion, SourceRunID: sourceRunID,
-	}); err != nil {
+	}
+	if err := cacheRepository.IndexSemantic(ctx, semanticIndexInput); err != nil {
 		t.Fatalf("IndexSemantic(): %v", err)
 	}
 	semanticInput := semanticcache.SemanticLookupInput{
@@ -216,6 +230,21 @@ WHERE document_version_id = ? ORDER BY ordinal LIMIT 1`, versionID).Scan(&chunkR
 		NormalizationVersion: semanticcache.SemanticNormalizationVersion,
 		MinimumSimilarity:    0.92, CandidateLimit: 5, Now: time.Now().UTC(),
 	}
+	contractAnswer, contractHit, contractErr := cacheRepository.Lookup(ctx, semanticcache.LookupInput{
+		QuestionHash: questionHash, Now: time.Now().UTC(),
+	})
+	if contractErr != nil || !contractHit {
+		t.Fatalf("load contract answer hit=%v err=%v", contractHit, contractErr)
+	}
+	contracttest.RunReadContract(t, contracttest.ReadContract{
+		Provider:          cacheRepository,
+		ExactInput:        semanticcache.LookupInput{QuestionHash: questionHash, Now: time.Now().UTC()},
+		ExpiredExactInput: semanticcache.LookupInput{QuestionHash: questionHash, Now: contractAnswer.ExpiresAt.Add(time.Second)},
+		SemanticInput:     semanticInput, SemanticIndexInput: semanticIndexInput,
+		ConflictingQuestion: "设备点检周期是 60 天吗？",
+		ExpectedSourceRunID: sourceRunID,
+		ValidPut:            semanticcache.PutInput{QuestionHash: questionHash, Answer: contractAnswer, TTL: time.Hour},
+	})
 	if answer, hit, err := cacheRepository.LookupSemantic(ctx, semanticInput); err != nil || !hit ||
 		answer.Layer != semanticcache.LayerSemantic || answer.SourceRunID != sourceRunID {
 		t.Fatalf("semantic cache lookup hit=%v answer=%+v err=%v", hit, answer, err)

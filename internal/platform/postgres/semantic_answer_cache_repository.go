@@ -75,8 +75,8 @@ func (r *SemanticAnswerCacheRepository) Lookup(
 	if r == nil || r.db == nil {
 		return semanticcache.Answer{}, false, errors.New("semantic answer cache repository is unavailable")
 	}
-	if !validSemanticQuestionHash(input.QuestionHash) || input.Now.IsZero() {
-		return semanticcache.Answer{}, false, semanticcache.ErrInvalidRecord
+	if err := input.Validate(); err != nil {
+		return semanticcache.Answer{}, false, err
 	}
 	var record semanticAnswerCacheLookupRecord
 	result := ResolveDB(ctx, r.db).Raw(`
@@ -181,21 +181,9 @@ func (r *SemanticAnswerCacheRepository) IndexSemantic(
 	}
 	vector := pgvector.NewVector(input.Vector)
 	return TranslateError(ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
-		var generation int64
-		if result := tx.Raw(`
-SELECT generation FROM global_knowledge_generation WHERE singleton = 1 FOR UPDATE`).Scan(&generation); result.Error != nil {
-			return result.Error
-		} else if result.RowsAffected != 1 || generation < 1 {
-			return errors.New("global knowledge generation is unavailable")
-		}
-		var profileMatches bool
-		if result := tx.Raw(`
-SELECT true FROM knowledge_embedding_profiles
-WHERE id = ? AND fingerprint = ? AND status = 'active' AND dimensions = 1024
-  AND distance_metric = 'cosine' AND normalized = true`, input.ProfileID, input.ProfileFingerprint).Scan(&profileMatches); result.Error != nil {
-			return result.Error
-		} else if result.RowsAffected != 1 || !profileMatches {
-			return semanticcache.ErrInvalidRecord
+		generation, err := authorizeSemanticCacheIndex(tx, input)
+		if err != nil {
+			return err
 		}
 		result := tx.Exec(`
 UPDATE semantic_answer_cache
@@ -238,12 +226,8 @@ func (r *SemanticAnswerCacheRepository) Put(ctx context.Context, input semanticc
 	if r == nil || r.db == nil {
 		return errors.New("semantic answer cache repository is unavailable")
 	}
-	if !validSemanticQuestionHash(input.QuestionHash) || input.TTL < time.Minute || input.TTL > 30*24*time.Hour ||
-		input.Answer.SourceRunID == uuid.Nil || input.Answer.CreatedAt.IsZero() ||
-		strings.TrimSpace(input.Answer.Content) == "" || len(input.Answer.Content) > semanticcache.MaxAnswerBytes ||
-		len(input.Answer.Citations) == 0 || len(input.Answer.Citations) > semanticcache.MaxCitations ||
-		len(input.Answer.RetrievedSources) == 0 || len(input.Answer.RetrievedSources) > semanticcache.MaxSources {
-		return semanticcache.ErrInvalidRecord
+	if err := input.Validate(); err != nil {
+		return err
 	}
 	citations, err := json.Marshal(input.Answer.Citations)
 	if err != nil {
@@ -256,25 +240,9 @@ func (r *SemanticAnswerCacheRepository) Put(ctx context.Context, input semanticc
 	createdAt := input.Answer.CreatedAt.UTC()
 	expiresAt := createdAt.Add(semanticCacheTTL(input.TTL, r.ttlJitterRatio, input.QuestionHash))
 	return TranslateError(ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
-		var generation int64
-		generationResult := tx.Raw(`
-SELECT generation
-FROM global_knowledge_generation
-WHERE singleton = 1
-FOR UPDATE`).Scan(&generation)
-		if generationResult.Error != nil {
-			return generationResult.Error
-		}
-		if generationResult.RowsAffected != 1 || generation < 1 {
-			return errors.New("global knowledge generation is unavailable")
-		}
-		if err := validateSemanticCacheSourceRun(tx, input.QuestionHash, input.Answer); err != nil {
+		generation, err := authorizeSemanticCachePut(tx, input)
+		if err != nil {
 			return err
-		}
-		for _, source := range append(append([]semanticcache.Source(nil), input.Answer.Citations...), input.Answer.RetrievedSources...) {
-			if err := validateCurrentGlobalKnowledgeSource(tx, source); err != nil {
-				return err
-			}
 		}
 		result := tx.Exec(`
 INSERT INTO semantic_answer_cache

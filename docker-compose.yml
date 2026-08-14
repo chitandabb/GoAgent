@@ -78,6 +78,23 @@ services:
       timeout: 5s
       retries: 10
 
+  redis-stack:
+    image: ${MESGUARD_REDIS_STACK_IMAGE:-redis/redis-stack-server:7.4.0-v8}
+    container_name: mesguard-redis-stack
+    profiles: ["semantic-cache-redis-stack"]
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "${MESGUARD_REDIS_STACK_PORT:-6380}:6379"
+    volumes:
+      - ${MESGUARD_REDIS_STACK_DATA:-mesguard_redis-stack-data}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   minio:
     image: ${MESGUARD_MINIO_IMAGE:-minio/minio:latest}
     container_name: mesguard-minio
@@ -316,5 +333,6 @@ volumes:
   mesguard_postgres-data:
   mesguard_sqlserver-data:
   mesguard_redis-data:
+  mesguard_redis-stack-data:
   mesguard_rabbitmq-data:
   mesguard_minio-data:

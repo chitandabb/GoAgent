@@ -3,21 +3,24 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
+	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
+	platformredisstack "github.com/chitandabb/GoAgent/internal/platform/redisstack"
 	"github.com/chitandabb/GoAgent/internal/resilience"
+	"github.com/chitandabb/GoAgent/internal/semanticcache"
 	"go.uber.org/zap"
-	"gorm.io/gorm"
 )
 
 func wireSemanticAnswerCache(
 	ctx context.Context,
 	service *conversation.Service,
-	db *gorm.DB,
+	deps *runtimeDependencies,
 	appConfig config.Config,
 	log *zap.Logger,
 ) error {
@@ -32,11 +35,48 @@ func wireSemanticAnswerCache(
 			zap.String("run_id", event.RunID), zap.Int64("duration_millis", event.DurationMillis),
 		)
 	})
-	repository, err := platformpostgres.NewSemanticAnswerCacheRepositoryWithConfig(
-		db, platformpostgres.SemanticAnswerCacheRepositoryConfig{
-			MaxRecords: cfg.MaxRecords, TTLJitterRatio: cfg.TTLJitterRatio,
-		},
-	)
+	var repository semanticcache.Provider
+	var err error
+	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	switch provider {
+	case "postgres":
+		repository, err = platformpostgres.NewSemanticAnswerCacheRepositoryWithConfig(
+			deps.db, platformpostgres.SemanticAnswerCacheRepositoryConfig{
+				MaxRecords: cfg.MaxRecords, TTLJitterRatio: cfg.TTLJitterRatio,
+			},
+		)
+	case "redis-stack":
+		password, passwordErr := cfg.RedisStack.Password()
+		if passwordErr != nil {
+			return fmt.Errorf("load semantic answer cache redis stack password: %w", passwordErr)
+		}
+		deps.semanticCacheRedis, err = platformredis.Open(ctx, config.RedisConfig{
+			Host: cfg.RedisStack.Host, Port: cfg.RedisStack.Port,
+			Password: password, Database: cfg.RedisStack.Database,
+		})
+		if err != nil {
+			log.Warn("Redis Stack semantic answer cache unavailable; continuing without answer cache", zap.Error(err))
+			return nil
+		}
+		authority, authorityErr := platformpostgres.NewSemanticAnswerCacheAuthority(deps.db)
+		if authorityErr != nil {
+			return fmt.Errorf("build semantic answer cache authority: %w", authorityErr)
+		}
+		repository, err = platformredisstack.NewSemanticAnswerCache(
+			ctx, deps.semanticCacheRedis, authority, platformredisstack.Config{
+				IndexName: cfg.RedisStack.IndexName, KeyPrefix: cfg.RedisStack.KeyPrefix,
+				MaxRecords: cfg.MaxRecords, TTLJitterRatio: cfg.TTLJitterRatio,
+			},
+		)
+		if err != nil {
+			_ = deps.semanticCacheRedis.Close()
+			deps.semanticCacheRedis = nil
+			log.Warn("Redis Stack semantic answer cache initialization failed; continuing without answer cache", zap.Error(err))
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported semantic answer cache provider %q", cfg.Provider)
+	}
 	if err != nil {
 		return fmt.Errorf("build semantic answer cache repository: %w", err)
 	}
@@ -59,7 +99,7 @@ func wireSemanticAnswerCache(
 		if clientErr != nil {
 			return fmt.Errorf("build semantic answer cache embedder: %w", clientErr)
 		}
-		if profileErr = platformpostgres.NewKnowledgeWorkerRepository(db).EnsureEmbeddingProfile(
+		if profileErr = platformpostgres.NewKnowledgeWorkerRepository(deps.db).EnsureEmbeddingProfile(
 			ctx, profile,
 		); profileErr != nil {
 			return fmt.Errorf("activate semantic answer cache embedding profile: %w", profileErr)

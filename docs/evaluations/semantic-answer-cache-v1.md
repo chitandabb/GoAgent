@@ -80,3 +80,76 @@ go run ./tools/observation/mesguard-semantic-cache-observe `
 ```
 
 结构化结果见 `testdata/semantic-cache-v1.performance.json`。
+
+## PostgreSQL / Redis Stack Provider 消融
+
+Ticket 08 在不改变 Conversation、Eligibility、Generation、Embedding Profile 和阈值的前提下增加了
+可选 Redis Stack Provider。单次部署只选择一个 Provider，不双写、不迁移缓存；PostgreSQL 仍负责
+Global Knowledge Generation、来源和 Embedding Profile 的权威校验。Redis Stack 使用 Hash 保存答案，
+RediSearch HNSW 负责向量候选召回，候选仍经过相同的 protected-facts 过滤。
+
+同一 5 问、20 次完整命中固定流量结果如下：
+
+| Provider / 边界 | 样本 | P50 | P95 | 降级率 |
+| --- | ---: | ---: | ---: | ---: |
+| PostgreSQL `LookupSemantic` | 200 | 2.101 ms | 3.199 ms | 0% |
+| Redis Stack `LookupSemantic` | 200 | 2.624 ms | 3.215 ms | 0% |
+| PostgreSQL 完整命中链路 | 20 | 225.096 ms | 244.743 ms | 0% |
+| Redis Stack 完整命中链路 | 20 | 215.260 ms | 253.714 ms | 0% |
+
+Redis Stack 相比 PostgreSQL 的 lookup P50 增加约 24.9%，P95 增加约 0.5%；完整链路 P50 降低约
+4.4%，但 P95 增加约 3.7%。变化方向不一致且远小于 Query Embedding 抖动，不能证明 Redis Stack
+带来稳定收益。一次 `docker stats --no-stream` 开发机快照中，独立 Redis Stack 容器约占 13.34 MiB，
+PostgreSQL 容器约占 58.83 MiB；该快照只用于说明额外服务成本，不是生产容量结论。
+
+120 对人工集使用同一 pairwise 相似度、Eligibility 和 protected-facts 决策，因此两个 Provider 的正式
+发布口径仍为 Calibration Precision 100% / Recall 16%，Holdout Precision 100% / Recall 7.69%。该
+Precision 只由人工标注的 Pair Gold Label 计算。同一次 24-call Observation 还复用同一批 240 个向量，
+分别把 120 个 Anchor 放入 PostgreSQL 临时 pgvector 表和 Redis HNSW 索引，以相同阈值、候选上限、
+顺序和冲突过滤执行全索引诊断：
+
+| Provider | Calibration 严格 Pair 身份 | Holdout 严格 Pair 身份 | 跨锚点 | Lookup P50 / P95 |
+| --- | ---: | ---: | ---: | ---: |
+| PostgreSQL | 80% / 16% | 100% / 7.69% | 1 | 3.201 / 3.936 ms |
+| Redis Stack | 80% / 16% | 100% / 7.69% | 1 | 1.495 / 1.934 ms |
+
+两端唯一的跨锚点返回完全一致：`hardneg-06` 的“如何发布知识文档？”命中了 `context-01` 的锚点
+“知识文档如何发布？”，相似度约 `0.935545`。人工复核认为两问可共享答案，因此表中的 80% 只表示
+严格 Pair ID 身份，不是 Cache Precision，不能据此判定错误答案；当前 120 对数据只标注 pairwise
+关系，不能充当所有锚点之间的全局相关性标签。该诊断证明两种索引在固定集上的候选行为一致，同时
+Redis 的纯索引查询更快，但完整链路收益仍被公网 Query Embedding 吞没。结构化结果见
+`testdata/semantic-cache-v1.provider-ablation.observations.json`。
+
+PostgreSQL 与 Redis Stack 共享的 tagged contract suite 覆盖 exact/semantic lookup、逻辑 TTL、答案大小
+限制，以及 Lookup/LookupSemantic/Put/IndexSemantic 的取消与超时；各后端的存储专项测试继续覆盖容量、
+Generation 失效和 malformed record。Redis Stack 运行时连接或索引初始化失败时不挂载答案缓存，后续按
+原有 best-effort 语义继续正常 RAG。可选 Compose Profile 不替换现有基础 Redis；本轮实测配置的 lookup/
+write timeout 分别为 100/200 ms，固定流量没有 timeout 或降级事件。
+
+**决策：保留 Redis Stack 适配器作为候选，不作为默认部署。** PostgreSQL/pgvector 已是必需依赖，
+当前消融没有证明增加一个常驻服务能换来可重复的 P95 或质量收益；默认配置继续使用 `postgres`。
+
+Redis Stack 完整链路最终观测使用 21 次调用、439 Embedding Token。120 对双 Provider 全索引最终观测
+使用 24 次批量调用、2526 Embedding Token；在修正 Eligibility 夹具、补充跨锚点明细和统一 PostgreSQL
+候选边界前还执行了三次同规模预跑。因此 Ticket 08 实际新增合计 117 次 Embedding 调用、10543 Token，
+未调用聊天模型、Rerank、OCR 或 VLM。
+
+```powershell
+docker compose --profile semantic-cache-redis-stack up -d redis-stack
+
+go run ./tools/observation/mesguard-semantic-cache-observe `
+  -fixture testdata/semantic-cache-latency-v1.json `
+  -output <new-report-path> `
+  -max-provider-calls 21 `
+  -cache-provider all
+
+go run ./tools/evaluation/mesguard-semantic-cache-eval `
+  -mode observe `
+  -dataset testdata/semantic-cache-v1.json `
+  -output <new-observation-path> `
+  -generation <current-global-generation> `
+  -max-provider-calls 24 `
+  -cache-provider redis-stack
+```
+
+Redis 固定流量结构化结果见 `testdata/semantic-cache-v1.redis-stack.performance.json`。

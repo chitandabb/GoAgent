@@ -97,7 +97,7 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		closeDependencies()
 		return nil, fmt.Errorf("build conversation service: %w", err)
 	}
-	if err := wireSemanticAnswerCache(ctx, conversationService, deps.db, cfg, log.Named("semantic_answer_cache")); err != nil {
+	if err := wireSemanticAnswerCache(ctx, conversationService, deps, cfg, log.Named("semantic_answer_cache")); err != nil {
 		closeDependencies()
 		return nil, err
 	}
