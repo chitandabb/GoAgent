@@ -193,6 +193,37 @@ WHERE document_version_id = ? ORDER BY ordinal LIMIT 1`, versionID).Scan(&chunkR
 	if err != nil {
 		t.Fatal(err)
 	}
+	profile := activeSemanticCacheTestProfile(t, ctx, tx)
+	vector := make([]float32, profile.Dimensions)
+	vector[0] = 1
+	if err := cacheRepository.IndexSemantic(ctx, semanticcache.SemanticIndexInput{
+		QuestionHash: questionHash, Question: "另一个问题", Vector: vector,
+		ProfileID: profile.ID, ProfileFingerprint: profile.Fingerprint,
+		NormalizationVersion: semanticcache.SemanticNormalizationVersion, SourceRunID: sourceRunID,
+	}); !errors.Is(err, semanticcache.ErrInvalidRecord) {
+		t.Fatalf("mismatched semantic index question error = %v", err)
+	}
+	if err := cacheRepository.IndexSemantic(ctx, semanticcache.SemanticIndexInput{
+		QuestionHash: questionHash, Question: question, Vector: vector,
+		ProfileID: profile.ID, ProfileFingerprint: profile.Fingerprint,
+		NormalizationVersion: semanticcache.SemanticNormalizationVersion, SourceRunID: sourceRunID,
+	}); err != nil {
+		t.Fatalf("IndexSemantic(): %v", err)
+	}
+	semanticInput := semanticcache.SemanticLookupInput{
+		Question: "设备点检需要遵循怎样的周期规范？", Vector: vector,
+		ProfileID: profile.ID, ProfileFingerprint: profile.Fingerprint,
+		NormalizationVersion: semanticcache.SemanticNormalizationVersion,
+		MinimumSimilarity:    0.92, CandidateLimit: 5, Now: time.Now().UTC(),
+	}
+	if answer, hit, err := cacheRepository.LookupSemantic(ctx, semanticInput); err != nil || !hit ||
+		answer.Layer != semanticcache.LayerSemantic || answer.SourceRunID != sourceRunID {
+		t.Fatalf("semantic cache lookup hit=%v answer=%+v err=%v", hit, answer, err)
+	}
+	semanticInput.Question = "设备点检周期是 60 天吗？"
+	if _, hit, err := cacheRepository.LookupSemantic(ctx, semanticInput); err != nil || hit {
+		t.Fatalf("conflicting semantic cache lookup hit=%v err=%v", hit, err)
+	}
 	if err := tx.Exec(`
 UPDATE semantic_answer_cache
 SET citations = '[{"unknown":true}]'::jsonb
@@ -258,6 +289,37 @@ VALUES (1, ?, now())`, generation).Error; err != nil {
 	if agent.calls != 2 {
 		t.Fatalf("agent calls after generation change = %d, want 2", agent.calls)
 	}
+}
+
+func activeSemanticCacheTestProfile(t *testing.T, ctx context.Context, db *gorm.DB) knowledge.EmbeddingProfile {
+	t.Helper()
+	var profile knowledge.EmbeddingProfile
+	result := db.WithContext(ctx).Raw(`
+SELECT id, profile_key AS key, provider, model, dimensions, distance_metric,
+       query_input_type, document_input_type, normalized AS normalize,
+       config_version, fingerprint
+FROM knowledge_embedding_profiles
+WHERE status = 'active'`).Scan(&profile)
+	if result.Error != nil {
+		t.Fatalf("load active embedding profile: %v", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		var err error
+		profile, err = knowledge.NewEmbeddingProfile(
+			"semantic-cache-integration", "fixture", "fixture-embedding", 1024, "cosine",
+			knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "v1",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := NewKnowledgeWorkerRepository(db).EnsureEmbeddingProfile(ctx, profile); err != nil {
+			t.Fatalf("ensure fixture embedding profile: %v", err)
+		}
+	}
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("active embedding profile is invalid: %+v err=%v", profile, err)
+	}
+	return profile
 }
 
 func processSemanticCacheTurn(

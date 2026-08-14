@@ -9,6 +9,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
+	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
@@ -299,6 +300,149 @@ func TestServiceExecuteTurnCommitsExactCacheHitWithoutCallingAgent(t *testing.T)
 		observation.CacheLayer != AgentRunCacheLayerExact || observation.SourceRunID != sourceRunID ||
 		observation.Usage.ModelCalls != 0 || observation.ToolCalls != 0 {
 		t.Fatalf("cache observation = %+v", observation)
+	}
+}
+
+func TestServiceExecuteTurnCommitsSemanticCacheHitAfterExactMiss(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	sourceRunID, versionID, chunkID := uuid.New(), uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	repository := &turnRepositoryStub{conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive}}
+	agent := &conversationAgentResponderStub{err: errors.New("agent must not run on semantic cache hit")}
+	profile, err := knowledge.NewEmbeddingProfile(
+		"cache-test", "test", "fixture", 2, "cosine",
+		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "v1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := &semanticCacheEmbedderStub{result: knowledge.EmbeddingResult{Vectors: [][]float32{{0.6, 0.8}}}}
+	cache := &semanticAnswerCacheStub{semanticHit: true, semanticAnswer: semanticcache.Answer{
+		Content: "知识文档通过发布任务生效。[source:" + sourceRef + "]",
+		Citations: []semanticcache.Source{{Position: 0, SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("d", 64)}},
+		RetrievedSources: []semanticcache.Source{{SourceType: string(CitationSourceKnowledgeChunk),
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("d", 64)}},
+		SourceRunID: sourceRunID, ModelProvider: "stepfun", ModelID: "step-3.5-flash",
+		PromptVersion: "knowledge-qa-v1", Generation: 1,
+		CreatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Hour),
+		Layer: semanticcache.LayerSemantic, Similarity: 0.96,
+	}}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, err = service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+		Semantic: &SemanticAnswerCacheSemanticConfig{
+			Embedder: embedder, Profile: profile, MinimumSimilarity: 0.92,
+			CandidateLimit: 5, EmbeddingTimeout: 100 * time.Millisecond,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("WithSemanticAnswerCache() error = %v", err)
+	}
+
+	result, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "MESGuard 知识库文档怎样发布？",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn() error = %v", err)
+	}
+	if result.Turn.AssistantMessage.Content == "" || agent.calls != 0 || !cache.semanticLookupCalled || embedder.calls != 1 {
+		t.Fatalf("result=%+v agentCalls=%d semanticLookup=%t embedCalls=%d",
+			result, agent.calls, cache.semanticLookupCalled, embedder.calls)
+	}
+	observation := repository.completedResponse.RunObservation
+	if observation == nil || observation.CacheLayer != AgentRunCacheLayerSemantic || observation.SourceRunID != sourceRunID {
+		t.Fatalf("semantic cache observation = %+v", observation)
+	}
+}
+
+func TestServiceEmbeddingFailurePreservesExactCacheWriteAndFallsBackToAgent(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	versionID, chunkID := uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	repository := &turnRepositoryStub{conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive}}
+	observation := validCacheableObservation(sourceRef)
+	agent := &conversationAgentResponderStub{response: AgentResponse{
+		Content: "正常知识回答。[source:" + sourceRef + "]",
+		Citations: []MessageCitation{{Position: 0, SourceType: CitationSourceKnowledgeChunk,
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("e", 64)}},
+		RunObservation: observation,
+	}}
+	profile, _ := knowledge.NewEmbeddingProfile(
+		"cache-test", "test", "fixture", 2, "cosine",
+		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "v1",
+	)
+	embedder := &semanticCacheEmbedderStub{err: errors.New("embedding unavailable")}
+	cache := &semanticAnswerCacheStub{}
+	var events []resilience.DegradationEvent
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, err := service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+		Semantic: &SemanticAnswerCacheSemanticConfig{
+			Embedder: embedder, Profile: profile, MinimumSimilarity: 0.92,
+			CandidateLimit: 5, EmbeddingTimeout: 100 * time.Millisecond,
+		},
+	}, resilience.ObserverFunc(func(event resilience.DegradationEvent) { events = append(events, event) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "知识文档如何发布？",
+	}); err != nil {
+		t.Fatalf("ExecuteTurn() error = %v", err)
+	}
+	if agent.calls != 1 || len(cache.puts) != 1 || len(cache.semanticIndexes) != 0 {
+		t.Fatalf("agentCalls=%d puts=%d semanticIndexes=%d", agent.calls, len(cache.puts), len(cache.semanticIndexes))
+	}
+	if embedder.calls != 1 || len(events) != 1 || events[0].Operation != "semantic_cache_embedding" {
+		t.Fatalf("degradation events = %+v", events)
+	}
+}
+
+func TestServiceReusesMissEmbeddingWhenIndexingAnswer(t *testing.T) {
+	userID, conversationID := uuid.New(), uuid.New()
+	versionID, chunkID := uuid.New(), uuid.New()
+	sourceRef := "knowledge:" + versionID.String() + "/" + chunkID.String()
+	repository := &turnRepositoryStub{conversation: Conversation{ID: conversationID, UserID: userID, Status: StatusActive}}
+	agent := &conversationAgentResponderStub{response: AgentResponse{
+		Content: "正常知识回答。[source:" + sourceRef + "]",
+		Citations: []MessageCitation{{Position: 0, SourceType: CitationSourceKnowledgeChunk,
+			SourceRef: sourceRef, ContentSHA256: strings.Repeat("e", 64)}},
+		RunObservation: validCacheableObservation(sourceRef),
+	}}
+	profile, _ := knowledge.NewEmbeddingProfile(
+		"cache-test", "test", "fixture", 2, "cosine",
+		knowledge.EmbeddingInputQuery, knowledge.EmbeddingInputDocument, true, "v1",
+	)
+	embedder := &semanticCacheEmbedderStub{result: knowledge.EmbeddingResult{Vectors: [][]float32{{0.6, 0.8}}}}
+	cache := &semanticAnswerCacheStub{}
+	service, _ := NewService(repository)
+	service, _ = service.WithAgentResponder(agent)
+	service, err := service.WithSemanticAnswerCache(cache, SemanticAnswerCacheConfig{
+		TTL: time.Hour, LookupTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+		MaxAnswerBytes: semanticcache.MaxAnswerBytes, MaxCitations: semanticcache.MaxCitations,
+		Semantic: &SemanticAnswerCacheSemanticConfig{
+			Embedder: embedder, Profile: profile, MinimumSimilarity: 0.92,
+			CandidateLimit: 5, EmbeddingTimeout: 100 * time.Millisecond,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.ExecuteTurn(context.Background(), Actor{UserID: userID}, uuid.NewString(), AppendMessageInput{
+		ConversationID: conversationID, Content: "知识文档如何发布？",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if embedder.calls != 1 || agent.calls != 1 || len(cache.puts) != 1 || len(cache.semanticIndexes) != 1 {
+		t.Fatalf("embedCalls=%d agentCalls=%d puts=%d indexes=%d",
+			embedder.calls, agent.calls, len(cache.puts), len(cache.semanticIndexes))
 	}
 }
 
@@ -777,12 +921,17 @@ func (s *turnRepositoryStub) CompleteTurn(_ context.Context, userID, turnID uuid
 }
 
 type semanticAnswerCacheStub struct {
-	answer       semanticcache.Answer
-	hit          bool
-	lookupErr    error
-	putErr       error
-	lookupCalled bool
-	puts         []semanticcache.PutInput
+	answer               semanticcache.Answer
+	hit                  bool
+	lookupErr            error
+	putErr               error
+	lookupCalled         bool
+	puts                 []semanticcache.PutInput
+	semanticAnswer       semanticcache.Answer
+	semanticHit          bool
+	semanticErr          error
+	semanticLookupCalled bool
+	semanticIndexes      []semanticcache.SemanticIndexInput
 }
 
 func (s *semanticAnswerCacheStub) Lookup(_ context.Context, _ semanticcache.LookupInput) (semanticcache.Answer, bool, error) {
@@ -793,6 +942,44 @@ func (s *semanticAnswerCacheStub) Lookup(_ context.Context, _ semanticcache.Look
 func (s *semanticAnswerCacheStub) Put(_ context.Context, input semanticcache.PutInput) error {
 	s.puts = append(s.puts, input)
 	return s.putErr
+}
+
+func (s *semanticAnswerCacheStub) LookupSemantic(
+	_ context.Context,
+	_ semanticcache.SemanticLookupInput,
+) (semanticcache.Answer, bool, error) {
+	s.semanticLookupCalled = true
+	return s.semanticAnswer, s.semanticHit, s.semanticErr
+}
+
+func (s *semanticAnswerCacheStub) IndexSemantic(_ context.Context, input semanticcache.SemanticIndexInput) error {
+	s.semanticIndexes = append(s.semanticIndexes, input)
+	return s.semanticErr
+}
+
+type semanticCacheEmbedderStub struct {
+	result knowledge.EmbeddingResult
+	err    error
+	calls  int
+}
+
+func (s *semanticCacheEmbedderStub) Embed(
+	_ context.Context,
+	_ knowledge.EmbeddingRequest,
+) (knowledge.EmbeddingResult, error) {
+	s.calls++
+	return s.result, s.err
+}
+
+func validCacheableObservation(sourceRef string) *AgentRunObservation {
+	return &AgentRunObservation{
+		ModelProvider: "stepfun", ModelID: "step-3.5-flash", PromptVersion: "conversation-v1",
+		Outcome: AgentRunAnswered, AnswerCacheEligible: true, ToolCalls: 1,
+		Usage: AgentRunUsage{ModelCalls: 1, TotalTokens: 20},
+		RetrievedSources: []AgentRunSource{{
+			SourceType: CitationSourceKnowledgeChunk, SourceRef: sourceRef, ContentSHA256: strings.Repeat("e", 64),
+		}},
+	}
 }
 
 func (s *turnRepositoryStub) FailTurn(ctx context.Context, _ uuid.UUID, turnID uuid.UUID, _ time.Time) error {

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSemanticAnswerCacheConfigValidate(t *testing.T) {
 	valid := SemanticAnswerCacheConfig{
@@ -35,5 +38,32 @@ func TestSemanticAnswerCacheConfigValidate(t *testing.T) {
 	}
 	if err := (SemanticAnswerCacheConfig{}).Validate(); err != nil {
 		t.Fatalf("disabled config should be optional: %v", err)
+	}
+}
+
+func TestSemanticAnswerCacheConfigBindsSemanticThresholdToProfile(t *testing.T) {
+	valid := SemanticAnswerCacheConfig{
+		Enabled: true, Provider: "postgres", TTLSeconds: 86400, TTLJitterRatio: 0.1,
+		MaxRecords: 1000, MaxAnswerBytes: 16 * 1024, MaxCitations: 8,
+		LookupTimeoutMillis: 100, WriteTimeoutMillis: 200,
+		SemanticEnabled: true, SemanticMinimumSimilarity: 0.94, SemanticCandidateLimit: 5,
+		SemanticEmbeddingTimeoutMillis: 1500, SemanticProfileFingerprint: strings.Repeat("a", 64),
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid semantic config: %v", err)
+	}
+	for name, mutate := range map[string]func(*SemanticAnswerCacheConfig){
+		"threshold":   func(c *SemanticAnswerCacheConfig) { c.SemanticMinimumSimilarity = 0.49 },
+		"candidates":  func(c *SemanticAnswerCacheConfig) { c.SemanticCandidateLimit = 21 },
+		"timeout":     func(c *SemanticAnswerCacheConfig) { c.SemanticEmbeddingTimeoutMillis = 9 },
+		"fingerprint": func(c *SemanticAnswerCacheConfig) { c.SemanticProfileFingerprint = "uncalibrated" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			current := valid
+			mutate(&current)
+			if err := current.Validate(); err == nil {
+				t.Fatal("invalid semantic config was accepted")
+			}
+		})
 	}
 }

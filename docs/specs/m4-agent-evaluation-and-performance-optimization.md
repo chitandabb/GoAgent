@@ -6,7 +6,8 @@
 
 ## Implementation Status
 
-截至 2026-08-13，Ticket 06 的 PostgreSQL L1 精确答案缓存纵切已落地：
+截至 2026-08-14，Ticket 06 的 PostgreSQL L1 精确答案缓存纵切已落地，Ticket 07 的 L2 运行时与
+待人工复核评测资产已进入实现：
 
 - PostgreSQL 保存单例、单调递增的 `Global Knowledge Generation`；直接发布与 Knowledge Worker 发布新的
   current Global 版本时，Generation 在同一事务中递增。当前代码尚不存在“撤回 current 文档”或“修改
@@ -25,8 +26,21 @@
   16 KiB、最多 8 条引用、100 ms 查询超时和 200 ms 写入超时，且均可配置。
 - Provider-free 单元测试覆盖归一化、Eligibility、同步/异步命中、写后提交和故障降级；真实 PostgreSQL
   集成测试已覆盖 AcceptTurn → Worker → 持久化的异步命中、TTL、损坏记录、Generation 不可读、跨
-  Conversation 命中及新 Global 版本发布后的立即失效。L2、Redis Stack 与固定集指标仍属于后续 Ticket，
-  不在本切片提前实现。
+  Conversation 命中及新 Global 版本发布后的立即失效。
+- L2 以可选 `SemanticProvider` 扩展 L1 合同：L1 miss 后才调用当前 Query Embedding Profile，PostgreSQL
+  只查询同 Generation、同 Profile 指纹、同 `semantic-question-v1` 规范化版本且未过期的向量记录；
+  应用侧再拒绝实体、数字、日期、版本、否定和意图冲突。Embedding 或向量索引失败不会删除 L1。
+- L2 阈值必须同时配置 `semanticEnabled`、Calibration 选择出的相似度阈值和对应 Profile 指纹；默认
+  `semanticEnabled=false`。Profile 变化、指纹不匹配或未通过 98% Precision 门禁时，服务保持 L1-only。
+- 已生成 `testdata/semantic-cache-v1.json`：40 可复用改写、40 困难负样本、20 时效/版本负样本、
+  20 上下文依赖负样本，固定种子分层为 80 Calibration/40 Holdout。全部仍为 `reviewed=false`，必须
+  人工确认后才能校准；系统不把建议标签或在线 LLM Judge 当作 Gold。
+- 评测命令支持零 Provider 的 draft/validate/calibrate，以及显式 observe 模式。observe 对 240 条问题文本
+  默认预计 24 次批量 Embedding 调用，并由调用上限保护。当前尚未执行付费 Observation、人工标注、
+  Holdout 或延迟测试，故不能报告 L2 Precision/Recall/Hit Rate；Redis Stack 仍属于后续 Ticket。
+- migration 00032 与真实 PostgreSQL 事务集成测试已验证 pgvector 候选、Profile/规范化版本隔离、
+  semantic cache hit、冲突拒绝、问题哈希绑定和 Generation 失效；该测试使用本地固定向量，不代表真实
+  Embedding Profile 的 Precision、Recall 或延迟。
 
 ## Problem Statement
 

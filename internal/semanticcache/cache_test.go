@@ -1,10 +1,101 @@
 package semanticcache_test
 
 import (
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
+	"github.com/google/uuid"
 )
+
+func TestSemanticQuestionsCompatibleProtectsMeaningChangingFacts(t *testing.T) {
+	t.Parallel()
+
+	compatible := []struct {
+		name      string
+		original  string
+		candidate string
+	}{
+		{
+			name:      "semantic paraphrase",
+			original:  "MESGuard 的知识文档发布流程是什么？",
+			candidate: "如何发布 MESGuard 知识库文档？",
+		},
+		{
+			name:      "same numeric constraint",
+			original:  "设备点检周期 30 天如何配置？",
+			candidate: "怎样把设备点检周期设置为 30 天？",
+		},
+		{
+			name:      "ordinary english words are not entities",
+			original:  "How to publish a knowledge document?",
+			candidate: "What is the document publishing process?",
+		},
+	}
+	for _, test := range compatible {
+		t.Run(test.name, func(t *testing.T) {
+			if result := semanticcache.CompareQuestions(test.original, test.candidate); !result.Compatible {
+				t.Fatalf("CompareQuestions() rejected reusable pair: %+v", result)
+			}
+		})
+	}
+
+	conflicts := []struct {
+		name      string
+		original  string
+		candidate string
+		want      semanticcache.ConflictKind
+	}{
+		{name: "number", original: "点检周期是 30 天吗？", candidate: "点检周期是 60 天吗？", want: semanticcache.ConflictNumber},
+		{name: "date", original: "2026-08-01 的制度是什么？", candidate: "2026-09-01 的制度是什么？", want: semanticcache.ConflictDate},
+		{name: "version", original: "MESGuard v2.1 如何升级？", candidate: "MESGuard v2.2 如何升级？", want: semanticcache.ConflictVersion},
+		{name: "negation", original: "管理员可以删除制度吗？", candidate: "管理员不可以删除制度吗？", want: semanticcache.ConflictNegation},
+		{name: "entity", original: "MESGuard 的发布流程是什么？", candidate: "GoChat 的发布流程是什么？", want: semanticcache.ConflictEntity},
+		{name: "intent", original: "为什么需要发布知识文档？", candidate: "如何发布知识文档？", want: semanticcache.ConflictIntent},
+		{name: "chinese entity", original: "甲车间点检流程是什么？", candidate: "乙车间点检流程是什么？", want: semanticcache.ConflictEntity},
+		{name: "chinese number", original: "点检周期是三十天吗？", candidate: "点检周期是六十天吗？", want: semanticcache.ConflictNumber},
+	}
+	for _, test := range conflicts {
+		t.Run(test.name, func(t *testing.T) {
+			result := semanticcache.CompareQuestions(test.original, test.candidate)
+			if result.Compatible || !slices.Contains(result.Conflicts, test.want) {
+				t.Fatalf("CompareQuestions() = %+v, want conflict %q", result, test.want)
+			}
+		})
+	}
+}
+
+func TestSemanticLookupInputRequiresBoundProfileAndNormalization(t *testing.T) {
+	t.Parallel()
+
+	profileID := uuid.New()
+	valid := semanticcache.SemanticLookupInput{
+		Question: "MESGuard 的知识文档如何发布？", Vector: []float32{0.6, 0.8},
+		ProfileID: profileID, ProfileFingerprint: strings.Repeat("a", 64),
+		NormalizationVersion: semanticcache.SemanticNormalizationVersion,
+		MinimumSimilarity:    0.92, CandidateLimit: 5, Now: time.Now().UTC(),
+	}
+	if err := valid.Validate(2, true); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(*semanticcache.SemanticLookupInput){
+		"profile":       func(input *semanticcache.SemanticLookupInput) { input.ProfileID = uuid.Nil },
+		"fingerprint":   func(input *semanticcache.SemanticLookupInput) { input.ProfileFingerprint = "wrong" },
+		"normalization": func(input *semanticcache.SemanticLookupInput) { input.NormalizationVersion = "semantic-question-v0" },
+		"threshold":     func(input *semanticcache.SemanticLookupInput) { input.MinimumSimilarity = 0.4 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := valid
+			mutate(&input)
+			if err := input.Validate(2, true); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
+	}
+}
 
 func TestExactQuestionKeyNormalizesOnlySafeSurfaceDifferences(t *testing.T) {
 	left, err := semanticcache.ExactQuestionKey("  MESGuard\t如何配置？  ")
@@ -45,7 +136,6 @@ func TestQuestionEligibilityRejectsContextDependentAndTemporalQuestions(t *testi
 		name     string
 		question semanticcache.Question
 	}{
-		{name: "prior conversation", question: semanticcache.Question{Text: "连接池规范是什么？", HasPriorMessages: true}},
 		{name: "attachment", question: semanticcache.Question{Text: "连接池规范是什么？", HasAttachments: true}},
 		{name: "case reference", question: semanticcache.Question{Text: "连接池规范是什么？", HasCaseReferences: true}},
 		{name: "task reference", question: semanticcache.Question{Text: "连接池规范是什么？", HasTaskReferences: true}},
@@ -65,5 +155,15 @@ func TestQuestionEligibilityRejectsContextDependentAndTemporalQuestions(t *testi
 	}
 	if !semanticcache.EligibleForLookup(semanticcache.Question{Text: "What is the security policy?"}) {
 		t.Fatal("English substrings such as it in security must not be treated as context deixis")
+	}
+	if !semanticcache.EligibleForLookup(semanticcache.Question{
+		Text: "连接池规范是什么？", HasPriorMessages: true,
+	}) {
+		t.Fatal("independent question in a multi-turn conversation should remain cache eligible")
+	}
+	if semanticcache.EligibleForLookup(semanticcache.Question{
+		Text: "这个规范是什么？", HasPriorMessages: true,
+	}) {
+		t.Fatal("context-dependent question should not be cache eligible")
 	}
 }

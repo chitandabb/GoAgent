@@ -353,6 +353,11 @@ maxAnswerBytes = 16384
 maxCitations = 8
 lookupTimeoutMillis = 100
 writeTimeoutMillis = 200
+semanticEnabled = false
+semanticMinimumSimilarity = 0.94
+semanticCandidateLimit = 5
+semanticEmbeddingTimeoutMillis = 1500
+semanticProfileFingerprint = ""
 
 [knowledge.retrieval]
 contextExpansionEnabled = true
