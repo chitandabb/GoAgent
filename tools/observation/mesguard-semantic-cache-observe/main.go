@@ -1,5 +1,5 @@
-// Command mesguard-semantic-cache-observe measures pgvector lookup and the
-// configured-provider semantic cache hit path against a fixed traffic replay.
+// Command mesguard-semantic-cache-observe measures a selected semantic answer
+// cache Provider against a fixed traffic replay.
 package main
 
 import (
@@ -21,6 +21,8 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
+	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
+	platformredisstack "github.com/chitandabb/GoAgent/internal/platform/redisstack"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/chitandabb/GoAgent/internal/semanticcache"
 	"github.com/google/uuid"
@@ -50,6 +52,7 @@ type pairObservation struct {
 
 type performanceReport struct {
 	SchemaVersion       string            `json:"schemaVersion"`
+	CacheProvider       string            `json:"cacheProvider"`
 	DatasetVersion      string            `json:"datasetVersion"`
 	EmbeddingProfile    string            `json:"embeddingProfile"`
 	Generation          int64             `json:"generation"`
@@ -81,11 +84,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fixturePath := flags.String("fixture", "", "versioned semantic cache latency fixture")
 	outputPath := flags.String("output", "", "new JSON report; existing files are rejected")
 	maxProviderCalls := flags.Int("max-provider-calls", 21, "hard Provider call limit")
+	cacheProvider := flags.String("cache-provider", "postgres", "cache Provider: postgres or redis-stack")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 || strings.TrimSpace(*fixturePath) == "" || strings.TrimSpace(*outputPath) == "" || *maxProviderCalls < 1 {
-		fmt.Fprintln(stderr, "-fixture, -output, and a positive -max-provider-calls are required")
+	provider := strings.ToLower(strings.TrimSpace(*cacheProvider))
+	if flags.NArg() != 0 || strings.TrimSpace(*fixturePath) == "" || strings.TrimSpace(*outputPath) == "" ||
+		*maxProviderCalls < 1 || provider != "postgres" && provider != "redis-stack" {
+		fmt.Fprintln(stderr, "-fixture, -output, a positive -max-provider-calls, and a supported -cache-provider are required")
 		return 2
 	}
 	fixture, err := readFixture(*fixturePath)
@@ -98,7 +104,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cost guard: observation requires %d Provider calls, limit is %d\n", expectedCalls, *maxProviderCalls)
 		return 1
 	}
-	report, err := observe(fixture)
+	report, err := observe(fixture, provider)
 	if err != nil {
 		fmt.Fprintf(stderr, "observe semantic cache: %v\n", err)
 		return 1
@@ -153,7 +159,7 @@ func readFixture(path string) (latencyFixture, error) {
 	return fixture, nil
 }
 
-func observe(fixture latencyFixture) (performanceReport, error) {
+func observe(fixture latencyFixture, cacheProvider string) (performanceReport, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return performanceReport{}, err
@@ -207,10 +213,11 @@ func observe(fixture latencyFixture) (performanceReport, error) {
 		}
 		observations = append(observations, pairObservation{ID: pair.ID, Similarity: similarity})
 	}
-	state, err := seedCacheFixture(ctx, tx, cfg, profile, fixture, seed.Vectors)
+	state, err := seedCacheFixture(ctx, tx, cfg, profile, fixture, seed.Vectors, cacheProvider)
 	if err != nil {
 		return performanceReport{}, err
 	}
+	defer state.cleanup()
 	lookupDurations := make([]time.Duration, 0, 200)
 	for index := range 200 {
 		pairIndex := index % len(fixture.Pairs)
@@ -224,10 +231,10 @@ func observe(fixture latencyFixture) (performanceReport, error) {
 		})
 		lookupDurations = append(lookupDurations, time.Since(startedAt))
 		if lookupErr != nil {
-			return performanceReport{}, fmt.Errorf("pgvector lookup %d: %w", index, lookupErr)
+			return performanceReport{}, fmt.Errorf("%s lookup %d: %w", cacheProvider, index, lookupErr)
 		}
 		if !hit {
-			return performanceReport{}, fmt.Errorf("pgvector lookup %d unexpectedly missed", index)
+			return performanceReport{}, fmt.Errorf("%s lookup %d unexpectedly missed", cacheProvider, index)
 		}
 	}
 	degradations := 0
@@ -276,7 +283,8 @@ func observe(fixture latencyFixture) (performanceReport, error) {
 	lookupP50, lookupP95 := durationPercentiles(lookupDurations)
 	fullP50, fullP95 := durationPercentiles(fullChainDurations)
 	return performanceReport{
-		SchemaVersion: "semantic_cache_performance_v1", DatasetVersion: fixture.DatasetVersion,
+		SchemaVersion: "semantic_cache_provider_ablation_v1", CacheProvider: cacheProvider,
+		DatasetVersion:   fixture.DatasetVersion,
 		EmbeddingProfile: profile.Fingerprint, Generation: state.generation,
 		Threshold: cfg.SemanticAnswerCache.SemanticMinimumSimilarity, PairObservations: observations,
 		LookupSamples: len(lookupDurations), LookupP50Millis: milliseconds(lookupP50), LookupP95Millis: milliseconds(lookupP95),
@@ -284,16 +292,17 @@ func observe(fixture latencyFixture) (performanceReport, error) {
 		ProviderCalls: embedder.calls, EmbeddingTokens: embedder.tokens, MainModelCalls: 0, ToolCalls: 0,
 		DegradationEvents: degradations, DegradationRate: float64(degradations) / float64(len(fullChainDurations)),
 		MeasuredAt:          time.Now().UTC(),
-		MeasurementBoundary: "query embedding, pgvector lookup, user/assistant message and run-observation commit; excludes browser network/rendering",
+		MeasurementBoundary: "query embedding, " + cacheProvider + " lookup, user/assistant message and run-observation commit; excludes browser network/rendering",
 	}, nil
 }
 
 type fixtureState struct {
 	service    *conversation.Service
-	cache      *platformpostgres.SemanticAnswerCacheRepository
+	cache      semanticcache.SemanticProvider
 	agent      *fixtureResponder
 	userID     uuid.UUID
 	generation int64
+	cleanup    func()
 }
 
 func seedCacheFixture(
@@ -303,6 +312,7 @@ func seedCacheFixture(
 	profile knowledge.EmbeddingProfile,
 	fixture latencyFixture,
 	vectors [][]float32,
+	cacheProvider string,
 ) (fixtureState, error) {
 	userID, documentID := uuid.New(), uuid.New()
 	if err := tx.Exec(`
@@ -363,12 +373,16 @@ VALUES (?, ?, 'Semantic Cache Observer', 'observation-hash', 'analyst', 'active'
 	if _, err := service.WithAgentResponder(agent); err != nil {
 		return fixtureState{}, err
 	}
-	cache, err := platformpostgres.NewSemanticAnswerCacheRepositoryWithConfig(tx, platformpostgres.SemanticAnswerCacheRepositoryConfig{
-		MaxRecords: cfg.SemanticAnswerCache.MaxRecords, TTLJitterRatio: cfg.SemanticAnswerCache.TTLJitterRatio,
-	})
+	cache, cleanup, err := buildObservedCache(ctx, tx, cfg, cacheProvider)
 	if err != nil {
 		return fixtureState{}, err
 	}
+	failed := true
+	defer func() {
+		if failed {
+			cleanup()
+		}
+	}()
 	if _, err := service.WithSemanticAnswerCache(cache, conversation.SemanticAnswerCacheConfig{
 		TTL:            time.Duration(cfg.SemanticAnswerCache.TTLSeconds) * time.Second,
 		LookupTimeout:  time.Duration(cfg.SemanticAnswerCache.LookupTimeoutMillis) * time.Millisecond,
@@ -404,7 +418,61 @@ VALUES (?, ?, 'Semantic Cache Observer', 'observation-hash', 'analyst', 'active'
 	if err := tx.Raw("SELECT generation FROM global_knowledge_generation WHERE singleton = 1").Scan(&generation).Error; err != nil {
 		return fixtureState{}, err
 	}
-	return fixtureState{service: service, cache: cache, agent: agent, userID: userID, generation: generation}, nil
+	failed = false
+	return fixtureState{
+		service: service, cache: cache, agent: agent, userID: userID,
+		generation: generation, cleanup: cleanup,
+	}, nil
+}
+
+func buildObservedCache(
+	ctx context.Context,
+	tx *gorm.DB,
+	cfg config.Config,
+	provider string,
+) (semanticcache.SemanticProvider, func(), error) {
+	if provider == "postgres" {
+		cache, err := platformpostgres.NewSemanticAnswerCacheRepositoryWithConfig(
+			tx, platformpostgres.SemanticAnswerCacheRepositoryConfig{
+				MaxRecords:     cfg.SemanticAnswerCache.MaxRecords,
+				TTLJitterRatio: cfg.SemanticAnswerCache.TTLJitterRatio,
+			},
+		)
+		return cache, func() {}, err
+	}
+	password, err := cfg.SemanticAnswerCache.RedisStack.Password()
+	if err != nil {
+		return nil, func() {}, err
+	}
+	client, err := platformredis.Open(ctx, config.RedisConfig{
+		Host: cfg.SemanticAnswerCache.RedisStack.Host, Port: cfg.SemanticAnswerCache.RedisStack.Port,
+		Password: password, Database: cfg.SemanticAnswerCache.RedisStack.Database,
+	})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	runID := strings.ReplaceAll(uuid.NewString(), "-", "")
+	indexName := cfg.SemanticAnswerCache.RedisStack.IndexName + "_observe_" + runID
+	keyPrefix := cfg.SemanticAnswerCache.RedisStack.KeyPrefix + "observe:" + runID + ":"
+	cleanup := func() {
+		_ = client.Del(context.Background(), keyPrefix+"capacity").Err()
+		_ = client.Do(context.Background(), "FT.DROPINDEX", indexName, "DD").Err()
+		_ = client.Close()
+	}
+	authority, err := platformpostgres.NewSemanticAnswerCacheAuthority(tx)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	cache, err := platformredisstack.NewSemanticAnswerCache(ctx, client, authority, platformredisstack.Config{
+		IndexName: indexName, KeyPrefix: keyPrefix, MaxRecords: cfg.SemanticAnswerCache.MaxRecords,
+		TTLJitterRatio: cfg.SemanticAnswerCache.TTLJitterRatio,
+	})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return cache, cleanup, nil
 }
 
 type turnRequest struct {

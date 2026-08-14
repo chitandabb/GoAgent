@@ -1,6 +1,6 @@
 # M4 Agent 评测与性能优化规格
 
-> 状态：规格已确认并进入实现；Ticket 01-07 已完成，下一步执行 Redis Stack 消融。
+> 状态：规格已确认并进入实现；Ticket 01-08 已完成，下一步执行 M4 选择性复测与收口。
 >
 > 本规格对应 MESGuard 简历第五点。现有量化数字均为验收目标，不是既成成果；最终简历必须使用当前实现、固定数据集和可复现评测得到的真实结果。
 
@@ -42,7 +42,8 @@
   Query Embedding、消息与 Observation 提交的完整命中链路 P50/P95 为 225.096/244.743 ms，20 次命中均为零主模型、零 Tool、
   零降级。原 P95 200 ms 目标未达到，最终简历必须改用真实结果或更换指标口径。
 - 方法、边界和原始制品见 `docs/evaluations/semantic-answer-cache-v1.md` 与
-  `testdata/semantic-cache-v1.{observations,calibration,performance}.json`；Redis Stack 仍属于后续 Ticket 08。
+  `testdata/semantic-cache-v1.{observations,calibration,performance}.json`；Ticket 08 已完成 Redis Stack
+  同合同消融，保留可选适配器但默认继续使用 PostgreSQL。
 
 ## Problem Statement
 

@@ -146,10 +146,28 @@ type LookupInput struct {
 	Now          time.Time
 }
 
+func (i LookupInput) Validate() error {
+	if !validSHA256(i.QuestionHash) || i.Now.IsZero() {
+		return ErrInvalidRecord
+	}
+	return nil
+}
+
 type PutInput struct {
 	QuestionHash string
 	Answer       Answer
 	TTL          time.Duration
+}
+
+func (i PutInput) Validate() error {
+	if !validSHA256(i.QuestionHash) || i.TTL < time.Minute || i.TTL > 30*24*time.Hour ||
+		i.Answer.SourceRunID == uuid.Nil || i.Answer.CreatedAt.IsZero() ||
+		strings.TrimSpace(i.Answer.Content) == "" || len(i.Answer.Content) > MaxAnswerBytes ||
+		len(i.Answer.Citations) == 0 || len(i.Answer.Citations) > MaxCitations ||
+		len(i.Answer.RetrievedSources) == 0 || len(i.Answer.RetrievedSources) > MaxSources {
+		return ErrInvalidRecord
+	}
+	return nil
 }
 
 // Provider owns authoritative Generation checks. Callers must never compose a

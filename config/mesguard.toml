@@ -359,6 +359,14 @@ semanticCandidateLimit = 5
 semanticEmbeddingTimeoutMillis = 1500
 semanticProfileFingerprint = "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
 
+[semanticAnswerCache.redisStack]
+host = "127.0.0.1"
+port = 6380
+passwordEnv = ""
+database = 0
+indexName = "mesguard_semantic_cache_v1"
+keyPrefix = "mesguard:semantic-cache:v1:"
+
 [knowledge.retrieval]
 contextExpansionEnabled = true
 contextWindow = 1

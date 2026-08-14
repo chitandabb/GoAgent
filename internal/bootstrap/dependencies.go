@@ -21,13 +21,14 @@ import (
 )
 
 type runtimeDependencies struct {
-	db               *gorm.DB
-	dbClose          func() error
-	redis            *rediscli.Client
-	objectStore      objectstore.Store
-	objectStoreError error
-	sqlServer        *sql.DB
-	sqlServerError   error
+	db                 *gorm.DB
+	dbClose            func() error
+	redis              *rediscli.Client
+	semanticCacheRedis *rediscli.Client
+	objectStore        objectstore.Store
+	objectStoreError   error
+	sqlServer          *sql.DB
+	sqlServerError     error
 }
 
 type dependencyOpeners struct {
@@ -143,6 +144,9 @@ func (d *runtimeDependencies) close() error {
 	}
 	if d.redis != nil {
 		errs = append(errs, d.redis.Close())
+	}
+	if d.semanticCacheRedis != nil {
+		errs = append(errs, d.semanticCacheRedis.Close())
 	}
 	if d.dbClose != nil {
 		errs = append(errs, d.dbClose())

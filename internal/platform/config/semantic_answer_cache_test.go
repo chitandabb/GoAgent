@@ -41,6 +41,37 @@ func TestSemanticAnswerCacheConfigValidate(t *testing.T) {
 	}
 }
 
+func TestSemanticAnswerCacheConfigAcceptsRedisStackProvider(t *testing.T) {
+	valid := SemanticAnswerCacheConfig{
+		Enabled: true, Provider: "redis-stack", TTLSeconds: 86400, TTLJitterRatio: 0.1,
+		MaxRecords: 1000, MaxAnswerBytes: 16 * 1024, MaxCitations: 8,
+		LookupTimeoutMillis: 100, WriteTimeoutMillis: 200,
+		RedisStack: SemanticAnswerCacheRedisStackConfig{
+			Host: "127.0.0.1", Port: 6380, Database: 0,
+			IndexName: "mesguard_semantic_cache_v1", KeyPrefix: "mesguard:semantic-cache:v1:",
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid redis stack config: %v", err)
+	}
+	for name, mutate := range map[string]func(*SemanticAnswerCacheConfig){
+		"host":        func(c *SemanticAnswerCacheConfig) { c.RedisStack.Host = "" },
+		"port":        func(c *SemanticAnswerCacheConfig) { c.RedisStack.Port = 0 },
+		"database":    func(c *SemanticAnswerCacheConfig) { c.RedisStack.Database = 16 },
+		"passwordEnv": func(c *SemanticAnswerCacheConfig) { c.RedisStack.PasswordEnv = "not valid" },
+		"indexName":   func(c *SemanticAnswerCacheConfig) { c.RedisStack.IndexName = "bad index" },
+		"keyPrefix":   func(c *SemanticAnswerCacheConfig) { c.RedisStack.KeyPrefix = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			current := valid
+			mutate(&current)
+			if err := current.Validate(); err == nil {
+				t.Fatal("invalid redis stack config was accepted")
+			}
+		})
+	}
+}
+
 func TestSemanticAnswerCacheConfigBindsSemanticThresholdToProfile(t *testing.T) {
 	valid := SemanticAnswerCacheConfig{
 		Enabled: true, Provider: "postgres", TTLSeconds: 86400, TTLJitterRatio: 0.1,
