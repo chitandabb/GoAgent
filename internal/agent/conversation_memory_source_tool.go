@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
@@ -102,5 +103,6 @@ func NewConversationMemorySourceToolRegistration(
 		AllowedRoles:         []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
 		AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 		RequiredCapabilities: []ToolCapability{ToolCapabilityMemory},
+		RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionMemoryRead},
 	}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
@@ -151,8 +152,28 @@ func TestToolCatalogRechecksScopeWhenToolExecutes(t *testing.T) {
 	if _, err := github.InvokableRun(WithTaskScope(context.Background(), denied), `{}`); !errors.Is(err, ErrToolNotAllowed) {
 		t.Fatalf("denied InvokableRun error = %v, want ErrToolNotAllowed", err)
 	}
-	if _, err := github.InvokableRun(context.Background(), `{}`); !errors.Is(err, ErrTaskScopeRequired) {
-		t.Fatalf("unscoped InvokableRun error = %v, want ErrTaskScopeRequired", err)
+	if _, err := github.InvokableRun(context.Background(), `{}`); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("unscoped InvokableRun error = %v, want ErrRunAccessRequired", err)
+	}
+}
+
+func TestToolCatalogRegistrationValidatesRequiredPermissions(t *testing.T) {
+	duplicate := newNamedToolForTest(t, "test_duplicate_permission")
+	validPolicy := ToolRegistration{
+		Tool: duplicate, AllowedRoles: []auth.Role{auth.RoleAnalyst},
+		AllowedTaskTypes: []TaskType{TaskTypeDiagnosis}, FailurePolicy: resilience.PolicyBestEffort,
+	}
+	duplicated := validPolicy
+	duplicated.RequiredPermissions = []agentruntime.Permission{
+		agentruntime.PermissionSQLRead, agentruntime.PermissionSQLRead,
+	}
+	if _, err := NewToolCatalog(context.Background(), duplicated); err == nil {
+		t.Fatal("NewToolCatalog accepted duplicated required permissions")
+	}
+	invalid := validPolicy
+	invalid.RequiredPermissions = []agentruntime.Permission{"sql.write"}
+	if _, err := NewToolCatalog(context.Background(), invalid); err == nil {
+		t.Fatal("NewToolCatalog accepted an invalid required permission")
 	}
 }
 
@@ -369,6 +390,7 @@ func scopedFailingToolForTest(
 		Tool: inner, FailurePolicy: policy, DegradationObserver: observer,
 		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
+		RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -399,6 +421,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 		{
 			Tool:          newNamedToolForTest(t, testToolGitHub),
@@ -406,6 +429,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
 			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCodeRead},
 		},
 		{
 			Tool:          newNamedToolForTest(t, testToolReadSQL),
@@ -415,6 +439,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly, DataSourceSafetyBoundedLab},
 			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
 			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		},
 		{
 			Tool:          newNamedToolForTest(t, testToolLabSQL),
@@ -424,6 +449,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyBoundedLab},
 			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
 			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		},
 		{
 			Tool:          newNamedToolForTest(t, testToolKnowledge),
@@ -431,6 +457,7 @@ func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
 		},
 	}
 	catalog, err := NewToolCatalog(context.Background(), registrations...)

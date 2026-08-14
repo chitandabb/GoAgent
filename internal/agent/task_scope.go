@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 
 	"github.com/google/uuid"
@@ -251,8 +252,14 @@ func (s TaskScope) matchesDataSource(roles []DataSourceRole, safetyModes []DataS
 type taskScopeContextKey struct{}
 
 // WithTaskScope 把不可变授权快照绑定到本次 Run 的 Context，不修改共享 Agent 实例。
+// 它同时写入旧 TaskScope 与经唯一兼容适配器派生的 v2 RunAccess；非法 TaskScope
+// 仍按旧行为写入，但不会生成 RunAccess（fail-closed）。
 func WithTaskScope(ctx context.Context, scope TaskScope) context.Context {
-	return context.WithValue(ctx, taskScopeContextKey{}, scope)
+	ctx = context.WithValue(ctx, taskScopeContextKey{}, scope)
+	if access, err := runAccessFromTaskScope(scope); err == nil {
+		ctx = agentruntime.WithRunAccess(ctx, access)
+	}
+	return ctx
 }
 
 func TaskScopeFromContext(ctx context.Context) (TaskScope, bool) {

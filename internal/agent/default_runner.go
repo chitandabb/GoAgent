@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/resilience"
@@ -133,6 +134,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 	}
 	if dependencies.SkillReference != nil {
@@ -147,6 +149,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
 			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
 		})
 	}
 	for _, webTool := range []tool.BaseTool{dependencies.WebSearch, dependencies.FetchPublicPage} {
@@ -158,6 +161,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityWebSearch},
 			RequiredDependencies: []ToolDependency{ToolDependencyWebSearch},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionWebRead},
 		})
 	}
 	if dependencies.CreateDiagnosisTask != nil {
@@ -165,11 +169,16 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 		if err != nil {
 			return nil, fmt.Errorf("build create diagnosis task Tool: %w", err)
 		}
+		// 任务创建命令只属于 Conversation：Diagnosis Worker 的 ReAct 循环
+		// 永远不暴露 create_diagnosis_task。旧 Schema 过滤仍保留 case 能力
+		// 与 external_case 依赖，保持 Conversation 中的动态可见条件不变；
+		// 执行期由 RequiredPermissions 的 diagnosis.create 做粗粒度校验。
 		registrations = append(registrations, ToolRegistration{
 			Tool: createDiagnosisTask, FailurePolicy: resilience.PolicyStrict, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
+			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
 			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionDiagnosisCreate},
 		})
 	}
 	if dependencies.DiagnosisTaskStatus != nil {
@@ -181,6 +190,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			Tool: getDiagnosisTaskStatus, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityTask},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionTaskRead},
 		})
 	}
 	if dependencies.AttachmentReader != nil {
@@ -193,6 +203,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityAttachment},
 			RequiredDependencies: []ToolDependency{ToolDependencyAttachment},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionAttachmentRead},
 		})
 	}
 	if dependencies.ConversationMemorySources != nil {
@@ -217,6 +228,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
 			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
 			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		})
 	}
 	for _, githubTool := range dependencies.GitHubTools {
@@ -238,6 +250,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
 			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
 			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
+			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCodeRead},
 		})
 	}
 	for index := range registrations {
