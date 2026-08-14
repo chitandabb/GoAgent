@@ -70,8 +70,8 @@
       "id": "rag-judge-v2",
       "domain": "rag_answer_quality",
       "observationKind": "rag_judge",
-      "status": "recomputed",
-      "reason": "The Judge input contract can be replayed locally from reviewed facts; Provider-backed Judge output remains auxiliary and is not required for deterministic citation metrics.",
+      "status": "reusable",
+      "reason": "The reviewed Judge input fixture remains reusable for schema and deterministic citation-contract validation; Provider-backed Judge output is auxiliary and is not a current M4 metric.",
       "entryPoint": "mesguard-rag-judge",
       "datasetArtifact": "testdata/rag-judge-v2.sample.jsonl",
       "reportArtifact": "docs/evaluations/conversation-quality-v1.md"
@@ -223,6 +223,17 @@
       "reason": "The five-question fixed traffic replay measured current pgvector lookup and configured-provider full-chain latency under a 21-call hard budget; it is an acceptance replay, not a production traffic percentile.",
       "entryPoint": "mesguard-semantic-cache-observe",
       "datasetArtifact": "testdata/semantic-cache-latency-v1.json",
+      "reportArtifact": "docs/evaluations/semantic-answer-cache-v1.md"
+    },
+    {
+      "id": "semantic-cache-provider-ablation-v1",
+      "domain": "semantic_answer_cache",
+      "observationKind": "semantic_cache_provider_ablation",
+      "status": "recomputed",
+      "reason": "PostgreSQL and Redis Stack were evaluated behind the same semantic-cache contract, dataset, threshold, candidate limit, conflict filter, and fixed traffic boundary. Redis Stack remains optional because its faster isolated lookup did not improve the full-chain P95 enough to justify another required service.",
+      "entryPoint": "mesguard-semantic-cache-observe",
+      "datasetArtifact": "testdata/semantic-cache-v1.json",
+      "observationArtifact": "testdata/semantic-cache-v1.provider-ablation.observations.json",
       "reportArtifact": "docs/evaluations/semantic-answer-cache-v1.md"
     }
   ]

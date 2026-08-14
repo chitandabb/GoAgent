@@ -161,7 +161,7 @@ func TestEvaluationInventoryCoversExistingEvaluationEntryPoints(t *testing.T) {
 		t.Fatalf("read evaluation commands: %v", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "mesguard-evaluation-ledger" || !strings.HasPrefix(entry.Name(), "mesguard-") {
+		if !entry.IsDir() || entry.Name() == "mesguard-evaluation-ledger" || entry.Name() == "mesguard-m4-acceptance" || !strings.HasPrefix(entry.Name(), "mesguard-") {
 			continue
 		}
 		if _, exists := covered[entry.Name()]; !exists {

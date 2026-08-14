@@ -1,0 +1,96 @@
+{
+  "schemaVersion": "m4_acceptance_manifest_v1",
+  "evidence": [
+    {
+      "id": "query-guard-safety",
+      "assetId": "sql-safety-v1",
+      "artifact": "testdata/sql-safety-v1.summary.json",
+      "artifactSchemaVersion": "sql_safety_summary_v1",
+      "metrics": [
+        { "name": "dataset_version", "pointer": "/datasetVersion" },
+        { "name": "policy_version", "pointer": "/policyVersion" },
+        { "name": "cases", "pointer": "/cases" },
+        { "name": "accuracy", "pointer": "/accuracy" },
+        { "name": "high_risk_cases", "pointer": "/highRiskCases" },
+        { "name": "high_risk_blocking_rate", "pointer": "/highRiskBlockingRate" },
+        { "name": "safe_read_cases", "pointer": "/safeReadCases" },
+        { "name": "safe_read_acceptance_rate", "pointer": "/safeReadAcceptanceRate" }
+      ]
+    },
+    {
+      "id": "evidence-gate-fixture",
+      "assetId": "evidence-gate-early-exit-v1",
+      "artifact": "testdata/evidence-gate-early-exit-v1.ticket09.ledger-v1.json",
+      "artifactSchemaVersion": "evaluation_ledger_v1",
+      "metrics": [
+        { "name": "dataset_version", "pointer": "/domainSummary/datasetVersion" },
+        { "name": "paired_cases", "pointer": "/domainSummary/pairedCases" },
+        { "name": "reviewed_case_gap", "pointer": "/domainSummary/reviewedCaseGap" },
+        { "name": "quality_gate_passed", "pointer": "/domainSummary/qualityGatePassed" },
+        { "name": "baseline_model_calls", "pointer": "/domainSummary/baseline/modelCalls" },
+        { "name": "experiment_model_calls", "pointer": "/domainSummary/experiment/modelCalls" },
+        { "name": "baseline_tool_calls", "pointer": "/domainSummary/baseline/toolCalls" },
+        { "name": "experiment_tool_calls", "pointer": "/domainSummary/experiment/toolCalls" },
+        { "name": "baseline_total_tokens", "pointer": "/domainSummary/baseline/totalTokens" },
+        { "name": "experiment_total_tokens", "pointer": "/domainSummary/experiment/totalTokens" }
+      ]
+    },
+    {
+      "id": "semantic-cache-calibration",
+      "assetId": "semantic-cache-v1",
+      "artifact": "testdata/semantic-cache-v1.calibration.json",
+      "artifactSchemaVersion": "semantic_cache_calibration_v1",
+      "metrics": [
+        { "name": "embedding_profile", "pointer": "/embeddingProfile" },
+        { "name": "knowledge_generation", "pointer": "/generation" },
+        { "name": "threshold", "pointer": "/selection/threshold" },
+        { "name": "calibration_total", "pointer": "/selection/calibration/total" },
+        { "name": "calibration_precision", "pointer": "/selection/calibration/precision" },
+        { "name": "calibration_recall", "pointer": "/selection/calibration/recall" },
+        { "name": "calibration_hit_rate", "pointer": "/selection/calibration/hitRate" },
+        { "name": "holdout_total", "pointer": "/holdout/total" },
+        { "name": "holdout_precision", "pointer": "/holdout/precision" },
+        { "name": "holdout_recall", "pointer": "/holdout/recall" },
+        { "name": "holdout_hit_rate", "pointer": "/holdout/hitRate" },
+        { "name": "embedding_requests", "pointer": "/providerCalls" },
+        { "name": "embedding_tokens", "pointer": "/embeddingTokens" }
+      ]
+    },
+    {
+      "id": "semantic-cache-postgres-performance",
+      "assetId": "semantic-cache-latency-v1",
+      "artifact": "testdata/semantic-cache-v1.performance.json",
+      "artifactSchemaVersion": "semantic_cache_performance_v1",
+      "metrics": [
+        { "name": "embedding_profile", "pointer": "/embeddingProfile" },
+        { "name": "knowledge_generation", "pointer": "/generation" },
+        { "name": "lookup_samples", "pointer": "/lookupSamples" },
+        { "name": "lookup_p50_millis", "pointer": "/lookupP50Millis" },
+        { "name": "lookup_p95_millis", "pointer": "/lookupP95Millis" },
+        { "name": "full_chain_samples", "pointer": "/fullChainSamples" },
+        { "name": "full_chain_p50_millis", "pointer": "/fullChainP50Millis" },
+        { "name": "full_chain_p95_millis", "pointer": "/fullChainP95Millis" },
+        { "name": "main_model_calls", "pointer": "/mainModelCalls" },
+        { "name": "tool_calls", "pointer": "/toolCalls" },
+        { "name": "degradation_rate", "pointer": "/degradationRate" },
+        { "name": "measurement_boundary", "pointer": "/measurementBoundary" }
+      ]
+    },
+    {
+      "id": "semantic-cache-provider-ablation",
+      "assetId": "semantic-cache-provider-ablation-v1",
+      "artifact": "testdata/semantic-cache-v1.provider-ablation.observations.json",
+      "artifactSchemaVersion": "semantic_cache_provider_ablation_v1",
+      "metrics": [
+        { "name": "embedding_profile", "pointer": "/embeddingProfile" },
+        { "name": "knowledge_generation", "pointer": "/generation" },
+        { "name": "postgres_lookup_p50_millis", "pointer": "/postgresQuality/lookupP50Millis" },
+        { "name": "postgres_lookup_p95_millis", "pointer": "/postgresQuality/lookupP95Millis" },
+        { "name": "redis_stack_lookup_p50_millis", "pointer": "/redisStackQuality/lookupP50Millis" },
+        { "name": "redis_stack_lookup_p95_millis", "pointer": "/redisStackQuality/lookupP95Millis" },
+        { "name": "postgres_cross_candidate_hits", "pointer": "/postgresQuality/crossCandidateHits" },
+        { "name": "redis_stack_cross_candidate_hits", "pointer": "/redisStackQuality/crossCandidateHits" }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 {
+  "schemaVersion": "semantic_cache_provider_ablation_v1",
   "datasetVersion": "semantic-cache-v1",
   "embeddingProfile": "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667",
   "normalizationVersion": "semantic-question-v1",

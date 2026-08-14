@@ -32,6 +32,7 @@ import (
 const maxSemanticCacheEvaluationBytes = 8 << 20
 
 type similarityObservationSet struct {
+	SchemaVersion        string                                `json:"schemaVersion,omitempty"`
 	DatasetVersion       string                                `json:"datasetVersion"`
 	EmbeddingProfile     string                                `json:"embeddingProfile"`
 	NormalizationVersion string                                `json:"normalizationVersion"`
@@ -226,7 +227,12 @@ func observeSimilarities(
 		vectors = append(vectors, result.Vectors...)
 		tokens += result.Usage.TotalTokens
 	}
+	observationSchema := "semantic_cache_similarity_observations_v1"
+	if cacheProvider != "pairwise" {
+		observationSchema = "semantic_cache_provider_ablation_v1"
+	}
 	observations := similarityObservationSet{
+		SchemaVersion:  observationSchema,
 		DatasetVersion: dataset.Version, EmbeddingProfile: profile.Fingerprint,
 		NormalizationVersion: semanticcache.SemanticNormalizationVersion,
 		Generation:           generation, RecordedAt: time.Now().UTC(), ProviderCalls: providerCalls, EmbeddingTokens: tokens,

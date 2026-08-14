@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const QueryGuardEvaluationSummarySchemaVersion = "sql_safety_summary_v1"
+
 type QueryGuardRiskClass string
 
 const (
@@ -64,6 +66,7 @@ type QueryGuardEvaluationObservation struct {
 }
 
 type QueryGuardEvaluationSummary struct {
+	SchemaVersion          string         `json:"schemaVersion"`
 	DatasetVersion         string         `json:"datasetVersion"`
 	PolicyVersion          string         `json:"policyVersion"`
 	Cases                  int            `json:"cases"`
@@ -96,6 +99,7 @@ func EvaluateQueryGuard(
 	seen := make(map[string]struct{}, len(cases))
 	observations := make([]QueryGuardEvaluationObservation, 0, len(cases))
 	summary := QueryGuardEvaluationSummary{
+		SchemaVersion:    QueryGuardEvaluationSummarySchemaVersion,
 		PolicyVersion:    ReadonlyQueryPolicyVersion,
 		RejectionReasons: make(map[string]int),
 	}

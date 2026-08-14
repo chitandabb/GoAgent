@@ -1,4 +1,5 @@
 {
+  "schemaVersion": "sql_safety_summary_v1",
   "datasetVersion": "sql-safety-v1",
   "policyVersion": "tsql-readonly-v1",
   "cases": 52,
