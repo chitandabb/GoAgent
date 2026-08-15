@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/diagnosisworker"
@@ -39,6 +40,8 @@ func (r *DiagnosisWorkerRepository) LoadTask(
 	result := ResolveDB(ctx, r.db).Raw(`
 SELECT task.id, task.created_by, task.request_text, task.request_scope,
        task.external_case_id, snapshot.payload AS case_snapshot,
+       task.investigation_policy, task.investigation_policy_schema_version,
+       task.investigation_policy_mode,
        user_record.role, user_record.status AS user_status
 FROM diagnosis_tasks task
 JOIN users user_record ON user_record.id = task.created_by
@@ -66,6 +69,10 @@ WHERE task.id = ? AND task.status = 'running' AND task.claim_owner = ?
 	}
 	if caseSnapshot.ID != record.ExternalCaseID {
 		return diagnosisworker.Task{}, diagnosis.ErrInvalidTaskSnapshot
+	}
+	policy, err := decodeWorkerInvestigationPolicy(record)
+	if err != nil {
+		return diagnosisworker.Task{}, err
 	}
 
 	var sourceRecords []workerDataSourceRecord
@@ -132,7 +139,44 @@ ORDER BY reference.created_at, reference.attachment_id`, lease.TaskID, record.Cr
 		ID: record.ID, CreatedBy: record.CreatedBy, Role: record.Role,
 		RequestText: record.RequestText, RequestScope: requestScope,
 		CaseSnapshot: caseSnapshot, DataSources: dataSources, Attachments: attachments,
+		Policy: policy,
 	}, nil
+}
+
+// decodeWorkerInvestigationPolicy 严格按 policy mode 判断行语义：
+//   - mode=legacy：Policy 两列必须同时 NULL，返回 nil（执行器只从冻结
+//     request_scope 与任务资源做 legacy 派生，绝不读取新部署配置扩权）；
+//   - mode=frozen：Policy 两列必须同时存在，严格 JSON 解码后 payload 内
+//     schemaVersion 必须等于列值，成功后返回冻结 Policy；
+//   - mode 缺失、非法、大小写不匹配或与两列组合不一致：fail-closed
+//     （ErrInvalidTask）。
+//
+// 双 NULL 不再单独代表 legacy：只有 mode=legacy 且双 NULL 才是合法旧任务，
+// frozen + 双 NULL 是"新任务漏写 Policy"，必须拒绝。
+func decodeWorkerInvestigationPolicy(record workerTaskRecord) (*agentruntime.InvestigationPolicy, error) {
+	hasPayload := len(record.InvestigationPolicy) > 0
+	hasVersion := record.InvestigationPolicySchemaVersion != nil
+	switch diagnosis.InvestigationPolicyMode(record.InvestigationPolicyMode) {
+	case diagnosis.InvestigationPolicyModeLegacy:
+		if hasPayload || hasVersion {
+			return nil, fmt.Errorf("%w: legacy task must not carry an investigation policy", diagnosis.ErrInvalidTask)
+		}
+		return nil, nil
+	case diagnosis.InvestigationPolicyModeFrozen:
+		if !hasPayload || !hasVersion {
+			return nil, fmt.Errorf("%w: frozen task is missing its investigation policy", diagnosis.ErrInvalidTask)
+		}
+		policy, err := agentruntime.UnmarshalInvestigationPolicy(record.InvestigationPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("%w: decode investigation policy: %v", diagnosis.ErrInvalidTask, err)
+		}
+		if policy.SchemaVersion() != *record.InvestigationPolicySchemaVersion {
+			return nil, fmt.Errorf("%w: investigation policy schema version mismatch", diagnosis.ErrInvalidTask)
+		}
+		return &policy, nil
+	default:
+		return nil, fmt.Errorf("%w: unknown investigation policy mode %q", diagnosis.ErrInvalidTask, record.InvestigationPolicyMode)
+	}
 }
 
 func (r *DiagnosisWorkerRepository) Complete(
@@ -539,14 +583,17 @@ func truncateWorkerValue(value string, maxLength int) string {
 }
 
 type workerTaskRecord struct {
-	ID             uuid.UUID       `gorm:"column:id"`
-	CreatedBy      uuid.UUID       `gorm:"column:created_by"`
-	RequestText    string          `gorm:"column:request_text"`
-	RequestScope   []byte          `gorm:"column:request_scope"`
-	ExternalCaseID uuid.UUID       `gorm:"column:external_case_id"`
-	CaseSnapshot   json.RawMessage `gorm:"column:case_snapshot"`
-	Role           auth.Role       `gorm:"column:role"`
-	UserStatus     string          `gorm:"column:user_status"`
+	ID                               uuid.UUID       `gorm:"column:id"`
+	CreatedBy                        uuid.UUID       `gorm:"column:created_by"`
+	RequestText                      string          `gorm:"column:request_text"`
+	RequestScope                     []byte          `gorm:"column:request_scope"`
+	ExternalCaseID                   uuid.UUID       `gorm:"column:external_case_id"`
+	CaseSnapshot                     json.RawMessage `gorm:"column:case_snapshot"`
+	InvestigationPolicy              []byte          `gorm:"column:investigation_policy"`
+	InvestigationPolicySchemaVersion *int            `gorm:"column:investigation_policy_schema_version"`
+	InvestigationPolicyMode          string          `gorm:"column:investigation_policy_mode"`
+	Role                             auth.Role       `gorm:"column:role"`
+	UserStatus                       string          `gorm:"column:user_status"`
 }
 
 type workerDataSourceRecord struct {

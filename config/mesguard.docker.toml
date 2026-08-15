@@ -21,7 +21,7 @@ sessionAbsoluteMinutes = 720
 
 [agent]
 skillsDirectory = "/app/config/skills"
-promptVersion = "diagnosis-v2"
+promptVersion = "diagnosis-v3"
 systemPromptFile = "/app/config/prompts/diagnosis-system.md"
 baselinePromptFile = "/app/config/prompts/evaluation-baseline.md"
 reportContractFile = "/app/config/prompts/report-contract.md"

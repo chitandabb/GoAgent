@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
@@ -21,6 +22,21 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// mustIntegrationPolicyBuilder 是集成测试共用的最小 Policy Builder。
+func mustIntegrationPolicyBuilder(t *testing.T, allowedSourceIDs ...uuid.UUID) diagnosis.InvestigationPolicyBuilder {
+	t.Helper()
+	builder, err := diagnosis.NewInvestigationPolicyBuilder(diagnosis.InvestigationPolicyConfig{
+		BasePermissions: []agentruntime.Permission{
+			agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead,
+		},
+		AllowedDataSourceIDs: allowedSourceIDs,
+	})
+	if err != nil {
+		t.Fatalf("NewInvestigationPolicyBuilder: %v", err)
+	}
+	return builder
+}
 
 func TestDiagnosisTaskRepositoryAgainstPostgres(t *testing.T) {
 	dsn := os.Getenv("MESGUARD_TEST_POSTGRES_DSN")
@@ -91,7 +107,7 @@ VALUES (?, ?, ?, 'incident', now())`,
 		Attachments: []externalcase.ExternalAttachment{{ObjectKey: "private/object-key", FileName: "fixture.txt"}},
 	}
 	repository := NewDiagnosisTaskRepository(tx)
-	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: item})
+	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: item}, mustIntegrationPolicyBuilder(t))
 	if err != nil {
 		t.Fatalf("NewDiagnosisTaskService(): %v", err)
 	}
@@ -345,7 +361,7 @@ VALUES (?, ?, ?, 'incident', now())`,
 		ReportedAt: time.Now().UTC(), SourceUpdatedAt: time.Now().UTC(),
 	}
 	repository := NewDiagnosisTaskRepository(db)
-	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: item})
+	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: item}, mustIntegrationPolicyBuilder(t))
 	if err != nil {
 		t.Fatalf("NewDiagnosisTaskService(): %v", err)
 	}

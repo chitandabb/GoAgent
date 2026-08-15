@@ -436,7 +436,7 @@ func evidenceTestContext(t *testing.T) context.Context {
 	if err != nil {
 		t.Fatalf("NewTaskScope: %v", err)
 	}
-	return WithTaskScope(context.Background(), scope)
+	return withRunnerTestRunAccess(context.Background(), scope)
 }
 
 func evidenceRunResult(t *testing.T, report StructuredReport) RunResult {

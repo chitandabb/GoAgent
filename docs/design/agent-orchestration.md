@@ -12,6 +12,7 @@
 - 会话回合状态查询和事件 JSON/SSE 已接通：`conversation_turn_events` 是断线补读事实源，支持 `afterSeq`/`Last-Event-ID`、心跳、终态关闭和 Session 绝对过期退出。事件 payload 只包含状态、尝试次数、重试等待和最终消息引用，不包含租约 owner、Prompt、原始 Tool 结果或模型推理过程。
 - 会话附件链路已接通：上传对象先固化到 MinIO，再写 PostgreSQL 附件事实；消息事务保存附件关联。`read_attachment` 属于固定 Conversation Profile 的启动 Epoch 装配快照，只有当前 user message 明确关联附件时执行期 `attachment.read` Permission 才放行，Tool 执行前先把 `attachmentId` 与 `RunAccess.Grants.AttachmentIDs` 校验一致，user/conversation/message/attachment 四元边界继续由 Tool 内部 owner 校验作为第二层。附件与知识 Chunk 引用预览均不泄漏对象存储坐标。
 - 统一 Runtime v2 已完成架构决策、领域合同、`TaskScope -> RunAccess` 兼容适配、执行期 Permission Guard 与生产 Schema 接线：两个 Runner 都通过 `ToolCatalog.ResolveProfile(profileID)` 解析固定部署级 `ToolProfile`，消息引用、依赖健康、能力声明、RunAccess 收窄和调用次数限制都不再改变模型可见 Schema；调用次数/blocked 状态只在执行期由 `agentToolRunPolicy.reserve` fail-closed。`ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor` 仅保留给评测，`TaskScope` 只作为 RunAccess 兼容转换与旧 Tool 内部资源校验的输入。本切片已接通 Conversation `turn_context`、`RunAccess` 资源 Grant 与生产 Text-to-SQL：成功构造的 `search_schema_catalog`/`execute_readonly_query` 进入固定 Conversation Profile，每轮由纯函数深模块经 `NewConversationRunAccess` 直接构造 RunAccess（引用 -> case/task/attachment Grant、唯一 selected -> diagnosis.create、Profile 实际 Tool -> knowledge/web/memory、已配置只读数据源 -> sql.read + 数据源 Grant），SQL 数据源解析迁移到 `RunAccess.Grants`，Conversation 的 `read_external_case`/`read_attachment`/`get_diagnosis_task_status`/`create_diagnosis_task` 也在 `CommandContext`/owner 校验前校验对应资源的 `RunAccess.Grants`；`get_database_object_definition` 按最小 Tool 集原则仍仅供 Diagnosis。
+- Diagnosis `InvestigationPolicy` 切片已落地：任务创建事务经注入的纯领域 Policy Builder 冻结严格确定性 JSONB Policy（migration `00033` Policy 列 + `00034` policy mode；Runtime 架构版本 v2，Policy JSON Schema v1，`investigation_policy_schema_version=1` 即当前 Policy JSON 协议版本；case/knowledge 恒为基础上限，web/code/sql 按部署开关，attachment.read 仅在任务冻结附件时，DataSourceIDs 只保留任务绑定且部署允许调查的只读源，Repositories 恒空，不授予 task.read/memory.read/diagnosis.create）；Policy 不进入幂等 fingerprint，同幂等键回放首次冻结 Policy。Worker 经 `BuildDiagnosisRunContext` 深模块派生有效 RunAccess = frozen Policy ∩ 当前 ceiling（固定 diagnosis-default Profile 实际 Tool、active/read_only/角色允许的任务数据源、仍 uploaded 的附件、当前有效用户），mode=legacy（Policy 双 NULL）的旧任务仅从冻结 `request_scope` 与任务资源 legacy 派生（绝不读取新部署配置扩权），新任务由 Service 显式写 mode=frozen、Repository 在 INSERT 前校验 frozen+非空 Policy+列版本与 payload 版本一致+严格 codec；mode 缺失/非法、frozen+双 NULL、legacy+任一列非空、损坏或版本不一致一律 fail-closed，双 NULL 不再单独代表 legacy；反向生成的兼容 TaskScope 由 `WithTaskScope` 先写入、权威 v2 RunAccess 由 `WithRunAccess` 最后覆盖，`read_external_case`/`read_attachment` 与 SQL Tool 在执行前统一走运行时 ResourceGrant Guard（未授权底层零调用）。确定性 `task_context`（policySchemaVersion/effectivePermissions/工单 ID/授权数据源 id-role-safetyMode，`encoding/json` 防闭合标签注入）追加到 Diagnosis system 指令最尾部，同一任务 Evidence Gate 重试保持一致，preflight 统计与真实调用完全相同的 task_context；`promptVersion` 升至 `diagnosis-v3`。Profile 名单在启动 Epoch 内解析一次并保存，TaskScope/`request_scope` 仅为旧代码与 RequestedSkill 兼容保留。
 - 当前状态和下一切片见 [`../roadmap.md`](../roadmap.md)，目录与包依赖边界见
   [`code-organization.md`](code-organization.md)。准确率和 Token 降幅必须以评测记录为准。
 
@@ -62,7 +63,7 @@ Conversation 与 Diagnosis 各有一个默认 Tool Profile。`ToolProfile` 是�
 普通 SQL、代码、知识库、附件和 Web 调查都在同一个 Agent 内循环中完成。只有必须隔离上下文、权限或预算的大型代码调查与脱敏 Web Research，才考虑 ADK Handoff/Fork。
 
 独立工作台会话使用单独的轻量 Conversation Agent Runtime。它加载持久化的 user/assistant
-历史和当前消息引用，并使用部署内固定 Conversation Tool Profile；case/task/attachment 引用决定执行期 `RunAccess` 的 Permission 与对应资源 Grant，Conversation 的 case/task/attachment/create Tool 执行前先校验具体 `ResourceGrant`，`CommandContext`/owner 校验保留为第二层；Diagnosis 从冻结 Policy 派生 Grant 属于后续切片，不改变
+历史和当前消息引用，并使用部署内固定 Conversation Tool Profile；case/task/attachment 引用决定执行期 `RunAccess` 的 Permission 与对应资源 Grant，Conversation 的 case/task/attachment/create Tool 执行前先校验具体 `ResourceGrant`，`CommandContext`/owner 校验保留为第二层；Diagnosis 已从创建时冻结的 `InvestigationPolicy` 派生 Grant（Policy ∩ 当前 ceiling），同样不改变
 Tool Schema。`turn_context` 已接线：本轮安全投影（case/task/report/attachment ID、引用类型、
 附件展示元数据、授权只读 `dataSourceId`）追加到当前 user 原文尾部（原文 + 换行 + `<turn_context>`
 块），历史消息保留各自已持久化引用且引用同样位于该消息正文尾部，当前运行的数据源授权绝不复制到
@@ -153,17 +154,27 @@ Tool 是模型与外部世界交互的唯一正式入口。SQL、GitHub、知识
 
 生产 Schema 选择已切换为固定部署级 `ToolProfile`：`ToolCatalog.ResolveProfile(profileID)` 是唯一生产入口，诊断与会话 Catalog 各自只绑定所属 Runtime 的 Profile（`diagnosis-default`/`conversation-default`），误配在 Runner 构造期失败。`ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor` 仅保留给历史评测与 wide baseline，不能作为生产接口。
 
-Catalog 注册项只保存 Tool、失败策略、降级观测器和所需 Permission。注册到 Catalog 不等于获得执行权限：`accessGuardedTool` 从 `context.Context` 读取 `RunAccess`，缺失时 fail-closed，先检查粗粒度 Permission；本切片已把 SQL Tool 的数据源解析迁移到 `RunAccess.Grants`（显式 ID 必须在 Grant、省略 ID 仅允许唯一授权源、无 RunAccess/无 sql.read/零个或多个候选均拒绝，未授权时底层 searcher/executor 零调用；Diagnosis 经 `WithTaskScope` 的兼容 RunAccess 只映射只读数据源，`bounded_lab` 不进入 Grant），Conversation 的 case/task/attachment/create Tool 在各自的 `CommandContext`/owner 校验前先校验 `RunAccess.Grants` 的具体资源值，Diagnosis 从冻结 Policy 派生 Grant 属于后续切片。角色与资源归属不再通过动态删 Schema 表达，依赖瞬时故障也不改变 Profile；Profile 内容由启动 Epoch 内成功构造的 Adapter 决定，临时健康状态不参与。
+Catalog 注册项只保存 Tool、失败策略、降级观测器和所需 Permission。注册到 Catalog 不等于获得执行权限：`accessGuardedTool` 从 `context.Context` 读取 `RunAccess`，缺失时 fail-closed，先检查粗粒度 Permission；SQL Tool 的数据源解析只读 `RunAccess.Grants`（显式 ID 必须在 Grant、省略 ID 仅允许唯一授权源、无 RunAccess/无 sql.read/零个或多个候选均拒绝，未授权时底层 searcher/executor 零调用；Diagnosis 的兼容 RunAccess 只映射只读数据源，`bounded_lab` 不进入 Grant），Conversation 与 Diagnosis 的 case/attachment 资源在各自的 `CommandContext`/owner 或任务归属校验前先经运行时通用 `requireRuntimeResourceGrant` 校验具体 Grant，Diagnosis 的 Grant 由冻结 Policy ∩ 当前 ceiling 派生。角色与资源归属不再通过动态删 Schema 表达，依赖瞬时故障也不改变 Profile；Profile 内容由启动 Epoch 内成功构造的 Adapter 决定，临时健康状态不参与。
 
 Catalog、Guarded Tool、Middleware 和无状态模型客户端
 可以复用；Eino `v0.9.13` 的 `ChatModelAgent` 在 Run 初始化时会改写内部配置，`-race` 已证明
 不能共享实例并发运行，所以目标 Runtime 必须为每次 Run 创建隔离 Agent。
 
+资源 Grant 边界已收敛为运行时通用 Guard（`requireRuntimeResourceGrant`）：Conversation 与
+Diagnosis 的 `read_external_case`/`read_attachment`/`create_diagnosis_task`/`get_diagnosis_task_status`
+在各自的 `CommandContext`/owner 或任务归属校验前先校验具体资源 Grant，SQL Tool 的数据源解析
+只读 `RunAccess.Grants`（显式 ID 必须在 Grant、省略 ID 仅允许唯一授权源、无 RunAccess/无
+sql.read/零个或多个候选均拒绝，未授权时底层 searcher/executor 零调用）；无 RunAccess、无
+Permission、资源不在 Grant 均 fail-closed。Diagnosis 的 RunAccess 由冻结 Policy ∩ 当前 ceiling
+派生（见上文 v2 决策），bounded_lab 永不进入数据源 Grant，GitHub 仓库边界继续由 Token/App
+权限与只读参数策略承担，不伪造仓库 ACL。角色与资源归属不再通过动态删 Schema 表达，依赖
+瞬时故障也不改变 Profile；Profile 内容由启动 Epoch 内成功构造的 Adapter 决定，临时健康状态不参与。
+
 所有 Tool 继续执行：参数 Schema 校验、应用策略重写、Context Timeout、行数/字节截断、敏感字段脱敏、调用轨迹和证据固化。Prompt 和 Skill 文本都不能代替这些安全边界。
 
 ### Prompt：可配置指令
 
-`diagnosis-system.md`、`evaluation-baseline.md` 和 `report-contract.md` 分别承载生产 Agent 基础指令、评测 baseline 基础指令和结构化报告契约。应用启动时读取并校验文件。目标设计中 Diagnosis 把同一任务内稳定的 Policy 安全投影和授权数据源别名作为 `task_context` 追加到 system 尾部；Evidence Orchestrator 把上一轮报告和门禁缺口追加到 user 输入。Conversation 的 `turn_context` 已在本切片接线：当前消息安全投影（引用 ID/类型、附件展示元数据、授权只读 `dataSourceId`）追加到当前 user 原文尾部，历史消息保留各自已持久化引用且引用位于该消息正文尾部，本轮数据源授权不复制到历史消息，Token 预算/摘要/连续 Tail/PromptManifest 统计追加后的内容。Diagnosis 的 `task_context` 仍是目标设计，尚未写入。临时依赖健康、凭证、连接地址和原始附件内容不进入稳定前缀。
+`diagnosis-system.md`、`evaluation-baseline.md` 和 `report-contract.md` 分别承载生产 Agent 基础指令、评测 baseline 基础指令和结构化报告契约。应用启动时读取并校验文件。Diagnosis 把同一任务内稳定的 Policy 安全投影（policySchemaVersion、有效权限、当前工单 ID 与授权数据源 id/role/safetyMode）作为 `task_context` 追加到 system 指令最尾部，同一任务每轮 Evidence Gate 重试保持一致；Evidence Orchestrator 把上一轮报告和门禁缺口追加到 user 输入。Conversation 的 `turn_context` 已接线：当前消息安全投影（引用 ID/类型、附件展示元数据、授权只读 `dataSourceId`）追加到当前 user 原文尾部，历史消息保留各自已持久化引用且引用位于该消息正文尾部，本轮数据源授权不复制到历史消息，Token 预算/摘要/连续 Tail/PromptManifest 统计追加后的内容。Diagnosis 的上下文 preflight 统计与真实调用完全相同的 `task_context`（同一 system 指令投影）。临时依赖健康、凭证、连接地址和原始附件内容不进入稳定前缀。
 
 `promptVersion` 由发布者在修改 Prompt 后显式递增，用于报告和评测追溯；它不是模型版本，也不自动根据文件内容生成。当前工程阶段只保证“文件配置、启动失败保护、重启生效和版本字段预留”，未来若接入 Nacos 或独立 Prompt 平台，应继续向 Runner 注入同一组已解析指令，不改变 Tool 授权和 Evidence Gate 的代码边界。
 

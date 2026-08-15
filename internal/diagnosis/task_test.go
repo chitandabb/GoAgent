@@ -9,9 +9,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/google/uuid"
 )
+
+// mustTestPolicyBuilder 是旧测试共用的最小 Policy Builder：case + knowledge
+// 上限，不授予数据源（旧断言不依赖 SQL Grant）。
+func mustTestPolicyBuilder(t *testing.T) InvestigationPolicyBuilder {
+	t.Helper()
+	return mustInvestigationPolicyBuilder(t,
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead},
+		nil,
+	)
+}
 
 func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testing.T) {
 	caseID := uuid.New()
@@ -30,7 +41,7 @@ func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testi
 			SizeBytes: 42, ObjectKey: "private/object-key", ContentHash: "sha256:file", SourceUpdatedAt: readAt,
 		}},
 	}}
-	service, err := NewDiagnosisTaskService(repo, reader)
+	service, err := NewDiagnosisTaskService(repo, reader, mustTestPolicyBuilder(t))
 	if err != nil {
 		t.Fatalf("NewDiagnosisTaskService(): %v", err)
 	}
@@ -152,7 +163,7 @@ func TestDiagnosisTaskServiceRejectsChangedSourceBeforePersistence(t *testing.T)
 	reader := &taskCaseReaderStub{item: &externalcase.ExternalCase{
 		ID: caseID, SourceFingerprint: "sha256:actual", ReportedAt: time.Now().UTC(), SourceUpdatedAt: time.Now().UTC(),
 	}}
-	service, _ := NewDiagnosisTaskService(repo, reader)
+	service, _ := NewDiagnosisTaskService(repo, reader, mustTestPolicyBuilder(t))
 	_, err := service.Create(context.Background(), TaskActor{UserID: uuid.New()}, CreateTaskInput{
 		ExternalCaseID: caseID, ExpectedSourceFingerprint: "sha256:old", RequestText: "检查", IdempotencyKey: uuid.NewString(),
 	})
@@ -167,7 +178,7 @@ func TestDiagnosisTaskServiceRejectsChangedSourceBeforePersistence(t *testing.T)
 func TestDiagnosisTaskServiceRejectsAttachmentsInsteadOfDroppingThem(t *testing.T) {
 	repo := &taskRepositoryStub{}
 	reader := &taskCaseReaderStub{}
-	service, _ := NewDiagnosisTaskService(repo, reader)
+	service, _ := NewDiagnosisTaskService(repo, reader, mustTestPolicyBuilder(t))
 	_, err := service.Create(context.Background(), TaskActor{UserID: uuid.New()}, CreateTaskInput{
 		ExternalCaseID: uuid.New(), ExpectedSourceFingerprint: "sha256:source", RequestText: "检查",
 		Attachments: []TaskAttachment{{AttachmentID: uuid.New(), Purpose: "problem_image"}}, IdempotencyKey: uuid.NewString(),
@@ -187,7 +198,7 @@ func TestDiagnosisTaskServiceFreezesMessageAuthorizedAttachments(t *testing.T) {
 		ID: caseID, DataSourceID: uuid.New(), SourceFingerprint: "sha256:source",
 		ReportedAt: time.Now().UTC(), SourceUpdatedAt: time.Now().UTC(),
 	}}
-	service, _ := NewDiagnosisTaskService(repo, reader)
+	service, _ := NewDiagnosisTaskService(repo, reader, mustTestPolicyBuilder(t))
 	_, err := service.Create(context.Background(), TaskActor{UserID: ownerID}, CreateTaskInput{
 		ExternalCaseID: caseID, ExpectedSourceFingerprint: "sha256:source", RequestText: "检查附件",
 		Attachments:      []TaskAttachment{{AttachmentID: attachmentID, Purpose: " log_file "}},
@@ -217,7 +228,7 @@ func TestDiagnosisTaskServiceGetEnforcesOwnerOrAdmin(t *testing.T) {
 	ownerID := uuid.New()
 	taskID := uuid.New()
 	repo := &taskRepositoryStub{getTask: DiagnosisTask{ID: taskID, CreatedBy: ownerID, Status: TaskPending}}
-	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{})
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))
 	if _, err := service.Get(context.Background(), TaskActor{UserID: uuid.New()}, taskID); !errors.Is(err, ErrTaskForbidden) {
 		t.Fatalf("non-owner Get() error = %v, want ErrTaskForbidden", err)
 	}
@@ -236,7 +247,7 @@ func TestDiagnosisTaskServiceListEventsNormalizesLimitAndEnforcesOwner(t *testin
 		getTask:   DiagnosisTask{ID: taskID, CreatedBy: ownerID, Status: TaskPending},
 		eventPage: TaskEventPage{Items: []TaskEvent{{TaskID: taskID, Seq: 1, EventType: "task_created"}}},
 	}
-	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{})
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))
 
 	if _, err := service.ListEvents(context.Background(), TaskActor{UserID: uuid.New()}, taskID, 0, 0); !errors.Is(err, ErrTaskForbidden) {
 		t.Fatalf("non-owner ListEvents() error = %v, want ErrTaskForbidden", err)
@@ -263,7 +274,7 @@ func TestDiagnosisTaskServiceOpensAuthorizedEventStreamOnce(t *testing.T) {
 			AfterSeq: 1, NextAfterSeq: 2,
 		},
 	}
-	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{})
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))
 
 	if _, err := service.OpenEventStream(context.Background(), TaskActor{UserID: uuid.New()}, taskID); !errors.Is(err, ErrTaskForbidden) {
 		t.Fatalf("non-owner OpenEventStream() error = %v, want ErrTaskForbidden", err)
@@ -292,7 +303,7 @@ func TestDiagnosisTaskServiceCancelUsesAuthorizedActorAndClock(t *testing.T) {
 		getTask:      DiagnosisTask{ID: taskID, CreatedBy: ownerID, Status: TaskRunning},
 		cancelResult: TaskCancelResult{Task: DiagnosisTask{ID: taskID, Status: TaskCancelRequested}, Changed: true},
 	}
-	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{})
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))
 	service.clock = func() time.Time { return now }
 
 	result, err := service.Cancel(context.Background(), TaskActor{UserID: ownerID}, taskID)
