@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
@@ -33,10 +34,14 @@ func TestReadAttachmentToolInjectsCurrentMessageScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
-		ConversationID: conversationID, UserMessageID: messageID,
-		Actor: conversation.Actor{UserID: userID},
-	})
+	ctx := agentruntime.WithRunAccess(
+		conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+			ConversationID: conversationID, UserMessageID: messageID,
+			Actor: conversation.Actor{UserID: userID},
+		}),
+		mustConversationAccess(t, []agentruntime.Permission{agentruntime.PermissionAttachmentRead},
+			agentruntime.ResourceGrantsConfig{AttachmentIDs: []uuid.UUID{attachmentID}}),
+	)
 	raw, err := current.InvokableRun(ctx, `{"attachmentId":"`+attachmentID.String()+`"}`)
 	if err != nil {
 		t.Fatalf("InvokableRun(): %v", err)

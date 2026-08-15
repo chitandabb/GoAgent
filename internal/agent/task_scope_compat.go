@@ -42,12 +42,17 @@ func runAccessFromTaskScope(scope TaskScope) (agentruntime.RunAccess, error) {
 		}
 		permissions = append(permissions, permission)
 	}
+	// 只映射 TaskScope 已有的、且为只读模式的数据源 ID：SQL Tool 的
+	// 执行授权只覆盖只读数据源，bounded_lab 等非只读源必须与旧的
+	// resolveGrantedSQLDataSource 角色/安全模式过滤保持一致，不得进入 Grant。
+	// 不凭空生成工单、附件、任务或仓库 Grant，GitHub 仓库级授权不在本
+	// 兼容层实现。
 	dataSourceIDs := make([]uuid.UUID, 0, len(scope.DataSources()))
 	for _, dataSource := range scope.DataSources() {
-		dataSourceIDs = append(dataSourceIDs, dataSource.ID)
+		if dataSource.SafetyMode == DataSourceSafetyReadOnly {
+			dataSourceIDs = append(dataSourceIDs, dataSource.ID)
+		}
 	}
-	// 只映射 TaskScope 已有的数据源 ID；不凭空生成工单、附件、任务或仓库
-	// Grant，GitHub 仓库级授权不在本兼容层实现。
 	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
 		DataSourceIDs: dataSourceIDs,
 	})

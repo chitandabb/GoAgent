@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
@@ -39,7 +40,10 @@ func TestCreateDiagnosisTaskToolUsesNarrowArguments(t *testing.T) {
 			t.Fatalf("tool schema exposes forbidden field %q: %s", forbidden, schemaText)
 		}
 	}
-	result, err := current.InvokableRun(context.Background(), `{"externalCaseId":"`+caseID.String()+`","diagnosisGoal":"诊断这个工单"}`)
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationAccess(t,
+		[]agentruntime.Permission{agentruntime.PermissionDiagnosisCreate},
+		agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{caseID}}))
+	result, err := current.InvokableRun(ctx, `{"externalCaseId":"`+caseID.String()+`","diagnosisGoal":"诊断这个工单"}`)
 	if err != nil {
 		t.Fatalf("InvokableRun(): %v", err)
 	}

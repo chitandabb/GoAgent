@@ -21,6 +21,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	ctx context.Context,
 	tools []tool.BaseTool,
 	request conversation.AgentRequest,
+	turnContext string,
 ) (conversationPromptProjection, *contextgovernance.PromptManifest, error) {
 	active, err := r.contextPreflight.Memory.Active(ctx, request.Conversation.ID)
 	if err != nil && !errors.Is(err, conversationmemory.ErrSnapshotNotFound) {
@@ -34,7 +35,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	if active != nil {
 		pressureHistory = conversationMessagesAfter(request.History, active.ThroughSeq)
 	}
-	pressure, err := buildFullConversationPromptProjection(pressureHistory, request.UserMessage)
+	pressure, err := buildFullConversationPromptProjection(pressureHistory, request.UserMessage, turnContext)
 	if err != nil {
 		return conversationPromptProjection{}, nil, err
 	}
@@ -53,7 +54,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	}
 	refreshNeeded := hardTriggered
 	if active != nil && !hardTriggered {
-		coverageComplete, coverageErr := r.summaryTailCoverageComplete(ctx, request, *active)
+		coverageComplete, coverageErr := r.summaryTailCoverageComplete(ctx, request, *active, turnContext)
 		if coverageErr != nil {
 			return pressure, pressureManifest, coverageErr
 		}
@@ -103,7 +104,7 @@ func (r *ConversationRunner) prepareSummaryTailPrompt(
 	var manifest *contextgovernance.PromptManifest
 	for attempt := 0; attempt < 6; attempt++ {
 		final, err = r.buildConversationPromptProjectionWithTailBudget(
-			ctx, request.History, request.UserMessage, tailBudget,
+			ctx, request.History, request.UserMessage, tailBudget, turnContext,
 		)
 		if err != nil {
 			failed := pressure
@@ -157,6 +158,7 @@ func (r *ConversationRunner) summaryTailCoverageComplete(
 	ctx context.Context,
 	request conversation.AgentRequest,
 	active conversationmemory.Snapshot,
+	turnContext string,
 ) (bool, error) {
 	summaryContent, _, _, err := conversationSummaryProjection(ctx, &active, r.contextPreflight)
 	if err != nil {
@@ -167,7 +169,7 @@ func (r *ConversationRunner) summaryTailCoverageComplete(
 		return false, err
 	}
 	projection, err := r.buildConversationPromptProjectionWithTailBudget(
-		ctx, request.History, request.UserMessage, tailBudget,
+		ctx, request.History, request.UserMessage, tailBudget, turnContext,
 	)
 	if err != nil {
 		return false, err
@@ -257,6 +259,7 @@ func summaryTailTokenBudgetForPreflight(
 func buildFullConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
+	turnContext string,
 ) (conversationPromptProjection, error) {
 	candidates, err := continuousConversationCandidates(history, current)
 	if err != nil {
@@ -264,7 +267,7 @@ func buildFullConversationPromptProjection(
 	}
 	messages := make([]*schema.Message, 0, len(candidates))
 	for _, item := range candidates {
-		content := conversationMessagePrompt(item)
+		content := conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext))
 		if item.Role == conversation.MessageRoleUser {
 			messages = append(messages, schema.UserMessage(content))
 		} else {
@@ -273,7 +276,8 @@ func buildFullConversationPromptProjection(
 	}
 	return conversationPromptProjection{
 		messages: messages, selected: candidates, currentMessageID: current.ID,
-		tailFromSeq: candidates[0].Seq, tailThroughSeq: candidates[len(candidates)-1].Seq,
+		currentUserContent: conversationCurrentUserContent(candidates, current, turnContext),
+		tailFromSeq:        candidates[0].Seq, tailThroughSeq: candidates[len(candidates)-1].Seq,
 		tailContinuous: true,
 	}, nil
 }

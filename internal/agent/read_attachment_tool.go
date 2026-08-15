@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/cloudwego/eino/components/tool"
@@ -63,6 +64,13 @@ func NewReadAttachmentTool(reader attachment.Reader) (tool.InvokableTool, error)
 			attachmentID, err := uuid.Parse(strings.TrimSpace(input.AttachmentID))
 			if err != nil {
 				return readAttachmentResponse{}, errors.New("attachmentId must be a valid UUID")
+			}
+			// Conversation 运行时：attachmentId 必须在本轮 RunAccess 的
+			// AttachmentIDs Grant 中；现有 CommandContext/owner 校验作为第二层。
+			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+				return grants.AllowsAttachment(attachmentID)
+			}); err != nil {
+				return readAttachmentResponse{}, err
 			}
 			var result attachment.ReadResult
 			if commandContext, ok := conversation.CommandContextFromContext(ctx); ok &&

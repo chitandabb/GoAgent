@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
@@ -67,6 +68,28 @@ func NewCreateDiagnosisTaskTool(creator DiagnosisTaskCreator) (tool.InvokableToo
 					return createDiagnosisTaskResponse{}, errors.New("parentTaskId must be a valid UUID")
 				}
 				parentTaskID = &parsed
+			}
+			// Conversation 运行时命令边界：case、显式 attachmentIds 与
+			// parentTaskId 都必须在本轮 RunAccess 对应 Grant 中；Conversation
+			// Service 的 CommandContext/owner/最新消息门禁保留为第二层。
+			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+				return grants.AllowsExternalCase(caseID)
+			}); err != nil {
+				return createDiagnosisTaskResponse{}, err
+			}
+			for _, attachmentID := range attachments {
+				if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+					return grants.AllowsAttachment(attachmentID)
+				}); err != nil {
+					return createDiagnosisTaskResponse{}, err
+				}
+			}
+			if parentTaskID != nil {
+				if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+					return grants.AllowsTask(*parentTaskID)
+				}); err != nil {
+					return createDiagnosisTaskResponse{}, err
+				}
 			}
 			result, err := creator.CreateDiagnosisTask(ctx, conversation.CreateDiagnosisInput{
 				ExternalCaseID: caseID, DiagnosisGoal: goal, AttachmentIDs: attachments, ParentTaskID: parentTaskID,

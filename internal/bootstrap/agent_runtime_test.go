@@ -7,13 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -324,6 +328,7 @@ func TestBuildAgentRuntimeRegistersOrDegradesWebResearchAsOneDependency(t *testi
 func TestBuildAgentRuntimeRegistersSQLToolWhenSQLServerIsAvailable(t *testing.T) {
 	cfg := testAgentConfig()
 	cfg.SQLServer.Enabled = true
+	cfg.SQLServer.ID = "8d5c67dc-4c09-4ee5-9e80-4d822303dc35"
 	cfg.SQLServer.Investigation.AllowedSchemas = []string{"dbo"}
 	called := false
 	runtime, err := buildAgentRuntime(
@@ -403,5 +408,171 @@ func testAgentConfig() config.Config {
 				"test": {Provider: "dashscope", Model: "fixture-v1"},
 			},
 		}},
+	}
+}
+
+func TestBuildAgentRuntimeFailsClosedOnInvalidSQLDataSourceID(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.SQLServer.Enabled = true
+	cfg.SQLServer.ID = "not-a-uuid"
+	cfg.SQLServer.Investigation.AllowedSchemas = []string{"dbo"}
+	builders := agentRuntimeBuilders{
+		chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+			return stubAgentChatModel{}, nil
+		},
+	}
+	// 无效 UUID 必须在任何 SQL Adapter 构造前 fail-closed：builder 被调用即说明接线错误。
+	builders.sqlObjectDefinitions = func(*sql.DB, config.SQLServerConfig, *zap.Logger) (tool.BaseTool, error) {
+		t.Fatal("sqlObjectDefinitions builder ran despite invalid data source id")
+		return nil, errors.New("must not run")
+	}
+	_, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, new(sql.DB), nil, zap.NewNop(), builders,
+	)
+	if err == nil || !strings.Contains(err.Error(), "data source id") {
+		t.Fatalf("buildAgentRuntime() error = %v, want fail-closed data source id rejection", err)
+	}
+}
+
+// conversationSQLExecutorStub 记录执行期 Context 的权威 RunAccess 与数据源。
+type conversationSQLExecutorStub struct {
+	mu           sync.Mutex
+	calls        int
+	dataSourceID uuid.UUID
+	sqlRead      bool
+	grants       []uuid.UUID
+}
+
+func (s *conversationSQLExecutorStub) Execute(
+	ctx context.Context, dataSourceID uuid.UUID, _ string,
+) (repository.ReadonlyQueryResult, error) {
+	access, ok := agentruntime.RunAccessFromContext(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	s.dataSourceID = dataSourceID
+	if ok {
+		s.sqlRead = access.Allows(agentruntime.PermissionSQLRead)
+		s.grants = access.Grants().DataSourceIDs()
+	}
+	return repository.ReadonlyQueryResult{
+		PolicyVersion: "tsql-readonly-v1", Columns: []string{"Status"},
+		Rows: [][]any{{"处理中"}}, ReturnedRows: 1,
+	}, nil
+}
+
+func (s *conversationSQLExecutorStub) snapshot() (int, uuid.UUID, bool, []uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, s.dataSourceID, s.sqlRead, append([]uuid.UUID(nil), s.grants...)
+}
+
+type conversationSQLCatalogSearcherStub struct{}
+
+func (conversationSQLCatalogSearcherStub) SearchPublished(
+	context.Context, uuid.UUID, string, int,
+) ([]repository.SchemaCatalogEntry, error) {
+	return []repository.SchemaCatalogEntry{{
+		CatalogVersion: 1, ObjectSchema: "dbo", ObjectName: "Tickets", ObjectType: "TABLE",
+		ColumnName: "Status", SensitivityLevel: "internal",
+	}}, nil
+}
+
+// scriptedSQLChatModel 在 Conversation 真实装配中先调用 execute_readonly_query。
+type scriptedSQLChatModel struct {
+	queryDone bool
+}
+
+func (m *scriptedSQLChatModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *scriptedSQLChatModel) Generate(
+	_ context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.Message, error) {
+	common := model.GetCommonOptions(nil, opts...)
+	hasQueryTool := false
+	for _, info := range common.Tools {
+		if info.Name == agent.ToolExecuteReadonlyQuery {
+			hasQueryTool = true
+		}
+	}
+	for _, message := range input {
+		if message.Role == schema.Tool && message.ToolName == agent.ToolExecuteReadonlyQuery {
+			m.queryDone = true
+		}
+	}
+	if !m.queryDone && hasQueryTool {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-sql", Function: schema.FunctionCall{
+				Name: agent.ToolExecuteReadonlyQuery, Arguments: `{"query":"SELECT Status FROM dbo.v_Tickets"}`,
+			},
+		}}), nil
+	}
+	return schema.AssistantMessage("工单当前状态为 处理中。", nil), nil
+}
+
+func (m *scriptedSQLChatModel) Stream(
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func TestBuildAgentRuntimeWiresSQLToolsAndGrantIntoConversationRunner(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.SQLServer.Enabled = true
+	cfg.SQLServer.ID = "8d5c67dc-4c09-4ee5-9e80-4d822303dc35"
+	cfg.SQLServer.Investigation.AllowedSchemas = []string{"dbo"}
+	sqlDataSourceID := uuid.MustParse(cfg.SQLServer.ID)
+	executor := &conversationSQLExecutorStub{}
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, new(sql.DB), &gorm.DB{}, zap.NewNop(),
+		agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return &scriptedSQLChatModel{}, nil
+			},
+			schemaCatalog: func(*gorm.DB, uuid.UUID, *zap.Logger) (tool.BaseTool, error) {
+				return agent.NewSearchSchemaCatalogTool(conversationSQLCatalogSearcherStub{})
+			},
+			readonlyQuery: func(*sql.DB, config.SQLServerConfig, *gorm.DB, *zap.Logger) (tool.BaseTool, error) {
+				return agent.NewExecuteReadonlyQueryTool(executor)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime: %v", err)
+	}
+	defer runtime.close()
+	if runtime.conversation == nil {
+		t.Fatal("conversation runtime is nil")
+	}
+
+	userID, conversationID, messageID := uuid.New(), uuid.New(), uuid.New()
+	message := conversation.Message{
+		ID: messageID, ConversationID: conversationID, Seq: 1,
+		Role: conversation.MessageRoleUser, Content: "查询工单实时状态",
+	}
+	ctx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+		ConversationID: conversationID, UserMessageID: messageID,
+		Actor: conversation.Actor{UserID: userID},
+	})
+	response, err := runtime.conversation.Respond(ctx, conversation.AgentRequest{
+		Conversation: conversation.Conversation{ID: conversationID, UserID: userID, Status: conversation.StatusActive},
+		UserMessage:  message, History: []conversation.Message{message},
+	})
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if !strings.Contains(response.Content, "处理中") {
+		t.Fatalf("answer must come from the executed query: %q", response.Content)
+	}
+	calls, gotID, sqlRead, grants := executor.snapshot()
+	if calls != 1 || gotID != sqlDataSourceID || !sqlRead ||
+		!slices.Contains(grants, sqlDataSourceID) {
+		t.Fatalf("executor observed calls=%d id=%s sqlRead=%v grants=%v", calls, gotID, sqlRead, grants)
 	}
 }

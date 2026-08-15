@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
@@ -26,8 +27,11 @@ func TestGetDiagnosisTaskStatusToolReturnsSafeProgressSummary(t *testing.T) {
 		t.Fatalf("NewGetDiagnosisTaskStatusTool(): %v", err)
 	}
 	trace := &conversationReportReferenceTrace{}
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationAccess(t,
+		[]agentruntime.Permission{agentruntime.PermissionTaskRead},
+		agentruntime.ResourceGrantsConfig{TaskIDs: []uuid.UUID{taskID}}))
 	result, err := current.InvokableRun(
-		withConversationReportReferenceTrace(context.Background(), trace),
+		withConversationReportReferenceTrace(ctx, trace),
 		`{"taskId":"`+taskID.String()+`"}`,
 	)
 	if err != nil {
@@ -56,8 +60,11 @@ func TestGetDiagnosisTaskStatusToolDoesNotInventUnavailableReportReference(t *te
 	}}
 	current, _ := NewGetDiagnosisTaskStatusTool(reader)
 	trace := &conversationReportReferenceTrace{}
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationAccess(t,
+		[]agentruntime.Permission{agentruntime.PermissionTaskRead},
+		agentruntime.ResourceGrantsConfig{TaskIDs: []uuid.UUID{taskID}}))
 	if _, err := current.InvokableRun(
-		withConversationReportReferenceTrace(context.Background(), trace),
+		withConversationReportReferenceTrace(ctx, trace),
 		`{"taskId":"`+taskID.String()+`"}`,
 	); err != nil {
 		t.Fatal(err)

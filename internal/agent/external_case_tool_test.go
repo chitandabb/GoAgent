@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 
 	"github.com/google/uuid"
@@ -31,7 +32,10 @@ func TestReadExternalCaseToolDoesNotExposeObjectKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReadExternalCaseTool: %v", err)
 	}
-	result, err := current.InvokableRun(context.Background(), `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`)
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationAccess(t,
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{id}}))
+	result, err := current.InvokableRun(ctx, `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`)
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}

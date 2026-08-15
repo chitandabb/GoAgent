@@ -223,7 +223,15 @@ func buildAgentRuntimeForRole(
 	var sqlObjectDefinitions tool.BaseTool
 	var schemaCatalog tool.BaseTool
 	var readonlyQuery tool.BaseTool
+	// conversationSQLDataSourceID 是 cfg.SQLServer.ID 解析出的 Conversation
+	// 只读数据源 Grant；无效 UUID 必须 fail-closed，不能静默开放 SQL。
+	var conversationSQLDataSourceID uuid.UUID
 	if sqlServer != nil && cfg.SQLServer.Enabled && len(cfg.SQLServer.Investigation.AllowedSchemas) > 0 {
+		dataSourceID, parseErr := uuid.Parse(cfg.SQLServer.ID)
+		if parseErr != nil {
+			_ = runtime.close()
+			return nil, fmt.Errorf("parse SQL Server data source id: %w", parseErr)
+		}
 		builder := builders.sqlObjectDefinitions
 		if builder == nil {
 			builder = defaultAgentRuntimeBuilders().sqlObjectDefinitions
@@ -234,29 +242,27 @@ func buildAgentRuntimeForRole(
 			sqlObjectDefinitions = nil
 		}
 		if postgresDB != nil {
-			dataSourceID, parseErr := uuid.Parse(cfg.SQLServer.ID)
-			if parseErr != nil {
-				log.Warn("SQL schema catalog unavailable; data source id is invalid", zap.Error(parseErr))
-			} else {
-				catalogBuilder := builders.schemaCatalog
-				if catalogBuilder == nil {
-					catalogBuilder = defaultAgentRuntimeBuilders().schemaCatalog
-				}
-				schemaCatalog, err = catalogBuilder(postgresDB, dataSourceID, log.Named("schema_catalog"))
-				if err != nil {
-					log.Warn("SQL schema catalog Tool unavailable; continuing without catalog search", zap.Error(err))
-					schemaCatalog = nil
-				}
-				queryBuilder := builders.readonlyQuery
-				if queryBuilder == nil {
-					queryBuilder = defaultAgentRuntimeBuilders().readonlyQuery
-				}
-				readonlyQuery, err = queryBuilder(sqlServer, cfg.SQLServer, postgresDB, log.Named("readonly_query"))
-				if err != nil {
-					log.Warn("SQL readonly query Tool unavailable; continuing without query execution", zap.Error(err))
-					readonlyQuery = nil
-				}
+			catalogBuilder := builders.schemaCatalog
+			if catalogBuilder == nil {
+				catalogBuilder = defaultAgentRuntimeBuilders().schemaCatalog
 			}
+			schemaCatalog, err = catalogBuilder(postgresDB, dataSourceID, log.Named("schema_catalog"))
+			if err != nil {
+				log.Warn("SQL schema catalog Tool unavailable; continuing without catalog search", zap.Error(err))
+				schemaCatalog = nil
+			}
+			queryBuilder := builders.readonlyQuery
+			if queryBuilder == nil {
+				queryBuilder = defaultAgentRuntimeBuilders().readonlyQuery
+			}
+			readonlyQuery, err = queryBuilder(sqlServer, cfg.SQLServer, postgresDB, log.Named("readonly_query"))
+			if err != nil {
+				log.Warn("SQL readonly query Tool unavailable; continuing without query execution", zap.Error(err))
+				readonlyQuery = nil
+			}
+		}
+		if schemaCatalog != nil || readonlyQuery != nil {
+			conversationSQLDataSourceID = dataSourceID
 		}
 	}
 	if sqlObjectDefinitions != nil || schemaCatalog != nil || readonlyQuery != nil {
@@ -396,6 +402,7 @@ func buildAgentRuntimeForRole(
 	conversationCatalog, err := mesagent.NewConversationDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
+		SchemaCatalog: schemaCatalog, ReadonlyQuery: readonlyQuery,
 		CreateDiagnosisTask:       builders.conversationCreator,
 		DiagnosisTaskStatus:       builders.conversationTaskStatus,
 		AttachmentReader:          builders.attachmentReader,
@@ -468,6 +475,7 @@ func buildAgentRuntimeForRole(
 		MemorySourceRecoveryEnabled:  sourceRecoveryEnabled,
 		MemorySourceRecoveryMaxCalls: cfg.Agent.ContextMemory.SourceRecoveryMaxCalls,
 		ContextPreflight:             contextPreflight,
+		SQLDataSourceID:              conversationSQLDataSourceID,
 	})
 	if err != nil {
 		_ = runtime.close()

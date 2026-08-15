@@ -129,7 +129,7 @@ func TestContextGovernancePilotFixtureCreatesThePinnedPromptPressureGradient(t *
 				ID: uuid.New(), ConversationID: conversationID, Seq: checkpoint.HistoryThroughSeq + 1,
 				Role: conversation.MessageRoleUser, Content: checkpoint.Question,
 			}
-			projection, err := buildFullConversationPromptProjection(messages[:checkpoint.HistoryThroughSeq], current)
+			projection, err := buildFullConversationPromptProjection(messages[:checkpoint.HistoryThroughSeq], current, "")
 			if err != nil {
 				t.Fatalf("%s/%s projection: %v", scenario.ScenarioID, checkpoint.CheckpointID, err)
 			}
