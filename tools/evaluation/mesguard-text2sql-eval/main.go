@@ -668,11 +668,6 @@ func observeConversationCase(
 		observation.ErrorType = "invalid_tool_sequence"
 		return observation
 	}
-	if respondErr != nil {
-		observation.ErrorType = conversationEvaluationErrorType(respondErr)
-		return observation
-	}
-	observation.Answer = response.Content
 	var lastSQL *conversationToolRecord
 	for index := range records {
 		if records[index].name == mesagent.ToolExecuteReadonlyQuery {
@@ -692,15 +687,20 @@ func observeConversationCase(
 	observation.Columns = lastSQL.columns
 	observation.Rows = lastSQL.rows
 	observation.Truncated = lastSQL.truncated
-	if strings.TrimSpace(observation.Answer) == "" {
-		observation.ErrorType = "empty_answer"
-		return observation
-	}
 	observation.ExecutionCorrect = mesagent.TextToSQLResultMatches(
 		definition, observation.Columns, observation.Rows, observation.Truncated,
 	)
 	if !observation.ExecutionCorrect {
 		observation.ErrorType = "result_mismatch"
+		return observation
+	}
+	if respondErr != nil {
+		observation.ErrorType = conversationEvaluationErrorType(respondErr)
+		return observation
+	}
+	observation.Answer = response.Content
+	if strings.TrimSpace(observation.Answer) == "" {
+		observation.ErrorType = "empty_answer"
 		return observation
 	}
 	observation.AnswerCorrect = texttosqleval.TextToSQLAnswerMatchesExpectedValues(definition, observation.Answer)

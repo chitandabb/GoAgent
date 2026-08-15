@@ -314,15 +314,24 @@ func EvaluateTextToSQLConversation(
 
 // TextToSQLConversationToolTraceMatchesRequiredSequence compares the Runner's
 // authoritative total Tool-call count with the SQL recorder and then enforces
-// the production-entry workflow expected by this evaluation.
+// the production-entry workflow expected by this evaluation: one or more
+// schema searches followed by exactly one final readonly query. Repeated
+// schema searches are valid Agent exploration; query-first, repeated query,
+// search-after-query, and non-SQL calls are not.
 func TextToSQLConversationToolTraceMatchesRequiredSequence(
 	actualToolCallCount int,
 	calls []TextToSQLConversationToolCall,
 ) (complete bool, sequenceCorrect bool) {
 	complete = actualToolCallCount == len(calls)
-	sequenceCorrect = complete && len(calls) == 2 &&
-		calls[0].ToolName == mesagent.ToolSearchSchemaCatalog &&
-		calls[1].ToolName == mesagent.ToolExecuteReadonlyQuery
+	if !complete || len(calls) < 2 || calls[len(calls)-1].ToolName != mesagent.ToolExecuteReadonlyQuery {
+		return complete, false
+	}
+	for _, call := range calls[:len(calls)-1] {
+		if call.ToolName != mesagent.ToolSearchSchemaCatalog {
+			return complete, false
+		}
+	}
+	sequenceCorrect = true
 	return complete, sequenceCorrect
 }
 
