@@ -555,8 +555,8 @@ type implementationIdentity struct {
 }
 
 const (
-	gitRevParseTimeout = 2 * time.Second
-	gitStatusTimeout   = 2 * time.Second
+	gitRevParseTimeout = 10 * time.Second
+	gitStatusTimeout   = 10 * time.Second
 )
 
 // git 命令执行 seam：评测命令默认走真实 git；测试替换为桩函数，避免依赖
