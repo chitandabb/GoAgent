@@ -10,6 +10,7 @@ import (
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 
 	"github.com/cloudwego/eino/components/model"
@@ -72,7 +73,7 @@ func TestNewEvaluationObservationUsesConfiguredPromptVersion(t *testing.T) {
 		mesagent.OrchestrationResult{},
 		time.Second,
 		strings.Repeat("2", 64),
-		implementationIdentity{revision: "git:test-revision", dirty: false},
+		evaluationidentity.Identity{Revision: "git:test-revision", Dirty: false},
 		strings.Repeat("a", 64),
 	)
 	if observation.PromptVersion != "diagnosis-v7" {
@@ -83,7 +84,7 @@ func TestNewEvaluationObservationUsesConfiguredPromptVersion(t *testing.T) {
 func TestNewEvaluationObservationRecordsV2ArmSpecificIdentity(t *testing.T) {
 	base := mesagent.EvaluationCase{DatasetVersion: "test-v1", CaseID: "case-1"}
 	cfg := config.Config{Agent: config.AgentConfig{PromptVersion: "diagnosis-v7"}}
-	identity := implementationIdentity{revision: "git:test-revision", dirty: false}
+	identity := evaluationidentity.Identity{Revision: "git:test-revision", Dirty: false}
 	experiment := observationFromResult(
 		base, mesagent.EvaluationExperiment, cfg, mesagent.OrchestrationResult{},
 		time.Second, strings.Repeat("2", 64), identity, strings.Repeat("a", 64),

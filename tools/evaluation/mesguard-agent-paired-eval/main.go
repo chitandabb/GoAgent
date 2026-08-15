@@ -14,9 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +23,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
+	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
@@ -124,17 +123,17 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision 与
 	// 最终模型 Profile 指纹，再决定是否允许继续。
-	identity, identityErr := resolveImplementationIdentity()
+	identity, identityErr := evaluationidentity.ResolveImplementationIdentity()
 	if identityErr != nil && !*allowDirty {
 		return fmt.Errorf("resolve implementation revision: %w (pass -allow-dirty for local smoke)", identityErr)
 	}
-	identity, decisionErr := evaluateImplementationIdentity(identity, *allowDirty)
+	identity, decisionErr := evaluationidentity.EvaluateImplementationIdentity(identity, *allowDirty)
 	if decisionErr != nil {
 		return decisionErr
 	}
-	if identityErr != nil || identity.dirty || identity.revision == "unknown" {
+	if identityErr != nil || identity.Dirty || identity.Revision == "unknown" {
 		log.Warn("dirty or unknown implementation revision accepted for local smoke only; observations are NOT formal metrics",
-			zap.String("revision", identity.revision), zap.Bool("dirty", identity.dirty))
+			zap.String("revision", identity.Revision), zap.Bool("dirty", identity.Dirty))
 	}
 	// 指纹基于写回后的最终 Profile 计算，保证记录的指纹与实际模型调用配置一致。
 	modelProfileFingerprint, fingerprintErr := profile.PromptProfileFingerprint(cfg.Models.Chat.ActiveProfileName)
@@ -599,7 +598,7 @@ func observationFromResult(
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
 	toolSchemaFingerprint string,
-	identity implementationIdentity,
+	identity evaluationidentity.Identity,
 	modelProfileFingerprint string,
 ) mesagent.EvaluationObservation {
 	profile, _ := cfg.Models.Chat.ActiveProfile()
@@ -633,8 +632,8 @@ func observationFromResult(
 		ToolProfileID:            toolProfileID,
 		ToolSchemaFingerprint:    toolSchemaFingerprint,
 		ModelProfileFingerprint:  modelProfileFingerprint,
-		ImplementationRevision:   identity.revision,
-		ImplementationDirty:      identity.dirty,
+		ImplementationRevision:   identity.Revision,
+		ImplementationDirty:      identity.Dirty,
 		SelectedSkill:            result.SelectedSkill,
 		ActualToolCalls:          actualTools,
 		AllowedTools:             result.AllowedTools,
@@ -646,96 +645,6 @@ func observationFromResult(
 		DurationMillis:           duration.Milliseconds(),
 		ErrorType:                result.StopReason,
 	}
-}
-
-// implementationIdentity 记录评测运行时的实现身份：revision 来自 vcs 元数据
-// （build info 的 vcs.revision 优先，git 兜底），dirty 表示工作树有未提交
-// 修改。dirty/unknown 的观测只能用于本地 smoke，不是正式指标。
-type implementationIdentity struct {
-	revision string
-	dirty    bool
-}
-
-const (
-	gitRevParseTimeout = 10 * time.Second
-	gitStatusTimeout   = 10 * time.Second
-)
-
-// git 命令执行 seam：评测命令默认走真实 git；测试替换为桩函数，避免依赖
-// 真实 git 工作树状态或故障注入。
-var (
-	gitRevParseShortHead = func(ctx context.Context) (string, error) {
-		output, err := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
-		return string(output), err
-	}
-	gitStatusPorcelain = func(ctx context.Context) (string, error) {
-		output, err := exec.CommandContext(ctx, "git", "status", "--porcelain").Output()
-		return string(output), err
-	}
-)
-
-// resolveImplementationIdentity fail-closed 地解析实现身份：优先读取 Go
-// build info 的 VCS 元数据，且必须同时确认 revision 与 modified 状态；
-// BuildInfo 缺失或不完整时回退到带独立超时的 git 命令。git status 失败时
-// 不能默认 clean——无法确认工作树状态一律返回 error，且 identity 保留
-// gitFallbackIdentity 已经取得的已知 revision + dirty=true，不得覆盖成
-// unknown。
-func resolveImplementationIdentity() (implementationIdentity, error) {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		var revision, modified string
-		for _, setting := range info.Settings {
-			switch setting.Key {
-			case "vcs.revision":
-				revision = setting.Value
-			case "vcs.modified":
-				modified = setting.Value
-			}
-		}
-		if revision != "" && modified != "" {
-			return implementationIdentity{revision: revision, dirty: modified == "true"}, nil
-		}
-	}
-	identity, err := gitFallbackIdentity()
-	if err != nil {
-		return identity, err
-	}
-	return identity, nil
-}
-
-func gitFallbackIdentity() (implementationIdentity, error) {
-	revCtx, cancelRev := context.WithTimeout(context.Background(), gitRevParseTimeout)
-	defer cancelRev()
-	revisionOutput, err := gitRevParseShortHead(revCtx)
-	if err != nil {
-		return implementationIdentity{revision: "unknown", dirty: true}, fmt.Errorf("git rev-parse failed: %w", err)
-	}
-	revision := strings.TrimSpace(revisionOutput)
-	if revision == "" {
-		return implementationIdentity{revision: "unknown", dirty: true}, errors.New("git rev-parse returned an empty revision")
-	}
-	statusCtx, cancelStatus := context.WithTimeout(context.Background(), gitStatusTimeout)
-	defer cancelStatus()
-	statusOutput, err := gitStatusPorcelain(statusCtx)
-	if err != nil {
-		// git status 失败不能默认 dirty=false：无法确认工作树状态。
-		return implementationIdentity{revision: revision, dirty: true}, fmt.Errorf("git status failed: %w", err)
-	}
-	return implementationIdentity{
-		revision: revision, dirty: len(bytes.TrimSpace([]byte(statusOutput))) > 0,
-	}, nil
-}
-
-// evaluateImplementationIdentity 决定身份是否可用于正式评测。formal 模式
-// 下 dirty/unknown 直接拒绝；-allow-dirty 模式接受并强制记录 dirty=true，
-// 结果仅用于本地 smoke。
-func evaluateImplementationIdentity(identity implementationIdentity, allowDirty bool) (implementationIdentity, error) {
-	if identity.revision == "unknown" || identity.dirty {
-		if !allowDirty {
-			return implementationIdentity{}, errors.New("implementation revision is dirty or unknown; refuse formal evaluation (pass -allow-dirty for local smoke)")
-		}
-		return implementationIdentity{revision: identity.revision, dirty: true}, nil
-	}
-	return identity, nil
 }
 
 func readEvaluationCases(path string) ([]mesagent.EvaluationCase, error) {
