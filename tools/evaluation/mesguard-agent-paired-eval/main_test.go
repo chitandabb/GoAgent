@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +11,58 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	"go.uber.org/zap"
 )
+
+type pairedEvaluationModelStub struct{}
+
+func (pairedEvaluationModelStub) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("ok", nil), nil
+}
+
+func (pairedEvaluationModelStub) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := (pairedEvaluationModelStub{}).Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (pairedEvaluationModelStub) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return pairedEvaluationModelStub{}, nil
+}
+
+func TestBuildPairedEvaluationRunUsesStrictEvidenceReportPolicy(t *testing.T) {
+	cfg := config.Config{Agent: config.AgentConfig{
+		SkillsDirectory: filepath.Join("..", "..", "..", "config", "skills"),
+		MaxAgentRuns:    2, MaxToolCalls: 8, MaxEvidenceItems: 16,
+		MaxTotalTokens: 16000, TimeoutMillis: 60000,
+	}}
+	prompts := config.AgentPrompts{
+		SystemInstruction:         "system",
+		BaselineInstruction:       "baseline",
+		ReportContractInstruction: "report contract",
+	}
+
+	orchestrator, fingerprint, err := buildPairedEvaluationRun(
+		context.Background(), cfg, prompts, pairedEvaluationModelStub{},
+		nil, nil, nil, nil, zap.NewNop(),
+		mesagent.EvaluationExperiment, "tool-selection",
+	)
+	if err != nil {
+		t.Fatalf("buildPairedEvaluationRun: %v", err)
+	}
+	if orchestrator == nil || len(fingerprint) != 64 {
+		t.Fatalf("orchestrator=%v fingerprint=%q", orchestrator, fingerprint)
+	}
+}
 
 func TestNewEvaluationObservationUsesConfiguredPromptVersion(t *testing.T) {
 	observation := observationFromResult(
