@@ -33,8 +33,10 @@ import (
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -74,10 +76,52 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, log *zap.Logger) error {
+	return runWithDependencies(ctx, args, log, defaultPairedEvalDependencies())
+}
+
+// pairedEvalDependencies 是 runWithDependencies 的注入点：离线测试用 stub
+// 替换所有真实 Provider/远端连接工厂，证明两臂可比性 preflight 发生在任何
+// Provider 创建之前（factory.calls == 0）。
+type pairedEvalDependencies struct {
+	loadConfig                func() (config.Config, error)
+	newChatModel              func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+	connectGitHub             func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error)
+	verifyPairedComparability func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error)
+}
+
+// pairedEvaluationAssembly is the exact startup-Epoch assembly accepted by
+// the comparability preflight. Runtime Runners reuse these Catalog and Skill
+// objects and re-check their arm-specific Schema fingerprint before invoking
+// any model, so preflight cannot validate one contract and execute another.
+type pairedEvaluationAssembly struct {
+	skillRuntime                *mesagent.NativeSkillRuntime
+	productionCatalog           *mesagent.ToolCatalog
+	wideCatalog                 *mesagent.ToolCatalog
+	productionSchemaFingerprint string
+	wideSchemaFingerprint       string
+	comparability               mesagent.ToolSelectionComparability
+}
+
+func defaultPairedEvalDependencies() pairedEvalDependencies {
+	return pairedEvalDependencies{
+		loadConfig: config.Load,
+		newChatModel: func(ctx context.Context, models config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+			instance, err := platformchatmodel.NewActive(ctx, models)
+			if err != nil {
+				return nil, err
+			}
+			return instance.Model, nil
+		},
+		connectGitHub:             githubmcp.Connect,
+		verifyPairedComparability: mesagent.VerifyToolSelectionComparability,
+	}
+}
+
+func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, deps pairedEvalDependencies) error {
 	flags := flag.NewFlagSet("mesguard-agent-paired-eval", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	datasetPath := flags.String("dataset", "testdata/agent-evaluation.real-v1.jsonl", "versioned JSONL evaluation cases")
-	outputPath := flags.String("output", "testdata/agent-evaluation.real-v1.observations.jsonl", "output JSONL observations")
+	outputPath := flags.String("output", "testdata/agent-evaluation.real-v3.observations.jsonl", "output JSONL observations")
 	reasoningEffort := flags.String("reasoning-effort", "", "provider-supported effort; defaults to config")
 	maxTotalTokens := flags.Int("max-total-tokens", 0, "override the Evidence Gate total token budget; defaults to config")
 	comparison := flags.String("comparison", "tool-selection", "paired variable: tool-selection or evidence-gate")
@@ -100,7 +144,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("read evaluation dataset: %w", err)
 	}
-	cfg, err := config.Load()
+	cfg, err := deps.loadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -167,12 +211,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return fmt.Errorf("load Agent prompts: %w", err)
 	}
 
-	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
-	if err != nil {
-		return fmt.Errorf("build chat model: %w", err)
-	}
-	chatModel := instance.Model
-	githubConnection, err := githubmcp.Connect(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
+	githubConnection, err := deps.connectGitHub(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
 	}
@@ -239,6 +278,23 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		}
 	}
 
+	// 两臂可比性 preflight 必须在创建任何收费 Provider 之前完成：production
+	// （diagnosis-default）与 baseline（evaluation-wide-v2）经过同一个真实
+	// Eino Skill Middleware，VerifyToolSelectionComparability 校验共享 Schema
+	// 一致性与严格超集；不一致直接 fail-closed，不发起任何模型调用。
+	assembly, err := verifyPairedArmsComparability(
+		ctx, cfg, githubConnection.Tools, sqlObjectDefinition, schemaCatalog, readonlyQuery,
+		deps.verifyPairedComparability,
+	)
+	if err != nil {
+		return fmt.Errorf("paired arms comparability preflight: %w", err)
+	}
+
+	chatModel, err := deps.newChatModel(ctx, cfg.Models.Chat)
+	if err != nil {
+		return fmt.Errorf("build chat model: %w", err)
+	}
+
 	var output *os.File
 	if *comparison == "evidence-gate" {
 		output, err = os.OpenFile(*outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -268,8 +324,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 				return err
 			}
 			orchestrator, toolSchemaFingerprint, buildErr := buildPairedEvaluationRun(
-				ctx, cfg, prompts, chatModel, githubConnection.Tools, sqlObjectDefinition,
-				schemaCatalog, readonlyQuery, log, variant, *comparison,
+				ctx, cfg, prompts, chatModel, log, variant, *comparison, assembly,
 			)
 			if buildErr != nil {
 				return fmt.Errorf("build %s run for case %q: %w", variant, definition.CaseID, buildErr)
@@ -311,7 +366,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			} else {
 				observation := observationFromResult(
 					definition, variant, cfg, result, duration, toolSchemaFingerprint,
-					identity, modelProfileFingerprint,
+					assembly.comparability, identity, modelProfileFingerprint,
 				)
 				if err := observation.Validate(); err != nil {
 					return fmt.Errorf("validate %s observation for case %q: %w", variant, definition.CaseID, err)
@@ -335,59 +390,32 @@ func buildPairedEvaluationRun(
 	cfg config.Config,
 	prompts config.AgentPrompts,
 	chatModel model.ToolCallingChatModel,
-	githubTools []tool.BaseTool,
-	sqlObjectDefinition tool.BaseTool,
-	schemaCatalog tool.BaseTool,
-	readonlyQuery tool.BaseTool,
 	log *zap.Logger,
 	variant mesagent.EvaluationVariant,
 	comparison string,
+	assembly pairedEvaluationAssembly,
 ) (*mesagent.EvidenceOrchestrator, string, error) {
-	var runner *mesagent.Runner
+	catalog := assembly.productionCatalog
+	mode := mesagent.RunnerModeExperiment
+	expectedSchemaFingerprint := assembly.productionSchemaFingerprint
 	if comparison == "tool-selection" && variant == mesagent.EvaluationBaseline {
-		// wide 臂使用独立 evaluation-wide-v1 固定 Profile（全部实际注册的
-		// 业务 Tool，无 skill/read_skill_reference）。
-		wideCatalog, err := mesagent.NewEvaluationWideDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
-			ExternalCases:        pairedEvalCaseGetter{},
-			GitHubTools:          githubTools,
-			SQLObjectDefinitions: sqlObjectDefinition,
-			SchemaCatalog:        schemaCatalog,
-			ReadonlyQuery:        readonlyQuery,
-		})
-		if err != nil {
-			return nil, "", fmt.Errorf("build wide evaluation Tool catalog: %w", err)
-		}
-		skillRuntime, err := mesagent.NewNativeSkillRuntime(ctx, cfg.Agent.SkillsDirectory)
-		if err != nil {
-			return nil, "", fmt.Errorf("build native Skill runtime: %w", err)
-		}
-		runner, err = mesagent.NewRunner(mesagent.RunnerConfig{
-			ChatModel: chatModel, ToolCatalog: wideCatalog, SkillRuntime: skillRuntime,
-			SystemInstruction:     prompts.SystemInstruction,
-			BaselineInstruction:   prompts.BaselineInstruction,
-			Mode:                  mesagent.RunnerModeBaseline,
-			GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
-			Logger:                log.Named(string(variant)),
-		})
-		if err != nil {
-			return nil, "", fmt.Errorf("build wide baseline Runner: %w", err)
-		}
-	} else {
-		var err error
-		runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
-			ChatModel: chatModel, ExternalCases: pairedEvalCaseGetter{},
-			SkillRoot:           cfg.Agent.SkillsDirectory,
-			SystemInstruction:   prompts.SystemInstruction,
-			BaselineInstruction: prompts.BaselineInstruction,
-			Mode:                mesagent.RunnerModeExperiment,
-			GitHubTools:         githubTools, GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
-			SQLObjectDefinitions: sqlObjectDefinition,
-			SchemaCatalog:        schemaCatalog, ReadonlyQuery: readonlyQuery,
-			Logger: log.Named(string(variant)),
-		})
-		if err != nil {
-			return nil, "", fmt.Errorf("build Agent runner: %w", err)
-		}
+		catalog = assembly.wideCatalog
+		mode = mesagent.RunnerModeBaseline
+		expectedSchemaFingerprint = assembly.wideSchemaFingerprint
+	}
+	if catalog == nil || assembly.skillRuntime == nil || expectedSchemaFingerprint == "" {
+		return nil, "", errors.New("paired evaluation preflight assembly is incomplete")
+	}
+	runner, err := mesagent.NewRunner(mesagent.RunnerConfig{
+		ChatModel: chatModel, ToolCatalog: catalog, SkillRuntime: assembly.skillRuntime,
+		SystemInstruction:     prompts.SystemInstruction,
+		BaselineInstruction:   prompts.BaselineInstruction,
+		Mode:                  mode,
+		GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
+		Logger:                log.Named(string(variant)),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("build %s Agent runner: %w", variant, err)
 	}
 	// toolSchemaFingerprint 是实验臂特有合同：由本 Runner 绑定 Profile 的
 	// 模型可见 Tool Schema 规范指纹（启动 Epoch 内固定），同 variant 跨样本
@@ -395,6 +423,12 @@ func buildPairedEvaluationRun(
 	toolSchemaFingerprint, fingerprintErr := runner.ProfileToolSchemaFingerprint(ctx)
 	if fingerprintErr != nil {
 		return nil, "", fmt.Errorf("compute %s Tool Schema fingerprint: %w", variant, fingerprintErr)
+	}
+	if toolSchemaFingerprint != expectedSchemaFingerprint {
+		return nil, "", fmt.Errorf(
+			"%s runtime Tool Schema fingerprint %q differs from preflight Tool Schema %q",
+			variant, toolSchemaFingerprint, expectedSchemaFingerprint,
+		)
 	}
 	orchestrator, err := mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runner, Logger: log.Named("evidence_" + string(variant)),
@@ -409,6 +443,138 @@ func buildPairedEvaluationRun(
 		return nil, "", fmt.Errorf("build Evidence orchestrator: %w", err)
 	}
 	return orchestrator, toolSchemaFingerprint, nil
+}
+
+// pairedArmToolInfos 把一臂装配成最终模型可见的 ToolInfo 列表：与 Runner
+// 相同的真实装配链（ToolAuthorizationMiddleware -> Eino Skill Middleware），
+// 不伪造任何 Schema。
+func pairedArmToolInfos(
+	ctx context.Context,
+	authorization *mesagent.ToolAuthorizationMiddleware,
+	skillMiddleware adk.ChatModelAgentMiddleware,
+	access agentruntime.RunAccess,
+) ([]*schema.ToolInfo, string, error) {
+	_, authorizedCtx, authErr := authorization.BeforeAgent(
+		agentruntime.WithRunAccess(ctx, access),
+		&adk.ChatModelAgentContext{Tools: nil},
+	)
+	if authErr != nil {
+		return nil, "", fmt.Errorf("assemble Tool schema: %w", authErr)
+	}
+	_, finalCtx, skillErr := skillMiddleware.BeforeAgent(
+		agentruntime.WithRunAccess(ctx, access),
+		authorizedCtx,
+	)
+	if skillErr != nil {
+		return nil, "", fmt.Errorf("append skill Tool: %w", skillErr)
+	}
+	fingerprint, fingerprintErr := mesagent.CanonicalToolContractFingerprint(ctx, finalCtx.Tools)
+	if fingerprintErr != nil {
+		return nil, "", fmt.Errorf("fingerprint final Tool schema: %w", fingerprintErr)
+	}
+	infos := make([]*schema.ToolInfo, 0, len(finalCtx.Tools))
+	for _, current := range finalCtx.Tools {
+		info, infoErr := current.Info(ctx)
+		if infoErr != nil {
+			return nil, "", infoErr
+		}
+		infos = append(infos, info)
+	}
+	return infos, fingerprint, nil
+}
+
+// pairedPreflightRunAccess 构造 preflight 装配用的最小合法诊断 RunAccess：
+// 装配层只校验 RunAccess 存在与 Profile 匹配，preflight 不执行任何 Tool。
+func pairedPreflightRunAccess() (agentruntime.RunAccess, error) {
+	permissions, err := agentruntime.NewPermissionSet(agentruntime.PermissionCaseRead)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{pairedEvalCaseID},
+	})
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissions, grants)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	return agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst},
+		agentruntime.AccessCeiling{Permissions: permissions, Grants: grants},
+	)
+}
+
+// verifyPairedArmsComparability 在创建任何收费 Provider 之前装配两臂并执行
+// 可比性 preflight：production（diagnosis-default）与 baseline
+// （evaluation-wide-v2）使用同一个真实 Eino Skill Middleware 与同一组注册
+// Tool；VerifyToolSelectionComparability 校验名字集合、共享 Schema 与严格
+// 超集，任何漂移直接 fail-closed。
+func verifyPairedArmsComparability(
+	ctx context.Context,
+	cfg config.Config,
+	githubTools []tool.BaseTool,
+	sqlObjectDefinition, schemaCatalog, readonlyQuery tool.BaseTool,
+	verify func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error),
+) (pairedEvaluationAssembly, error) {
+	skillRuntime, err := mesagent.NewNativeSkillRuntime(ctx, cfg.Agent.SkillsDirectory)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("build native Skill runtime: %w", err)
+	}
+	dependencies := mesagent.DefaultToolCatalogDependencies{
+		ExternalCases:        pairedEvalCaseGetter{},
+		SkillReference:       skillRuntime.ReferenceTool,
+		GitHubTools:          githubTools,
+		SQLObjectDefinitions: sqlObjectDefinition,
+		SchemaCatalog:        schemaCatalog,
+		ReadonlyQuery:        readonlyQuery,
+	}
+	productionCatalog, err := mesagent.NewDiagnosisDefaultToolCatalog(ctx, dependencies)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("build production Tool catalog: %w", err)
+	}
+	wideCatalog, err := mesagent.NewEvaluationWideDefaultToolCatalog(ctx, dependencies)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("build wide Tool catalog: %w", err)
+	}
+	productionAuthorization, err := mesagent.NewToolAuthorizationMiddleware(productionCatalog, agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("build production Tool authorization middleware: %w", err)
+	}
+	wideAuthorization, err := mesagent.NewToolAuthorizationMiddleware(wideCatalog, agentruntime.ToolProfileEvaluationWide)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("build wide Tool authorization middleware: %w", err)
+	}
+	access, err := pairedPreflightRunAccess()
+	if err != nil {
+		return pairedEvaluationAssembly{}, err
+	}
+	productionInfos, productionFingerprint, err := pairedArmToolInfos(
+		ctx, productionAuthorization, skillRuntime.Middleware, access,
+	)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("assemble production arm: %w", err)
+	}
+	wideInfos, wideFingerprint, err := pairedArmToolInfos(
+		ctx, wideAuthorization, skillRuntime.Middleware, access,
+	)
+	if err != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("assemble wide arm: %w", err)
+	}
+	comparability, err := verify(productionInfos, wideInfos)
+	if err != nil {
+		return pairedEvaluationAssembly{}, err
+	}
+	return pairedEvaluationAssembly{
+		skillRuntime:                skillRuntime,
+		productionCatalog:           productionCatalog,
+		wideCatalog:                 wideCatalog,
+		productionSchemaFingerprint: productionFingerprint,
+		wideSchemaFingerprint:       wideFingerprint,
+		comparability:               comparability,
+	}, nil
 }
 
 type evidenceGateProviderBudget struct {
@@ -598,6 +764,7 @@ func observationFromResult(
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
 	toolSchemaFingerprint string,
+	comparability mesagent.ToolSelectionComparability,
 	identity evaluationidentity.Identity,
 	modelProfileFingerprint string,
 ) mesagent.EvaluationObservation {
@@ -613,7 +780,7 @@ func observationFromResult(
 			evidence = append(evidence, value)
 		}
 	}
-	// ToolProfileID 是实验臂特有合同：baseline 固定 evaluation-wide-v1（评测
+	// ToolProfileID 是实验臂特有合同：baseline 固定 evaluation-wide-v2（评测
 	// wide 合同），experiment 固定生产 diagnosis-default。
 	toolProfileID := string(agentruntime.ToolProfileDiagnosis)
 	if variant == mesagent.EvaluationBaseline {
@@ -624,7 +791,7 @@ func observationFromResult(
 		CaseID:                   definition.CaseID,
 		Variant:                  variant,
 		RunID:                    fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		ObservationSchemaVersion: mesagent.EvaluationObservationV2,
+		ObservationSchemaVersion: mesagent.EvaluationObservationV3,
 		Model:                    profile.Provider,
 		ModelVersion:             profile.Model,
 		ReasoningEffort:          profile.ReasoningEffort,
@@ -634,6 +801,9 @@ func observationFromResult(
 		ModelProfileFingerprint:  modelProfileFingerprint,
 		ImplementationRevision:   identity.Revision,
 		ImplementationDirty:      identity.Dirty,
+		ComparisonFingerprint:    comparability.ComparisonFingerprint,
+		SharedToolNames:          append([]string(nil), comparability.SharedToolNames...),
+		BaselineOnlyToolNames:    append([]string(nil), comparability.BaselineOnlyToolNames...),
 		SelectedSkill:            result.SelectedSkill,
 		ActualToolCalls:          actualTools,
 		AllowedTools:             result.AllowedTools,

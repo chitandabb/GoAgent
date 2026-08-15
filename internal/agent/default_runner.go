@@ -125,9 +125,11 @@ func NewDiagnosisDefaultToolCatalog(ctx context.Context, dependencies DefaultToo
 	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileDiagnosis)
 }
 
-// NewEvaluationWideDefaultToolCatalog 构造绑定 evaluation-wide-v1 宽 Profile
-// 的评测 Catalog，只供评测 wide 臂使用。它包含全部实际注册的业务 Tool，
-// 不含 skill/read_skill_reference（wide 臂不使用 Skill 渐进式读取）。
+// NewEvaluationWideDefaultToolCatalog 构造绑定 evaluation-wide-v2 宽 Profile
+// 的评测 Catalog，只供评测 wide 臂使用。evaluation-wide-v2 是
+// conversation-default 与 diagnosis-default 的并集：包含全部实际注册的
+// 业务 Tool、Middleware-owned skill（SkillReference 配置存在时）与
+// read_skill_reference；wide 臂与 production 臂使用同一个 Skill Middleware。
 func NewEvaluationWideDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
 	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileEvaluationWide)
 }

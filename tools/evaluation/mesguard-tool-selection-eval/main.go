@@ -1,4 +1,4 @@
-// Command mesguard-tool-selection-eval 对相同业务请求执行单轮宽/过滤 Tool Schema 配对评测。
+// Command mesguard-tool-selection-eval 对相同业务请求执行单轮 wide/production Tool Schema 配对评测。
 // 每次模型调用只允许选择一个下一步只读 Tool，不执行 Tool，也不进入完整 Agent 循环。
 package main
 
@@ -44,6 +44,9 @@ import (
 const (
 	toolSelectionPromptVersion = "tool-selection-v4"
 	toolSelectionMaxTokens     = 1024
+	// v3 输出资产默认名：新合同生成新资产，不覆盖 v1/v2 历史观测与汇总。
+	toolSelectionObservationsOutput = "testdata/tool-selection-v3.observations.jsonl"
+	toolSelectionSummaryOutput      = "testdata/tool-selection-v3.summary.json"
 )
 
 var (
@@ -66,11 +69,40 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, log *zap.Logger) error {
+	return runWithDependencies(ctx, args, log, defaultSelectionEvalDependencies())
+}
+
+// selectionEvalDependencies 是 runWithDependencies 的注入点：离线测试用 stub
+// 替换所有真实 Provider/远端连接工厂，证明 fail-closed 校验发生在任何
+// Provider 创建之前（factory.calls == 0）。
+type selectionEvalDependencies struct {
+	loadConfig                   func() (config.Config, error)
+	newChatModel                 func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+	connectGitHub                func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error)
+	verifySelectionComparability func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error)
+}
+
+func defaultSelectionEvalDependencies() selectionEvalDependencies {
+	return selectionEvalDependencies{
+		loadConfig: config.Load,
+		newChatModel: func(ctx context.Context, models config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+			instance, err := platformchatmodel.NewActive(ctx, models)
+			if err != nil {
+				return nil, err
+			}
+			return instance.Model, nil
+		},
+		connectGitHub:                githubmcp.Connect,
+		verifySelectionComparability: mesagent.VerifyToolSelectionComparability,
+	}
+}
+
+func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, deps selectionEvalDependencies) error {
 	flags := flag.NewFlagSet("mesguard-tool-selection-eval", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	datasetPath := flags.String("dataset", "testdata/tool-selection-v1.jsonl", "versioned JSONL cases")
-	outputPath := flags.String("output", "testdata/tool-selection-v1.observations.jsonl", "observation JSONL output")
-	summaryPath := flags.String("summary", "testdata/tool-selection-v1.summary.json", "summary JSON output")
+	outputPath := flags.String("output", toolSelectionObservationsOutput, "observation JSONL output")
+	summaryPath := flags.String("summary", toolSelectionSummaryOutput, "summary JSON output")
 	concurrency := flags.Int("concurrency", 4, "parallel cases; each case keeps paired variants sequential")
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
@@ -83,7 +115,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("read tool selection dataset: %w", err)
 	}
-	cfg, err := config.Load()
+	cfg, err := deps.loadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -105,18 +137,13 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			zap.String("revision", identity.Revision), zap.Bool("dirty", identity.Dirty))
 	}
 	// 工具选择评测固定低推理强度：先完成全部 Profile 变换，写回配置，再基于
-	// 最终 Profile 计算 PromptProfileFingerprint，最后创建 Provider。指纹与
-	// 实际模型调用配置必须完全一致。
+	// 最终 Profile 计算 PromptProfileFingerprint。指纹与实际模型调用配置必须
+	// 完全一致。
 	modelProfile, modelProfileFingerprint, err := prepareToolSelectionModelProfile(cfg.Models.Chat)
 	if err != nil {
 		return err
 	}
-	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
-	if err != nil {
-		return fmt.Errorf("build chat model: %w", err)
-	}
-	chatModel := instance.Model
-	githubConnection, err := githubmcp.Connect(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
+	githubConnection, err := deps.connectGitHub(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
 	}
@@ -125,20 +152,17 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("build native Skill runtime: %w", err)
 	}
-	catalog, wideCatalog, err := buildSelectionCatalogs(ctx, githubConnection.Tools, skillRuntime)
+	// 两臂装配与可比性 preflight 必须在创建任何收费 Provider 之前完成：
+	// 生产臂（diagnosis-default）与 wide 臂（evaluation-wide-v2）经过同一个
+	// Eino Skill Middleware，VerifyToolSelectionComparability 校验共享 Schema
+	// 一致性与严格超集；不一致直接 fail-closed，不发起任何模型调用。
+	assembly, err := assembleSelectionEval(ctx, githubConnection.Tools, skillRuntime, deps.verifySelectionComparability)
 	if err != nil {
 		return err
 	}
-	// 与生产 Diagnosis Runner 相同的装配入口：固定 diagnosis-default Profile
-	// 由 Middleware 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加
-	// 真实 skill Tool。wide 臂使用独立 evaluation-wide-v1 Profile。
-	authorization, err := mesagent.NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
+	chatModel, err := deps.newChatModel(ctx, cfg.Models.Chat)
 	if err != nil {
-		return fmt.Errorf("build Tool authorization middleware: %w", err)
-	}
-	wideAuthorization, err := mesagent.NewToolAuthorizationMiddleware(wideCatalog, agentruntime.ToolProfileEvaluationWide)
-	if err != nil {
-		return fmt.Errorf("build wide Tool authorization middleware: %w", err)
+		return fmt.Errorf("build chat model: %w", err)
 	}
 
 	outputTempPath := *outputPath + ".tmp-" + uuid.NewString()
@@ -174,15 +198,14 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 					results <- caseResult{err: fmt.Errorf("measure case %q base prompt: %w", current.definition.CaseID, baseErr)}
 					continue
 				}
-				variants := []mesagent.ToolSelectionVariant{mesagent.ToolSelectionWide, mesagent.ToolSelectionFiltered}
+				variants := []mesagent.ToolSelectionVariant{mesagent.ToolSelectionWide, mesagent.ToolSelectionProduction}
 				if current.index%2 == 1 {
 					variants[0], variants[1] = variants[1], variants[0]
 				}
 				currentResult := caseResult{observations: make([]mesagent.ToolSelectionObservation, 0, 2)}
 				for _, variant := range variants {
 					observation, observeErr := observeToolSelection(
-						evalCtx, chatModel, wideCatalog, authorization, wideAuthorization,
-						skillRuntime.Middleware,
+						evalCtx, chatModel, assembly,
 						current.definition, variant, basePromptTokens, identity,
 						modelProfileFingerprint, modelProfile,
 					)
@@ -278,10 +301,7 @@ func replaceEvaluationFile(source, target string) error {
 func observeToolSelection(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
-	wideCatalog *mesagent.ToolCatalog,
-	authorization *mesagent.ToolAuthorizationMiddleware,
-	wideAuthorization *mesagent.ToolAuthorizationMiddleware,
-	skillMiddleware adk.ChatModelAgentMiddleware,
+	assembly *selectionEvalAssembly,
 	definition mesagent.ToolSelectionCase,
 	variant mesagent.ToolSelectionVariant,
 	basePromptTokens int,
@@ -289,62 +309,44 @@ func observeToolSelection(
 	modelProfileFingerprint string,
 	modelProfile config.ChatModelProfileConfig,
 ) (mesagent.ToolSelectionObservation, error) {
-	var available []tool.BaseTool
-	var toolProfileID string
-	var modelVisibleNames []string
-	if variant == mesagent.ToolSelectionWide {
-		// wide baseline 使用独立 evaluation-wide-v1 固定 Profile：全部实际
-		// 注册的业务 Tool（无 skill/read_skill_reference），不得伪装成
-		// diagnosis-default。它不再依赖 ToolsFor(TaskScope)。
-		// wide 臂不使用 Skill 中间件，直接以 Profile 名单作为最终 Schema。
-		accessCtx, err := withSelectionRunAccess(ctx)
-		if err != nil {
-			return mesagent.ToolSelectionObservation{}, err
-		}
-		_, authorizedCtx, authErr := wideAuthorization.BeforeAgent(
-			accessCtx, &adk.ChatModelAgentContext{Tools: nil},
-		)
-		if authErr != nil {
-			return mesagent.ToolSelectionObservation{}, fmt.Errorf("assemble wide Tool schema: %w", authErr)
-		}
-		available = authorizedCtx.Tools
-		names, namesErr := mesagent.ToolNamesFromTools(ctx, available)
-		if namesErr != nil {
-			return mesagent.ToolSelectionObservation{}, namesErr
-		}
-		modelVisibleNames = names
-		toolProfileID = string(agentruntime.ToolProfileEvaluationWide)
-	} else {
-		// experiment 基于固定 diagnosis-default Profile，并使用与生产
-		// Diagnosis Runner 相同的最终 Schema 装配：ToolAuthorizationMiddleware
-		// 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加真实 skill。
-		// ModelVisibleNames、AvailableTools 与 ToolSchemaHash 都描述同一份
-		// 真正传给模型的 Schema。
-		accessCtx, err := withSelectionRunAccess(ctx)
-		if err != nil {
-			return mesagent.ToolSelectionObservation{}, err
-		}
-		_, authorizedCtx, authErr := authorization.BeforeAgent(
-			accessCtx, &adk.ChatModelAgentContext{Tools: nil},
-		)
-		if authErr != nil {
-			return mesagent.ToolSelectionObservation{}, fmt.Errorf("assemble production Tool schema: %w", authErr)
-		}
-		_, finalCtx, skillErr := skillMiddleware.BeforeAgent(accessCtx, authorizedCtx)
-		if skillErr != nil {
-			return mesagent.ToolSelectionObservation{}, fmt.Errorf("append production skill Tool: %w", skillErr)
-		}
-		available = finalCtx.Tools
-		names, namesErr := mesagent.ToolNamesFromTools(ctx, available)
-		if namesErr != nil {
-			return mesagent.ToolSelectionObservation{}, namesErr
-		}
-		modelVisibleNames = names
-		toolProfileID = string(agentruntime.ToolProfileDiagnosis)
+	accessCtx, err := withSelectionRunAccess(ctx)
+	if err != nil {
+		return mesagent.ToolSelectionObservation{}, err
 	}
+	// 两臂使用同一个真实 Eino Skill Middleware：wide 臂（evaluation-wide-v2
+	// 并集 Profile）与 production 臂（diagnosis-default）经过完全相同的装配
+	// 链（ToolAuthorizationMiddleware -> Skill Middleware），最终模型 Schema
+	// 的共享 Tool 完全一致。preflight 已证明这一点。
+	authorization := assembly.productionAuthorization
+	toolProfileID := string(agentruntime.ToolProfileDiagnosis)
+	if variant == mesagent.ToolSelectionWide {
+		authorization = assembly.wideAuthorization
+		toolProfileID = string(agentruntime.ToolProfileEvaluationWide)
+	}
+	_, authorizedCtx, authErr := authorization.BeforeAgent(
+		accessCtx, &adk.ChatModelAgentContext{Tools: nil},
+	)
+	if authErr != nil {
+		return mesagent.ToolSelectionObservation{}, fmt.Errorf("assemble %s Tool schema: %w", variant, authErr)
+	}
+	_, finalCtx, skillErr := assembly.skillMiddleware.BeforeAgent(accessCtx, authorizedCtx)
+	if skillErr != nil {
+		return mesagent.ToolSelectionObservation{}, fmt.Errorf("append %s skill Tool: %w", variant, skillErr)
+	}
+	available := finalCtx.Tools
 	infos, names, schemaHash, schemaBytes, err := selectionToolSchemas(ctx, available)
 	if err != nil {
 		return mesagent.ToolSelectionObservation{}, err
+	}
+	expectedSchemaHash := assembly.productionSchemaHash
+	if variant == mesagent.ToolSelectionWide {
+		expectedSchemaHash = assembly.wideSchemaHash
+	}
+	if schemaHash != expectedSchemaHash {
+		return mesagent.ToolSelectionObservation{}, fmt.Errorf(
+			"%s runtime Tool Schema hash %q differs from preflight Tool Schema %q",
+			variant, schemaHash, expectedSchemaHash,
+		)
 	}
 	bound, err := chatModel.WithTools(infos)
 	if err != nil {
@@ -356,14 +358,17 @@ func observeToolSelection(
 	observation := mesagent.ToolSelectionObservation{
 		DatasetVersion: definition.DatasetVersion, CaseID: definition.CaseID, Variant: variant,
 		RunID:                    fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		ObservationSchemaVersion: mesagent.ToolSelectionObservationV2,
+		ObservationSchemaVersion: mesagent.ToolSelectionObservationV3,
 		ModelProvider:            modelProfile.Provider, ModelID: modelProfile.Model,
 		ReasoningEffort: modelProfile.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
 		MaxOutputTokens: toolSelectionMaxTokens,
-		ToolProfileID:   toolProfileID, ModelVisibleNames: modelVisibleNames,
+		ToolProfileID:   toolProfileID, ModelVisibleNames: names,
 		ModelProfileFingerprint: modelProfileFingerprint,
 		ImplementationRevision:  identity.Revision, ImplementationDirty: identity.Dirty,
-		AvailableTools: names, ToolSchemaHash: schemaHash, ToolSchemaBytes: schemaBytes,
+		ComparisonFingerprint: assembly.comparability.ComparisonFingerprint,
+		SharedToolNames:       assembly.comparability.SharedToolNames,
+		BaselineOnlyToolNames: assembly.comparability.BaselineOnlyToolNames,
+		AvailableTools:        names, ToolSchemaHash: schemaHash, ToolSchemaBytes: schemaBytes,
 		DurationMillis: time.Since(startedAt).Milliseconds(),
 	}
 	if generateErr != nil {
@@ -464,6 +469,12 @@ func selectionToolSchemas(
 		}
 		infos = append(infos, info)
 	}
+	return selectionToolInfoMetadata(infos)
+}
+
+func selectionToolInfoMetadata(
+	infos []*schema.ToolInfo,
+) ([]*schema.ToolInfo, []string, string, int, error) {
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 	names := make([]string, 0, len(infos))
 	for _, info := range infos {
@@ -534,7 +545,7 @@ func buildSelectionCatalogs(
 		GitHubTools:          githubTools,
 		SQLObjectDefinitions: objectDefinition, SchemaCatalog: catalogSearch, ReadonlyQuery: readonlyQuery,
 	}
-	filtered, err := mesagent.NewDiagnosisDefaultToolCatalog(ctx, dependencies)
+	production, err := mesagent.NewDiagnosisDefaultToolCatalog(ctx, dependencies)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -542,7 +553,103 @@ func buildSelectionCatalogs(
 	if err != nil {
 		return nil, nil, err
 	}
-	return filtered, wide, nil
+	return production, wide, nil
+}
+
+// selectionEvalAssembly 是两臂的完整装配件：Catalog、Authorization
+// Middleware、共享 Skill Middleware 与 preflight 得到的 comparison 身份。
+type selectionEvalAssembly struct {
+	productionCatalog       *mesagent.ToolCatalog
+	wideCatalog             *mesagent.ToolCatalog
+	productionAuthorization *mesagent.ToolAuthorizationMiddleware
+	wideAuthorization       *mesagent.ToolAuthorizationMiddleware
+	skillMiddleware         adk.ChatModelAgentMiddleware
+	productionSchemaHash    string
+	wideSchemaHash          string
+	comparability           mesagent.ToolSelectionComparability
+}
+
+// selectionArmTools 把一臂装配成最终模型可见的 ToolInfo 列表：与生产
+// Diagnosis Runner 相同的真实装配链（ToolAuthorizationMiddleware ->
+// Eino Skill Middleware），不伪造任何 Schema。
+func selectionArmTools(
+	ctx context.Context,
+	authorization *mesagent.ToolAuthorizationMiddleware,
+	skillMiddleware adk.ChatModelAgentMiddleware,
+) ([]*schema.ToolInfo, string, error) {
+	accessCtx, err := withSelectionRunAccess(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	_, authorizedCtx, authErr := authorization.BeforeAgent(
+		accessCtx, &adk.ChatModelAgentContext{Tools: nil},
+	)
+	if authErr != nil {
+		return nil, "", fmt.Errorf("assemble Tool schema: %w", authErr)
+	}
+	_, finalCtx, skillErr := skillMiddleware.BeforeAgent(accessCtx, authorizedCtx)
+	if skillErr != nil {
+		return nil, "", fmt.Errorf("append skill Tool: %w", skillErr)
+	}
+	infos := make([]*schema.ToolInfo, 0, len(finalCtx.Tools))
+	for _, current := range finalCtx.Tools {
+		info, infoErr := current.Info(ctx)
+		if infoErr != nil {
+			return nil, "", infoErr
+		}
+		infos = append(infos, info)
+	}
+	metadataInfos, _, schemaHash, _, metadataErr := selectionToolInfoMetadata(infos)
+	if metadataErr != nil {
+		return nil, "", metadataErr
+	}
+	return metadataInfos, schemaHash, nil
+}
+
+// assembleSelectionEval 在创建任何收费 Provider 之前完成两臂装配与可比性
+// preflight：production（diagnosis-default）与 wide（evaluation-wide-v2）
+// 都经过同一个 Skill Middleware；VerifyToolSelectionComparability 校验
+// 名字集合、共享 Schema 与严格超集，任何漂移直接 fail-closed。
+func assembleSelectionEval(
+	ctx context.Context,
+	githubTools []tool.BaseTool,
+	skillRuntime *mesagent.NativeSkillRuntime,
+	verify func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error),
+) (*selectionEvalAssembly, error) {
+	productionCatalog, wideCatalog, err := buildSelectionCatalogs(ctx, githubTools, skillRuntime)
+	if err != nil {
+		return nil, err
+	}
+	productionAuthorization, err := mesagent.NewToolAuthorizationMiddleware(productionCatalog, agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		return nil, fmt.Errorf("build production Tool authorization middleware: %w", err)
+	}
+	wideAuthorization, err := mesagent.NewToolAuthorizationMiddleware(wideCatalog, agentruntime.ToolProfileEvaluationWide)
+	if err != nil {
+		return nil, fmt.Errorf("build wide Tool authorization middleware: %w", err)
+	}
+	productionInfos, productionSchemaHash, err := selectionArmTools(ctx, productionAuthorization, skillRuntime.Middleware)
+	if err != nil {
+		return nil, fmt.Errorf("assemble production arm: %w", err)
+	}
+	wideInfos, wideSchemaHash, err := selectionArmTools(ctx, wideAuthorization, skillRuntime.Middleware)
+	if err != nil {
+		return nil, fmt.Errorf("assemble wide arm: %w", err)
+	}
+	comparability, err := verify(productionInfos, wideInfos)
+	if err != nil {
+		return nil, fmt.Errorf("tool selection comparability preflight: %w", err)
+	}
+	return &selectionEvalAssembly{
+		productionCatalog:       productionCatalog,
+		wideCatalog:             wideCatalog,
+		productionAuthorization: productionAuthorization,
+		wideAuthorization:       wideAuthorization,
+		skillMiddleware:         skillRuntime.Middleware,
+		productionSchemaHash:    productionSchemaHash,
+		wideSchemaHash:          wideSchemaHash,
+		comparability:           comparability,
+	}, nil
 }
 
 // prepareToolSelectionModelProfile 完成评测需要的全部实际模型参数变换后，

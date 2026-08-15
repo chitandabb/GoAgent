@@ -13,10 +13,13 @@ type ToolProfileID string
 const (
 	ToolProfileConversation ToolProfileID = "conversation-default"
 	ToolProfileDiagnosis    ToolProfileID = "diagnosis-default"
-	// ToolProfileEvaluationWide 是评测 wide 臂专用的固定宽 Profile。它不是
-	// 生产授权接口：生产两个 Runner 只绑定 conversation-default 与
-	// diagnosis-default；评测用它与 diagnosis-default 的窄 Schema 配对。
-	ToolProfileEvaluationWide ToolProfileID = "evaluation-wide-v1"
+	// ToolProfileEvaluationWide 是评测 wide 臂专用的固定宽 Profile：同一部署
+	// 配置下 conversation-default ∪ diagnosis-default 的稳定并集。它不是生产
+	// 授权接口：生产两个 Runner 只绑定 conversation-default 与
+	// diagnosis-default；评测用它与 diagnosis-default 的窄 Schema 配对，
+	// 保证 baseline 是 experiment 的严格 Schema 超集（Prompt Token 对照
+	// 变量有效）。
+	ToolProfileEvaluationWide ToolProfileID = "evaluation-wide-v2"
 )
 
 func (id ToolProfileID) Valid() bool {
