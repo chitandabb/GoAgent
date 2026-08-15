@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
@@ -35,6 +36,8 @@ type conversationRunnerModelState struct {
 	createIfAvailable          bool
 	repeatCreate               bool
 	searchKnowledgeIfAvailable bool
+	readAttachmentIfAvailable  bool
+	readTaskStatusIfAvailable  bool
 	omitKnowledgeCitation      bool
 	finalContent               string
 	schemas                    [][]string
@@ -169,10 +172,18 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 
 	hasCreateResult := false
 	hasKnowledgeResult := false
+	hasAttachmentResult := false
+	hasStatusResult := false
 	knowledgeSourceRef := ""
 	for _, message := range input {
 		if message.Role == schema.Tool && message.ToolName == ToolCreateDiagnosisTask {
 			hasCreateResult = true
+		}
+		if message.Role == schema.Tool && message.ToolName == ToolReadAttachment {
+			hasAttachmentResult = true
+		}
+		if message.Role == schema.Tool && message.ToolName == ToolGetDiagnosisTaskStatus {
+			hasStatusResult = true
 		}
 		if message.Role == schema.Tool && message.ToolName == ToolSearchKnowledge {
 			hasKnowledgeResult = true
@@ -183,6 +194,14 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 				knowledgeSourceRef = payload.CitationSources[0].SourceRef
 			}
 		}
+	}
+	if m.state.readAttachmentIfAvailable && slices.Contains(names, ToolReadAttachment) && !hasAttachmentResult {
+		return runnerTestToolCall(ToolReadAttachment,
+			`{"attachmentId":"11111111-1111-1111-1111-111111111111"}`), nil
+	}
+	if m.state.readTaskStatusIfAvailable && slices.Contains(names, ToolGetDiagnosisTaskStatus) && !hasStatusResult {
+		return runnerTestToolCall(ToolGetDiagnosisTaskStatus,
+			`{"taskId":"11111111-1111-1111-1111-111111111111"}`), nil
 	}
 	if m.state.createIfAvailable && slices.Contains(names, ToolCreateDiagnosisTask) &&
 		(!hasCreateResult || m.state.repeatCreate) {
@@ -947,7 +966,7 @@ func TestConversationRunnerGuardsEveryReActModelCallAfterToolGrowth(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
 	})
 	if err != nil {
@@ -1015,7 +1034,7 @@ func TestConversationRunnerProducesOneCorrelatedAgentTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
 	})
 	if err != nil {
@@ -1170,7 +1189,7 @@ func (m *conversationRunnerTestModel) Stream(ctx context.Context, input []*schem
 
 func TestConversationRunnerUsesStreamingOnlyWhenExplicitlyEnabled(t *testing.T) {
 	state := &conversationRunnerModelState{}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{},
 	})
 	if err != nil {
@@ -1218,11 +1237,10 @@ func TestConversationAnswerCacheEligibilityRequiresKnowledgeOnlyToolPath(t *test
 	}
 }
 
-func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) {
+func TestConversationRunnerKeepsStableSchemaAcrossCaseReferences(t *testing.T) {
 	tests := []struct {
 		name       string
 		references []conversation.CaseReference
-		wantCase   bool
 	}{
 		{name: "no selected case"},
 		{
@@ -1230,7 +1248,6 @@ func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) 
 			references: []conversation.CaseReference{{
 				ExternalCaseID: runnerTestCaseID, Kind: conversation.ReferenceKindSelected,
 			}},
-			wantCase: true,
 		},
 		{
 			name: "multiple selected cases",
@@ -1254,23 +1271,25 @@ func TestConversationRunnerOnlyExposesCaseToolsForOneSelectedCase(t *testing.T) 
 			if len(state.schemas) == 0 {
 				t.Fatal("model received no Tool schema snapshot")
 			}
-			if !slices.Contains(state.schemas[0], ToolReadConversationToolResult) {
-				t.Fatalf("bounded Tool result reader is absent from the frozen conversation schema: %v", state.schemas[0])
+			// 固定 Conversation Profile：消息引用变化绝不改变模型可见 Schema。
+			wantStable := []string{
+				ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus,
+				ToolReadConversationToolResult, ToolReadExternalCase,
 			}
-			for _, name := range []string{ToolReadExternalCase, ToolCreateDiagnosisTask} {
-				if got := slices.Contains(state.schemas[0], name); got != test.wantCase {
-					t.Fatalf("Tool %s exposed=%v, want %v; schema=%v", name, got, test.wantCase, state.schemas[0])
-				}
+			slices.Sort(wantStable)
+			got := append([]string(nil), state.schemas[0]...)
+			slices.Sort(got)
+			if !slices.Equal(got, wantStable) {
+				t.Fatalf("conversation schema = %v, want stable %v", state.schemas[0], wantStable)
 			}
 		})
 	}
 }
 
-func TestConversationRunnerOnlyExposesTaskStatusForReferencedTask(t *testing.T) {
+func TestConversationRunnerKeepsStableSchemaForTaskReferences(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		references []conversation.TaskReference
-		want       bool
 	}{
 		{name: "no task reference"},
 		{
@@ -1278,7 +1297,6 @@ func TestConversationRunnerOnlyExposesTaskStatusForReferencedTask(t *testing.T) 
 			references: []conversation.TaskReference{{
 				TaskID: uuid.New(), Kind: conversation.ReferenceKindReferenced,
 			}},
-			want: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1292,10 +1310,33 @@ func TestConversationRunnerOnlyExposesTaskStatusForReferencedTask(t *testing.T) 
 			}
 			state.mu.Lock()
 			defer state.mu.Unlock()
-			if got := slices.Contains(state.schemas[0], ToolGetDiagnosisTaskStatus); got != test.want {
-				t.Fatalf("task status Tool exposed=%v, want %v; schema=%v", got, test.want, state.schemas[0])
+			if !slices.Contains(state.schemas[0], ToolGetDiagnosisTaskStatus) {
+				t.Fatalf("task status Tool must stay visible with the stable profile: %v", state.schemas[0])
 			}
 		})
+	}
+}
+
+func TestConversationRunnerRejectsTaskCreationWithoutCaseReference(t *testing.T) {
+	state := &conversationRunnerModelState{createIfAvailable: true}
+	creator := &diagnosisToolCreatorStub{result: conversation.CreateDiagnosisResult{
+		Task: diagnosis.DiagnosisTask{ID: uuid.New(), Status: diagnosis.TaskPending},
+	}}
+	runner := newConversationRunnerTest(t, state, creator)
+	// 无 selected case：create_diagnosis_task 仍出现在 Schema 中，
+	// 但执行必须被 RunAccess（缺少 diagnosis.create）拒绝。
+	request, ctx := conversationRunnerRequest(nil)
+	_, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("Respond() error = %v, want ErrToolNotAllowed", err)
+	}
+	if creator.calls != 0 {
+		t.Fatalf("creator calls = %d, want 0", creator.calls)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.schemas) == 0 || !slices.Contains(state.schemas[0], ToolCreateDiagnosisTask) {
+		t.Fatalf("create_diagnosis_task missing from stable schema: %v", state.schemas)
 	}
 }
 
@@ -1362,6 +1403,23 @@ func TestConversationRunnerRejectsSecondCreateDiagnosisTaskCall(t *testing.T) {
 	if creator.calls != 1 {
 		t.Fatalf("creator calls = %d, want 1", creator.calls)
 	}
+	// 调用次数耗尽绝不能删除下一轮模型上下文中的 Tool Schema：
+	// 两次模型调用必须看到完全相同的工具名单。
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.schemas) < 2 {
+		t.Fatalf("model calls = %d, want at least 2 schema snapshots", len(state.schemas))
+	}
+	first := append([]string(nil), state.schemas[0]...)
+	slices.Sort(first)
+	second := append([]string(nil), state.schemas[1]...)
+	slices.Sort(second)
+	if !slices.Equal(first, second) {
+		t.Fatalf("Tool schema changed after the run limit was exhausted: %v vs %v", state.schemas[0], state.schemas[1])
+	}
+	if !slices.Contains(second, ToolCreateDiagnosisTask) {
+		t.Fatalf("create_diagnosis_task disappeared after the run limit: %v", state.schemas[1])
+	}
 }
 
 func TestConversationRunnerPersistsOnlyCitedSameRunKnowledgeSource(t *testing.T) {
@@ -1382,7 +1440,7 @@ func TestConversationRunnerPersistsOnlyCitedSameRunKnowledgeSource(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
 	})
 	if err != nil {
@@ -1437,7 +1495,7 @@ func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, KnowledgeSearch: knowledgeTool,
 	})
 	if err != nil {
@@ -1471,7 +1529,7 @@ func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
 }
 
 func TestConversationRunnerRequiresCitationRepairPolicy(t *testing.T) {
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{},
 	})
 	if err != nil {
@@ -1544,12 +1602,12 @@ func newConversationRunnerTestWithPreflight(
 	preflight ConversationContextPreflightConfig,
 ) *ConversationRunner {
 	t.Helper()
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, CreateDiagnosisTask: creator,
 		DiagnosisTaskStatus: &diagnosisTaskStatusReaderStub{},
 	})
 	if err != nil {
-		t.Fatalf("NewDefaultToolCatalog(): %v", err)
+		t.Fatalf("NewConversationDefaultToolCatalog(): %v", err)
 	}
 	runner, err := NewConversationRunner(ConversationRunnerConfig{
 		ChatModel:             &conversationRunnerTestModel{state: state},
@@ -1625,5 +1683,90 @@ func TestConversationMessageReferencePromptIncludesStructuredReportReference(t *
 	})
 	if !strings.Contains(prompt, "report id="+referenceID) || !strings.Contains(prompt, "<message_references>") {
 		t.Fatalf("report reference prompt = %q", prompt)
+	}
+}
+
+func TestConversationRunnerRejectsAttachmentReadWithoutReference(t *testing.T) {
+	state := &conversationRunnerModelState{readAttachmentIfAvailable: true}
+	reader := &attachmentReaderStub{}
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, AttachmentReader: reader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
+		SystemInstruction: "conversation attachment rejection test",
+		ModelProvider:     "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 无附件引用：read_attachment 仍出现在固定 Schema 中，
+	// 但执行必须被 RunAccess（缺少 attachment.read）拒绝，底层 Reader 零调用。
+	request, ctx := conversationRunnerRequest(nil)
+	_, err = runner.Respond(ctx, request)
+	if !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("Respond() error = %v, want ErrToolNotAllowed", err)
+	}
+	if reader.calls != 0 {
+		t.Fatalf("attachment reader calls = %d, want 0", reader.calls)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.schemas) == 0 || !slices.Contains(state.schemas[0], ToolReadAttachment) {
+		t.Fatalf("read_attachment missing from stable schema: %v", state.schemas)
+	}
+}
+
+func TestConversationRunnerRejectsTaskStatusReadWithoutReference(t *testing.T) {
+	state := &conversationRunnerModelState{readTaskStatusIfAvailable: true}
+	statusReader := &diagnosisTaskStatusReaderStub{}
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, DiagnosisTaskStatus: statusReader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
+		SystemInstruction: "conversation task status rejection test",
+		ModelProvider:     "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 无任务引用：get_diagnosis_task_status 仍出现在固定 Schema 中，
+	// 但执行必须被 RunAccess（缺少 task.read）拒绝，底层 Reader 零调用。
+	request, ctx := conversationRunnerRequest(nil)
+	_, err = runner.Respond(ctx, request)
+	if !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("Respond() error = %v, want ErrToolNotAllowed", err)
+	}
+	if statusReader.calls != 0 {
+		t.Fatalf("task status reader calls = %d, want 0", statusReader.calls)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.schemas) == 0 || !slices.Contains(state.schemas[0], ToolGetDiagnosisTaskStatus) {
+		t.Fatalf("get_diagnosis_task_status missing from stable schema: %v", state.schemas)
+	}
+}
+
+func TestNewConversationRunnerRejectsDiagnosisBoundCatalog(t *testing.T) {
+	catalog := mustDiagnosisConfiguredDefaultCatalogForTest(t)
+	// 会话 Runner 只能使用 conversation-default Catalog；传入诊断 Catalog 必须构造失败。
+	_, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: &conversationRunnerTestModel{state: &conversationRunnerModelState{}}, ToolCatalog: catalog,
+		SystemInstruction: "test", ModelProvider: "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+	})
+	if err == nil || !strings.Contains(err.Error(), string(agentruntime.ToolProfileConversation)) {
+		t.Fatalf("NewConversationRunner accepted a diagnosis-bound catalog, error = %v", err)
 	}
 }

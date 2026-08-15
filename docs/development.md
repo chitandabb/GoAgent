@@ -584,9 +584,19 @@ persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release
 platform.
 
-Prompt and Skill text cannot grant capabilities. `TaskScope`, `ToolCatalog`,
-argument policies, database accounts, and upstream credentials remain the
-authorization boundary even if a Prompt file is edited incorrectly.
+Prompt and Skill text cannot grant capabilities. The Tool Profile (model-visible
+Schema) is the startup assembly snapshot of one process-start/deployment Epoch:
+its content is fixed by which Adapters complete construction at startup, and
+after the Runtime starts, current message references, `TaskScope`/`RunAccess`
+narrowing and temporary dependency health never remove Schema. A restart that
+fails to construct an Adapter is a new startup Profile/Epoch with a new Tool
+Schema fingerprint; do not mix its evaluation data with the old Epoch. The
+execution-time Permission Guard is wired; the unified `ResourceGrant`
+projection and Tool-internal checks land in the `turn_context` + Conversation
+Text-to-SQL slice, and existing attachment/task Tools keep their
+`CommandContext`/owner checks until then. `TaskScope`, `ToolCatalog`, argument
+policies, database accounts, and upstream credentials remain the authorization
+boundary even if a Prompt file is edited incorrectly.
 
 GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
 If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
@@ -1049,8 +1059,9 @@ Message writes require `X-CSRF-Token`. The message request may carry `caseRefere
 `taskReferences`; the server verifies referenced records and writes them with the message in one
 PostgreSQL transaction. Selecting a case alone does not create a diagnosis task. The guarded
 `create_diagnosis_task` command service and internal Tool contract are invoked by the independent
-Conversation Agent through `/turns`. A unique `selected` case reference plus explicit diagnosis
-intent is required before that Tool is exposed. The command only creates a durable diagnosis task;
+Conversation Agent through `/turns`. The Tool stays model-visible in the fixed Conversation Profile;
+a unique `selected` case reference plus explicit diagnosis
+intent is required before execution passes the `diagnosis.create` permission and command Guard. The command only creates a durable diagnosis task;
 the Diagnosis Worker remains asynchronous and independent from conversation lifecycle. `/turns`
 requires a client-generated UUID `Idempotency-Key`. PostgreSQL atomically writes the user message,
 the `queued` turn, and a `conversation.turn.execute` Outbox event; the API returns `202` without
@@ -1060,8 +1071,9 @@ assistant message. Failed retries reuse the same user message; completed retries
 assistant message with `200/replayed=true`. Turn status is independently queryable, and turn events can
 be replayed from PostgreSQL with `afterSeq` or `Last-Event-ID` over JSON/SSE. A changed request with the same key, or another message
 while a turn is queued/running, returns `409`; the same queued/running request returns its current
-state with `202`. A user turn carrying a verified `taskReferences` entry dynamically exposes
-the internal `get_diagnosis_task_status` Tool. The Tool rechecks the latest message reference and
+state with `202`. The internal `get_diagnosis_task_status` Tool stays model-visible in the fixed
+Conversation Profile; a verified `taskReferences` entry grants the execution-time `task.read`
+permission. The Tool rechecks the latest message reference and
 owner/admin authorization, then returns persisted task status and report availability without an
 invented progress percentage.
 
@@ -1070,8 +1082,9 @@ Attachment upload also requires `X-CSRF-Token`, a UUID `Idempotency-Key`, and ex
 formats match the existing parser boundary: UTF-8 text/Markdown/log/JSON/CSV/SQL/XML/YAML, PDF,
 DOCX/XLSX/PPTX, PNG and JPEG. A user message may carry up to eight attachment references;
 the server validates owner and conversation before writing the message and links all references in the
-same transaction. Upload does not itself authorize the Agent. `read_attachment` is exposed only when the
-current user message carries an attachment and then rechecks user, conversation, message and attachment
+same transaction. Upload does not itself authorize the Agent. `read_attachment` stays model-visible
+in the fixed Conversation Profile; only a current user message carrying an attachment grants the
+execution-time `attachment.read` permission, and the Tool rechecks user, conversation, message and attachment
 IDs before parsing at most 12,000 runes. The preview route returns at most 2,000 runes. Neither route
 returns MinIO bucket/object coordinates, ETags, credentials, permanent URLs or Base64. Images and
 scan-only pages report visual content but do not trigger paid OCR/VLM calls.

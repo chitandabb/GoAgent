@@ -46,14 +46,27 @@ type catalogEntry struct {
 	requiredPermissions  []agentruntime.Permission
 }
 
-// AgentToolProvider 根据一次任务的授权快照返回模型实际可见的 Tool。
+// ResolvedToolProfile 是一次 Profile 解析的完整结果：Tools 是已包装
+// accessGuardedTool 的 Catalog-owned Tool，ModelVisibleNames 是模型最终应该
+// 看到的完整稳定 Schema 名单（包含 Middleware-owned Tool 如 skill）。
+type ResolvedToolProfile struct {
+	ID                agentruntime.ToolProfileID
+	Tools             []tool.BaseTool
+	ModelVisibleNames []string
+}
+
+// AgentToolProvider 根据固定的部署级 Profile ID 返回一次运行的工具合同。
+// 调用方只提供 Profile ID，不需要了解注册表和名称匹配细节。
 type AgentToolProvider interface {
-	ToolsFor(ctx context.Context, scope TaskScope) ([]tool.BaseTool, error)
+	ResolveProfile(ctx context.Context, profileID agentruntime.ToolProfileID) (ResolvedToolProfile, error)
 }
 
 // ToolCatalog 在启动时完成注册并保持只读；注册不等于向某次模型调用暴露。
 type ToolCatalog struct {
-	entries []catalogEntry
+	entries             []catalogEntry
+	entriesByName       map[string]catalogEntry
+	profile             *agentruntime.ToolProfile
+	middlewareOwnedName string
 }
 
 func NewToolCatalog(ctx context.Context, registrations ...ToolRegistration) (*ToolCatalog, error) {
@@ -74,7 +87,86 @@ func NewToolCatalog(ctx context.Context, registrations ...ToolRegistration) (*To
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
-	return &ToolCatalog{entries: entries}, nil
+	entriesByName := make(map[string]catalogEntry, len(entries))
+	for _, entry := range entries {
+		entriesByName[entry.name] = entry
+	}
+	return &ToolCatalog{entries: entries, entriesByName: entriesByName}, nil
+}
+
+// BindProfile 把部署级 ToolProfile 绑定到 Catalog，并把 Middleware-owned
+// 名称（当前仅 ToolSkill）与注册表区分开。每个生产 Catalog 只绑定它实际
+// 负责的 Runtime Profile（Diagnosis Catalog -> diagnosis-default，
+// Conversation Catalog -> conversation-default）。Profile 引用的每个名字
+// 要么已注册（Catalog-owned），要么已声明为 Middleware-owned；否则启动期
+// 失败。Profile 只允许绑定一次，绑定后保持不可变。
+func (c *ToolCatalog) BindProfile(profile agentruntime.ToolProfile, middlewareOwned []string) error {
+	if c == nil {
+		return errors.New("tool catalog is nil")
+	}
+	if c.profile != nil {
+		return fmt.Errorf("tool catalog profile is already bound to %q", c.profile.ID())
+	}
+	if len(middlewareOwned) != 1 || middlewareOwned[0] != ToolSkill {
+		return fmt.Errorf("unsupported middleware-owned tool names %v", middlewareOwned)
+	}
+	for _, name := range profile.ToolNames() {
+		if _, registered := c.entriesByName[name]; registered {
+			continue
+		}
+		if name != ToolSkill {
+			return fmt.Errorf("profile %q references unregistered tool %q", profile.ID(), name)
+		}
+	}
+	bound := profile
+	c.profile = &bound
+	c.middlewareOwnedName = middlewareOwned[0]
+	return nil
+}
+
+// BoundProfileID 返回本 Catalog 绑定的 Runtime Profile；未绑定返回空值。
+func (c *ToolCatalog) BoundProfileID() agentruntime.ToolProfileID {
+	if c == nil || c.profile == nil {
+		return ""
+	}
+	return c.profile.ID()
+}
+
+// ResolveProfile 返回固定 Profile 的完整模型可见合同。Tools 是 Catalog-owned
+// 且已包装 accessGuardedTool 的执行器集合（不含 Middleware-owned 名称）；
+// ModelVisibleNames 是稳定 Schema 名单（含 Middleware-owned 名称）。
+// 未绑定 Profile 或请求非本 Catalog 负责的 Profile 时失败。
+// 返回值全部防御性复制，调用方修改不会影响 Catalog 或后续解析。
+func (c *ToolCatalog) ResolveProfile(_ context.Context, profileID agentruntime.ToolProfileID) (ResolvedToolProfile, error) {
+	if c == nil {
+		return ResolvedToolProfile{}, errors.New("tool catalog is nil")
+	}
+	if c.profile == nil {
+		return ResolvedToolProfile{}, errors.New("tool catalog has no bound deployment profile")
+	}
+	if c.profile.ID() != profileID {
+		return ResolvedToolProfile{}, fmt.Errorf(
+			"tool catalog is bound to profile %q, cannot resolve %q", c.profile.ID(), profileID,
+		)
+	}
+	tools := make([]tool.BaseTool, 0, len(c.profile.ToolNames()))
+	visibleNames := make([]string, 0, len(c.profile.ToolNames()))
+	for _, name := range c.profile.ToolNames() {
+		visibleNames = append(visibleNames, name)
+		if name == c.middlewareOwnedName {
+			continue
+		}
+		entry, registered := c.entriesByName[name]
+		if !registered {
+			return ResolvedToolProfile{}, fmt.Errorf("profile %q references unregistered tool %q", profileID, name)
+		}
+		guarded, err := entry.scopedTool()
+		if err != nil {
+			return ResolvedToolProfile{}, err
+		}
+		tools = append(tools, guarded)
+	}
+	return ResolvedToolProfile{ID: profileID, Tools: tools, ModelVisibleNames: visibleNames}, nil
 }
 
 func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalogEntry, error) {
@@ -256,9 +348,11 @@ func (entry catalogEntry) scopedTool() (tool.BaseTool, error) {
 	return &accessGuardedTool{inner: invokable, entry: entry}, nil
 }
 
-// accessGuardedTool 是执行期第二层授权 Guard：Schema 可见性仍由 ToolsFor 的
-// v1 过滤决定，执行时它只读取 v2 RunAccess 做粗粒度 Permission 校验。
-// Tool 内部仍负责具体资源（数据源、工单、附件）归属校验。
+// accessGuardedTool 是执行期授权 Guard。生产 Schema 来自固定 ToolProfile
+// （ResolveProfile 按 Profile 名单装配），不再由 ToolsFor 的 v1 过滤决定；
+// ToolsFor 只保留给历史评测。执行期它读取 v2 RunAccess 做粗粒度 Permission
+// 校验。具体 ResourceGrant 的统一投影与 Tool 内部检查尚未全部迁移完成：
+// 当前部分 Tool 继续使用原有的 CommandContext/owner 校验。
 type accessGuardedTool struct {
 	inner tool.InvokableTool
 	entry catalogEntry

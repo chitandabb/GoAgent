@@ -15,6 +15,8 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/bootstrap"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
@@ -573,4 +575,64 @@ func pilotMemoryCandidateAt(
 		t.Fatal(err)
 	}
 	return candidate
+}
+
+// TestPilotToolSchemaMatchesConversationProfile 证明 Pilot 的工具合同来自固定
+// conversation-default Profile，且不随空 TaskScope/capability 变化。该测试
+// 不调用任何模型或 Provider。
+func TestPilotToolSchemaMatchesConversationProfile(t *testing.T) {
+	catalog, err := mesagent.NewConversationDefaultToolCatalog(context.Background(),
+		mesagent.DefaultToolCatalogDependencies{ExternalCases: pilotExternalCaseGetter{}})
+	if err != nil {
+		t.Fatalf("NewConversationDefaultToolCatalog: %v", err)
+	}
+	if got := catalog.BoundProfileID(); got != agentruntime.ToolProfileConversation {
+		t.Fatalf("pilot catalog bound profile = %q, want conversation-default", got)
+	}
+	base, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
+	if err != nil {
+		t.Fatalf("ResolveProfile(conversation): %v", err)
+	}
+	baseContract, err := mesagent.CanonicalToolContract(context.Background(), base.Tools)
+	if err != nil {
+		t.Fatalf("CanonicalToolContract: %v", err)
+	}
+
+	// 空 capability 的会话 TaskScope 与带能力/引用的 scope 都不改变 Schema。
+	scopes := []mesagent.TaskScope{
+		mustPilotConversationScope(t, nil),
+		mustPilotConversationScope(t, []mesagent.ToolCapability{
+			mesagent.ToolCapabilityCase, mesagent.ToolCapabilityKnowledge,
+			mesagent.ToolCapabilityTask, mesagent.ToolCapabilityAttachment,
+		}),
+	}
+	for _, scope := range scopes {
+		resolved, err := catalog.ResolveProfile(
+			mesagent.WithTaskScope(context.Background(), scope),
+			agentruntime.ToolProfileConversation,
+		)
+		if err != nil {
+			t.Fatalf("ResolveProfile(scoped): %v", err)
+		}
+		contract, err := mesagent.CanonicalToolContract(context.Background(), resolved.Tools)
+		if err != nil {
+			t.Fatalf("CanonicalToolContract(scoped): %v", err)
+		}
+		if contract.Fingerprint != baseContract.Fingerprint {
+			t.Fatalf("TaskScope changed the Pilot Tool Schema fingerprint: %v vs %v",
+				contract.Fingerprint, baseContract.Fingerprint)
+		}
+	}
+}
+
+func mustPilotConversationScope(t *testing.T, capabilities []mesagent.ToolCapability) mesagent.TaskScope {
+	t.Helper()
+	scope, err := mesagent.NewTaskScope(mesagent.TaskScopeConfig{
+		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: mesagent.TaskTypeConversation,
+		AllowedCapabilities: capabilities,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskScope: %v", err)
+	}
+	return scope
 }

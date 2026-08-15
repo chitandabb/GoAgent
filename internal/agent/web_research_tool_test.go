@@ -118,7 +118,7 @@ func TestDefaultCatalogExposesWebToolsOnlyWhenScopeAndDependencyAllow(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, WebSearch: searchTool, FetchPublicPage: fetchTool,
 	})
 	if err != nil {

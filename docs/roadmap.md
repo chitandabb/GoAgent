@@ -37,11 +37,10 @@ Ordered next slices are maintained directly in this file.
       `turn_queued/turn_running/turn_retry_scheduled/turn_completed/turn_failed` events; JSON and
       SSE endpoints support `afterSeq`/`Last-Event-ID`, safe payloads, heartbeats, terminal close,
       application shutdown and Session absolute-expiry handling.
-- [x] Reference-gated `get_diagnosis_task_status` Tool with dynamic TaskScope exposure, latest-message
-      validation, owner/admin authorization reuse, and report-availability summary.
+- [x] Reference-gated `get_diagnosis_task_status` Tool with latest-message validation, owner/admin authorization reuse, and report-availability summary. Under the v2 fixed Profile the Tool stays model-visible; a verified task reference grants the execution-time `task.read` permission.
 - [x] Conversation-scoped attachment upload with MinIO immutable objects, PostgreSQL idempotency,
-      atomic message associations, message-gated `read_attachment`, and safe attachment/knowledge-chunk
-      citation preview APIs.
+      atomic message associations, and safe attachment/knowledge-chunk citation preview APIs.
+      Under the v2 fixed Profile `read_attachment` stays model-visible; a current-message attachment grants the execution-time `attachment.read` permission.
 - [x] Diagnosis task attachment snapshot: a Conversation Agent command may freeze the current user
       message's selected/all session attachments into `diagnosis_task_attachments`; task creation,
       Outbox and attachment associations share one PostgreSQL transaction. Diagnosis Worker loads only
@@ -57,14 +56,17 @@ This slice resolves the mismatch between the unified conversation product entry 
 - [x] Retire `Capability` from the target domain language; define `RuntimeKind`, `Permission`, `ResourceGrants`, `InvestigationPolicy`, `RunAccess` and `ToolProfile`.
 - [x] Record the invariant that Diagnosis `RunAccess` is the intersection of frozen Policy and the current access ceiling, so an old task can only lose permissions/resources.
 - [x] Add immutable Permission/Grant contracts and default Conversation/Diagnosis Tool Profile definitions with tests.
-- [x] Confirm Conversation Profile includes knowledge and safe Text-to-SQL, while Diagnosis Profile excludes `create_diagnosis_task` and keeps Diagnosis Skills.
+- [x] Confirm the fixed Conversation/Diagnosis Tool Profile definitions: Diagnosis excludes `create_diagnosis_task` and keeps Diagnosis Skills; the current wiring keeps SQL in the Diagnosis Profile only.
 - [x] Add the legacy `TaskScope -> RunAccess` compatibility adapter, move Tool execution guards to the new context value without changing current callers, and remove `create_diagnosis_task` from the Diagnosis Schema.
-- [ ] Refactor ToolCatalog from dynamic `ToolsFor(TaskScope)` filtering to fixed `Tools(profileID)` resolution; retain the guarded-wrapper seam and strict/best-effort behavior.
-- [ ] Wire Conversation to a stable Profile across case/task/attachment references, append `turn_context` to the current user message, and enable production Text-to-SQL through RunAccess resource grants.
+- [x] Wire production Schema selection to fixed deployment Tool Profiles: `ToolCatalog.ResolveProfile(profileID)` is the only production entry, `ToolAuthorizationMiddleware` and both Runners resolve fixed Profile IDs, and `ToolsFor`/`EvaluationBaselineToolsFor` remain evaluation-only APIs.
+- [x] Bind each production Catalog to exactly one Runtime Profile (`Diagnosis -> diagnosis-default`, `Conversation -> conversation-default`); runner construction rejects a mismatched catalog, and Profile construction follows per-Tool partial construction (Web search and page fetch, and each SQL Tool, are declared separately).
+- [x] Freeze the schema contract: Conversation/Diagnosis Schema no longer varies with message references, dependency health, capability declarations, RunAccess narrowing or per-run call limits; blocked/limit enforcement moved to execution-time `agentToolRunPolicy.reserve` and never deletes Schema. The schema-filtering helper `filterAgentToolsForRun` was removed after all callers migrated.
+- [x] Tool Selection v2: the evaluation experiment side resolves the fixed `diagnosis-default` Profile instead of `ToolsFor(TaskScope)`; observations carry an explicit `observationSchemaVersion` (`tool-selection-observation-v2`) and record `toolProfileId` (filtered=`diagnosis-default`, wide=`evaluation-wide-v1`), `modelVisibleNames`, actual Schema names/hash, model Profile fingerprint and implementation revision. Implementation identity is fail-closed (dirty/unknown refused in formal mode, `-allow-dirty` only for local smoke), and wide/filtered arms pair only when schema version, model Profile fingerprint and revision/dirty state all match and neither arm is dirty. Historical v1 Tool Selection data remains `retest_needed`.
+- [ ] Append `turn_context` to the current user message and enable production Text-to-SQL in Conversation through RunAccess resource grants (Conversation Profile currently excludes SQL Tools by design until the SQL resource checks slice lands).
 - [ ] Persist Diagnosis InvestigationPolicy v2, derive Worker RunAccess from it and append stable `task_context` to the Diagnosis system instruction; task-creation Tool exposure has already been removed by the compatibility slice.
 - [ ] Update `sql-investigation` SOP to include `execute_readonly_query`, evidence citation and stop conditions; keep Skill as SOP rather than authorization.
 - [ ] Retire `TaskTypeKnowledge`, `ToolCapability`, `RequestedSkill` and dependency-health-driven Schema deletion after compatibility coverage passes.
-- [ ] Run v2 production-entry fixed sets. Record `toolProfileId`, Tool Schema fingerprint/names, System Prompt version, model Profile fingerprint and implementation revision. Re-measure resume item 1 and trigger Text-to-SQL from natural-language Conversation input for resume item 2.
+- [ ] Run v2 production-entry fixed sets (deferred until the Conversation SQL/`turn_context` slice lands). Record `observationSchemaVersion`, `toolProfileId`, Tool Schema fingerprint/names, System Prompt version, model Profile fingerprint and implementation revision; pair wide/filtered only under identical clean identity. Re-measure resume item 1 and trigger Text-to-SQL from natural-language Conversation input for resume item 2.
 
 ## Completed Slice: M4 Agent Evaluation and Performance Optimization
 

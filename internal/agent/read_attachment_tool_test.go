@@ -98,11 +98,13 @@ type attachmentReaderStub struct {
 	conversationID uuid.UUID
 	messageID      uuid.UUID
 	attachmentID   uuid.UUID
+	calls          int
 }
 
 func (s *attachmentReaderStub) ReadForMessage(
 	_ context.Context, userID, conversationID, messageID, attachmentID uuid.UUID, _ int,
 ) (attachment.ReadResult, error) {
+	s.calls++
 	s.userID, s.conversationID = userID, conversationID
 	s.messageID, s.attachmentID = messageID, attachmentID
 	return s.result, nil
@@ -111,6 +113,7 @@ func (s *attachmentReaderStub) ReadForMessage(
 func (s *attachmentReaderStub) ReadForTask(
 	_ context.Context, userID, taskID, attachmentID uuid.UUID, _ int,
 ) (attachment.ReadResult, error) {
+	s.calls++
 	s.userID, s.conversationID = userID, uuid.Nil
 	s.messageID, s.attachmentID = taskID, attachmentID
 	return s.result, nil

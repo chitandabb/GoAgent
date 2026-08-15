@@ -193,11 +193,11 @@ func TestConversationMemorySourceToolRejectsMissingOrMismatchedRunScope(t *testi
 
 func TestDefaultToolCatalogRequiresMemoryCapabilityForSourceRecovery(t *testing.T) {
 	reader := &sourceRecoveryReaderStub{}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, ConversationMemorySources: reader,
 	})
 	if err != nil {
-		t.Fatalf("NewDefaultToolCatalog(): %v", err)
+		t.Fatalf("NewConversationDefaultToolCatalog(): %v", err)
 	}
 	userID := uuid.New()
 	withMemory := sourceRecoveryConversationScope(t, userID)
@@ -275,7 +275,7 @@ func TestConversationMemorySourceToolAppliesRecoveryBoundsAndCursorEndToEnd(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, ConversationMemorySources: recovery,
 	})
 	if err != nil {

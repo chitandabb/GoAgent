@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
@@ -115,6 +116,7 @@ type Runner struct {
 	chatModel             model.ToolCallingChatModel
 	toolCatalog           *ToolCatalog
 	toolProvider          AgentToolProvider
+	toolProfileID         agentruntime.ToolProfileID
 	mode                  RunnerMode
 	skillRuntime          *NativeSkillRuntime
 	systemInstruction     string
@@ -143,11 +145,19 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if !cfg.Mode.Valid() {
 		return nil, fmt.Errorf("invalid runner mode %q", cfg.Mode)
 	}
+	// Diagnosis Runner 只能使用 diagnosis-default Profile；误配的 Catalog
+	// 在构造期失败，而不是在每次请求时失败。
+	if boundProfileID := cfg.ToolCatalog.BoundProfileID(); boundProfileID != agentruntime.ToolProfileDiagnosis {
+		return nil, fmt.Errorf(
+			"diagnosis runner requires a diagnosis-default catalog, got profile %q", boundProfileID,
+		)
+	}
+	const toolProfileID = agentruntime.ToolProfileDiagnosis
 	var toolProvider AgentToolProvider = cfg.ToolCatalog
 	if cfg.Mode == RunnerModeBaseline {
 		toolProvider = evaluationBaselineToolProvider{catalog: cfg.ToolCatalog}
 	}
-	authorization, err := NewToolAuthorizationMiddleware(toolProvider)
+	authorization, err := NewToolAuthorizationMiddleware(toolProvider, toolProfileID)
 	if err != nil {
 		return nil, fmt.Errorf("build Tool authorization middleware: %w", err)
 	}
@@ -174,7 +184,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	return &Runner{
 		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
-		toolProvider: toolProvider, mode: cfg.Mode,
+		toolProvider: toolProvider, toolProfileID: toolProfileID, mode: cfg.Mode,
 		skillRuntime:          cfg.SkillRuntime,
 		systemInstruction:     strings.TrimSpace(cfg.SystemInstruction),
 		baselineInstruction:   strings.TrimSpace(cfg.BaselineInstruction),
@@ -188,15 +198,35 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}, nil
 }
 
+// evaluationBaselineToolProvider 只供评测使用：它返回按角色和任务类型筛选的
+// 宽 Tool Schema，刻意不套用固定 Profile。这不是生产授权接口。
 type evaluationBaselineToolProvider struct {
 	catalog *ToolCatalog
 }
 
-func (p evaluationBaselineToolProvider) ToolsFor(ctx context.Context, scope TaskScope) ([]tool.BaseTool, error) {
+func (p evaluationBaselineToolProvider) ResolveProfile(
+	ctx context.Context,
+	profileID agentruntime.ToolProfileID,
+) (ResolvedToolProfile, error) {
 	if p.catalog == nil {
-		return nil, errors.New("evaluation baseline tool catalog is nil")
+		return ResolvedToolProfile{}, errors.New("evaluation baseline tool catalog is nil")
 	}
-	return p.catalog.EvaluationBaselineToolsFor(ctx, scope)
+	if !profileID.Valid() {
+		return ResolvedToolProfile{}, fmt.Errorf("evaluation baseline profile id %q is invalid", profileID)
+	}
+	scope, ok := TaskScopeFromContext(ctx)
+	if !ok {
+		return ResolvedToolProfile{}, ErrTaskScopeRequired
+	}
+	tools, err := p.catalog.EvaluationBaselineToolsFor(ctx, scope)
+	if err != nil {
+		return ResolvedToolProfile{}, err
+	}
+	names, err := toolNames(ctx, tools)
+	if err != nil {
+		return ResolvedToolProfile{}, err
+	}
+	return ResolvedToolProfile{ID: profileID, Tools: tools, ModelVisibleNames: names}, nil
 }
 
 func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
@@ -240,23 +270,11 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		runID = identity.RunID
 	}
 	defer func() { observability.End(agentSpan, err) }()
-	allowedTools, resolveErr := r.toolProvider.ToolsFor(ctx, scope)
+	resolved, resolveErr := r.toolProvider.ResolveProfile(ctx, r.toolProfileID)
 	if resolveErr != nil {
 		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
 	}
-	allowedTools, err = filterAgentToolsForRun(ctx, allowedTools)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("apply run tool policy: %w", err)
-	}
-	result.AllowedTools, err = toolNames(ctx, allowedTools)
-	if err != nil {
-		return RunResult{}, err
-	}
-	// Experiment 的 Skill Middleware 在 Tool 授权之后追加 skill Tool；评测必须记录
-	// 模型实际看到的完整 Schema 列表。Baseline 不启用 Skill 渐进式读取。
-	if r.mode == RunnerModeExperiment {
-		result.AllowedTools = append(result.AllowedTools, ToolSkill)
-	}
+	result.AllowedTools = append([]string(nil), resolved.ModelVisibleNames...)
 	result.SkillID, result.RouteReason, err = r.entrySkill(request, scope)
 	if err != nil {
 		return RunResult{}, err
@@ -750,6 +768,12 @@ func toolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {
 		names = append(names, info.Name)
 	}
 	return names, nil
+}
+
+// ToolNamesFromTools 返回模型最终可见的 Tool 名称列表（评测与观测用它把
+// 真实装配后的 Schema 记录为 ModelVisibleNames/AvailableTools）。
+func ToolNamesFromTools(ctx context.Context, tools []tool.BaseTool) ([]string, error) {
+	return toolNames(ctx, tools)
 }
 
 func mergeSkillIDs(base, extra []SkillID) []SkillID {

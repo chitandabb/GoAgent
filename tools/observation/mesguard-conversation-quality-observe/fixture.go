@@ -269,7 +269,7 @@ func buildConversationQualityRunner(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	catalog, err := mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+	catalog, err := mesagent.NewConversationDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: unavailableExternalCaseGetter{}, KnowledgeSearch: searchTool,
 	})
 	if err != nil {

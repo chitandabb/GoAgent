@@ -393,7 +393,7 @@ func buildAgentRuntimeForRole(
 		_ = runtime.close()
 		return nil, fmt.Errorf("build Agent runner: %w", err)
 	}
-	conversationCatalog, err := mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+	conversationCatalog, err := mesagent.NewConversationDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
 		CreateDiagnosisTask:       builders.conversationCreator,

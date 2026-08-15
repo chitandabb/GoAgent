@@ -137,7 +137,7 @@ func TestSingleSearchQualityModelLetsRunnerAnswerAfterFirstSearch(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := mesagent.NewDefaultToolCatalog(context.Background(), mesagent.DefaultToolCatalogDependencies{
+	catalog, err := mesagent.NewConversationDefaultToolCatalog(context.Background(), mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: unavailableExternalCaseGetter{}, KnowledgeSearch: searchTool,
 	})
 	if err != nil {

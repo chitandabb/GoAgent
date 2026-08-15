@@ -12,7 +12,7 @@
 
 ~~~text
 模型生成调用意图
-  -> 当前生产：TaskScope 动态选 Schema + RunAccess Guard；目标 v2：固定 ToolProfile + RunAccess Guard
+  -> 部署配置决定固定 ToolProfile（Schema）；RunAccess/ResourceGrant 决定可执行性
   -> 任务数据源授权
   -> Tool 参数 Schema 校验
   -> SQL/路径/查询策略校验
@@ -122,7 +122,7 @@ SQL Tool 是 Conversation 与 Diagnosis 共享的只读业务能力，不属于�
 T-SQL Parser。项目参考 [Bytebase Omni](https://github.com/bytebase/omni) 的语句分类、
 对象提取和对抗测试思路，自行实现一个默认拒绝的窄 `QueryGuard`：词法层必须正确处理
 注释、字符串和带引号标识符；策略层只接受单条 `SELECT` 或只读 CTE，识别 `UNION`、
-拒绝 `SELECT INTO`，并提取引用对象供 `RunAccess.ResourceGrants` 和已发布 Catalog 复核。生产迁移完成前仍由旧 `TaskScope` 承担同一检查。
+拒绝 `SELECT INTO`，并提取引用对象供 `RunAccess.ResourceGrants` 和已发布 Catalog 复核。执行期粗粒度由 `accessGuardedTool` 的 `RunAccess.Permission` 承担；Tool 内部的具体资源归属校验仍由旧 `TaskScope` 承担，直到 SQL Tool 完成 ResourceGrant 迁移。
 
 首版明确拒绝变量、临时表、动态 SQL、跨库/链接服务器、危险系统对象和无法可靠分析的
 方言结构。它不是通用 T-SQL AST，不负责格式化或执行计划分析。当前执行器先复核

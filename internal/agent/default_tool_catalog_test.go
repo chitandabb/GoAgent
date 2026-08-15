@@ -14,7 +14,26 @@ import (
 	"github.com/google/uuid"
 )
 
+// mustFullyConfiguredDefaultToolCatalog 构造完整注册、绑定 conversation-default
+// 的默认 Catalog（与会话 Runner 的生产构造一致）。
 func mustFullyConfiguredDefaultToolCatalog(t *testing.T) *ToolCatalog {
+	t.Helper()
+	return mustDefaultToolCatalogForProfile(t, NewConversationDefaultToolCatalog)
+}
+
+// mustDiagnosisConfiguredDefaultCatalogForTest 构造完整注册、绑定
+// diagnosis-default 的默认 Catalog（与诊断 Runner 的生产构造一致）。
+func mustDiagnosisConfiguredDefaultCatalogForTest(t *testing.T) *ToolCatalog {
+	t.Helper()
+	return mustDefaultToolCatalogForProfile(t, NewDiagnosisDefaultToolCatalog)
+}
+
+type defaultCatalogConstructor func(context.Context, DefaultToolCatalogDependencies) (*ToolCatalog, error)
+
+func mustDefaultToolCatalogForProfile(
+	t *testing.T,
+	constructor defaultCatalogConstructor,
+) *ToolCatalog {
 	t.Helper()
 	knowledgeTool, err := NewSearchKnowledgeTool(&knowledgeSearcherStub{result: knowledge.HybridSearch{}})
 	if err != nil {
@@ -42,8 +61,9 @@ func mustFullyConfiguredDefaultToolCatalog(t *testing.T) *ToolCatalog {
 	for _, name := range GitHubReadOnlyTools {
 		githubTools = append(githubTools, newNamedToolForTest(t, name))
 	}
-	catalog, err := NewDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+	catalog, err := constructor(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases:        runnerTestCaseGetter{},
+		SkillReference:       newNamedToolForTest(t, ToolReadSkillReference),
 		GitHubTools:          githubTools,
 		SQLObjectDefinitions: sqlDefinition,
 		SchemaCatalog:        mustSchemaCatalogToolForTest(t),
@@ -57,7 +77,7 @@ func mustFullyConfiguredDefaultToolCatalog(t *testing.T) *ToolCatalog {
 		ConversationMemorySources: &sourceRecoveryReaderStub{},
 	})
 	if err != nil {
-		t.Fatalf("NewDefaultToolCatalog: %v", err)
+		t.Fatalf("default catalog: %v", err)
 	}
 	return catalog
 }

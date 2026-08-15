@@ -2,26 +2,42 @@ package agent
 
 import "github.com/chitandabb/GoAgent/internal/agentruntime"
 
-// ToolProfileConfig is derived once from deployment configuration. A configured
-// adapter keeps its Schema in the Profile even while the remote dependency is
-// temporarily unavailable. The config deliberately contains no actor,
-// message-reference, resource-grant, or transient dependency-health fields.
+// ToolProfileConfig 是启动期从"实际成功构造并注册的 Adapter"推导一次的部署级
+// 配置。它故意不包含 actor、消息引用、资源授权或依赖瞬时健康状态字段；
+// 一个进程启动后 Profile 不再变化，临时 Tool 执行失败也不能删除 Schema。
+//
+// 本切片接线状态：SQL Tool 只进入 Diagnosis Profile；Conversation Profile
+// 暂不含 SQL（下一切片完成 RunAccess/ResourceGrant 与 SQL Tool 内部资源检查后
+// 再开放）。Web 两件套与 SQL 三件套按各自成功构造分别声明，部分构造不会
+// 让 Profile 引用未注册的 Tool。
 type ToolProfileConfig struct {
-	ExternalCaseConfigured       bool
-	KnowledgeConfigured          bool
-	WebSearchConfigured          bool
-	AttachmentConfigured         bool
-	SQLConfigured                bool
-	GitHubToolNames              []string
-	DiagnosisCommandConfigured   bool
-	DiagnosisStatusConfigured    bool
-	ConversationMemoryConfigured bool
+	ExternalCaseConfigured           bool
+	SkillReferenceConfigured         bool
+	KnowledgeConfigured              bool
+	WebSearchConfigured              bool
+	FetchPublicPageConfigured        bool
+	AttachmentConfigured             bool
+	SQLObjectDefinitionsConfigured   bool
+	SchemaCatalogConfigured          bool
+	ReadonlyQueryConfigured          bool
+	GitHubToolNames                  []string
+	DiagnosisCommandConfigured       bool
+	DiagnosisStatusConfigured        bool
+	ConversationMemoryConfigured     bool
+	ConversationToolResultConfigured bool
 }
 
+// BuildDefaultToolProfiles 从部署配置派生 Conversation 与 Diagnosis 两个固定
+// Tool Profile。ToolSkill 是 Middleware-owned（由 Eino Skill Middleware 追加，
+// 不在 ToolCatalog 注册表），因此始终声明在 Diagnosis Profile 的可见名单中，
+// 但永远不会由 Catalog 生成一个假的 skill Tool。
 func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfiles, error) {
 	conversationNames := make([]string, 0, 16)
-	diagnosisNames := []string{ToolSkill, ToolReadSkillReference}
+	diagnosisNames := []string{ToolSkill}
 
+	if config.SkillReferenceConfigured {
+		diagnosisNames = append(diagnosisNames, ToolReadSkillReference)
+	}
 	if config.ExternalCaseConfigured {
 		conversationNames = append(conversationNames, ToolReadExternalCase)
 		diagnosisNames = append(diagnosisNames, ToolReadExternalCase)
@@ -31,17 +47,28 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 		diagnosisNames = append(diagnosisNames, ToolSearchKnowledge)
 	}
 	if config.WebSearchConfigured {
-		conversationNames = append(conversationNames, ToolWebSearch, ToolFetchPublicPage)
-		diagnosisNames = append(diagnosisNames, ToolWebSearch, ToolFetchPublicPage)
+		conversationNames = append(conversationNames, ToolWebSearch)
+		diagnosisNames = append(diagnosisNames, ToolWebSearch)
+	}
+	if config.FetchPublicPageConfigured {
+		conversationNames = append(conversationNames, ToolFetchPublicPage)
+		diagnosisNames = append(diagnosisNames, ToolFetchPublicPage)
 	}
 	if config.AttachmentConfigured {
 		conversationNames = append(conversationNames, ToolReadAttachment)
 		diagnosisNames = append(diagnosisNames, ToolReadAttachment)
 	}
-	if config.SQLConfigured {
-		sqlTools := []string{ToolSearchSchemaCatalog, ToolDatabaseObjectDefinition, ToolExecuteReadonlyQuery}
-		conversationNames = append(conversationNames, sqlTools...)
-		diagnosisNames = append(diagnosisNames, sqlTools...)
+	// SQL 三件套按"实际成功构造"逐个加入 Diagnosis Profile；本切片不加入
+	// Conversation Profile。同一组 Tool 只成功构造一部分时，Profile 只声明
+	// 实际注册的名字，避免引用不存在的 Catalog Tool。
+	if config.SQLObjectDefinitionsConfigured {
+		diagnosisNames = append(diagnosisNames, ToolDatabaseObjectDefinition)
+	}
+	if config.SchemaCatalogConfigured {
+		diagnosisNames = append(diagnosisNames, ToolSearchSchemaCatalog)
+	}
+	if config.ReadonlyQueryConfigured {
+		diagnosisNames = append(diagnosisNames, ToolExecuteReadonlyQuery)
 	}
 	if len(config.GitHubToolNames) != 0 {
 		diagnosisNames = append(diagnosisNames, config.GitHubToolNames...)
@@ -55,8 +82,10 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 	if config.ConversationMemoryConfigured {
 		conversationNames = append(conversationNames,
 			ToolReadConversationMemorySources,
-			ToolReadConversationToolResult,
 		)
+	}
+	if config.ConversationToolResultConfigured {
+		conversationNames = append(conversationNames, ToolReadConversationToolResult)
 	}
 
 	conversation, err := agentruntime.NewToolProfile(agentruntime.ToolProfileConversation, conversationNames)
