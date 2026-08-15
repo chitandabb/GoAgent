@@ -1,10 +1,10 @@
-# Conversation Text-to-SQL v2 评测
+# Conversation Text-to-SQL 评测（v2 历史基线 / v3 当前合同）
 
 ## 目标与边界
 
 `mesguard-text2sql-eval -mode conversation` 验证生产 Conversation 入口，而不是历史 direct 模式的强制 Tool Calling 能力测试。用户问题直接来自版本化固定集，进入真实 `ConversationRunner`、固定 `conversation-default` Tool Profile、`turn_context`、`RunAccess`、SQL Tool 与 `ReadonlyQueryExecutor`/QueryGuard；评测器不直接调用 SQL Tool，也不使用 `WithToolChoiceForced`。
 
-Conversation v2 使用独立的 `text-to-sql-conversation-observation-v2` 合同，记录模型/Profile/实现 revision、Tool Schema 指纹、完整 Tool 尝试数、SQL 调用序列、SQL hash、结果集、最终答案、usage 与耗时。正式汇总要求同一身份且 `formal=true`；dirty/unknown 只允许生成明确标记为非正式的本地 smoke 汇总，不能和 clean 观测混合。
+当前评测器已硬切到独立的 `text-to-sql-conversation-observation-v3` 合同，记录模型/Profile/实现 revision、Tool Schema 指纹、完整 Tool 尝试数、SQL 调用序列、SQL hash、结果集、最终答案、usage 与耗时；同时对 `search_schema_catalog` 额外记录归一化 keyword 的 SHA-256 hash、返回数组长度和同 Case 内是否重复。原始 keyword、参数 JSON 和 Tool 返回正文不落盘。v3 Validator 与 reducer 拒绝历史 direct v1 和 conversation v2 观测；旧 v2 资产仅作历史基线，不得混入 v3 汇总。正式汇总要求同一身份且 `formal=true`；dirty/unknown 只允许生成明确标记为非正式的本地 smoke 汇总，不能和 clean 观测混合。
 
 正确性拆为四层：
 
@@ -71,6 +71,26 @@ Conversation v2 使用独立的 `text-to-sql-conversation-observation-v2` 合同
 失败位置发生了迁移：`sql-total-cases` 从 StepFun 的 7 次 schema search 后未执行 SQL，变为 OpenCode Go 的 3 次 search 后正确执行 `SELECT COUNT(*) AS Total FROM dbo.v_MESGuardExternalCases` 并回答 `4`；但 `sql-urgent-count` 在 OpenCode Go 上连续成功调用 schema search 8 次，仍未执行 SQL。这证明生产 SQL Tool、RunAccess、QueryGuard 和数据库执行链路能够完成这些查询，同时也证明单纯替换 Provider 不能解决 schema 探索不收敛。
 
 当前不设置 `search_schema_catalog=2` 的生产硬上限：正确的 `sql-total-cases` 已实际需要 3 次 search，而且现有 `agentToolRunPolicy` 超限会终止整轮 Conversation，而不是把可恢复结果交还模型。下一步应先补齐 schema search 的受控诊断事实（至少记录归一化 keyword hash、返回条数和是否重复），再以不改变固定 Tool Schema、不牺牲正确率为前提比较“Prompt 明确元数据/业务值边界”和“可恢复重复搜索反馈”。在失败根因可观察之前不新增 Planner、意图分类器或硬限流；扩大到 20 Case 仍需等待三 Case 收敛。
+
+## 2026-08-15 Observation v3 单 Case 诊断复测
+
+Observation v3 在 clean revision `37b361c` 上对之前失败的 `sql-urgent-count` 只执行了一次受控正式复测：
+
+- Provider/Profile：OpenCode Go `opencode-deepseek-main`；
+- 模型：`deepseek-v4-flash`；
+- Prompt / Tool Profile：`conversation-v7` / `conversation-default`；
+- 上限：1 Case、8 次 Provider 调用、16,000 Token、2 分钟；
+- 本地原始产物：`output/evaluation/text-to-sql-conversation-v3-opencode-go-sql-urgent-count.{observations.jsonl,summary.json}`（Git 忽略）。
+
+| 顺序 | Tool | keyword hash | 返回条数 | 同 Case 重复 |
+| ---: | --- | --- | ---: | --- |
+| 1 | `search_schema_catalog` | `sha256:e45308061f71ca078488dab3f2ce373b3838d355dcbedc7ca3297a6c9636a39c` | 3 | 否 |
+| 2 | `search_schema_catalog` | `sha256:3092a5f0dba05ff3cadc3c2c8eeacd47940b1837f9534bc559d19d8435c8b219` | 1 | 否 |
+| 3 | `execute_readonly_query` | — | — | — |
+
+该回合端到端正确：Tool 轨迹、SQL 执行、自然语言答案均通过。共 3 次模型调用，Prompt/Completion/Total Token 为 `6437/252/6689`，Cached Token `5760`，Reasoning Token `100`，耗时 5.796 秒。
+
+本次观测只证明“两个不同 keyword 都命中正结果后，模型能够收敛到 SQL”；之前 8 次 search 的失败未在 v3 复测中复现，而历史 v2 观测又没有 keyword/result-count 诊断，因此不能宣称 Prompt 或生产策略已修复。当前决策是保持生产 Prompt、Tool Schema 和调用上限不变，不新增 Planner/意图分类器；以后只在 v3 失败样本出现时按事实选择治理：全部零结果则改进“元数据词 vs 业务值”引导；已有正结果仍持续扩散搜索则补停止条件；同 hash 重复则设计可恢复的重复搜索反馈，而不直接终止整轮。
 
 ## 被丢弃的试跑
 
