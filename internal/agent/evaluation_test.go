@@ -56,7 +56,7 @@ func TestEvaluateDatasetDoesNotPairDifferentModelSettings(t *testing.T) {
 
 func TestEvaluateDatasetPairsArmsWithDifferentToolProfileContracts(t *testing.T) {
 	// ToolProfileID/toolSchemaFingerprint 是实验臂特有合同：两臂按设计不同
-	// （baseline=evaluation-wide-v1，experiment=diagnosis-default），禁止要求
+	// （baseline=evaluation-wide-v2，experiment=diagnosis-default），禁止要求
 	// 两臂相等；身份一致时仍必须正常配对。
 	baseline := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
 	experiment := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
@@ -70,6 +70,17 @@ func TestEvaluateDatasetPairsArmsWithDifferentToolProfileContracts(t *testing.T)
 	}
 	if summary.PairedCases != 1 || summary.UnpairedRuns != 0 {
 		t.Fatalf("arms with distinct Tool Profile contracts were not paired: %+v", summary)
+	}
+}
+
+func TestEvaluateDatasetRejectsHistoricalV2Observation(t *testing.T) {
+	// active evaluator 不保留 v2 兼容分支：历史 v2 资产只能标记 historical，
+	// 不得进入正式归约。
+	observation := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
+	observation.ObservationSchemaVersion = "evaluation-observation-v2"
+	_, err := EvaluateDataset(evaluationCasesForTest()[:1], []EvaluationObservation{observation})
+	if err == nil || !strings.Contains(err.Error(), "unsupported observationSchemaVersion") {
+		t.Fatalf("EvaluateDataset error = %v, want explicit v2 rejection", err)
 	}
 }
 
@@ -93,20 +104,40 @@ func TestEvaluateDatasetRejectsUnknownObservationSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestEvaluationObservationV3RequiresComparisonIdentity(t *testing.T) {
+	observation := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
+	observation.ComparisonFingerprint = ""
+
+	if err := observation.Validate(); err == nil {
+		t.Fatal("v3 observation without comparison identity must be rejected")
+	}
+}
+
 func TestEvaluateDatasetRejectsVariantToolProfileContractViolation(t *testing.T) {
-	// baseline 必须记录 evaluation-wide-v1；伪装成 diagnosis-default 拒绝。
+	// baseline 必须记录 evaluation-wide-v2；伪装成 diagnosis-default 拒绝。
 	baseline := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
 	baseline.ToolProfileID = string(agentruntime.ToolProfileDiagnosis)
 	_, err := EvaluateDataset(evaluationCasesForTest()[:1], []EvaluationObservation{baseline})
 	if err == nil || !strings.Contains(err.Error(), "toolProfileId") {
 		t.Fatalf("EvaluateDataset error = %v, want Tool Profile contract rejection", err)
 	}
-	// experiment 必须记录 diagnosis-default；伪装成 evaluation-wide-v1 拒绝。
+	// experiment 必须记录 diagnosis-default；伪装成 evaluation-wide-v2 拒绝。
 	experiment := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
 	experiment.ToolProfileID = string(agentruntime.ToolProfileEvaluationWide)
 	_, err = EvaluateDataset(evaluationCasesForTest()[:1], []EvaluationObservation{experiment})
 	if err == nil || !strings.Contains(err.Error(), "toolProfileId") {
 		t.Fatalf("EvaluateDataset error = %v, want Tool Profile contract rejection", err)
+	}
+}
+
+func TestEvaluateDatasetRejectsMixedComparisonContracts(t *testing.T) {
+	baseline := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
+	experiment := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
+	experiment.ComparisonFingerprint = "sha256:" + strings.Repeat("d", 64)
+
+	_, err := EvaluateDataset(evaluationCasesForTest()[:1], []EvaluationObservation{baseline, experiment})
+	if err == nil || !strings.Contains(err.Error(), "comparison contract") {
+		t.Fatalf("EvaluateDataset error = %v, want mixed comparison contract rejection", err)
 	}
 }
 
@@ -241,11 +272,14 @@ func evaluationObservationForTest(
 		DatasetVersion: "dev-v1", CaseID: caseID, Variant: variant,
 		RunID: caseID + "-" + string(variant), Model: "stepfun", ModelVersion: "step-3.7-flash",
 		ReasoningEffort: "medium", PromptVersion: "test-v1",
-		ObservationSchemaVersion: EvaluationObservationV2,
+		ObservationSchemaVersion: EvaluationObservationV3,
 		ToolProfileID:            evaluationProfileIDForTest(variant),
 		ToolSchemaFingerprint:    evaluationSchemaFingerprintForTest(variant),
 		ModelProfileFingerprint:  strings.Repeat("a", 64),
 		ImplementationRevision:   "git:test-revision",
+		ComparisonFingerprint:    "sha256:" + strings.Repeat("c", 64),
+		SharedToolNames:          []string{ToolReadExternalCase, ToolSkill},
+		BaselineOnlyToolNames:    []string{"search_code"},
 		SelectedSkill:            SkillTicketDiagnosis,
 		ActualToolCalls:          actualTools,
 		AllowedTools:             []string{ToolReadExternalCase, "search_code", ToolSkill},

@@ -16,12 +16,12 @@ const (
 	EvaluationBaseline   EvaluationVariant = "baseline"
 	EvaluationExperiment EvaluationVariant = "experiment"
 
-	// EvaluationObservationV2 是通用 Agent 评测的 v2 数据合同：显式
+	// EvaluationObservationV3 是通用 Agent 评测的 v3 数据合同：显式
 	// observationSchemaVersion 加上完整身份（Tool Profile 合同
 	// toolProfileId/toolSchemaFingerprint、模型 Profile 指纹、实现
-	// revision/dirty）。active evaluator 不保留 v1 兼容分支：历史 v1 资产
+	// revision/dirty）。active evaluator 不保留 v1/v2 兼容分支：历史资产
 	// 只能标记 historical，不得进入正式归约。
-	EvaluationObservationV2 = "evaluation-observation-v2"
+	EvaluationObservationV3 = "evaluation-observation-v3"
 )
 
 func (v EvaluationVariant) Valid() bool {
@@ -87,10 +87,11 @@ func (c EvaluationCase) Validate() error {
 
 // EvaluationObservation 是 baseline 或 experiment 的一次真实运行记录。
 // Usage 必须来自供应商响应，不能用字符数或静态 Schema 字节数代替。
-// v2 身份字段：ObservationSchemaVersion 必须等于 EvaluationObservationV2
-// （无 v1 兼容分支）；ToolProfileID/ToolSchemaFingerprint 是实验臂特有合同
-// （baseline=evaluation-wide-v1，experiment=diagnosis-default），同一 variant
-// 跨样本必须一致，两臂之间按合同允许不同。
+// v3 身份字段：ObservationSchemaVersion 必须等于 EvaluationObservationV3
+// （无 v1/v2 兼容分支）；ToolProfileID/ToolSchemaFingerprint 是实验臂特有合同
+// （baseline=evaluation-wide-v2，experiment=diagnosis-default），同一 variant
+// 跨样本必须一致，两臂之间按合同允许不同；comparisonFingerprint 与两组
+// Tool 名单描述整组 wide/production 对照合同，必须在两臂观测中一致。
 type EvaluationObservation struct {
 	DatasetVersion           string            `json:"datasetVersion"`
 	CaseID                   string            `json:"caseId"`
@@ -106,6 +107,9 @@ type EvaluationObservation struct {
 	ModelProfileFingerprint  string            `json:"modelProfileFingerprint,omitempty"`
 	ImplementationRevision   string            `json:"implementationRevision,omitempty"`
 	ImplementationDirty      bool              `json:"implementationDirty,omitempty"`
+	ComparisonFingerprint    string            `json:"comparisonFingerprint,omitempty"`
+	SharedToolNames          []string          `json:"sharedToolNames,omitempty"`
+	BaselineOnlyToolNames    []string          `json:"baselineOnlyToolNames,omitempty"`
 	SelectedSkill            SkillID           `json:"selectedSkill"`
 	ActualToolCalls          []string          `json:"actualToolCalls"`
 	AllowedTools             []string          `json:"allowedTools"`
@@ -129,15 +133,16 @@ func (o EvaluationObservation) Validate() error {
 	if !o.Variant.Valid() {
 		return fmt.Errorf("invalid evaluation variant %q", o.Variant)
 	}
-	// 数据合同：v2 是唯一支持的合同，不保留 v1 兼容分支。历史 v1 资产
-	// （没有 observationSchemaVersion）只能标记 historical，不得进入正式归约。
-	if o.ObservationSchemaVersion != EvaluationObservationV2 {
+	// 数据合同：v3 是唯一支持的合同，不保留 v1/v2 兼容分支。历史资产
+	// （没有 observationSchemaVersion 或 v2 版本）只能标记 historical，不得
+	// 进入正式归约。
+	if o.ObservationSchemaVersion != EvaluationObservationV3 {
 		return fmt.Errorf(
-			"unsupported observationSchemaVersion %q: the active evaluator has no v1 compatibility branch; historical v1 assets must be marked historical and excluded from formal reduction",
-			o.ObservationSchemaVersion,
+			"unsupported observationSchemaVersion %q: the active evaluator only accepts %q; historical v1/v2 assets must be marked historical and excluded from formal reduction",
+			o.ObservationSchemaVersion, EvaluationObservationV3,
 		)
 	}
-	if err := o.validateV2Identity(); err != nil {
+	if err := o.validateV3Identity(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(o.Model) == "" || strings.TrimSpace(o.ModelVersion) == "" ||
@@ -169,37 +174,72 @@ func (o EvaluationObservation) Validate() error {
 	return nil
 }
 
-// validateV2Identity 强制执行 v2 身份合同。ToolProfileID 是实验臂特有合同：
-// baseline 固定 evaluation-wide-v1（评测 wide 合同，不是生产 Runtime
+// validateV3Identity 强制执行 v3 身份合同。ToolProfileID 是实验臂特有合同：
+// baseline 固定 evaluation-wide-v2（评测 wide 合同，不是生产 Runtime
 // Profile），experiment 固定生产 diagnosis-default；两臂不得互相伪装。
 // ToolSchemaFingerprint/ModelProfileFingerprint 必须是合法 SHA-256；
 // implementationRevision 非空，unknown 且 clean 拒绝（unknown 且 dirty 仅限
 // 本地 smoke）。
-func (o EvaluationObservation) validateV2Identity() error {
+func (o EvaluationObservation) validateV3Identity() error {
 	switch o.Variant {
 	case EvaluationBaseline:
 		if o.ToolProfileID != string(agentruntime.ToolProfileEvaluationWide) {
-			return fmt.Errorf("v2 baseline toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileEvaluationWide)
+			return fmt.Errorf("v3 baseline toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileEvaluationWide)
 		}
 	case EvaluationExperiment:
 		if o.ToolProfileID != string(agentruntime.ToolProfileDiagnosis) {
-			return fmt.Errorf("v2 experiment toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileDiagnosis)
+			return fmt.Errorf("v3 experiment toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileDiagnosis)
 		}
 	default:
 		return fmt.Errorf("invalid evaluation variant %q", o.Variant)
 	}
 	if !contextgovernance.IsSHA256Hex(o.ToolSchemaFingerprint) {
-		return errors.New("v2 observation requires a valid SHA-256 toolSchemaFingerprint")
+		return errors.New("v3 observation requires a valid SHA-256 toolSchemaFingerprint")
 	}
 	if !contextgovernance.IsSHA256Hex(o.ModelProfileFingerprint) {
-		return errors.New("v2 observation requires a valid SHA-256 modelProfileFingerprint")
+		return errors.New("v3 observation requires a valid SHA-256 modelProfileFingerprint")
 	}
 	revision := strings.TrimSpace(o.ImplementationRevision)
 	if revision == "" {
-		return errors.New("v2 observation requires an implementationRevision")
+		return errors.New("v3 observation requires an implementationRevision")
 	}
 	if revision == "unknown" && !o.ImplementationDirty {
-		return errors.New("v2 observation with unknown revision must set implementationDirty=true (local smoke only)")
+		return errors.New("v3 observation with unknown revision must set implementationDirty=true (local smoke only)")
+	}
+	if err := validateToolComparisonIdentity(
+		o.ComparisonFingerprint, o.SharedToolNames, o.BaselineOnlyToolNames,
+	); err != nil {
+		return fmt.Errorf("v3 observation comparison identity: %w", err)
+	}
+	return nil
+}
+
+func validateToolComparisonIdentity(fingerprint string, sharedToolNames, baselineOnlyToolNames []string) error {
+	if !strings.HasPrefix(fingerprint, "sha256:") ||
+		!contextgovernance.IsSHA256Hex(strings.TrimPrefix(fingerprint, "sha256:")) {
+		return errors.New("requires a valid SHA-256 comparisonFingerprint")
+	}
+	if len(sharedToolNames) == 0 {
+		return errors.New("requires non-empty sharedToolNames")
+	}
+	if len(baselineOnlyToolNames) == 0 {
+		return errors.New("requires non-empty baselineOnlyToolNames (the wide arm is a strict superset)")
+	}
+	for _, name := range append(append([]string(nil), sharedToolNames...), baselineOnlyToolNames...) {
+		if !toolNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid comparison Tool name %q", name)
+		}
+	}
+	if hasDuplicate(sharedToolNames) || hasDuplicate(baselineOnlyToolNames) {
+		return errors.New("comparison Tool names must be unique")
+	}
+	for _, shared := range sharedToolNames {
+		if slices.Contains(baselineOnlyToolNames, shared) {
+			return fmt.Errorf("baseline-only Tool %q overlaps sharedToolNames", shared)
+		}
+	}
+	if !slices.IsSorted(sharedToolNames) || !slices.IsSorted(baselineOnlyToolNames) {
+		return errors.New("comparison Tool names must use canonical sorted order")
 	}
 	return nil
 }
@@ -308,14 +348,28 @@ func EvaluateDataset(cases []EvaluationCase, observations []EvaluationObservatio
 // checkVariantToolProfileConsistency 对同一 variant 跨样本执行 fail-closed
 // 一致性检查：同一实验臂的所有样本必须保持同一个 ToolProfileID 与
 // toolSchemaFingerprint（启动 Epoch 的固定装配合同）。ToolProfileID/Schema
-// 指纹是实验臂特有合同，两臂之间允许（且预期）不同，这里只做臂内检查。
+// 指纹是实验臂特有合同，两臂之间允许（且预期）不同；comparison identity
+// 则描述整组 wide/production 对照合同，所有样本和两臂必须完全一致。
 func checkVariantToolProfileConsistency(observations []EvaluationObservation) error {
 	type contract struct {
 		profileID         string
 		schemaFingerprint string
 	}
 	byVariant := make(map[EvaluationVariant]contract, 2)
+	var comparison *ToolSelectionComparability
 	for _, observation := range observations {
+		currentComparison := ToolSelectionComparability{
+			ComparisonFingerprint: observation.ComparisonFingerprint,
+			SharedToolNames:       append([]string(nil), observation.SharedToolNames...),
+			BaselineOnlyToolNames: append([]string(nil), observation.BaselineOnlyToolNames...),
+		}
+		if comparison == nil {
+			comparison = &currentComparison
+		} else if comparison.ComparisonFingerprint != currentComparison.ComparisonFingerprint ||
+			!slices.Equal(comparison.SharedToolNames, currentComparison.SharedToolNames) ||
+			!slices.Equal(comparison.BaselineOnlyToolNames, currentComparison.BaselineOnlyToolNames) {
+			return fmt.Errorf("evaluation dataset mixes Tool comparison contracts: all variants and samples must keep one comparisonFingerprint/sharedToolNames/baselineOnlyToolNames identity")
+		}
 		previous, exists := byVariant[observation.Variant]
 		if !exists {
 			byVariant[observation.Variant] = contract{
@@ -481,7 +535,8 @@ func calculatePairedMetrics(
 			continue
 		}
 		// 配对只允许相同运行身份：model/modelVersion/reasoningEffort/promptVersion/
-		// modelProfileFingerprint/implementationRevision 必须一致，且两臂
+		// modelProfileFingerprint/implementationRevision/comparison identity 必须
+		// 一致，且两臂
 		// implementationDirty 都必须为 false（dirty 观测只保留单臂统计供本地
 		// smoke，不进入正式 paired 归约）。ToolProfileID 与 toolSchemaFingerprint
 		// 刻意不参与比较：它们是实验臂特有合同，两臂按设计不同，臂内一致性由
@@ -491,6 +546,9 @@ func calculatePairedMetrics(
 			baseline.PromptVersion != experiment.PromptVersion ||
 			baseline.ModelProfileFingerprint != experiment.ModelProfileFingerprint ||
 			baseline.ImplementationRevision != experiment.ImplementationRevision ||
+			baseline.ComparisonFingerprint != experiment.ComparisonFingerprint ||
+			!slices.Equal(baseline.SharedToolNames, experiment.SharedToolNames) ||
+			!slices.Equal(baseline.BaselineOnlyToolNames, experiment.BaselineOnlyToolNames) ||
 			baseline.ImplementationDirty || experiment.ImplementationDirty {
 			summary.UnpairedRuns += 2
 			continue

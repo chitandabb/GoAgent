@@ -143,7 +143,9 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	// Runner 只通过 Catalog 绑定的固定 Profile 装配 Schema：
 	//   - experiment：production Diagnosis Runner，必须绑定 diagnosis-default；
-	//   - baseline：评测 wide 臂专用，必须绑定独立 evaluation-wide-v1 Profile。
+	//   - baseline：评测 wide 臂专用，必须绑定 evaluation-wide-v2（两个生产
+	//     Profile 的并集）。baseline 与 experiment 使用同一个 Eino Skill
+	//     Middleware，两臂共享 Tool 的 Schema 完全一致。
 	// 误配的 Catalog 在构造期失败，而不是在每次请求时失败。
 	boundProfileID := cfg.ToolCatalog.BoundProfileID()
 	switch cfg.Mode {
@@ -156,7 +158,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	case RunnerModeBaseline:
 		if boundProfileID != agentruntime.ToolProfileEvaluationWide {
 			return nil, fmt.Errorf(
-				"baseline runner requires an evaluation-wide-v1 catalog, got profile %q", boundProfileID,
+				"baseline runner requires an evaluation-wide-v2 catalog, got profile %q", boundProfileID,
 			)
 		}
 	}
@@ -217,10 +219,10 @@ func (r *Runner) ProfileToolNames() []string {
 }
 
 // ProfileToolSchemaFingerprint 返回本 Runner 最终传给模型的 Tool Schema
-// 指纹。experiment 除 Catalog-owned Tool 外还包含 Eino Skill Middleware
-// 注入的真实 skill Tool；baseline 不启用该 Middleware。评测观测用它作为
-// v2 toolSchemaFingerprint：同一 variant 跨样本必须一致，不同 Profile
-// （臂）之间按合同允许不同。
+// 指纹。experiment 与 baseline 都经过同一个 Eino Skill Middleware：除
+// Catalog-owned Tool 外还包含 Middleware 注入的真实 skill Tool。评测观测
+// 用它作为 v3 toolSchemaFingerprint：同一 variant 跨样本必须一致，不同
+// Profile（臂）之间按合同允许不同。
 func (r *Runner) ProfileToolSchemaFingerprint(ctx context.Context) (string, error) {
 	if r == nil || r.toolCatalog == nil {
 		return "", errors.New("agent runner has no bound tool catalog")
@@ -229,18 +231,14 @@ func (r *Runner) ProfileToolSchemaFingerprint(ctx context.Context) (string, erro
 	if err != nil {
 		return "", err
 	}
-	visibleTools := resolved.Tools
-	if r.mode == RunnerModeExperiment {
-		_, finalCtx, middlewareErr := r.skillRuntime.Middleware.BeforeAgent(
-			ctx,
-			&adk.ChatModelAgentContext{Tools: append([]tool.BaseTool(nil), resolved.Tools...)},
-		)
-		if middlewareErr != nil {
-			return "", fmt.Errorf("append skill Tool for Schema fingerprint: %w", middlewareErr)
-		}
-		visibleTools = finalCtx.Tools
+	_, finalCtx, middlewareErr := r.skillRuntime.Middleware.BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext{Tools: append([]tool.BaseTool(nil), resolved.Tools...)},
+	)
+	if middlewareErr != nil {
+		return "", fmt.Errorf("append skill Tool for Schema fingerprint: %w", middlewareErr)
 	}
-	return CanonicalToolContractFingerprint(ctx, visibleTools)
+	return CanonicalToolContractFingerprint(ctx, finalCtx.Tools)
 }
 
 func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
@@ -325,8 +323,11 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	instruction := buildBaselineAgentInstruction(r.baselineInstruction, result.SkillID)
 	if r.mode == RunnerModeExperiment {
 		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction)
-		handlers = append(handlers, r.skillRuntime.Middleware)
 	}
+	// 两臂（experiment 与 baseline wide）使用同一个 Eino Skill Middleware：
+	// wide 臂的 evaluation-wide-v2 Profile 并集声明了 skill 名单，最终模型
+	// Schema 与 experiment 共享完全一致的 skill Tool。
+	handlers = append(handlers, r.skillRuntime.Middleware)
 	// task_context 追加到 system 指令最尾部；同一任务的每轮 Evidence Gate
 	// 重试保持一致（Context 内的值在任务执行开始前绑定一次）。
 	taskContext := DiagnosisTaskContextFromContext(ctx)

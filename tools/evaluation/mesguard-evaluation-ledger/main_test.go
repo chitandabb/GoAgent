@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/evaluationledger"
 )
 
@@ -36,7 +37,7 @@ func TestRunReplaysToolSelectionWithoutProviderAndRefusesOverwrite(t *testing.T)
 	}})
 	writeJSONLines(t, observationsPath, []mesagent.ToolSelectionObservation{
 		ledgerCLIObservation("run-wide", mesagent.ToolSelectionWide),
-		ledgerCLIObservation("run-filtered", mesagent.ToolSelectionFiltered),
+		ledgerCLIObservation("run-production", mesagent.ToolSelectionProduction),
 	})
 
 	args := []string{
@@ -228,16 +229,31 @@ func TestReadJSONLinesRejectsNullRequiredField(t *testing.T) {
 }
 
 func ledgerCLIObservation(runID string, variant mesagent.ToolSelectionVariant) mesagent.ToolSelectionObservation {
-	return mesagent.ToolSelectionObservation{
+	observation := mesagent.ToolSelectionObservation{
 		DatasetVersion: "tool-selection-v1", CaseID: "case-1", Variant: variant, RunID: runID,
 		ModelProvider: "stepfun", ModelID: "step-3.7-flash", ReasoningEffort: "low",
 		PromptVersion: "tool-selection-v1", MaxOutputTokens: 64,
 		AvailableTools: []string{mesagent.ToolReadExternalCase}, SelectedTool: mesagent.ToolReadExternalCase,
 		ToolCallCount: 1, ToolSchemaHash: "sha256:schema", ToolSchemaBytes: 100,
 		BasePromptTokens: 80, ToolSchemaPromptTokens: 40,
-		Usage:          mesagent.ModelUsage{ModelCalls: 1, PromptTokens: 120, CompletionTokens: 5, TotalTokens: 125},
-		DurationMillis: 200,
+		Usage:                    mesagent.ModelUsage{ModelCalls: 1, PromptTokens: 120, CompletionTokens: 5, TotalTokens: 125},
+		DurationMillis:           200,
+		ObservationSchemaVersion: mesagent.ToolSelectionObservationV3,
+		ModelVisibleNames:        []string{mesagent.ToolReadExternalCase},
+		ModelProfileFingerprint:  strings.Repeat("ab", 32),
+		ImplementationRevision:   "git:revision-1",
+		ComparisonFingerprint:    "sha256:" + strings.Repeat("cd", 32),
+		SharedToolNames:          []string{mesagent.ToolReadExternalCase},
+		BaselineOnlyToolNames:    []string{"read_conversation_tool_result"},
 	}
+	if variant == mesagent.ToolSelectionWide {
+		observation.ToolProfileID = mesagent.ToolSelectionEvaluationWideProfile
+		observation.AvailableTools = []string{mesagent.ToolReadExternalCase, "read_conversation_tool_result"}
+		observation.ModelVisibleNames = append([]string(nil), observation.AvailableTools...)
+	} else {
+		observation.ToolProfileID = string(agentruntime.ToolProfileDiagnosis)
+	}
+	return observation
 }
 
 func writeJSONFile(t *testing.T, path string, value any) {

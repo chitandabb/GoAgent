@@ -229,3 +229,144 @@ func TestBuildDefaultToolProfilesRejectsInvalidGitHubToolNames(t *testing.T) {
 		t.Fatal("BuildDefaultToolProfiles accepted an invalid GitHub Tool name")
 	}
 }
+
+// fullyConfiguredToolProfileConfig 返回全部业务 Tool 都成功构造的部署配置，
+// 等价于真实 Pilot 中 evaluation-wide-v1=7 个业务 Tool、diagnosis-default=9
+// 个模型可见 Tool 的对照场景。
+func fullyConfiguredToolProfileConfig() ToolProfileConfig {
+	return ToolProfileConfig{
+		ExternalCaseConfigured:           true,
+		SkillReferenceConfigured:         true,
+		KnowledgeConfigured:              true,
+		WebSearchConfigured:              true,
+		FetchPublicPageConfigured:        true,
+		AttachmentConfigured:             true,
+		SQLObjectDefinitionsConfigured:   true,
+		SchemaCatalogConfigured:          true,
+		ReadonlyQueryConfigured:          true,
+		GitHubToolNames:                  append([]string(nil), GitHubReadOnlyTools...),
+		DiagnosisCommandConfigured:       true,
+		DiagnosisStatusConfigured:        true,
+		ConversationMemoryConfigured:     true,
+		ConversationToolResultConfigured: true,
+	}
+}
+
+// TestEvaluationWideV2IsStableUnionOfProductionProfiles 证明
+// evaluation-wide-v2 是 conversation-default 与 diagnosis-default 的稳定并
+// 集：去重、顺序无关、包含 diagnosis-only 与 conversation-only Tool，并且
+// 两个生产 Profile 名单逐项保持既有语义（本切片不得改变生产 Tool 名单）。
+func TestEvaluationWideV2IsStableUnionOfProductionProfiles(t *testing.T) {
+	profiles, err := BuildDefaultToolProfiles(fullyConfiguredToolProfileConfig())
+	if err != nil {
+		t.Fatalf("BuildDefaultToolProfiles: %v", err)
+	}
+	conversation, ok := profiles.Profile(agentruntime.ToolProfileConversation)
+	if !ok {
+		t.Fatal("conversation-default profile is missing")
+	}
+	diagnosis, ok := profiles.Profile(agentruntime.ToolProfileDiagnosis)
+	if !ok {
+		t.Fatal("diagnosis-default profile is missing")
+	}
+	wide, ok := profiles.Profile(agentruntime.ToolProfileEvaluationWide)
+	if !ok {
+		t.Fatal("evaluation-wide-v2 profile is missing")
+	}
+
+	// 1. 生产 Profile 名单逐项保持既有语义（conversation-only / diagnosis-only
+	//    分界不变，SQL 三件套接线不变）。
+	conversationWant := sortedUnique([]string{
+		ToolReadExternalCase, ToolSearchKnowledge, ToolWebSearch, ToolFetchPublicPage,
+		ToolReadAttachment, ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery,
+		ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus,
+		ToolReadConversationMemorySources, ToolReadConversationToolResult,
+	})
+	diagnosisWant := sortedUnique(append([]string{
+		ToolSkill, ToolReadSkillReference, ToolReadExternalCase, ToolSearchKnowledge,
+		ToolWebSearch, ToolFetchPublicPage, ToolReadAttachment,
+		ToolDatabaseObjectDefinition, ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery,
+	}, GitHubReadOnlyTools...))
+	if !slices.Equal(conversation.ToolNames(), conversationWant) {
+		t.Fatalf("conversation-default must stay unchanged, got %v want %v", conversation.ToolNames(), conversationWant)
+	}
+	if !slices.Equal(diagnosis.ToolNames(), diagnosisWant) {
+		t.Fatalf("diagnosis-default must stay unchanged, got %v want %v", diagnosis.ToolNames(), diagnosisWant)
+	}
+
+	// 2. wide 是两臂的并集（去重、排序稳定）。
+	wantWide := append(append([]string(nil), conversation.ToolNames()...), diagnosis.ToolNames()...)
+	wantWide = sortedUnique(wantWide)
+	if !slices.Equal(wide.ToolNames(), wantWide) {
+		t.Fatalf("evaluation-wide-v2 = %v, want union %v", wide.ToolNames(), wantWide)
+	}
+
+	// 3. wide 覆盖 diagnosis-default 的全部 Tool 与 conversation-only Tool。
+	for _, name := range diagnosis.ToolNames() {
+		if !wide.Has(name) {
+			t.Fatalf("evaluation-wide-v2 is missing diagnosis tool %q: %v", name, wide.ToolNames())
+		}
+	}
+	for _, name := range []string{
+		ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus,
+		ToolReadConversationMemorySources, ToolReadConversationToolResult,
+	} {
+		if !wide.Has(name) {
+			t.Fatalf("evaluation-wide-v2 is missing conversation-only tool %q: %v", name, wide.ToolNames())
+		}
+	}
+
+	// 4. 输入顺序变化不影响最终名单（union 与排序在 Profile 构造内部完成）。
+	shuffled := fullyConfiguredToolProfileConfig()
+	reversed := append([]string(nil), GitHubReadOnlyTools...)
+	for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
+		reversed[left], reversed[right] = reversed[right], reversed[left]
+	}
+	shuffled.GitHubToolNames = reversed
+	shuffledProfiles, err := BuildDefaultToolProfiles(shuffled)
+	if err != nil {
+		t.Fatalf("BuildDefaultToolProfiles(shuffled): %v", err)
+	}
+	shuffledWide, _ := shuffledProfiles.Profile(agentruntime.ToolProfileEvaluationWide)
+	if !slices.Equal(shuffledWide.ToolNames(), wide.ToolNames()) {
+		t.Fatalf("input order changed the wide profile: %v vs %v", shuffledWide.ToolNames(), wide.ToolNames())
+	}
+	shuffledDiagnosis, _ := shuffledProfiles.Profile(agentruntime.ToolProfileDiagnosis)
+	if !slices.Equal(shuffledDiagnosis.ToolNames(), diagnosis.ToolNames()) {
+		t.Fatalf("input order changed the diagnosis profile: %v vs %v", shuffledDiagnosis.ToolNames(), diagnosis.ToolNames())
+	}
+}
+
+// TestEvaluationWideV2FollowsPartialConstruction 证明 wide 并集只引用已配置
+// 成功构造的 Tool：部分构造配置下 wide 名单等于两臂并集，不引入假 Tool。
+func TestEvaluationWideV2FollowsPartialConstruction(t *testing.T) {
+	profiles, err := BuildDefaultToolProfiles(ToolProfileConfig{
+		ExternalCaseConfigured:   true,
+		SkillReferenceConfigured: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildDefaultToolProfiles(partial): %v", err)
+	}
+	conversation, _ := profiles.Profile(agentruntime.ToolProfileConversation)
+	diagnosis, _ := profiles.Profile(agentruntime.ToolProfileDiagnosis)
+	wide, ok := profiles.Profile(agentruntime.ToolProfileEvaluationWide)
+	if !ok {
+		t.Fatal("evaluation-wide-v2 profile is missing under partial construction")
+	}
+	want := sortedUnique(append(append([]string(nil), conversation.ToolNames()...), diagnosis.ToolNames()...))
+	if !slices.Equal(wide.ToolNames(), want) {
+		t.Fatalf("partial wide profile = %v, want %v", wide.ToolNames(), want)
+	}
+	if !wide.Has(ToolSkill) || !wide.Has(ToolReadSkillReference) {
+		t.Fatalf("partial wide profile must include middleware-owned skill and read_skill_reference: %v", wide.ToolNames())
+	}
+	if wide.Has(ToolSearchSchemaCatalog) || wide.Has(ToolDatabaseObjectDefinition) {
+		t.Fatalf("partial wide profile over-declared tools: %v", wide.ToolNames())
+	}
+}
+
+func sortedUnique(values []string) []string {
+	result := append([]string(nil), values...)
+	slices.Sort(result)
+	return slices.Compact(result)
+}

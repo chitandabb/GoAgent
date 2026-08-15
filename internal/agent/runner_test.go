@@ -192,7 +192,11 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 	}
 }
 
-func TestRunnerBaselineBindsWideProfileWithoutSkillMiddleware(t *testing.T) {
+func TestRunnerBaselineBindsWideProfileWithSkillMiddleware(t *testing.T) {
+	// wide 臂（evaluation-wide-v2）与 production 使用同一个真实 Eino Skill
+	// Middleware：最终模型 Schema 包含 Middleware-owned skill，两臂共享
+	// Tool 的 Schema 一致。wide 是两臂并集，因此 AllowedTools 还包含
+	// 本次装配注册的共享只读 Tool。
 	runner := newRunnerTestWithMode(t, &runnerModelState{baseline: true}, RunnerModeBaseline)
 	access := runnerTestAccess(t, agentruntime.PermissionCaseRead)
 	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), access), RunRequest{
@@ -201,11 +205,32 @@ func TestRunnerBaselineBindsWideProfileWithoutSkillMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoke baseline: %v", err)
 	}
-	if !slices.Equal(result.AllowedTools, []string{ToolReadExternalCase, "search_code"}) {
-		t.Fatalf("baseline allowed tools = %v", result.AllowedTools)
+	if !slices.Contains(result.AllowedTools, ToolSkill) {
+		t.Fatalf("baseline allowed tools must include the Middleware-owned skill: %v", result.AllowedTools)
 	}
-	if slices.Contains(result.AllowedTools, ToolSkill) || len(result.ExecutedSkills) != 0 {
-		t.Fatalf("baseline unexpectedly exposed or executed Skill: allowed=%v executed=%v", result.AllowedTools, result.ExecutedSkills)
+	for _, name := range []string{ToolReadExternalCase, "search_code"} {
+		if !slices.Contains(result.AllowedTools, name) {
+			t.Fatalf("baseline allowed tools are missing %q: %v", name, result.AllowedTools)
+		}
+	}
+	// baseline 的最终 Schema 指纹必须包含 skill Middleware 追加的 schema。
+	fingerprint, err := runner.ProfileToolSchemaFingerprint(context.Background())
+	if err != nil {
+		t.Fatalf("ProfileToolSchemaFingerprint(baseline): %v", err)
+	}
+	if len(fingerprint) != 64 {
+		t.Fatalf("baseline fingerprint = %q, want a SHA-256 hex digest", fingerprint)
+	}
+	resolved, err := runner.toolCatalog.ResolveProfile(context.Background(), runner.toolProfileID)
+	if err != nil {
+		t.Fatalf("ResolveProfile(baseline): %v", err)
+	}
+	catalogOnly, err := CanonicalToolContractFingerprint(context.Background(), resolved.Tools)
+	if err != nil {
+		t.Fatalf("catalog-only fingerprint: %v", err)
+	}
+	if fingerprint == catalogOnly {
+		t.Fatal("baseline fingerprint ignored the Middleware-owned skill Tool")
 	}
 }
 
@@ -630,8 +655,8 @@ func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMod
 	}
 	var runner *Runner
 	if mode == RunnerModeBaseline {
-		// wide 臂：独立 evaluation-wide-v1 Profile（全部业务 Tool，无 Skill
-		// 中间件）。
+		// wide 臂：独立 evaluation-wide-v2 Profile（两臂并集，Skill 由
+		// Runner 内同一个 Skill Middleware 追加）。
 		wideCatalog, catalogErr := NewEvaluationWideDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 			ExternalCases: runnerTestCaseGetter{}, GitHubTools: []tool.BaseTool{searchTool},
 		})

@@ -63,23 +63,29 @@ func TestToolCatalogSchemaComesOnlyFromBoundProfile(t *testing.T) {
 	}
 }
 
-// TestToolCatalogEvaluationWideProfileResolvesRegisteredBusinessTools 证明
-// evaluation-wide-v1 是独立的固定宽 Profile：它解析全部注册的业务 Tool，
-// 不含 skill/read_skill_reference。
-func TestToolCatalogEvaluationWideProfileResolvesRegisteredBusinessTools(t *testing.T) {
-	wideCatalog := newEvaluationWideToolCatalogForTest(t)
+// TestToolCatalogEvaluationWideProfileResolvesUnionOfProductionProfiles 证明
+// evaluation-wide-v2 是独立且完整的固定宽 Profile：它解析两个生产 Profile
+// 的并集（含 Middleware-owned skill 与 read_skill_reference，以及
+// conversation-only 工具），且 Catalog 不会伪造 skill Tool。
+func TestToolCatalogEvaluationWideProfileResolvesUnionOfProductionProfiles(t *testing.T) {
+	wideCatalog := comparabilityWideCatalogForTest(t)
 	resolved, err := wideCatalog.ResolveProfile(context.Background(), agentruntime.ToolProfileEvaluationWide)
 	if err != nil {
-		t.Fatalf("ResolveProfile(evaluation-wide-v1): %v", err)
+		t.Fatalf("ResolveProfile(evaluation-wide-v2): %v", err)
 	}
-	want := []string{testToolGitHub, testToolKnowledge, testToolLabSQL, testToolReadCase, testToolReadSQL}
-	if got := toolNamesForTest(t, resolved.Tools); !slices.Equal(got, want) {
-		t.Fatalf("wide profile tools = %v, want %v", got, want)
-	}
-	for _, name := range resolved.ModelVisibleNames {
-		if name == ToolSkill || name == ToolReadSkillReference {
-			t.Fatalf("wide profile must not include %q", name)
+	names := resolved.ModelVisibleNames
+	for _, required := range []string{
+		"search_code", ToolSearchKnowledge, ToolDatabaseObjectDefinition, ToolReadExternalCase,
+		ToolExecuteReadonlyQuery, ToolSkill, ToolReadSkillReference,
+		ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus, ToolReadConversationToolResult,
+		ToolSearchSchemaCatalog, ToolReadConversationMemorySources,
+	} {
+		if !slices.Contains(names, required) {
+			t.Fatalf("wide profile is missing %q: %v", required, names)
 		}
+	}
+	if slices.Contains(toolNamesForTest(t, resolved.Tools), ToolSkill) {
+		t.Fatal("catalog resolved a fake skill Tool")
 	}
 }
 

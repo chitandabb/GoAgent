@@ -2,16 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	"go.uber.org/zap"
 )
 
 func skillRuntimeForSelectionTest(t *testing.T) *mesagent.NativeSkillRuntime {
@@ -332,3 +342,274 @@ func TestPrepareToolSelectionModelProfileKeepsEmptyEffort(t *testing.T) {
 // 由该包自身的 7 个测试覆盖：dirty 检测、status 失败非 clean、status 失败 +
 // allow-dirty 保留已知 revision、clean 树、rev-parse 失败 unknown、formal
 // 拒绝 unknown/dirty、allow-dirty 接受 unknown）。本命令不再保留本地副本。
+
+// selectionEvalModelStub 是单 case 评测的脚本化模型：第一次调用（base
+// prompt 测量）返回 800 tokens，后续调用返回 1000 tokens，使
+// ToolSchemaPromptTokens = 200 满足 v3 校准校验。每次调用都选择
+// read_external_case 且带完整 Provider usage。
+type selectionEvalModelStub struct {
+	calls atomic.Int32
+}
+
+func (m *selectionEvalModelStub) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	promptTokens := 1000
+	if m.calls.Add(1) == 1 {
+		promptTokens = 800
+	}
+	return &schema.Message{
+		Role:    schema.Assistant,
+		Content: "ok",
+		ToolCalls: []schema.ToolCall{{
+			Index: intPtr(0),
+			Function: schema.FunctionCall{
+				Name: mesagent.ToolReadExternalCase, Arguments: "{}",
+			},
+		}},
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage: &schema.TokenUsage{
+				PromptTokens: promptTokens, CompletionTokens: 50, TotalTokens: promptTokens + 50,
+			},
+		},
+	}, nil
+}
+
+func (m *selectionEvalModelStub) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *selectionEvalModelStub) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func selectionTestConfig() config.Config {
+	return config.Config{
+		Models: config.ModelsConfig{Chat: config.ChatModelConfig{
+			Enabled:           true,
+			ActiveProfileName: "stepfun-main",
+			Profiles: map[string]config.ChatModelProfileConfig{
+				"stepfun-main": {
+					Provider: "stepfun", BaseURL: "https://api.stepfun.com/step_plan/v1",
+					APIKeyEnv: "MESGUARD_STEPFUN_API_KEY",
+					Model:     "step-3.7-flash", ReasoningEffort: "low",
+					TimeoutMillis:       120_000,
+					ContextWindowTokens: 131_072, MaxOutputTokens: 4096,
+					PromptSafetyMarginTokens: 2048, PromptSafetyMarginRatio: 0.05,
+					TokenizerStrategy: config.TokenizerStrategyLocalCalibrated,
+				},
+			},
+		}},
+		GitHubMCP: config.GitHubMCPConfig{Enabled: true},
+		Agent: config.AgentConfig{
+			SkillsDirectory: filepath.Join("..", "..", "..", "config", "skills"),
+		},
+	}
+}
+
+func writeSelectionDatasetForTest(t *testing.T) string {
+	t.Helper()
+	dataset := filepath.Join(t.TempDir(), "dataset.jsonl")
+	line := `{"datasetVersion":"tools-v1","caseId":"case-1","scope":"github","userQuery":"查找代码","expectedTool":"read_external_case"}` + "\n"
+	if err := os.WriteFile(dataset, []byte(line), 0o600); err != nil {
+		t.Fatalf("write dataset: %v", err)
+	}
+	return dataset
+}
+
+// TestSelectionPreflightFailClosedBeforeProvider 证明可比性校验在创建任何
+// Provider 之前 fail-closed：verify 返回漂移错误时，runWithDependencies 立即
+// 失败且 newChatModel factory 从未被调用（factory.calls == 0）。
+func TestSelectionPreflightFailClosedBeforeProvider(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+
+	factoryCalls := atomic.Int32{}
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+		factoryCalls.Add(1)
+		return nil, errors.New("factory must not be reached before comparability preflight")
+	}
+	deps.verifySelectionComparability = func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error) {
+		return mesagent.ToolSelectionComparability{}, errors.New("drifted shared schema")
+	}
+
+	err := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+	}, zap.NewNop(), deps)
+	if err == nil || !strings.Contains(err.Error(), "comparability preflight") {
+		t.Fatalf("runWithDependencies error = %v, want comparability preflight rejection", err)
+	}
+	if factoryCalls.Load() != 0 {
+		t.Fatalf("newChatModel factory called %d times before comparability preflight, want 0", factoryCalls.Load())
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("observations output must not be created on preflight failure: %v", err)
+	}
+}
+
+// TestSelectionPreflightAcceptsRealArms 端到端证明：真实两臂装配与真实
+// VerifyToolSelectionComparability 通过 preflight，随后只创建一次 Provider
+// 并产出 v3 观测：两臂共享 comparison 身份、v3 合同、正确的 Profile ID。
+func TestSelectionPreflightAcceptsRealArms(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+
+	factoryCalls := atomic.Int32{}
+	modelStub := &selectionEvalModelStub{}
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+		factoryCalls.Add(1)
+		return modelStub, nil
+	}
+	// 真实 VerifyToolSelectionComparability（默认依赖）。
+
+	if err := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+	}, zap.NewNop(), deps); err != nil {
+		t.Fatalf("runWithDependencies: %v", err)
+	}
+	if factoryCalls.Load() != 1 {
+		t.Fatalf("newChatModel factory called %d times, want exactly 1", factoryCalls.Load())
+	}
+
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read observations: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("observations = %d lines, want 2 (wide + production)", len(lines))
+	}
+	var wide, production mesagent.ToolSelectionObservation
+	for _, line := range lines {
+		var observation mesagent.ToolSelectionObservation
+		if err := json.Unmarshal([]byte(line), &observation); err != nil {
+			t.Fatalf("unmarshal observation: %v", err)
+		}
+		switch observation.Variant {
+		case mesagent.ToolSelectionWide:
+			wide = observation
+		case mesagent.ToolSelectionProduction:
+			production = observation
+		default:
+			t.Fatalf("unexpected variant %q", observation.Variant)
+		}
+	}
+	if wide.Variant == "" || production.Variant == "" {
+		t.Fatal("both arms must be recorded")
+	}
+	for name, observation := range map[string]mesagent.ToolSelectionObservation{
+		"wide": wide, "production": production,
+	} {
+		if observation.ObservationSchemaVersion != mesagent.ToolSelectionObservationV3 {
+			t.Fatalf("%s observationSchemaVersion = %q, want %q", name,
+				observation.ObservationSchemaVersion, mesagent.ToolSelectionObservationV3)
+		}
+		if observation.ComparisonFingerprint == "" ||
+			!strings.HasPrefix(observation.ComparisonFingerprint, "sha256:") {
+			t.Fatalf("%s comparisonFingerprint = %q", name, observation.ComparisonFingerprint)
+		}
+		if len(observation.SharedToolNames) == 0 || len(observation.BaselineOnlyToolNames) == 0 {
+			t.Fatalf("%s comparison Tool lists are empty: shared=%v baselineOnly=%v", name,
+				observation.SharedToolNames, observation.BaselineOnlyToolNames)
+		}
+		if observation.ToolCallCount != 1 || observation.SelectedTool != mesagent.ToolReadExternalCase {
+			t.Fatalf("%s selection = %d/%q", name, observation.ToolCallCount, observation.SelectedTool)
+		}
+		if err := observation.Validate(); err != nil {
+			t.Fatalf("%s Validate: %v", name, err)
+		}
+	}
+	if wide.ComparisonFingerprint != production.ComparisonFingerprint {
+		t.Fatal("both arms must record the same comparisonFingerprint")
+	}
+	if !slices.Equal(wide.SharedToolNames, production.SharedToolNames) ||
+		!slices.Equal(wide.BaselineOnlyToolNames, production.BaselineOnlyToolNames) {
+		t.Fatal("both arms must record the same comparison Tool lists")
+	}
+	if wide.ToolProfileID != string(agentruntime.ToolProfileEvaluationWide) {
+		t.Fatalf("wide toolProfileId = %q, want evaluation-wide-v2", wide.ToolProfileID)
+	}
+	if production.ToolProfileID != string(agentruntime.ToolProfileDiagnosis) {
+		t.Fatalf("production toolProfileId = %q, want diagnosis-default", production.ToolProfileID)
+	}
+	// wide 必须包含 production 的全部 Tool 且严格更多（并集合同）。
+	for _, name := range production.ModelVisibleNames {
+		if !slices.Contains(wide.ModelVisibleNames, name) {
+			t.Fatalf("wide arm is missing production Tool %q: %v", name, wide.ModelVisibleNames)
+		}
+	}
+	if len(wide.ModelVisibleNames) <= len(production.ModelVisibleNames) {
+		t.Fatalf("wide arm must be a strict superset: wide=%d production=%d",
+			len(wide.ModelVisibleNames), len(production.ModelVisibleNames))
+	}
+	if _, err := os.Stat(summary); err != nil {
+		t.Fatalf("summary output missing: %v", err)
+	}
+}
+
+func TestObserveToolSelectionRejectsSchemaDriftFromPreflight(t *testing.T) {
+	cfg := selectionTestConfig()
+	skillRuntime, err := mesagent.NewNativeSkillRuntime(context.Background(), cfg.Agent.SkillsDirectory)
+	if err != nil {
+		t.Fatalf("NewNativeSkillRuntime: %v", err)
+	}
+	assembly, err := assembleSelectionEval(
+		context.Background(), nil, skillRuntime, mesagent.VerifyToolSelectionComparability,
+	)
+	if err != nil {
+		t.Fatalf("assembleSelectionEval: %v", err)
+	}
+	assembly.productionSchemaHash = "sha256:" + strings.Repeat("f", 64)
+	profile, fingerprint, err := prepareToolSelectionModelProfile(cfg.Models.Chat)
+	if err != nil {
+		t.Fatalf("prepareToolSelectionModelProfile: %v", err)
+	}
+
+	_, err = observeToolSelection(
+		context.Background(), &selectionEvalModelStub{}, assembly,
+		mesagent.ToolSelectionCase{
+			DatasetVersion: "tool-selection-v1", CaseID: "case-1",
+			Scope: mesagent.ToolSelectionTicket, UserQuery: "读取工单",
+			ExpectedTool: mesagent.ToolReadExternalCase,
+		},
+		mesagent.ToolSelectionProduction, 800,
+		evaluationidentity.Identity{Revision: "git:test", Dirty: false}, fingerprint, profile,
+	)
+	if err == nil || !strings.Contains(err.Error(), "preflight Tool Schema") {
+		t.Fatalf("observeToolSelection error = %v, want preflight Schema drift rejection", err)
+	}
+}
+
+// TestSelectionDefaultOutputPathsAreV3 证明 v3 输出资产默认名，避免覆盖
+// v1/v2 历史资产。
+func TestSelectionDefaultOutputPathsAreV3(t *testing.T) {
+	if toolSelectionObservationsOutput != "testdata/tool-selection-v3.observations.jsonl" {
+		t.Fatalf("default observations output = %q", toolSelectionObservationsOutput)
+	}
+	if toolSelectionSummaryOutput != "testdata/tool-selection-v3.summary.json" {
+		t.Fatalf("default summary output = %q", toolSelectionSummaryOutput)
+	}
+}
