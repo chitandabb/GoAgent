@@ -3,15 +3,11 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/shared/api'
 import { ApiError } from '@/shared/api'
-import type {
-  InvestigationCapability,
-  RequestedSkill,
-} from '@/shared/api/m1-types'
 import { shortId } from '@/shared/lib/fmt'
 import { Button } from '@/shared/ui/Button'
 import { Card, CardTitle } from '@/shared/ui/Card'
 import { Dialog } from '@/shared/ui/Dialog'
-import { FieldLabel, Select, TextArea } from '@/shared/ui/Field'
+import { FieldLabel, TextArea } from '@/shared/ui/Field'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { PageLoading } from '@/shared/ui/Spinner'
 import { useToast } from '@/shared/ui/Toast'
@@ -40,19 +36,15 @@ export function DiagnosePage() {
 
   const [selectedDs, setSelectedDs] = useState<string[] | null>(null)
   const [requestText, setRequestText] = useState('')
-  const [requestedSkill, setRequestedSkill] = useState<RequestedSkill>('ticket-diagnosis')
-  const [capabilities, setCapabilities] = useState<InvestigationCapability[]>(['case'])
   const [fpDialogOpen, setFpDialogOpen] = useState(false)
 
-  // 重新诊断：用原任务输入预填一次（仍创建全新任务与快照）
+  // 重新诊断：只恢复仍存在的业务输入（问题文本），不恢复已删除的
+  // Skill/Capability 选择；仍创建全新任务与快照。
   const prefilled = useRef(false)
   useEffect(() => {
     if (prefilled.current || !retryOfTask.data) return
     prefilled.current = true
     setRequestText(retryOfTask.data.requestText)
-    const scope = retryOfTask.data.requestScope
-    setRequestedSkill(scope.requestedSkill ?? 'ticket-diagnosis')
-    setCapabilities(scope.allowedCapabilities ?? ['case'])
   }, [retryOfTask.data])
 
   const create = useMutation({
@@ -88,26 +80,6 @@ export function DiagnosePage() {
     )
   }
 
-  const selectSkill = (skill: RequestedSkill) => {
-    setRequestedSkill(skill)
-    setCapabilities((current) => {
-      const required = skill === 'code-investigation' ? 'code' : skill === 'sql-investigation' ? 'sql' : null
-      return required && !current.includes(required) ? [...current, required] : current
-    })
-  }
-
-  const toggleCapability = (capability: 'code' | 'sql') => {
-    const required =
-      (requestedSkill === 'code-investigation' && capability === 'code') ||
-      (requestedSkill === 'sql-investigation' && capability === 'sql')
-    if (required) return
-    setCapabilities((current) =>
-      current.includes(capability)
-        ? current.filter((item) => item !== capability)
-        : [...current, capability],
-    )
-  }
-
   const submit = () => {
     create.mutate({
       idempotencyKey: api.createIdempotencyKey(),
@@ -116,11 +88,6 @@ export function DiagnosePage() {
         expectedSourceFingerprint: c.sourceFingerprint,
         evidenceDataSourceIds: checked,
         requestText: requestText.trim(),
-        requestScope: {
-          requestedSkill,
-          allowedCapabilities: capabilities,
-        },
-        requestScopeSchemaVersion: 1,
         attachments: [],
         retryOfTaskId,
       },
@@ -163,49 +130,6 @@ export function DiagnosePage() {
       )}
 
       <Card className="p-7">
-        <div className="mb-7">
-          <FieldLabel hint="决定首选调查流程">调查入口</FieldLabel>
-          <Select value={requestedSkill} onValueChange={(value) => selectSkill(value as RequestedSkill)}>
-            <option value="ticket-diagnosis">工单诊断</option>
-            <option value="code-investigation">代码调查</option>
-            <option value="sql-investigation">SQL 调查</option>
-          </Select>
-        </div>
-
-        <div className="mb-7">
-          <FieldLabel hint="任务允许使用的能力">调查范围</FieldLabel>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {([
-              ['case', '工单调查', '始终启用'],
-              ['code', '代码调查', '读取代码证据'],
-              ['sql', 'SQL 调查', '执行受控只读查询'],
-            ] as const).map(([value, label, note]) => {
-              const selected = capabilities.includes(value)
-              const locked = value === 'case' ||
-                (value === 'code' && requestedSkill === 'code-investigation') ||
-                (value === 'sql' && requestedSkill === 'sql-investigation')
-              return (
-                <label key={value} className="flex min-h-16 items-start gap-3 rounded-utility border border-hairline bg-canvas px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    disabled={locked}
-                    onChange={() => value !== 'case' && toggleCapability(value)}
-                    className="mt-0.5 size-4 accent-primary"
-                  />
-                  <span>
-                    <span className="block text-[13px] font-semibold text-ink">{label}</span>
-                    <span className="block text-[11px] text-ink-48">{note}</span>
-                  </span>
-                </label>
-              )
-            })}
-          </div>
-          <p className="mt-2 text-[12px] leading-[1.6] text-ink-48">
-            这里表示任务被允许使用的能力，不代表代码服务或 SQL 服务当前在线；系统不会根据在线状态扩大范围。
-          </p>
-        </div>
-
         <div className="mb-7">
           <CardTitle className="mb-1">证据数据源</CardTitle>
           <p className="mb-3 text-[12px] text-ink-48">

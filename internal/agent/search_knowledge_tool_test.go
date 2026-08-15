@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/google/uuid"
@@ -17,11 +17,13 @@ type knowledgeSearcherStub struct {
 	actorID uuid.UUID
 	query   string
 	limit   int
+	calls   int
 	result  knowledge.HybridSearch
 	err     error
 }
 
 func (s *knowledgeSearcherStub) Search(_ context.Context, actorID uuid.UUID, query string, limit int) (knowledge.HybridSearch, error) {
+	s.calls++
 	s.actorID, s.query, s.limit = actorID, query, limit
 	return s.result, s.err
 }
@@ -66,15 +68,12 @@ func TestSearchKnowledgeToolReturnsBoundedEvidenceAndDegradedChannels(t *testing
 	if err != nil {
 		t.Fatalf("NewSearchKnowledgeTool: %v", err)
 	}
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeKnowledge, nil,
-		[]ToolCapability{ToolCapabilityKnowledge}, ToolDependencyKnowledge)
-	// Use a stable actor assertion independent of the helper's generated user.
-	scope = scopeWithUserID(t, scope, actorID)
-	encoded, err := tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"  事务超时  ","maxResults":3}`)
+	scope := mustKnowledgeTestRunAccess(t, actorID)
+	encoded, err := tool.InvokableRun(withTestRunAccess(context.Background(), scope), `{"query":"  事务超时  ","maxResults":3}`)
 	if err == nil {
 		t.Fatal("InvokableRun accepted an untrimmed query")
 	}
-	encoded, err = tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"事务超时","maxResults":3}`)
+	encoded, err = tool.InvokableRun(withTestRunAccess(context.Background(), scope), `{"query":"事务超时","maxResults":3}`)
 	if err != nil {
 		t.Fatalf("InvokableRun: %v", err)
 	}
@@ -151,27 +150,32 @@ func TestSearchKnowledgeToolRejectsMalformedCitationFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSearchKnowledgeTool: %v", err)
 	}
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeKnowledge, nil,
-		[]ToolCapability{ToolCapabilityKnowledge}, ToolDependencyKnowledge)
-	if _, err := tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"事务超时"}`); err == nil ||
+	scope := mustKnowledgeTestRunAccess(t, uuid.New())
+	if _, err := tool.InvokableRun(withTestRunAccess(context.Background(), scope), `{"query":"事务超时"}`); err == nil ||
 		!strings.Contains(err.Error(), "knowledge search result 0 is invalid") {
 		t.Fatalf("malformed result error = %v", err)
 	}
 }
 
-func TestSearchKnowledgeToolRequiresKnowledgeDependency(t *testing.T) {
+func TestSearchKnowledgeToolRequiresRunAccessPermission(t *testing.T) {
 	searcher := &knowledgeSearcherStub{}
 	tool, err := NewSearchKnowledgeTool(searcher)
 	if err != nil {
 		t.Fatalf("NewSearchKnowledgeTool: %v", err)
 	}
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeKnowledge, nil,
-		[]ToolCapability{ToolCapabilityKnowledge})
-	if _, err := tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"问题"}`); !errors.Is(err, ErrToolNotAllowed) {
-		t.Fatalf("InvokableRun error = %v, want ErrToolNotAllowed", err)
+	// 没有 knowledge.read Permission：执行期 fail-closed，底层零调用。
+	withoutPermission := mustConversationTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
+	if _, err := tool.InvokableRun(withTestRunAccess(context.Background(), withoutPermission), `{"query":"问题"}`); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("InvokableRun error = %v, want ErrRunAccessRequired", err)
 	}
-	if _, err := tool.InvokableRun(context.Background(), `{"query":"问题"}`); !errors.Is(err, ErrTaskScopeRequired) {
-		t.Fatalf("unscoped InvokableRun error = %v, want ErrTaskScopeRequired", err)
+	if _, err := tool.InvokableRun(context.Background(), `{"query":"问题"}`); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("unscoped InvokableRun error = %v, want ErrRunAccessRequired", err)
+	}
+	if searcher.calls != 0 {
+		t.Fatalf("searcher calls = %d, want 0", searcher.calls)
 	}
 }
 
@@ -183,9 +187,8 @@ func TestSearchKnowledgeToolPreservesSafeStructuredOperationFailure(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeKnowledge, nil,
-		[]ToolCapability{ToolCapabilityKnowledge}, ToolDependencyKnowledge)
-	_, err = tool.InvokableRun(WithTaskScope(context.Background(), scope), `{"query":"连接池超时"}`)
+	scope := mustKnowledgeTestRunAccess(t, uuid.New())
+	_, err = tool.InvokableRun(withTestRunAccess(context.Background(), scope), `{"query":"连接池超时"}`)
 	if err == nil {
 		t.Fatal("expected structured Tool failure")
 	}
@@ -221,15 +224,12 @@ func TestQueryRewriteObservationRejectsInconsistentTokenUsage(t *testing.T) {
 	}
 }
 
-func scopeWithUserID(t *testing.T, original TaskScope, userID uuid.UUID) TaskScope {
+// mustKnowledgeTestRunAccess 构造 knowledge.read 的会话 RunAccess（知识检索
+// 在 Conversation 与 Diagnosis 共享同一授权事实）。
+func mustKnowledgeTestRunAccess(t *testing.T, userID uuid.UUID) agentruntime.RunAccess {
 	t.Helper()
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: userID, Role: original.Role(), TaskType: original.TaskType(),
-		DataSources: original.DataSources(), AllowedCapabilities: original.AllowedCapabilities(),
-		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge},
-	})
-	if err != nil {
-		t.Fatalf("scopeWithUserID: %v", err)
-	}
-	return scope
+	return mustConversationTestRunAccess(t, userID,
+		[]agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
 }

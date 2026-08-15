@@ -8,7 +8,6 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/model"
@@ -58,7 +57,8 @@ type DefaultToolCatalogDependencies struct {
 }
 
 // NewDefaultRunner 完成单 ADK Agent 的手动依赖装配。
-// Skill 只描述调查 SOP；ToolCatalog 才是角色、任务、数据源和依赖权限的事实来源。
+// Skill 只描述调查 SOP；模型可见 Schema 由固定 ToolProfile 决定，
+// 执行授权由 RunAccess 决定。
 func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencies) (*Runner, error) {
 	if dependencies.ChatModel == nil || dependencies.ExternalCases == nil || dependencies.Logger == nil {
 		return nil, errors.New("default runner model, external cases, and logger are required")
@@ -125,6 +125,13 @@ func NewDiagnosisDefaultToolCatalog(ctx context.Context, dependencies DefaultToo
 	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileDiagnosis)
 }
 
+// NewEvaluationWideDefaultToolCatalog 构造绑定 evaluation-wide-v1 宽 Profile
+// 的评测 Catalog，只供评测 wide 臂使用。它包含全部实际注册的业务 Tool，
+// 不含 skill/read_skill_reference（wide 臂不使用 Skill 渐进式读取）。
+func NewEvaluationWideDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileEvaluationWide)
+}
+
 func newDefaultToolCatalog(
 	ctx context.Context,
 	dependencies DefaultToolCatalogDependencies,
@@ -141,30 +148,24 @@ func newDefaultToolCatalog(
 	if err != nil {
 		return nil, fmt.Errorf("build external case tool: %w", err)
 	}
-	roles := []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}
+	// 注册只声明执行期 Permission 与失败策略：Schema 可见性完全由绑定的
+	// 固定 Profile 决定，不再有任何角色/任务类型/能力/依赖过滤字段。
 	registrations := []ToolRegistration{
 		conversationToolResultRegistration,
 		{
-			Tool: readExternalCase, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
-			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
+			Tool: readExternalCase, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 	}
 	if dependencies.SkillReference != nil {
 		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.SkillReference, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
+			Tool: dependencies.SkillReference, FailurePolicy: resilience.PolicyBestEffort,
 		})
 	}
 	if dependencies.KnowledgeSearch != nil {
 		registrations = append(registrations, ToolRegistration{
-			Tool: dependencies.KnowledgeSearch, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
-			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+			Tool: dependencies.KnowledgeSearch, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
 		})
 	}
 	for _, webTool := range []tool.BaseTool{dependencies.WebSearch, dependencies.FetchPublicPage} {
@@ -172,11 +173,8 @@ func newDefaultToolCatalog(
 			continue
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: webTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge, TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityWebSearch},
-			RequiredDependencies: []ToolDependency{ToolDependencyWebSearch},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionWebRead},
+			Tool: webTool, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionWebRead},
 		})
 	}
 	if dependencies.CreateDiagnosisTask != nil {
@@ -184,16 +182,12 @@ func newDefaultToolCatalog(
 		if err != nil {
 			return nil, fmt.Errorf("build create diagnosis task Tool: %w", err)
 		}
-		// 任务创建命令只属于 Conversation：Diagnosis Worker 的 ReAct 循环
-		// 永远不暴露 create_diagnosis_task。旧 Schema 过滤仍保留 case 能力
-		// 与 external_case 依赖，保持 Conversation 中的动态可见条件不变；
-		// 执行期由 RequiredPermissions 的 diagnosis.create 做粗粒度校验。
+		// 任务创建命令只属于 Conversation Profile：Diagnosis Worker 的
+		// ReAct 循环永远不暴露 create_diagnosis_task。执行期由
+		// RequiredPermissions 的 diagnosis.create 做粗粒度校验。
 		registrations = append(registrations, ToolRegistration{
-			Tool: createDiagnosisTask, FailurePolicy: resilience.PolicyStrict, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
-			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionDiagnosisCreate},
+			Tool: createDiagnosisTask, FailurePolicy: resilience.PolicyStrict,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionDiagnosisCreate},
 		})
 	}
 	if dependencies.DiagnosisTaskStatus != nil {
@@ -202,10 +196,8 @@ func newDefaultToolCatalog(
 			return nil, fmt.Errorf("build diagnosis task status Tool: %w", err)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: getDiagnosisTaskStatus, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityTask},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionTaskRead},
+			Tool: getDiagnosisTaskStatus, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionTaskRead},
 		})
 	}
 	if dependencies.AttachmentReader != nil {
@@ -214,11 +206,8 @@ func newDefaultToolCatalog(
 			return nil, fmt.Errorf("build read attachment Tool: %w", err)
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: readAttachment, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeConversation},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityAttachment},
-			RequiredDependencies: []ToolDependency{ToolDependencyAttachment},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionAttachmentRead},
+			Tool: readAttachment, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionAttachmentRead},
 		})
 	}
 	if dependencies.ConversationMemorySources != nil {
@@ -235,15 +224,8 @@ func newDefaultToolCatalog(
 			continue
 		}
 		registrations = append(registrations, ToolRegistration{
-			Tool: sqlTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles: []DataSourceRole{
-				DataSourceRoleCaseSource, DataSourceRoleProduction, DataSourceRoleProductReplica,
-			},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
+			Tool: sqlTool, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		})
 	}
 	// 注册阶段已经读取并校验过 GitHub Tool 名（allowlist），
@@ -265,11 +247,8 @@ func newDefaultToolCatalog(
 		}
 		githubNames = append(githubNames, info.Name)
 		registrations = append(registrations, ToolRegistration{
-			Tool: githubTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
-			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
-			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCodeRead},
+			Tool: githubTool, FailurePolicy: resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCodeRead},
 		})
 	}
 	for index := range registrations {

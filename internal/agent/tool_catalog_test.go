@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -30,107 +29,79 @@ const (
 	testToolKnowledge = "test_knowledge_search"
 )
 
-func TestToolCatalogFiltersByScope(t *testing.T) {
+// TestToolCatalogSchemaComesOnlyFromBoundProfile 证明模型可见 Schema 只由
+// Catalog 绑定的固定 Profile 决定：引用、权限、依赖健康或调用次数都不参与，
+// 注册表也不再有角色/任务/能力/依赖过滤字段。
+func TestToolCatalogSchemaComesOnlyFromBoundProfile(t *testing.T) {
 	catalog := newToolCatalogForTest(t)
-	tests := []struct {
-		name  string
-		scope TaskScope
-		want  []string
-	}{
-		{
-			name: "analyst case with github",
-			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-			}}, ToolDependencyExternalCase, ToolDependencyGitHubMCP),
-			want: []string{testToolGitHub, testToolReadCase},
-		},
-		{
-			name: "github capability denied while dependency is healthy",
-			scope: mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-			}}, []ToolCapability{ToolCapabilityCase}, ToolDependencyExternalCase, ToolDependencyGitHubMCP),
-			want: []string{testToolReadCase},
-		},
-		{
-			name: "github dependency degraded",
-			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-			}}, ToolDependencyExternalCase),
-			want: []string{testToolReadCase},
-		},
-		{
-			name: "diagnosis receives knowledge when dependency is healthy",
-			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-			}}, ToolDependencyExternalCase, ToolDependencyKnowledge),
-			want: []string{testToolKnowledge, testToolReadCase},
-		},
-		{
-			name: "production admin cannot receive lab tool",
-			scope: mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-			}}, ToolDependencySQLServer),
-			want: []string{testToolReadSQL},
-		},
-		{
-			name: "product replica admin receives bounded lab tool",
-			scope: mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-			}}, ToolDependencySQLServer),
-			want: []string{testToolLabSQL, testToolReadSQL},
-		},
-		{
-			name: "product replica analyst cannot receive admin lab tool",
-			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-			}}, ToolDependencySQLServer),
-			want: []string{testToolReadSQL},
-		},
-		{
-			name:  "knowledge task receives only knowledge tool",
-			scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeKnowledge, nil, ToolDependencyKnowledge),
-			want:  []string{testToolKnowledge},
-		},
+	profile, err := agentruntime.NewToolProfile(agentruntime.ToolProfileDiagnosis, []string{
+		testToolReadCase, testToolKnowledge, ToolSkill,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tools, err := catalog.ToolsFor(context.Background(), tt.scope)
-			if err != nil {
-				t.Fatalf("ToolsFor: %v", err)
-			}
-			if got := toolNamesForTest(t, tools); !slices.Equal(got, tt.want) {
-				t.Fatalf("tool names = %v, want %v", got, tt.want)
-			}
-		})
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		t.Fatalf("BindProfile: %v", err)
+	}
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		t.Fatalf("ResolveProfile: %v", err)
+	}
+	if got := toolNamesForTest(t, resolved.Tools); !slices.Equal(got, []string{testToolKnowledge, testToolReadCase}) {
+		t.Fatalf("tool names = %v", got)
+	}
+	if !slices.Equal(resolved.ModelVisibleNames, []string{ToolSkill, testToolKnowledge, testToolReadCase}) {
+		t.Fatalf("model visible names = %v", resolved.ModelVisibleNames)
+	}
+	// 重复解析结果不变：Schema 与任何 per-run 状态无关。
+	resolvedAgain, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		t.Fatalf("second ResolveProfile: %v", err)
+	}
+	if !slices.Equal(toolNamesForTest(t, resolvedAgain.Tools), toolNamesForTest(t, resolved.Tools)) {
+		t.Fatal("profile resolution changed between calls")
 	}
 }
 
-func TestToolCatalogEvaluationBaselineUsesRoleAndTaskToolSet(t *testing.T) {
-	catalog := newToolCatalogForTest(t)
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencyExternalCase)
-	tools, err := catalog.EvaluationBaselineToolsFor(context.Background(), scope)
+// TestToolCatalogEvaluationWideProfileResolvesRegisteredBusinessTools 证明
+// evaluation-wide-v1 是独立的固定宽 Profile：它解析全部注册的业务 Tool，
+// 不含 skill/read_skill_reference。
+func TestToolCatalogEvaluationWideProfileResolvesRegisteredBusinessTools(t *testing.T) {
+	wideCatalog := newEvaluationWideToolCatalogForTest(t)
+	resolved, err := wideCatalog.ResolveProfile(context.Background(), agentruntime.ToolProfileEvaluationWide)
 	if err != nil {
-		t.Fatalf("EvaluationBaselineToolsFor: %v", err)
+		t.Fatalf("ResolveProfile(evaluation-wide-v1): %v", err)
 	}
-	want := []string{testToolGitHub, testToolKnowledge, testToolReadCase, testToolReadSQL}
-	if got := toolNamesForTest(t, tools); !slices.Equal(got, want) {
-		t.Fatalf("baseline tool names = %v, want %v", got, want)
+	want := []string{testToolGitHub, testToolKnowledge, testToolLabSQL, testToolReadCase, testToolReadSQL}
+	if got := toolNamesForTest(t, resolved.Tools); !slices.Equal(got, want) {
+		t.Fatalf("wide profile tools = %v, want %v", got, want)
+	}
+	for _, name := range resolved.ModelVisibleNames {
+		if name == ToolSkill || name == ToolReadSkillReference {
+			t.Fatalf("wide profile must not include %q", name)
+		}
 	}
 }
 
-func TestToolCatalogRechecksScopeWhenToolExecutes(t *testing.T) {
+// TestToolCatalogRechecksRunAccessWhenToolExecutes 证明执行期 Guard 仍读取
+// RunAccess：Schema 可见不等于可执行。
+func TestToolCatalogRechecksRunAccessWhenToolExecutes(t *testing.T) {
 	catalog := newToolCatalogForTest(t)
-	authorized := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}, []ToolCapability{ToolCapabilityCase, ToolCapabilityCode}, ToolDependencyExternalCase, ToolDependencyGitHubMCP)
-	tools, err := catalog.ToolsFor(context.Background(), authorized)
+	profile, err := agentruntime.NewToolProfile(agentruntime.ToolProfileDiagnosis, []string{
+		testToolGitHub, testToolReadCase, ToolSkill,
+	})
 	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
+		t.Fatal(err)
+	}
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		t.Fatalf("BindProfile: %v", err)
+	}
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		t.Fatalf("ResolveProfile: %v", err)
 	}
 	var github tool.InvokableTool
-	for _, current := range tools {
+	for _, current := range resolved.Tools {
 		info, infoErr := current.Info(context.Background())
 		if infoErr != nil {
 			t.Fatalf("Tool.Info: %v", infoErr)
@@ -143,13 +114,19 @@ func TestToolCatalogRechecksScopeWhenToolExecutes(t *testing.T) {
 	if github == nil {
 		t.Fatal("authorized GitHub tool is missing")
 	}
-	if _, err := github.InvokableRun(WithTaskScope(context.Background(), authorized), `{}`); err != nil {
+	authorized := mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionCodeRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
+	if _, err := github.InvokableRun(withTestRunAccess(context.Background(), authorized), `{}`); err != nil {
 		t.Fatalf("authorized InvokableRun: %v", err)
 	}
 
-	denied := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeDiagnosis, authorized.DataSources(),
-		[]ToolCapability{ToolCapabilityCase}, ToolDependencyExternalCase, ToolDependencyGitHubMCP)
-	if _, err := github.InvokableRun(WithTaskScope(context.Background(), denied), `{}`); !errors.Is(err, ErrToolNotAllowed) {
+	denied := mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
+	if _, err := github.InvokableRun(withTestRunAccess(context.Background(), denied), `{}`); !errors.Is(err, ErrToolNotAllowed) {
 		t.Fatalf("denied InvokableRun error = %v, want ErrToolNotAllowed", err)
 	}
 	if _, err := github.InvokableRun(context.Background(), `{}`); !errors.Is(err, ErrRunAccessRequired) {
@@ -160,8 +137,7 @@ func TestToolCatalogRechecksScopeWhenToolExecutes(t *testing.T) {
 func TestToolCatalogRegistrationValidatesRequiredPermissions(t *testing.T) {
 	duplicate := newNamedToolForTest(t, "test_duplicate_permission")
 	validPolicy := ToolRegistration{
-		Tool: duplicate, AllowedRoles: []auth.Role{auth.RoleAnalyst},
-		AllowedTaskTypes: []TaskType{TaskTypeDiagnosis}, FailurePolicy: resilience.PolicyBestEffort,
+		Tool: duplicate, FailurePolicy: resilience.PolicyBestEffort,
 	}
 	duplicated := validPolicy
 	duplicated.RequiredPermissions = []agentruntime.Permission{
@@ -177,40 +153,10 @@ func TestToolCatalogRegistrationValidatesRequiredPermissions(t *testing.T) {
 	}
 }
 
-func TestToolCatalogRequiresOneDataSourceToMatchWholeConstraint(t *testing.T) {
-	conflictingTool := newNamedToolForTest(t, "test_conflicting_source")
-	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{
-		Tool: conflictingTool, FailurePolicy: resilience.PolicyBestEffort,
-		AllowedRoles:         []auth.Role{auth.RoleAdmin},
-		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-		AllowedDataRoles:     []DataSourceRole{DataSourceRoleProduction},
-		AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyBoundedLab},
-		RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
-		RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-	})
-	if err != nil {
-		t.Fatalf("NewToolCatalog: %v", err)
-	}
-	scope := mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{
-		{ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly},
-		{ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab},
-	}, ToolDependencySQLServer)
-	tools, err := catalog.ToolsFor(context.Background(), scope)
-	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
-	}
-	if len(tools) != 0 {
-		t.Fatalf("cross-source constraints incorrectly authorized tools: %v", toolNamesForTest(t, tools))
-	}
-}
-
 func TestToolCatalogRejectsDuplicateNamesAndInvalidPolicy(t *testing.T) {
 	duplicateA := newNamedToolForTest(t, "test_duplicate")
 	duplicateB := newNamedToolForTest(t, "test_duplicate")
-	validPolicy := ToolRegistration{
-		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-		FailurePolicy: resilience.PolicyBestEffort,
-	}
+	validPolicy := ToolRegistration{FailurePolicy: resilience.PolicyBestEffort}
 	first := validPolicy
 	first.Tool = duplicateA
 	second := validPolicy
@@ -218,25 +164,11 @@ func TestToolCatalogRejectsDuplicateNamesAndInvalidPolicy(t *testing.T) {
 	if _, err := NewToolCatalog(context.Background(), first, second); err == nil {
 		t.Fatal("NewToolCatalog accepted duplicate tool names")
 	}
-	if _, err := NewToolCatalog(context.Background(), ToolRegistration{
-		Tool: duplicateA, AllowedRoles: []auth.Role{auth.RoleAnalyst, auth.RoleAnalyst},
-		AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-	}); err == nil {
-		t.Fatal("NewToolCatalog accepted a duplicated policy value")
-	}
-	if _, err := NewToolCatalog(context.Background(), ToolRegistration{
-		Tool: duplicateA, AllowedRoles: []auth.Role{auth.RoleAnalyst},
-		AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
-		RequiredCapabilities: []ToolCapability{ToolCapabilityCase, ToolCapabilityCase},
-	}); err == nil {
-		t.Fatal("NewToolCatalog accepted duplicated capabilities")
-	}
 }
 
 func TestToolCatalogRequiresExplicitFailurePolicy(t *testing.T) {
 	_, err := NewToolCatalog(context.Background(), ToolRegistration{
-		Tool:         newNamedToolForTest(t, "test_missing_failure_policy"),
-		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+		Tool: newNamedToolForTest(t, "test_missing_failure_policy"),
 	})
 	if err == nil {
 		t.Fatal("NewToolCatalog accepted a tool without an explicit failure policy")
@@ -246,8 +178,9 @@ func TestToolCatalogRequiresExplicitFailurePolicy(t *testing.T) {
 func TestScopeGuardedToolKeepsStrictFailureAsError(t *testing.T) {
 	want := errors.New("side effect failed")
 	current := scopedFailingToolForTest(t, resilience.PolicyStrict, want, nil)
-	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	ctx := withTestRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
 	))
 	if _, err := current.InvokableRun(ctx, `{}`); !errors.Is(err, want) {
 		t.Fatalf("InvokableRun error = %v, want strict failure", err)
@@ -269,8 +202,9 @@ func TestScopeGuardedToolReturnsStructuredBestEffortFailure(t *testing.T) {
 		resilience.RetryableFailure(errors.New("dial tcp secret.internal:1433")),
 		resilience.ObserverFunc(func(event resilience.DegradationEvent) { observed = append(observed, event) }),
 	)
-	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	ctx := withTestRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
 	))
 	ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: "run-1", TraceID: "trace-1"})
 	endpoint := newToolObservabilityMiddleware().Invokable(func(
@@ -354,8 +288,9 @@ func TestToolResultDegradedRecognizesBothTruncationFormats(t *testing.T) {
 }
 
 func TestScopeGuardedToolDistinguishesRejectedAndStrictFailures(t *testing.T) {
-	ctx := WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
+	ctx := withTestRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
 	))
 	ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: "run-2"})
 	rejected := scopedFailingToolForTest(t, resilience.PolicyBestEffort, errors.New("argument is invalid"), nil)
@@ -388,81 +323,74 @@ func scopedFailingToolForTest(
 	}
 	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{
 		Tool: inner, FailurePolicy: policy, DegradationObserver: observer,
-		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-		RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
-		RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
+		RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := catalog.ToolsFor(context.Background(), mustTaskScopeWithCapabilities(
-		t, auth.RoleAnalyst, TaskTypeDiagnosis, toolFailureDataSource(), []ToolCapability{ToolCapabilityCase},
-	))
-	if err != nil || len(tools) != 1 {
-		t.Fatalf("ToolsFor = %d, %v", len(tools), err)
+	profile, err := agentruntime.NewToolProfile(agentruntime.ToolProfileDiagnosis, []string{
+		"test_failing_tool", ToolSkill,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return tools[0].(tool.InvokableTool)
-}
-
-func toolFailureDataSource() []ScopedDataSource {
-	return []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
+	if err != nil || len(resolved.Tools) != 1 {
+		t.Fatalf("ResolveProfile = %d, %v", len(resolved.Tools), err)
+	}
+	return resolved.Tools[0].(tool.InvokableTool)
 }
 
 func newToolCatalogForTest(t *testing.T) *ToolCatalog {
 	t.Helper()
 	registrations := []ToolRegistration{
 		{
-			Tool:          newNamedToolForTest(t, testToolReadCase),
-			FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles:     []DataSourceRole{DataSourceRoleCaseSource},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityCase},
-			RequiredDependencies: []ToolDependency{ToolDependencyExternalCase},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCaseRead},
+			Tool:                newNamedToolForTest(t, testToolReadCase),
+			FailurePolicy:       resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 		{
-			Tool:          newNamedToolForTest(t, testToolGitHub),
-			FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityCode},
-			RequiredDependencies: []ToolDependency{ToolDependencyGitHubMCP},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionCodeRead},
+			Tool:                newNamedToolForTest(t, testToolGitHub),
+			FailurePolicy:       resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCodeRead},
 		},
 		{
-			Tool:          newNamedToolForTest(t, testToolReadSQL),
-			FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles:     []DataSourceRole{DataSourceRoleProduction, DataSourceRoleProductReplica},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyReadOnly, DataSourceSafetyBoundedLab},
-			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
+			Tool:                newNamedToolForTest(t, testToolReadSQL),
+			FailurePolicy:       resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		},
 		{
-			Tool:          newNamedToolForTest(t, testToolLabSQL),
-			FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles:  []auth.Role{auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
-			AllowedDataRoles:     []DataSourceRole{DataSourceRoleProductReplica},
-			AllowedSafetyModes:   []DataSourceSafetyMode{DataSourceSafetyBoundedLab},
-			RequiredCapabilities: []ToolCapability{ToolCapabilitySQL},
-			RequiredDependencies: []ToolDependency{ToolDependencySQLServer},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
+			Tool:                newNamedToolForTest(t, testToolLabSQL),
+			FailurePolicy:       resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		},
 		{
-			Tool:          newNamedToolForTest(t, testToolKnowledge),
-			FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles:  []auth.Role{auth.RoleAnalyst, auth.RoleAdmin}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis, TaskTypeKnowledge},
-			RequiredCapabilities: []ToolCapability{ToolCapabilityKnowledge},
-			RequiredDependencies: []ToolDependency{ToolDependencyKnowledge},
-			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+			Tool:                newNamedToolForTest(t, testToolKnowledge),
+			FailurePolicy:       resilience.PolicyBestEffort,
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
 		},
 	}
 	catalog, err := NewToolCatalog(context.Background(), registrations...)
 	if err != nil {
 		t.Fatalf("NewToolCatalog: %v", err)
+	}
+	return catalog
+}
+
+func newEvaluationWideToolCatalogForTest(t *testing.T) *ToolCatalog {
+	t.Helper()
+	catalog := newToolCatalogForTest(t)
+	profile, err := agentruntime.NewToolProfile(agentruntime.ToolProfileEvaluationWide, []string{
+		testToolGitHub, testToolKnowledge, testToolReadCase, testToolReadSQL, testToolLabSQL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		t.Fatalf("BindProfile(evaluation-wide-v1): %v", err)
 	}
 	return catalog
 }
@@ -476,49 +404,6 @@ func newNamedToolForTest(t *testing.T, name string) tool.InvokableTool {
 		t.Fatalf("InferTool(%s): %v", name, err)
 	}
 	return current
-}
-
-func mustTaskScope(
-	t *testing.T,
-	role auth.Role,
-	taskType TaskType,
-	dataSources []ScopedDataSource,
-	dependencies ...ToolDependency,
-) TaskScope {
-	t.Helper()
-	capabilities := []ToolCapability{ToolCapabilityCase, ToolCapabilityKnowledge}
-	if taskType == TaskTypeKnowledge {
-		capabilities = []ToolCapability{ToolCapabilityKnowledge}
-	} else {
-		for _, dependency := range dependencies {
-			switch dependency {
-			case ToolDependencyGitHubMCP:
-				capabilities = append(capabilities, ToolCapabilityCode)
-			case ToolDependencySQLServer:
-				capabilities = append(capabilities, ToolCapabilitySQL)
-			}
-		}
-	}
-	return mustTaskScopeWithCapabilities(t, role, taskType, dataSources, capabilities, dependencies...)
-}
-
-func mustTaskScopeWithCapabilities(
-	t *testing.T,
-	role auth.Role,
-	taskType TaskType,
-	dataSources []ScopedDataSource,
-	capabilities []ToolCapability,
-	dependencies ...ToolDependency,
-) TaskScope {
-	t.Helper()
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: role, TaskType: taskType,
-		DataSources: dataSources, AllowedCapabilities: capabilities, AvailableDependencies: dependencies,
-	})
-	if err != nil {
-		t.Fatalf("NewTaskScope: %v", err)
-	}
-	return scope
 }
 
 func toolNamesForTest(t *testing.T, tools []tool.BaseTool) []string {

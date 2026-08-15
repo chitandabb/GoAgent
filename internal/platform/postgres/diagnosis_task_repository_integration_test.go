@@ -113,7 +113,7 @@ VALUES (?, ?, ?, 'incident', now())`,
 	}
 	input := diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: item.SourceFingerprint,
-		RequestText: "检查任务快照", RequestScope: map[string]any{"source": "integration"},
+		RequestText: "检查任务快照",
 		Attachments: []diagnosis.TaskAttachment{{AttachmentID: attachmentItem.ID, Purpose: "log_file"}},
 		AttachmentSource: &diagnosis.TaskAttachmentSource{
 			ConversationID: conversationItem.ID, MessageID: message.ID,
@@ -234,7 +234,7 @@ VALUES (?, ?, ?, 'incident', now())`,
 
 	claimInput := diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: item.SourceFingerprint,
-		RequestText: "检查 Worker 领取", RequestScope: map[string]any{"source": "integration"},
+		RequestText: "检查 Worker 领取",
 		IdempotencyKey: uuid.NewString(), CorrelationID: uuid.New(),
 	}
 	claimable, err := service.Create(ctx, diagnosis.TaskActor{UserID: ownerID}, claimInput)

@@ -7,7 +7,6 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 
 	"github.com/google/uuid"
@@ -83,20 +82,10 @@ func TestReadAttachmentToolDiagnosisGrantEnforcedBeforeReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: userID, Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
-		DataSources:           []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
-		AllowedCapabilities:   []ToolCapability{ToolCapabilityCase, ToolCapabilityAttachment},
-		AvailableDependencies: []ToolDependency{ToolDependencyAttachment},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 绑定顺序与生产一致：WithTaskScope 先写兼容上下文，WithRunAccess
-	// 最后覆盖为权威 v2 RunAccess。
+	// 绑定顺序与生产一致：任务附件 Context + 权威 v2 RunAccess（旧
+	// WithTaskScope 双写已硬切删除）。
 	bind := func(access agentruntime.RunAccess) context.Context {
 		ctx := WithDiagnosisAttachmentContext(context.Background(), taskID)
-		ctx = WithTaskScope(ctx, scope)
 		return agentruntime.WithRunAccess(ctx, access)
 	}
 	// 1. Diagnosis 越权：attachment.read 已授予但附件不在 Grant，reader 零调用。

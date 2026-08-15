@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用不可变 `TaskScope`、统一 `ToolCatalog`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
+- P0-P4 已完成：当前 Runner 每次调用创建独立的 Eino ADK `ChatModelAgent`，使用统一 `ToolCatalog` 绑定的固定 `ToolProfile`、`BeforeAgent` 运行时授权、原生 `SKILL.md` 和按需 reference Tool。
 - `ticket-diagnosis` 可以在同一 Agent 循环内加载 `code-investigation` 并继续调用 GitHub Tool；旧的每 Skill Executor、Graph Dispatcher、结构化 Handoff 和兼容 Registry 已删除。
 - 当前实现已在单 Agent 外接入薄 Evidence Gate Graph，默认最多两轮 Agent、8 次 Tool、16 条 Evidence、16000 个 Provider Token 和 90 秒总耗时；结构化报告校验失败或预算耗尽时生成 `partial_report`。
 - 生产系统指令、评测 baseline 指令、Evidence Gate 报告契约和独立会话指令已外置到 `config/prompts/`，由 `[agent]` 配置启动期一次加载并缓存；`promptVersion` 与 `conversationPromptVersion` 是人工发布标签。当前不做热更新、内容哈希或 Nacos Prompt 发布。
@@ -11,8 +11,8 @@
 - 独立会话 `/turns` 已改为异步受理：API 原子写 user message、queued turn 与 Outbox，`mesguard-conversation-worker` 领取租约后运行 Conversation Agent 并 fenced 提交助手消息；模型运行时不再驻留 HTTP 进程。
 - 会话回合状态查询和事件 JSON/SSE 已接通：`conversation_turn_events` 是断线补读事实源，支持 `afterSeq`/`Last-Event-ID`、心跳、终态关闭和 Session 绝对过期退出。事件 payload 只包含状态、尝试次数、重试等待和最终消息引用，不包含租约 owner、Prompt、原始 Tool 结果或模型推理过程。
 - 会话附件链路已接通：上传对象先固化到 MinIO，再写 PostgreSQL 附件事实；消息事务保存附件关联。`read_attachment` 属于固定 Conversation Profile 的启动 Epoch 装配快照，只有当前 user message 明确关联附件时执行期 `attachment.read` Permission 才放行，Tool 执行前先把 `attachmentId` 与 `RunAccess.Grants.AttachmentIDs` 校验一致，user/conversation/message/attachment 四元边界继续由 Tool 内部 owner 校验作为第二层。附件与知识 Chunk 引用预览均不泄漏对象存储坐标。
-- 统一 Runtime v2 已完成架构决策、领域合同、`TaskScope -> RunAccess` 兼容适配、执行期 Permission Guard 与生产 Schema 接线：两个 Runner 都通过 `ToolCatalog.ResolveProfile(profileID)` 解析固定部署级 `ToolProfile`，消息引用、依赖健康、能力声明、RunAccess 收窄和调用次数限制都不再改变模型可见 Schema；调用次数/blocked 状态只在执行期由 `agentToolRunPolicy.reserve` fail-closed。`ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor` 仅保留给评测，`TaskScope` 只作为 RunAccess 兼容转换与旧 Tool 内部资源校验的输入。本切片已接通 Conversation `turn_context`、`RunAccess` 资源 Grant 与生产 Text-to-SQL：成功构造的 `search_schema_catalog`/`execute_readonly_query` 进入固定 Conversation Profile，每轮由纯函数深模块经 `NewConversationRunAccess` 直接构造 RunAccess（引用 -> case/task/attachment Grant、唯一 selected -> diagnosis.create、Profile 实际 Tool -> knowledge/web/memory、已配置只读数据源 -> sql.read + 数据源 Grant），SQL 数据源解析迁移到 `RunAccess.Grants`，Conversation 的 `read_external_case`/`read_attachment`/`get_diagnosis_task_status`/`create_diagnosis_task` 也在 `CommandContext`/owner 校验前校验对应资源的 `RunAccess.Grants`；`get_database_object_definition` 按最小 Tool 集原则仍仅供 Diagnosis。
-- Diagnosis `InvestigationPolicy` 切片已落地：任务创建事务经注入的纯领域 Policy Builder 冻结严格确定性 JSONB Policy（migration `00033` Policy 列 + `00034` policy mode；Runtime 架构版本 v2，Policy JSON Schema v1，`investigation_policy_schema_version=1` 即当前 Policy JSON 协议版本；case/knowledge 恒为基础上限，web/code/sql 按部署开关，attachment.read 仅在任务冻结附件时，DataSourceIDs 只保留任务绑定且部署允许调查的只读源，Repositories 恒空，不授予 task.read/memory.read/diagnosis.create）；Policy 不进入幂等 fingerprint，同幂等键回放首次冻结 Policy。Worker 经 `BuildDiagnosisRunContext` 深模块派生有效 RunAccess = frozen Policy ∩ 当前 ceiling（固定 diagnosis-default Profile 实际 Tool、active/read_only/角色允许的任务数据源、仍 uploaded 的附件、当前有效用户），mode=legacy（Policy 双 NULL）的旧任务仅从冻结 `request_scope` 与任务资源 legacy 派生（绝不读取新部署配置扩权），新任务由 Service 显式写 mode=frozen、Repository 在 INSERT 前校验 frozen+非空 Policy+列版本与 payload 版本一致+严格 codec；mode 缺失/非法、frozen+双 NULL、legacy+任一列非空、损坏或版本不一致一律 fail-closed，双 NULL 不再单独代表 legacy；反向生成的兼容 TaskScope 由 `WithTaskScope` 先写入、权威 v2 RunAccess 由 `WithRunAccess` 最后覆盖，`read_external_case`/`read_attachment` 与 SQL Tool 在执行前统一走运行时 ResourceGrant Guard（未授权底层零调用）。确定性 `task_context`（policySchemaVersion/effectivePermissions/工单 ID/授权数据源 id-role-safetyMode，`encoding/json` 防闭合标签注入）追加到 Diagnosis system 指令最尾部，同一任务 Evidence Gate 重试保持一致，preflight 统计与真实调用完全相同的 task_context；`promptVersion` 升至 `diagnosis-v3`。Profile 名单在启动 Epoch 内解析一次并保存，TaskScope/`request_scope` 仅为旧代码与 RequestedSkill 兼容保留。
+- 统一 Runtime v2 已完成架构决策、领域合同、硬切清理、执行期 Permission Guard 与生产 Schema 接线：两个 Runner 都通过 `ToolCatalog.ResolveProfile(profileID)` 解析固定部署级 `ToolProfile`，消息引用、依赖健康、RunAccess 收窄和调用次数限制都不再改变模型可见 Schema；调用次数/blocked 状态只在执行期由 `agentToolRunPolicy.reserve` fail-closed。旧 `ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor`、`TaskScope`、`ToolCapability`、`TaskTypeKnowledge`、`RequestedSkill` 与兼容适配器（`WithTaskScope`、`taskCapabilitiesFromScope` 等）已在硬切切片中删除；评测 wide 臂改用独立 `evaluation-wide-v1` 固定 Profile。本切片已接通 Conversation `turn_context`、`RunAccess` 资源 Grant 与生产 Text-to-SQL：成功构造的 `search_schema_catalog`/`execute_readonly_query` 进入固定 Conversation Profile，每轮由纯函数深模块经 `NewConversationRunAccess` 直接构造 RunAccess（引用 -> case/task/attachment Grant、唯一 selected -> diagnosis.create、Profile 实际 Tool -> knowledge/web/memory、已配置只读数据源 -> sql.read + 数据源 Grant），SQL 数据源解析迁移到 `RunAccess.Grants`，Conversation 的 `read_external_case`/`read_attachment`/`get_diagnosis_task_status`/`create_diagnosis_task` 也在 `CommandContext`/owner 校验前校验对应资源的 `RunAccess.Grants`；`get_database_object_definition` 按最小 Tool 集原则仍仅供 Diagnosis。
+- Diagnosis `InvestigationPolicy` 切片已落地：任务创建事务经注入的纯领域 Policy Builder 冻结严格确定性 JSONB Policy（migration `00033` Policy 列；Runtime 架构版本 v2，Policy JSON Schema v1，`investigation_policy_schema_version=1` 即当前 Policy JSON 协议版本；case/knowledge 恒为基础上限，web/code/sql 按部署开关，attachment.read 仅在任务冻结附件时，DataSourceIDs 只保留任务绑定且部署允许调查的只读源，Repositories 恒空，不授予 task.read/memory.read/diagnosis.create）；Policy 不进入幂等 fingerprint，同幂等键回放首次冻结 Policy。Worker 经 `BuildDiagnosisRunContext` 深模块派生有效 RunAccess = frozen Policy ∩ 当前 ceiling（固定 diagnosis-default Profile 实际 Tool、active/read_only/角色允许的任务数据源、仍 uploaded 的附件、当前有效用户）。migration `00034` 引入的 `investigation_policy_mode`（legacy/frozen）与 `request_scope` 列已由 migration `00035` 硬切删除（不可逆 Down；存在 NULL Policy 旧行时 fail-fast，绝不静默删行）；Worker `Task.Policy` 是非指针值，缺失/损坏/版本不一致一律 `ErrInvalidTask`，`read_external_case`/`read_attachment` 与 SQL Tool 在执行前统一走运行时 ResourceGrant Guard（未授权底层零调用）。确定性 `task_context`（policySchemaVersion/effectivePermissions/工单 ID/授权数据源 id-role-safetyMode，`encoding/json` 防闭合标签注入）追加到 Diagnosis system 指令最尾部，同一任务 Evidence Gate 重试保持一致，preflight 统计与真实调用完全相同的 task_context；`promptVersion` 升至 `diagnosis-v3`。Profile 名单在启动 Epoch 内解析一次并保存；TaskScope/`request_scope`/RequestedSkill 已硬切删除，OpenAPI 与前端契约同步移除（创建任务只提交 `externalCaseId`/`expectedSourceFingerprint`/`evidenceDataSourceIds`/`requestText`/`attachments`/`retryOfTaskId`）。
 - 当前状态和下一切片见 [`../roadmap.md`](../roadmap.md)，目录与包依赖边界见
   [`code-organization.md`](code-organization.md)。准确率和 Token 降幅必须以评测记录为准。
 
@@ -40,7 +40,7 @@ RunAccess（每次运行生成）
 
 诊断任务创建时冻结 `InvestigationPolicy`；Worker 执行时以该 Policy 与当前紧急撤权/资源禁用上限的交集派生 `RunAccess`。运行时只能收窄旧任务权限，不能因为新配置、模型判断、Skill 或 Tool 参数而扩大。Conversation 不保存 Policy，每个 Turn 根据认证用户、会话归属和当前结构化引用生成 `RunAccess`。
 
-Conversation 与 Diagnosis 各有一个默认 Tool Profile。`ToolProfile` 是一次进程启动/部署 Epoch 内的固定启动装配快照：Profile 内容由启动时成功完成构造的 Adapter 集合决定（配置声明某类 Adapter 且构造成功后，即使远端依赖暂时不可用也保留其 Schema；若该 Adapter 在启动时无法完成构造，则它不在本 Epoch 的 Profile 中）。同一部署内 Profile 跨 Turn/任务稳定，用户、当前消息引用、TaskScope、RunAccess 和依赖瞬时执行健康状态都不参与构造，也不删除 Schema；临时故障由 Tool 返回结构化 `unavailable/degraded`。服务重启时某 Adapter 无法完成构造属于新的启动 Profile/Epoch，必须产生新的 Tool Schema 指纹，其评测数据不得与旧 Profile 混合。本文档不承诺"只有配置文件变化才能改变 Profile"这类超出当前实现的绝对保证。评测必须记录 `observationSchemaVersion + toolProfileId + toolSchemaFingerprint + toolNames + modelProfileFingerprint + implementationRevision/dirty`，不得跨指纹混合汇总。
+Conversation 与 Diagnosis 各有一个默认 Tool Profile。`ToolProfile` 是一次进程启动/部署 Epoch 内的固定启动装配快照：Profile 内容由启动时成功完成构造的 Adapter 集合决定（配置声明某类 Adapter 且构造成功后，即使远端依赖暂时不可用也保留其 Schema；若该 Adapter 在启动时无法完成构造，则它不在本 Epoch 的 Profile 中）。同一部署内 Profile 跨 Turn/任务稳定，用户、当前消息引用、RunAccess 和依赖瞬时执行健康状态都不参与构造，也不删除 Schema（旧 TaskScope/Capability 概念已硬切删除，不再参与任何 Schema 选择）；临时故障由 Tool 返回结构化 `unavailable/degraded`。服务重启时某 Adapter 无法完成构造属于新的启动 Profile/Epoch，必须产生新的 Tool Schema 指纹，其评测数据不得与旧 Profile 混合。本文档不承诺"只有配置文件变化才能改变 Profile"这类超出当前实现的绝对保证。评测必须记录通用 v2 身份合同：`observationSchemaVersion`（`evaluation-observation-v2`）、`toolProfileId`、`toolSchemaFingerprint`、`modelProfileFingerprint`、`implementationRevision` 与 `implementationDirty`，不得跨指纹混合汇总。baseline 臂必须记录 `evaluation-wide-v1`，experiment 臂必须记录 `diagnosis-default`；Tool Profile ID 与 Schema 指纹是实验臂特有合同，禁止要求两臂相等，但同一 variant 跨样本必须保持同一 Profile ID 与 Schema 指纹，否则 fail-closed。active evaluator 不保留 v1 兼容分支；历史 v1 资产只能标记 historical，不进入正式归约。
 
 ## 目标架构
 
@@ -152,7 +152,7 @@ Knowledge Q&A 和用户直接提出的只读数据查询属于 Conversation 高�
 
 Tool 是模型与外部世界交互的唯一正式入口。SQL、GitHub、知识库、附件、日志和网络访问都必须实现为 Eino `tool.BaseTool`，不能藏在 Skill 脚本里绕过治理。
 
-生产 Schema 选择已切换为固定部署级 `ToolProfile`：`ToolCatalog.ResolveProfile(profileID)` 是唯一生产入口，诊断与会话 Catalog 各自只绑定所属 Runtime 的 Profile（`diagnosis-default`/`conversation-default`），误配在 Runner 构造期失败。`ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor` 仅保留给历史评测与 wide baseline，不能作为生产接口。
+生产 Schema 选择已切换为固定部署级 `ToolProfile`：`ToolCatalog.ResolveProfile(profileID)` 是唯一生产入口，诊断与会话 Catalog 各自只绑定所属 Runtime 的 Profile（`diagnosis-default`/`conversation-default`），误配在 Runner 构造期失败。旧 `ToolsFor(TaskScope)`/`EvaluationBaselineToolsFor` 已随硬切删除，不能作为生产接口；评测 wide 臂使用独立 `evaluation-wide-v1` 固定 Profile（全部实际注册的业务 Tool，无 skill/read_skill_reference），不是生产 Runtime Profile。
 
 Catalog 注册项只保存 Tool、失败策略、降级观测器和所需 Permission。注册到 Catalog 不等于获得执行权限：`accessGuardedTool` 从 `context.Context` 读取 `RunAccess`，缺失时 fail-closed，先检查粗粒度 Permission；SQL Tool 的数据源解析只读 `RunAccess.Grants`（显式 ID 必须在 Grant、省略 ID 仅允许唯一授权源、无 RunAccess/无 sql.read/零个或多个候选均拒绝，未授权时底层 searcher/executor 零调用；Diagnosis 的兼容 RunAccess 只映射只读数据源，`bounded_lab` 不进入 Grant），Conversation 与 Diagnosis 的 case/attachment 资源在各自的 `CommandContext`/owner 或任务归属校验前先经运行时通用 `requireRuntimeResourceGrant` 校验具体 Grant，Diagnosis 的 Grant 由冻结 Policy ∩ 当前 ceiling 派生。角色与资源归属不再通过动态删 Schema 表达，依赖瞬时故障也不改变 Profile；Profile 内容由启动 Epoch 内成功构造的 Adapter 决定，临时健康状态不参与。
 
@@ -257,24 +257,26 @@ queued/running/retry/completed/failed 生命周期和最终消息引用。前端
 
 ## 评测口径
 
-v1 历史评测固定相同模型、温度、问题集、输入上下文和最大迭代，对比：
+> **historical/superseded**：v1 历史评测固定相同模型、温度、问题集、输入上下文和最大迭代，对比：
 
 - 基线：一次绑定全部授权 Tool Schema，不使用 Skill 渐进式读取；
-- 实验：按 TaskScope 过滤 Tool，并使用 Skill 渐进式读取。
+- 实验：按旧动态 `TaskScope` 过滤 Tool，并使用 Skill 渐进式读取。
 
-该结果只证明旧动态 `TaskScope` 方案，不能直接作为 v2 简历结果。当前 Tool Selection v2 评测验证的是"固定 Profile 装配机制 + 真实 Eino Skill Middleware + 受控评测 Tool 合同"（experiment 臂基于固定 `diagnosis-default` Profile 经真实 Middleware 链装配，wide 臂使用独立的 `evaluation-wide-v1` 评测合同），它不声称已复现所有生产 Knowledge/Web/Attachment Adapter。正式 v2 生产入口重测必须从真实 Conversation/Diagnosis 生产入口复测：同一实验臂内固定 Tool Profile 指纹，对比稳定 Profile、执行期 Guard 和 Diagnosis 渐进式 Skill；Text-to-SQL 必须从自然语言 Conversation 输入触发，不能由评测器直接强制调用 SQL Tool。Conversation SQL/`turn_context` 已在本切片接线，重测本身仍要求干净 Git 修订 + post-commit（按既定规程，本轮未执行）。
+该结果只证明已被硬切删除的旧动态 `TaskScope` 方案，不能作为 v2 简历结果，也不代表当前生产实现。当前 Tool Selection v2 评测验证的是"固定 Profile 装配机制 + 真实 Eino Skill Middleware + 受控评测 Tool 合同"（experiment 臂基于固定 `diagnosis-default` Profile 经真实 Middleware 链装配，wide 臂使用独立的 `evaluation-wide-v1` 评测合同），它不声称已复现所有生产 Knowledge/Web/Attachment Adapter。正式 v2 生产入口重测必须从真实 Conversation/Diagnosis 生产入口复测：同一实验臂内固定 Tool Profile 指纹，对比稳定 Profile、执行期 Guard 和 Diagnosis 渐进式 Skill；Text-to-SQL 必须从自然语言 Conversation 输入触发，不能由评测器直接强制调用 SQL Tool。Conversation SQL/`turn_context` 已在本切片接线，重测本身仍要求干净 Git 修订 + post-commit（按既定规程，本轮未执行）。
 
 | 指标 | 定义 |
 | --- | --- |
 | Tool 选择准确率 | 首个关键 Tool 与标注一致的样本比例 |
 | 任务完成率 | 满足预定义证据和报告要求的样本比例 |
-| 越权调用率 | 被策略拒绝或不属于 TaskScope 的调用数 / 总调用数 |
+| 越权调用率 | 被策略拒绝或不在 RunAccess/Profile 授权内的调用数 / 总调用数 |
 | 输入 Token 降幅 | `(baseline_input_tokens - experiment_input_tokens) / baseline_input_tokens` |
 | 端到端耗时 | 从 Agent 开始到完整/部分报告完成 |
 
-P5 的评测输入分为两类：版本化 `EvaluationCase` 保存 expected tools、forbidden tools、required evidence、可接受结论和根因标注；每次真实运行单独保存 `EvaluationObservation`，包括 baseline/experiment、Run ID、模型配置、实际 Tool、报告状态和 Provider usage。CLI 会按 `caseId` 配对，只有模型、版本、reasoning effort、`observationSchemaVersion`、模型 Profile 指纹、实现 revision 与 dirty 状态一致且两臂都干净时才计算 Token/TTFT/耗时差异；dirty 观测只保留单臂统计供本地 smoke，不进入正式 paired 归约。
+P5 的评测输入分为两类：版本化 `EvaluationCase` 保存 expected tools、forbidden tools、required evidence、可接受结论和根因标注；每次真实运行单独保存 v2 `EvaluationObservation`，包括 baseline/experiment、Run ID、模型配置、`toolProfileId`/`toolSchemaFingerprint`/`modelProfileFingerprint`/`implementationRevision`/`implementationDirty`、实际 Tool、报告状态和 Provider usage。CLI 会按 `caseId` 配对，只有模型、模型版本、reasoning effort、`promptVersion`、模型 Profile 指纹、实现 revision 一致且两臂 `implementationDirty=false` 时才计算 Token/TTFT/耗时差异；Tool Profile ID 与 Schema 指纹是实验臂特有合同，配对不要求两臂相等（同一 variant 跨样本必须一致，否则 fail-closed）；dirty 观测只保留单臂统计供本地 smoke，不进入正式 paired 归约。观测必须是 `evaluation-observation-v2` 合同，active evaluator 无 v1 兼容分支。
 
 Tool Schema 字节数只能做静态规模检查，不能替代 Provider Token。`testdata/*sample*` 只验证统计程序，不是项目效果证据。真实实验要保留该次实际 `AllowedTools`、评测集版本、模型配置、原始脱敏结果和可复现命令。
+
+> **historical/superseded**：以下 `agent-real-v1/v2/v3/v4` 是硬切前旧 paired 评测（baseline 绑全部 Schema、experiment 按旧 TaskScope 过滤）的真实运行记录，只用于边界与成本观察，不代表当前生产实现；当前基线/实验臂结构与 v2 身份合同见上文"评测口径"。
 
 2026-08-02 的首条真实 `agent-real-v1` 工单样本已验证 paired CLI：baseline 暴露
 7 个业务 Tool Schema，experiment 暴露 `read_external_case`、`read_skill_reference`

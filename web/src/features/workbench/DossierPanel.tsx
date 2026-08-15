@@ -1,37 +1,23 @@
 import { FileText, Plus, RotateCcw } from 'lucide-react'
-import type {
-  DataSource,
-  ExternalCase,
-  InvestigationCapability,
-  RequestedSkill,
-} from '@/shared/api/m1-types'
+import type { DataSource, ExternalCase } from '@/shared/api/m1-types'
 import { caseStatusMeta, priorityMeta } from '@/shared/lib/status'
 import { fmtDateTime } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
-import { Select } from '@/shared/ui/Field'
 
 export function DossierPanel({
   extCase,
   dataSources,
-  requestedSkill,
-  capabilities,
   selectedDataSourceIds,
   pendingCases,
-  onSkillChange,
-  onCapabilityToggle,
   onDataSourceToggle,
   onOpenCase,
   onNewWorkspace,
 }: {
   extCase: ExternalCase
   dataSources: DataSource[]
-  requestedSkill: RequestedSkill
-  capabilities: InvestigationCapability[]
   selectedDataSourceIds: string[]
   pendingCases: ExternalCase[]
-  onSkillChange: (skill: RequestedSkill) => void
-  onCapabilityToggle: (capability: 'code' | 'sql') => void
   onDataSourceToggle: (dataSourceId: string) => void
   onOpenCase: (externalCaseId: string) => void
   onNewWorkspace: () => void
@@ -70,44 +56,6 @@ export function DossierPanel({
             <div className="flex justify-between gap-3 py-2"><dt className="text-ink-48">产品</dt><dd className="text-right text-ink-80">{[extCase.productName, extCase.productVersion].filter(Boolean).join(' ') || '—'}</dd></div>
             <div className="flex justify-between gap-3 py-2"><dt className="text-ink-48">上报</dt><dd className="text-right text-ink-80">{fmtDateTime(extCase.reportedAt)}</dd></div>
           </dl>
-        </section>
-
-        <section>
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="text-[12px] font-semibold text-ink">调查入口</h3>
-            <span className="text-[10px] text-ink-48">创建任务时冻结</span>
-          </div>
-          <Select value={requestedSkill} onValueChange={(value) => onSkillChange(value as RequestedSkill)}>
-            <option value="ticket-diagnosis">工单诊断</option>
-            <option value="code-investigation">代码调查</option>
-            <option value="sql-investigation">SQL 调查</option>
-          </Select>
-          <div className="mt-3 flex flex-col gap-2">
-            {([
-              ['case', '工单', '必选'],
-              ['code', '代码', '只读代码证据'],
-              ['sql', 'SQL', '受控只读查询'],
-            ] as const).map(([value, label, note]) => {
-              const selected = capabilities.includes(value)
-              const locked = value === 'case' ||
-                (value === 'code' && requestedSkill === 'code-investigation') ||
-                (value === 'sql' && requestedSkill === 'sql-investigation')
-              return (
-                <label key={value} className="flex items-center gap-3 rounded-utility border border-hairline px-3 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    disabled={locked}
-                    onChange={() => value !== 'case' && onCapabilityToggle(value)}
-                    className="size-4 accent-primary"
-                  />
-                  <span className="min-w-0 flex-1 text-[12px] font-semibold text-ink">{label}</span>
-                  <span className="text-[10px] text-ink-48">{note}</span>
-                </label>
-              )
-            })}
-          </div>
-          <p className="mt-2 text-[10px] leading-[1.55] text-ink-48">能力范围不随服务在线状态自动扩大。</p>
         </section>
 
         <section>

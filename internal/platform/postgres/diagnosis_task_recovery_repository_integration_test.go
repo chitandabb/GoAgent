@@ -416,7 +416,7 @@ func (f *taskRecoveryIntegrationFixture) createTask(t *testing.T) uuid.UUID {
 	}
 	created, err := service.Create(context.Background(), diagnosis.TaskActor{UserID: f.creatorID}, diagnosis.CreateTaskInput{
 		ExternalCaseID: f.externalCase.ID, ExpectedSourceFingerprint: f.externalCase.SourceFingerprint,
-		RequestText: "验证任务恢复", RequestScope: map[string]any{"source": "integration"},
+		RequestText: "验证任务恢复",
 		IdempotencyKey: uuid.NewString(), CorrelationID: uuid.New(),
 	})
 	if err != nil {

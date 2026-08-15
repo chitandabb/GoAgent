@@ -4,7 +4,7 @@
 
 - 本文定义诊断 Agent 如何访问远程 SQL Server、数据库执行证据、代码、知识库、公开网页和日志。
 - 当前代码已实现单 ADK Agent 内循环：`ticket-diagnosis` 可在同一次 Run 中按需加载 `code-investigation` 或 `sql-investigation`，继续调用工单、GitHub 和 SQL Server 对象定义只读 Tool；普通调查不使用 Handoff。
-- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool、后端拥有的 `search_knowledge`、Firecrawl `web_search`/`fetch_public_page`、有界 `read_attachment`，以及会话专用 `create_diagnosis_task`/`get_diagnosis_task_status`。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。附件 Tool 在会话中绑定当前 user message，在诊断 Worker 中绑定已冻结的 task attachment；成功读取生成 `attachment` EvidenceItem，不返回对象存储坐标。任务状态 Tool 只有在当前消息带有已验证任务引用时才进入 TaskScope，并继续复用 owner/admin 权限。Web Search 已完成 Query 脱敏、Run 预算、搜索结果 URL 授权、公网 DNS/IP 校验、响应上限和 `web` 引用快照；真实 Firecrawl smoke 仍依赖本机 Key/额度。Catalog 扫描/发布管理、Query Store 和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
+- 当前已实现 SQL Server 对象定义读取、PostgreSQL 已发布 Catalog 的窄检索、受 QueryGuard/Catalog/资源限制保护的 `execute_readonly_query` Tool、后端拥有的 `search_knowledge`、Firecrawl `web_search`/`fetch_public_page`、有界 `read_attachment`，以及会话专用 `create_diagnosis_task`/`get_diagnosis_task_status`。Docker PostgreSQL + SQL Server 的真实跨数据库联调、混合检索固定集和运行时/正式 EvidenceItem 已验证；知识检索结果只有通过 Chunk 身份、版本、内容哈希和定位字段校验后才可进入 `knowledge_chunk` EvidenceItem。附件 Tool 在会话中绑定当前 user message，在诊断 Worker 中绑定已冻结的 task attachment；成功读取生成 `attachment` EvidenceItem，不返回对象存储坐标。任务状态 Tool 始终属于固定 Conversation Profile，但只有当前消息带已验证任务引用并派生出对应 `RunAccess` Permission/Grant 时才可执行，之后仍复用 owner/admin 权限。Web Search 已完成 Query 脱敏、Run 预算、搜索结果 URL 授权、公网 DNS/IP 校验、响应上限和 `web` 引用快照；真实 Firecrawl smoke 仍依赖本机 Key/额度。Catalog 扫描/发布管理、Query Store 和运行日志 Tool 仍未实现，本文不把目标能力当作已验证结果。
 
 ## 总体原则
 
@@ -122,7 +122,7 @@ SQL Tool 是 Conversation 与 Diagnosis 共享的只读业务能力，不属于�
 T-SQL Parser。项目参考 [Bytebase Omni](https://github.com/bytebase/omni) 的语句分类、
 对象提取和对抗测试思路，自行实现一个默认拒绝的窄 `QueryGuard`：词法层必须正确处理
 注释、字符串和带引号标识符；策略层只接受单条 `SELECT` 或只读 CTE，识别 `UNION`、
-拒绝 `SELECT INTO`，并提取引用对象供 `RunAccess.ResourceGrants` 和已发布 Catalog 复核。执行期粗粒度由 `accessGuardedTool` 的 `RunAccess.Permission` 承担；Tool 内部的具体资源归属校验仍由旧 `TaskScope` 承担，直到 SQL Tool 完成 ResourceGrant 迁移。
+拒绝 `SELECT INTO`，并提取引用对象供 `RunAccess.ResourceGrants` 和已发布 Catalog 复核。执行期粗粒度由 `accessGuardedTool` 的 `RunAccess.Permission` 承担；Tool 在访问数据库前还会校验具体数据源 Grant、已发布 Catalog、查询安全策略和只读账号权限。
 
 首版明确拒绝变量、临时表、动态 SQL、跨库/链接服务器、危险系统对象和无法可靠分析的
 方言结构。它不是通用 T-SQL AST，不负责格式化或执行计划分析。当前执行器先复核

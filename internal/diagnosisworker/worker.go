@@ -44,14 +44,13 @@ type Task struct {
 	CreatedBy    uuid.UUID
 	Role         auth.Role
 	RequestText  string
-	RequestScope map[string]any
 	CaseSnapshot externalcase.ExternalCase
 	DataSources  []DataSource
 	Attachments  []TaskAttachment
-	// Policy 是任务创建时冻结的 InvestigationPolicy；nil 表示 mode=legacy 的
-	// migration 前旧任务（由执行器仅从冻结 request_scope/任务资源做 legacy
-	// 派生）。新任务（mode=frozen）永远携带非 nil Policy。
-	Policy *agentruntime.InvestigationPolicy
+	// Policy 是任务创建时冻结的 InvestigationPolicy。旧授权体系已硬切删除：
+	// 没有 legacy fallback，缺失/损坏/版本不一致的任务在执行前一律
+	// ErrInvalidTask。
+	Policy agentruntime.InvestigationPolicy
 }
 
 type ExecutionResult struct {

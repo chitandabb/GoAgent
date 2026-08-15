@@ -17,7 +17,11 @@ var ErrSchemaNotCurrent = errors.New("database schema version is not current")
 
 // NewProvider 使用嵌入二进制的 SQL 文件创建 Goose Provider。
 func NewProvider(db *sql.DB) (*goose.Provider, error) {
-	provider, err := goose.NewProvider(goose.DialectPostgres, db, dbmigrations.Files)
+	return newProvider(db)
+}
+
+func newProvider(db *sql.DB, options ...goose.ProviderOption) (*goose.Provider, error) {
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, dbmigrations.Files, options...)
 	if err != nil {
 		return nil, fmt.Errorf("create migration provider: %w", err)
 	}
@@ -38,7 +42,12 @@ func CheckCurrent(ctx context.Context, db *sql.DB) error {
 	var versionTableExists bool
 	if err := db.QueryRowContext(
 		ctx,
-		"SELECT to_regclass($1) IS NOT NULL",
+		`SELECT EXISTS (
+SELECT 1
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = current_schema() AND c.relname = $1
+)`,
 		goose.DefaultTablename,
 	).Scan(&versionTableExists); err != nil {
 		return fmt.Errorf("check migration version table: %w", err)

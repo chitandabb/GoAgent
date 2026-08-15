@@ -4,16 +4,17 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-func TestDefaultRunnerAuthorizesObjectDefinitionToolByScope(t *testing.T) {
+// TestDefaultRunnerFixedProfileContainsConstructedSQLTools 证明 SQL Tool 的
+// 模型可见性只由启动装配（固定 diagnosis-default Profile）决定：成功构造的
+// SQL 三件套进入 Profile，未构造的不进入；任何 per-run 状态都不改变名单。
+func TestDefaultRunnerFixedProfileContainsConstructedSQLTools(t *testing.T) {
 	sqlTool, err := NewDatabaseObjectDefinitionTool(&stubDatabaseObjectDefinitionReader{
 		definition: "CREATE VIEW dbo.v_Test AS SELECT 1", objectType: "VIEW",
 	})
@@ -35,42 +36,36 @@ func TestDefaultRunnerAuthorizesObjectDefinitionToolByScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDefaultRunner: %v", err)
 	}
-
-	readOnlySource := ScopedDataSource{
-		ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-	}
-	withDependency := mustTaskScope(
-		t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{readOnlySource}, ToolDependencySQLServer,
-	)
-	tools, err := runner.toolCatalog.ToolsFor(context.Background(), withDependency)
+	resolved, err := runner.toolCatalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
 	if err != nil {
-		t.Fatalf("ToolsFor(read-only): %v", err)
+		t.Fatalf("ResolveProfile: %v", err)
 	}
-	if names := toolNamesForTest(t, tools); !slices.Contains(names, ToolDatabaseObjectDefinition) ||
-		!slices.Contains(names, ToolSearchSchemaCatalog) || !slices.Contains(names, ToolExecuteReadonlyQuery) {
-		t.Fatalf("read-only tools = %v, missing object definition Tool", names)
+	names := resolved.ModelVisibleNames
+	for _, want := range []string{ToolDatabaseObjectDefinition, ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("fixed Profile = %v, missing %q", names, want)
+		}
 	}
 
-	withoutDependency := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{readOnlySource})
-	tools, err = runner.toolCatalog.ToolsFor(context.Background(), withoutDependency)
+	// 未构造 SQL Tool 的部署：Profile 中不存在 SQL Tool，且重复解析名单不变。
+	withoutSQL, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ExternalCases: runnerTestCaseGetter{},
+		SkillRoot:           filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction:   runnerTestSystemInstruction,
+		BaselineInstruction: runnerTestBaselineInstruction,
+		Logger:              zap.NewNop(),
+	})
 	if err != nil {
-		t.Fatalf("ToolsFor(no SQL Server): %v", err)
+		t.Fatalf("NewDefaultRunner(no SQL): %v", err)
 	}
-	if names := toolNamesForTest(t, tools); slices.Contains(names, ToolDatabaseObjectDefinition) ||
-		slices.Contains(names, ToolExecuteReadonlyQuery) {
-		t.Fatalf("tools without SQL Server dependency = %v", names)
+	withoutNames := withoutSQL.ProfileToolNames()
+	if slices.Contains(withoutNames, ToolDatabaseObjectDefinition) ||
+		slices.Contains(withoutNames, ToolExecuteReadonlyQuery) {
+		t.Fatalf("unassembled SQL Tools leaked into the fixed Profile: %v", withoutNames)
 	}
-
-	labScope := mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-	}}, ToolDependencySQLServer)
-	tools, err = runner.toolCatalog.ToolsFor(context.Background(), labScope)
-	if err != nil {
-		t.Fatalf("ToolsFor(bounded lab): %v", err)
-	}
-	if names := toolNamesForTest(t, tools); slices.Contains(names, ToolDatabaseObjectDefinition) ||
-		slices.Contains(names, ToolExecuteReadonlyQuery) {
-		t.Fatalf("bounded-lab scope received read-only object definition Tool: %v", names)
+	again := withoutSQL.ProfileToolNames()
+	if !slices.Equal(withoutNames, again) {
+		t.Fatal("profile names changed between snapshots")
 	}
 }
 
@@ -81,12 +76,4 @@ func mustSchemaCatalogToolForTest(t *testing.T) tool.InvokableTool {
 		t.Fatalf("NewSearchSchemaCatalogTool: %v", err)
 	}
 	return current
-}
-
-func TestAgentInstructionDisclosesUnavailableSQLDependency(t *testing.T) {
-	scope := runnerTestScopeWithCapabilities(t, []ToolCapability{ToolCapabilityCase, ToolCapabilitySQL}, ToolDependencyExternalCase)
-	instruction := buildAgentInstruction(runnerTestSystemInstruction, SkillSQLInvestigation, "test SQL Skill", scope)
-	if !strings.Contains(instruction, sqlServerUnavailableMessage) {
-		t.Fatalf("instruction did not disclose SQL Server degradation: %s", instruction)
-	}
 }

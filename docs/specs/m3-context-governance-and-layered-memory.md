@@ -34,7 +34,7 @@ schema v1 Snapshot/Job 表中的 predecessor、candidate/active、activation 字
 - Tail 从当前消息向前连续选择，遇到首条放不下即停止，不跳选更老消息。
 - Summary 投影按实际 Token 预算动态选择 Entry；`promptMaxEntries=64` 只防止碎片化。
 - Current User Message、当前 Tool Call/Result 和安全/输出合同不能被摘要替代。
-- Prompt Epoch 冻结 TaskScope 授权 Tool Schema；Skill 装载不授予新权限。
+- Prompt Epoch 冻结部署级 ToolProfile 的模型可见 Tool Schema；RunAccess 只控制执行权限与资源 Grant，Skill 装载不授予新权限。
 
 ## 软硬压缩
 

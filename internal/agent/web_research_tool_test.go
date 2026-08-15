@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/google/uuid"
 )
 
@@ -29,33 +30,32 @@ func (s webResearcherStub) Fetch(context.Context, string, string) (webresearch.P
 	return s.page, s.err
 }
 
-func TestWebResearchToolsRequireScopeCapabilityAndDependency(t *testing.T) {
+func TestWebResearchToolsRequireRunAccessWebPermission(t *testing.T) {
 	searchTool, err := NewWebSearchTool(webResearcherStub{search: webresearch.SearchResponse{Query: "PostgreSQL timeout", UntrustedContent: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorized, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
-		DataSources:           []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
-		AllowedCapabilities:   []ToolCapability{ToolCapabilityCase, ToolCapabilityWebSearch},
-		AvailableDependencies: []ToolDependency{ToolDependencyWebSearch},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := searchTool.InvokableRun(WithTaskScope(context.Background(), authorized), `{"query":"PostgreSQL timeout"}`); err != nil {
+	// 授权完全来自 RunAccess：web.read 存在时允许执行。
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+		t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionWebRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
+	if _, err := searchTool.InvokableRun(ctx, `{"query":"PostgreSQL timeout"}`); err != nil {
 		t.Fatalf("authorized web_search: %v", err)
 	}
-	denied, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
-		DataSources:         []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
-		AllowedCapabilities: []ToolCapability{ToolCapabilityCase, ToolCapabilityWebSearch},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := searchTool.InvokableRun(WithTaskScope(context.Background(), denied), `{"query":"PostgreSQL timeout"}`); !errors.Is(err, ErrToolNotAllowed) {
+	// 没有 web.read：fail-closed。
+	ctx = agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+		t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
+	if _, err := searchTool.InvokableRun(ctx, `{"query":"PostgreSQL timeout"}`); !errors.Is(err, ErrToolNotAllowed) {
 		t.Fatalf("denied web_search error=%v", err)
+	}
+	// 没有 RunAccess：fail-closed。
+	if _, err := searchTool.InvokableRun(context.Background(), `{"query":"PostgreSQL timeout"}`); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("missing RunAccess error=%v", err)
 	}
 }
 
@@ -93,22 +93,10 @@ func TestFetchPublicPageCreatesTamperEvidentWebEvidence(t *testing.T) {
 	}
 }
 
-func TestKnowledgeTaskScopeAllowsOnlyKnowledgeAndWebResearch(t *testing.T) {
-	if _, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeKnowledge,
-		AllowedCapabilities: []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityWebSearch},
-	}); err != nil {
-		t.Fatalf("knowledge web scope: %v", err)
-	}
-	if _, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeKnowledge,
-		AllowedCapabilities: []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityCode},
-	}); err == nil {
-		t.Fatal("knowledge scope accepted code capability")
-	}
-}
-
-func TestDefaultCatalogExposesWebToolsOnlyWhenScopeAndDependencyAllow(t *testing.T) {
+// TestConversationProfileExposesWebToolsAndExecutionRequiresWebPermission
+// 证明 Conversation 固定 Profile 总是包含 web 工具（Schema 与 RunAccess
+// 解耦），但执行期仍按 RunAccess.PermissionWebRead fail-closed。
+func TestConversationProfileExposesWebToolsAndExecutionRequiresWebPermission(t *testing.T) {
 	stub := webResearcherStub{}
 	searchTool, err := NewWebSearchTool(stub)
 	if err != nil {
@@ -124,34 +112,35 @@ func TestDefaultCatalogExposesWebToolsOnlyWhenScopeAndDependencyAllow(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeKnowledge,
-		AllowedCapabilities:   []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityWebSearch},
-		AvailableDependencies: []ToolDependency{ToolDependencyWebSearch},
-	})
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := catalog.ToolsFor(context.Background(), scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := toolNamesForTest(t, tools)
+	names := toolNamesForTest(t, resolved.Tools)
 	if !slices.Contains(names, ToolWebSearch) || !slices.Contains(names, ToolFetchPublicPage) {
-		t.Fatalf("web tool names=%v", names)
+		t.Fatalf("conversation profile web tool names=%v", names)
 	}
-	withoutDependency, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeKnowledge,
-		AllowedCapabilities: []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityWebSearch},
-	})
-	if err != nil {
-		t.Fatal(err)
+	var guarded tool.InvokableTool
+	for _, current := range resolved.Tools {
+		info, infoErr := current.Info(context.Background())
+		if infoErr != nil {
+			t.Fatalf("Tool.Info: %v", infoErr)
+		}
+		if info.Name == ToolWebSearch {
+			guarded = current.(tool.InvokableTool)
+			break
+		}
 	}
-	tools, err = catalog.ToolsFor(context.Background(), withoutDependency)
-	if err != nil {
-		t.Fatal(err)
+	if guarded == nil {
+		t.Fatal("web_search missing from resolved profile")
 	}
-	if names = toolNamesForTest(t, tools); slices.Contains(names, ToolWebSearch) || slices.Contains(names, ToolFetchPublicPage) {
-		t.Fatalf("web tools exposed without dependency: %v", names)
+	// 无 web.read 的执行必须拒绝（Profile 可见不等于可执行）。
+	denied := agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+		t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
+	if _, err := guarded.InvokableRun(denied, `{"query":"PostgreSQL timeout"}`); !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("denied web_search error=%v, want ErrToolNotAllowed", err)
 	}
 }

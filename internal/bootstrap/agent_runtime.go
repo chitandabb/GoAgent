@@ -40,7 +40,6 @@ type agentRuntime struct {
 	runner                    *mesagent.Runner
 	conversation              *mesagent.ConversationRunner
 	orchestrator              *mesagent.EvidenceOrchestrator
-	availableDependencies     []mesagent.ToolDependency
 	diagnosisToolNames        []string
 	modelProvider             string
 	modelID                   string
@@ -197,8 +196,6 @@ func buildAgentRuntimeForRole(
 	}
 	if externalCases == nil {
 		externalCases = unavailableExternalCaseGetter{}
-	} else {
-		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyExternalCase)
 	}
 	chatModel, err := builders.chatModel(ctx, cfg.Models.Chat)
 	if err != nil {
@@ -217,7 +214,6 @@ func buildAgentRuntimeForRole(
 			runtime.closeMCP = nil
 		} else {
 			argumentRewrite = githubmcp.NewArgumentRewriter()
-			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyGitHubMCP)
 		}
 	}
 
@@ -266,9 +262,6 @@ func buildAgentRuntimeForRole(
 			conversationSQLDataSourceID = dataSourceID
 		}
 	}
-	if sqlObjectDefinitions != nil || schemaCatalog != nil || readonlyQuery != nil {
-		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencySQLServer)
-	}
 
 	var knowledgeSearch tool.BaseTool
 	if postgresDB != nil {
@@ -280,8 +273,6 @@ func buildAgentRuntimeForRole(
 		if err != nil {
 			log.Warn("knowledge search Tool unavailable; continuing with other Agent capabilities", zap.Error(err))
 			knowledgeSearch = nil
-		} else if knowledgeSearch != nil {
-			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyKnowledge)
 		}
 	}
 
@@ -304,7 +295,6 @@ func buildAgentRuntimeForRole(
 			if err != nil {
 				return nil, fmt.Errorf("build public web tools: %w", err)
 			}
-			runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyWebSearch)
 		}
 	}
 
@@ -417,9 +407,6 @@ func buildAgentRuntimeForRole(
 		_ = runtime.close()
 		return nil, fmt.Errorf("build conversation Tool catalog: %w", err)
 	}
-	if builders.attachmentReader != nil {
-		runtime.availableDependencies = append(runtime.availableDependencies, mesagent.ToolDependencyAttachment)
-	}
 	var citationRepairer mesagent.ConversationCitationRepairer
 	var citationRepairPolicy resilience.Policy
 	if cfg.Agent.ConversationCitationRepairEnabled {
@@ -469,7 +456,6 @@ func buildAgentRuntimeForRole(
 		ModelProvider:                runtime.modelProvider,
 		ModelID:                      runtime.modelID,
 		PromptVersion:                runtime.conversationPromptVersion,
-		AvailableDependencies:        runtime.availableDependencies,
 		Logger:                       log.Named("conversation_runner"),
 		MaxIterations:                cfg.Agent.ConversationMaxIterations,
 		MaxToolCalls:                 cfg.Agent.MaxToolCalls,

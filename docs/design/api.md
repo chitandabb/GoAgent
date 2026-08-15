@@ -593,15 +593,6 @@ X-CSRF-Token: <token>
   "expectedSourceFingerprint": "sha256:...",
   "evidenceDataSourceIds": ["..."],
   "requestText": "请先检查数据库中的业务状态",
-  "requestScope": {
-    "requestedSkill": "sql-investigation",
-    "allowedCapabilities": ["case", "sql"],
-    "timeRange": {
-      "from": "2026-07-25T00:00:00Z",
-      "to": "2026-07-26T00:00:00Z"
-    }
-  },
-  "requestScopeSchemaVersion": 1,
   "attachments": [
     {
       "attachmentId": "...",
@@ -612,8 +603,7 @@ X-CSRF-Token: <token>
 }
 ```
 
-`requestScope.allowedCapabilities` 是任务创建时冻结的能力白名单，可由调用方声明的值为 `case`、`code`、`sql`，后端会始终为新建诊断任务追加 `knowledge`。用户不得显式提交 `knowledge`，因此前端不应提供该 Tool 开关。它与服务健康状态分离：声明 `sql` 不代表 SQL Server 当前可用，未声明 `sql` 时即使 SQL Server 健康也不会向模型暴露 SQL Tool。未提供该字段时，后端按 `requestedSkill` 推导 `case`/`code`/`sql`，再附加 `knowledge`。
-`code-investigation` 必须包含 `case + code`，`sql-investigation` 必须包含 `case + sql`；常规 `ticket-diagnosis` 可以声明 `case`、`case + code`、`case + sql` 或三者组合，但始终会同时拥有后端策略追加的 `knowledge`。
+调用方只提交业务输入、工单引用、附件和允许调查的数据源，不选择 Skill、Tool 或能力白名单。后端在创建事务中根据部署上限、任务绑定资源和只读数据源冻结 `InvestigationPolicy`；Worker 再从该 Policy 与当前 access ceiling 的交集派生 `RunAccess`。Skill 只承载诊断 SOP，不参与授权。
 
 API 在创建前重新只读查询 SQL Server 并计算 fingerprint：
 

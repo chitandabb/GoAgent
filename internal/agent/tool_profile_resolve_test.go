@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -52,27 +51,28 @@ func TestResolveConversationProfileStableAcrossRunContexts(t *testing.T) {
 	}{
 		{name: "no references"},
 		{
+			// 引用变化只改变 RunAccess（case Grant），不改变 Schema。
 			name: "selected case",
-			ctx: WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-				t, auth.RoleAnalyst, TaskTypeConversation, nil,
-				[]ToolCapability{ToolCapabilityCase, ToolCapabilityKnowledge},
-				ToolDependencyExternalCase, ToolDependencyKnowledge,
+			ctx: agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+				t, uuid.New(),
+				[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead},
+				agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{uuid.New()}},
 			)),
 		},
 		{
 			name: "task reference",
-			ctx: WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-				t, auth.RoleAnalyst, TaskTypeConversation, nil,
-				[]ToolCapability{ToolCapabilityTask, ToolCapabilityKnowledge},
-				ToolDependencyKnowledge,
+			ctx: agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+				t, uuid.New(),
+				[]agentruntime.Permission{agentruntime.PermissionTaskRead, agentruntime.PermissionKnowledgeRead},
+				agentruntime.ResourceGrantsConfig{},
 			)),
 		},
 		{
 			name: "attachment",
-			ctx: WithTaskScope(context.Background(), mustTaskScopeWithCapabilities(
-				t, auth.RoleAnalyst, TaskTypeConversation, nil,
-				[]ToolCapability{ToolCapabilityAttachment, ToolCapabilityKnowledge},
-				ToolDependencyAttachment, ToolDependencyKnowledge,
+			ctx: agentruntime.WithRunAccess(context.Background(), mustConversationTestRunAccess(
+				t, uuid.New(),
+				[]agentruntime.Permission{agentruntime.PermissionAttachmentRead, agentruntime.PermissionKnowledgeRead},
+				agentruntime.ResourceGrantsConfig{AttachmentIDs: []uuid.UUID{uuid.New()}},
 			)),
 		},
 	}
@@ -95,7 +95,7 @@ func TestResolveConversationProfileStableAcrossRunContexts(t *testing.T) {
 	}
 }
 
-func TestResolveDiagnosisProfileStableAcrossCapabilityScopes(t *testing.T) {
+func TestResolveDiagnosisProfileStableAcrossPermissionSets(t *testing.T) {
 	catalog := mustDiagnosisConfiguredDefaultCatalogForTest(t)
 	base, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
 	if err != nil {
@@ -104,27 +104,26 @@ func TestResolveDiagnosisProfileStableAcrossCapabilityScopes(t *testing.T) {
 	wantNames := append([]string(nil), base.ModelVisibleNames...)
 	wantToolNames := namesOfToolsForTest(t, base.Tools)
 
-	capabilitySets := [][]ToolCapability{
-		{ToolCapabilityCase, ToolCapabilityKnowledge},
-		{ToolCapabilityCase, ToolCapabilitySQL},
-		{ToolCapabilityCase, ToolCapabilityCode},
-		{ToolCapabilityCase, ToolCapabilityKnowledge, ToolCapabilitySQL, ToolCapabilityCode},
+	permissionSets := [][]agentruntime.Permission{
+		{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead},
+		{agentruntime.PermissionCaseRead, agentruntime.PermissionSQLRead},
+		{agentruntime.PermissionCaseRead, agentruntime.PermissionCodeRead},
+		{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead,
+			agentruntime.PermissionSQLRead, agentruntime.PermissionCodeRead},
 	}
-	for _, capabilities := range capabilitySets {
-		scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeDiagnosis,
-			[]ScopedDataSource{{
-				ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-			}}, capabilities,
-			ToolDependencyExternalCase, ToolDependencySQLServer, ToolDependencyGitHubMCP, ToolDependencyKnowledge)
-		resolved, err := catalog.ResolveProfile(WithTaskScope(context.Background(), scope), agentruntime.ToolProfileDiagnosis)
+	for _, permissions := range permissionSets {
+		ctx := agentruntime.WithRunAccess(context.Background(), mustDiagnosisTestRunAccess(
+			t, uuid.New(), permissions, agentruntime.ResourceGrantsConfig{},
+		))
+		resolved, err := catalog.ResolveProfile(ctx, agentruntime.ToolProfileDiagnosis)
 		if err != nil {
-			t.Fatalf("ResolveProfile(diagnosis, %v): %v", capabilities, err)
+			t.Fatalf("ResolveProfile(diagnosis, %v): %v", permissions, err)
 		}
 		if !slices.Equal(resolved.ModelVisibleNames, wantNames) {
-			t.Fatalf("capabilities %v changed model visible names: %v vs %v", capabilities, resolved.ModelVisibleNames, wantNames)
+			t.Fatalf("permissions %v changed model visible names: %v vs %v", permissions, resolved.ModelVisibleNames, wantNames)
 		}
 		if got := namesOfToolsForTest(t, resolved.Tools); !slices.Equal(got, wantToolNames) {
-			t.Fatalf("capabilities %v changed resolved tools: %v vs %v", capabilities, got, wantToolNames)
+			t.Fatalf("permissions %v changed resolved tools: %v vs %v", permissions, got, wantToolNames)
 		}
 	}
 }
@@ -142,11 +141,11 @@ func TestBindProfileRejectsReferenceToUnregisteredTool(t *testing.T) {
 	catalog, err := NewToolCatalog(context.Background(),
 		ToolRegistration{
 			Tool: registered, FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 		ToolRegistration{
 			Tool: other, FailurePolicy: resilience.PolicyBestEffort,
-			AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+			RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 		},
 	)
 	if err != nil {
@@ -169,7 +168,7 @@ func TestBindProfileRejectsUndeclaredMiddlewareOwnedName(t *testing.T) {
 	registered := newNamedToolForTest(t, "test_registered_tool")
 	catalog, err := NewToolCatalog(context.Background(), ToolRegistration{
 		Tool: registered, FailurePolicy: resilience.PolicyBestEffort,
-		AllowedRoles: []auth.Role{auth.RoleAnalyst}, AllowedTaskTypes: []TaskType{TaskTypeDiagnosis},
+		RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionCaseRead},
 	})
 	if err != nil {
 		t.Fatalf("NewToolCatalog: %v", err)

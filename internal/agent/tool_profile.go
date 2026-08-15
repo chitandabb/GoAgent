@@ -29,13 +29,20 @@ type ToolProfileConfig struct {
 	ConversationToolResultConfigured bool
 }
 
-// BuildDefaultToolProfiles 从部署配置派生 Conversation 与 Diagnosis 两个固定
-// Tool Profile。ToolSkill 是 Middleware-owned（由 Eino Skill Middleware 追加，
-// 不在 ToolCatalog 注册表），因此始终声明在 Diagnosis Profile 的可见名单中，
-// 但永远不会由 Catalog 生成一个假的 skill Tool。
+// BuildDefaultToolProfiles 从部署配置派生固定 Tool Profile：
+//   - conversation-default：Conversation Runtime 的 Schema 名单；
+//   - diagnosis-default：Diagnosis Runtime 的 Schema 名单；
+//   - evaluation-wide-v1：评测 wide 臂专用宽名单（全部实际注册的业务 Tool，
+//     不含 skill/read_skill_reference）。
+//
+// ToolSkill 是 Middleware-owned（由 Eino Skill Middleware 追加，不在
+// ToolCatalog 注册表），因此始终声明在 Diagnosis Profile 的可见名单中，
+// 但永远不会由 Catalog 生成一个假的 skill Tool。Profile 只反映"启动时成功
+// 构造的 Adapter"，不随引用、权限、依赖瞬时健康或调用次数变化。
 func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfiles, error) {
 	conversationNames := make([]string, 0, 16)
 	diagnosisNames := []string{ToolSkill}
+	wideNames := make([]string, 0, 16)
 
 	if config.SkillReferenceConfigured {
 		diagnosisNames = append(diagnosisNames, ToolReadSkillReference)
@@ -43,22 +50,27 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 	if config.ExternalCaseConfigured {
 		conversationNames = append(conversationNames, ToolReadExternalCase)
 		diagnosisNames = append(diagnosisNames, ToolReadExternalCase)
+		wideNames = append(wideNames, ToolReadExternalCase)
 	}
 	if config.KnowledgeConfigured {
 		conversationNames = append(conversationNames, ToolSearchKnowledge)
 		diagnosisNames = append(diagnosisNames, ToolSearchKnowledge)
+		wideNames = append(wideNames, ToolSearchKnowledge)
 	}
 	if config.WebSearchConfigured {
 		conversationNames = append(conversationNames, ToolWebSearch)
 		diagnosisNames = append(diagnosisNames, ToolWebSearch)
+		wideNames = append(wideNames, ToolWebSearch)
 	}
 	if config.FetchPublicPageConfigured {
 		conversationNames = append(conversationNames, ToolFetchPublicPage)
 		diagnosisNames = append(diagnosisNames, ToolFetchPublicPage)
+		wideNames = append(wideNames, ToolFetchPublicPage)
 	}
 	if config.AttachmentConfigured {
 		conversationNames = append(conversationNames, ToolReadAttachment)
 		diagnosisNames = append(diagnosisNames, ToolReadAttachment)
+		wideNames = append(wideNames, ToolReadAttachment)
 	}
 	// SQL 三件套按"实际成功构造"逐个声明：search_schema_catalog 与
 	// execute_readonly_query 同时进入 Conversation 与 Diagnosis Profile；
@@ -67,17 +79,21 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 	// 引用不存在的 Catalog Tool。
 	if config.SQLObjectDefinitionsConfigured {
 		diagnosisNames = append(diagnosisNames, ToolDatabaseObjectDefinition)
+		wideNames = append(wideNames, ToolDatabaseObjectDefinition)
 	}
 	if config.SchemaCatalogConfigured {
 		conversationNames = append(conversationNames, ToolSearchSchemaCatalog)
 		diagnosisNames = append(diagnosisNames, ToolSearchSchemaCatalog)
+		wideNames = append(wideNames, ToolSearchSchemaCatalog)
 	}
 	if config.ReadonlyQueryConfigured {
 		conversationNames = append(conversationNames, ToolExecuteReadonlyQuery)
 		diagnosisNames = append(diagnosisNames, ToolExecuteReadonlyQuery)
+		wideNames = append(wideNames, ToolExecuteReadonlyQuery)
 	}
 	if len(config.GitHubToolNames) != 0 {
 		diagnosisNames = append(diagnosisNames, config.GitHubToolNames...)
+		wideNames = append(wideNames, config.GitHubToolNames...)
 	}
 	if config.DiagnosisCommandConfigured {
 		conversationNames = append(conversationNames, ToolCreateDiagnosisTask)
@@ -102,5 +118,9 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 	if err != nil {
 		return agentruntime.ToolProfiles{}, err
 	}
-	return agentruntime.NewToolProfiles(conversation, diagnosis)
+	wide, err := agentruntime.NewToolProfile(agentruntime.ToolProfileEvaluationWide, wideNames)
+	if err != nil {
+		return agentruntime.ToolProfiles{}, err
+	}
+	return agentruntime.NewToolProfiles(conversation, diagnosis, wide)
 }

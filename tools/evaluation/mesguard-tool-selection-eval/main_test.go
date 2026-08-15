@@ -9,7 +9,6 @@ import (
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
@@ -50,16 +49,16 @@ func declaredProfileNames(t *testing.T, catalog *mesagent.ToolCatalog) []string 
 // （B 源）：ToolAuthorizationMiddleware 注入 Catalog-owned Tool，真实 Eino
 // Skill Middleware 追加真实 skill，返回最终真正传给模型的 Schema 名单。
 // 与 declaredProfileNames 不同源：前者来自 Profile 声明，后者来自
-// Middleware 链的实际输出。
+// Middleware 链的实际输出。调用方必须传入已绑定合法 RunAccess 的 Context
+// （Middleware 校验 RunAccess 存在，装配不执行任何 Tool）。
 func assembleSelectionSchema(
 	t *testing.T,
 	catalog *mesagent.ToolCatalog,
 	authorization *mesagent.ToolAuthorizationMiddleware,
 	skillMiddleware adk.ChatModelAgentMiddleware,
-	scope mesagent.TaskScope,
+	ctx context.Context,
 ) []string {
 	t.Helper()
-	ctx := mesagent.WithTaskScope(context.Background(), scope)
 	_, authorizedCtx, err := authorization.BeforeAgent(ctx, &adk.ChatModelAgentContext{Tools: nil})
 	if err != nil {
 		t.Fatalf("BeforeAgent(authorization): %v", err)
@@ -77,14 +76,15 @@ func assembleSelectionSchema(
 
 // TestSelectionCatalogBindsDiagnosisProfile 证明 experiment 侧 Catalog 绑定
 // 固定 diagnosis-default Profile：Profile 声明名单（A 源）与 Middleware 链
-// 实际输出（B 源）完全一致，且最终模型 Schema 不随 TaskScope
-// capability/dependency 变化。该测试不调用任何模型或 Provider。
+// 实际输出（B 源）完全一致，且最终模型 Schema 不随 RunAccess 变化。该测试
+// 不调用任何模型或 Provider。
 func TestSelectionCatalogBindsDiagnosisProfile(t *testing.T) {
 	skillRuntime := skillRuntimeForSelectionTest(t)
-	catalog, err := buildSelectionCatalog(context.Background(), nil, skillRuntime)
+	catalog, wideCatalog, err := buildSelectionCatalogs(context.Background(), nil, skillRuntime)
 	if err != nil {
-		t.Fatalf("buildSelectionCatalog: %v", err)
+		t.Fatalf("buildSelectionCatalogs: %v", err)
 	}
+	_ = wideCatalog
 	if got := catalog.BoundProfileID(); got != agentruntime.ToolProfileDiagnosis {
 		t.Fatalf("selection catalog bound profile = %q, want diagnosis-default", got)
 	}
@@ -97,7 +97,7 @@ func TestSelectionCatalogBindsDiagnosisProfile(t *testing.T) {
 		t.Fatal("declared profile names are empty")
 	}
 	baseActual := assembleSelectionSchema(t, catalog, authorization, skillRuntime.Middleware,
-		selectionScopeForTest(t, mesagent.ToolSelectionTicket))
+		selectionRunAccessForTest(t, mesagent.ToolSelectionTicket))
 	if len(baseActual) == 0 {
 		t.Fatal("assembled model schema is empty")
 	}
@@ -109,8 +109,8 @@ func TestSelectionCatalogBindsDiagnosisProfile(t *testing.T) {
 	for _, kind := range []mesagent.ToolSelectionScope{
 		mesagent.ToolSelectionTicket, mesagent.ToolSelectionGitHub, mesagent.ToolSelectionSQL,
 	} {
-		scope := selectionScopeForTest(t, kind)
-		actual := assembleSelectionSchema(t, catalog, authorization, skillRuntime.Middleware, scope)
+		actual := assembleSelectionSchema(t, catalog, authorization, skillRuntime.Middleware,
+			selectionRunAccessForTest(t, kind))
 		if !slices.Equal(actual, baseActual) {
 			t.Fatalf("scope %s changed the final model schema: %v vs %v", kind, actual, baseActual)
 		}
@@ -122,17 +122,18 @@ func TestSelectionCatalogBindsDiagnosisProfile(t *testing.T) {
 // Profile 声明名单与最终 Schema 完全一致（跨源比较）。
 func TestSelectionFinalSchemaSkillOwnership(t *testing.T) {
 	skillRuntime := skillRuntimeForSelectionTest(t)
-	catalog, err := buildSelectionCatalog(context.Background(), nil, skillRuntime)
+	catalog, wideCatalog, err := buildSelectionCatalogs(context.Background(), nil, skillRuntime)
 	if err != nil {
-		t.Fatalf("buildSelectionCatalog: %v", err)
+		t.Fatalf("buildSelectionCatalogs: %v", err)
 	}
+	_ = wideCatalog
 	authorization, err := mesagent.NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		t.Fatalf("NewToolAuthorizationMiddleware: %v", err)
 	}
 	declared := declaredProfileNames(t, catalog)
 	actual := assembleSelectionSchema(t, catalog, authorization, skillRuntime.Middleware,
-		selectionScopeForTest(t, mesagent.ToolSelectionTicket))
+		selectionRunAccessForTest(t, mesagent.ToolSelectionTicket))
 
 	if !slices.Equal(declared, actual) {
 		t.Fatalf("declared profile names %v != actual assembled schema %v", declared, actual)
@@ -174,8 +175,6 @@ func TestSelectionSchemaComparisonDetectsProfileDeclarationDrift(t *testing.T) {
 	ctx := context.Background()
 	registration := mesagent.ToolRegistration{
 		Tool: skillRuntime.ReferenceTool, FailurePolicy: resilience.PolicyBestEffort,
-		AllowedRoles:     []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
-		AllowedTaskTypes: []mesagent.TaskType{mesagent.TaskTypeDiagnosis, mesagent.TaskTypeKnowledge},
 	}
 	withSkill, err := agentruntime.NewToolProfile(agentruntime.ToolProfileDiagnosis,
 		[]string{mesagent.ToolReadSkillReference, mesagent.ToolSkill})
@@ -201,7 +200,7 @@ func TestSelectionSchemaComparisonDetectsProfileDeclarationDrift(t *testing.T) {
 	if err := withoutCatalog.BindProfile(withoutSkill, []string{mesagent.ToolSkill}); err != nil {
 		t.Fatalf("BindProfile(without skill): %v", err)
 	}
-	scope := selectionScopeForTest(t, mesagent.ToolSelectionTicket)
+	scope := selectionRunAccessForTest(t, mesagent.ToolSelectionTicket)
 	for _, current := range []struct {
 		name    string
 		catalog *mesagent.ToolCatalog
@@ -225,13 +224,13 @@ func TestSelectionSchemaComparisonDetectsProfileDeclarationDrift(t *testing.T) {
 	}
 }
 
-func selectionScopeForTest(t *testing.T, kind mesagent.ToolSelectionScope) mesagent.TaskScope {
+func selectionRunAccessForTest(t *testing.T, _ mesagent.ToolSelectionScope) context.Context {
 	t.Helper()
-	scope, err := selectionScope(kind)
+	ctx, err := withSelectionRunAccess(context.Background())
 	if err != nil {
-		t.Fatalf("selectionScope(%s): %v", kind, err)
+		t.Fatalf("withSelectionRunAccess: %v", err)
 	}
-	return scope
+	return ctx
 }
 
 func selectionChatModelsForTest() config.ChatModelConfig {

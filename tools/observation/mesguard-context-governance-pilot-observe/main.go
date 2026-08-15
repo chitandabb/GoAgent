@@ -344,9 +344,8 @@ func executePilot(
 	if err != nil {
 		return nil, fmt.Errorf("build Pilot Tool catalog: %w", err)
 	}
-	// Pilot 使用固定 conversation-default Profile 解析 Schema，不再调用
-	// ToolsFor(TaskScope)；空 capability 的 TaskScope 只用于 RunAccess 兼容，
-	// 不改变模型可见工具合同。
+	// Pilot 使用固定 conversation-default Profile 解析 Schema，不按任何
+	// per-run 状态（权限/引用）变化；执行授权由 RunAccess 单独负责。
 	resolved, err := catalog.ResolveProfile(ctx, agentruntime.ToolProfileConversation)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Pilot conversation Profile: %w", err)

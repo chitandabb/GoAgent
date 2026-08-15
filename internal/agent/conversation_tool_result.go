@@ -9,7 +9,6 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
@@ -156,9 +155,7 @@ func NewConversationToolResultRegistration() (ToolRegistration, error) {
 		return ToolRegistration{}, err
 	}
 	return ToolRegistration{
-		Tool:             reader,
-		FailurePolicy:    resilience.PolicyBestEffort,
-		AllowedRoles:     []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
-		AllowedTaskTypes: []TaskType{TaskTypeConversation},
+		Tool:          reader,
+		FailurePolicy: resilience.PolicyBestEffort,
 	}, nil
 }

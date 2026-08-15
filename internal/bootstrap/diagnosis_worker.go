@@ -165,34 +165,23 @@ func (e diagnosisAgentExecutor) Execute(
 	for _, current := range task.Attachments {
 		attachmentIDs = append(attachmentIDs, current.ID)
 	}
-	// legacy 派生输入仍来自冻结 request_scope（request_scope 只为旧任务与
-	// RequestedSkill 兼容保留，不再成为新任务的授权事实）。
-	legacyCapabilities, err := taskCapabilitiesFromScope(task.RequestScope)
-	if err != nil {
-		return diagnosisworker.ExecutionResult{}, err
-	}
+	// 旧授权体系已硬切删除：授权事实只来自持久化 frozen Policy 与当前
+	// ceiling；request_scope/RequestedSkill 已不复存在，也没有 legacy 派生。
 	runContext, err := agent.BuildDiagnosisRunContext(agent.DiagnosisRunContextInput{
-		Policy:             task.Policy,
-		Actor:              agentruntime.Actor{UserID: task.CreatedBy, Role: task.Role},
-		ProfileToolNames:   e.runtime.diagnosisToolNames,
-		ExternalCaseID:     task.CaseSnapshot.ID,
-		DataSources:        ceilingSources,
-		AttachmentIDs:      attachmentIDs,
-		LegacyCapabilities: legacyCapabilities,
+		Policy:           task.Policy,
+		Actor:            agentruntime.Actor{UserID: task.CreatedBy, Role: task.Role},
+		ProfileToolNames: e.runtime.diagnosisToolNames,
+		ExternalCaseID:   task.CaseSnapshot.ID,
+		DataSources:      ceilingSources,
+		AttachmentIDs:    attachmentIDs,
 	})
 	if err != nil {
 		return diagnosisworker.ExecutionResult{}, fmt.Errorf(
 			"%w: build diagnosis run context: %v", diagnosis.ErrInvalidTask, err,
 		)
 	}
-	requestedSkill, err := requestedSkillFromScope(task.RequestScope)
-	if err != nil {
-		return diagnosisworker.ExecutionResult{}, err
-	}
-	// 绑定顺序：WithTaskScope 写入兼容上下文（反向生成的 TaskScope），
-	// agentruntime.WithRunAccess 最后覆盖为权威 v2 RunAccess。
-	runCtx := agent.WithTaskScope(ctx, runContext.Scope())
-	runCtx = agentruntime.WithRunAccess(runCtx, runContext.Access())
+	// 权威 v2 RunAccess 直接绑定；旧 WithTaskScope 双写已硬切删除。
+	runCtx := agentruntime.WithRunAccess(ctx, runContext.Access())
 	runCtx = agent.WithDiagnosisTaskContext(runCtx, runContext.TaskContext())
 	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
 		RunID: task.ID.String(), TaskID: task.ID.String(),
@@ -215,7 +204,7 @@ func (e diagnosisAgentExecutor) Execute(
 	}
 	result, err := e.runtime.orchestrator.Invoke(runCtx, agent.RunRequest{
 		UserQuery: diagnosisAgentQuery(task), ExternalCaseID: task.CaseSnapshot.ID.String(),
-		RequestedSkill: requestedSkill, CaseSnapshot: string(caseSnapshot),
+		CaseSnapshot: string(caseSnapshot),
 	})
 	if err != nil {
 		return diagnosisworker.ExecutionResult{}, err
@@ -239,48 +228,6 @@ func diagnosisAgentQuery(task diagnosisworker.Task) string {
 			current.ID, current.OriginalName, current.MediaType, current.Purpose, current.SizeBytes, current.ContentSHA256)
 	}
 	return builder.String()
-}
-
-func requestedSkillFromScope(scope map[string]any) (agent.SkillID, error) {
-	value, err := diagnosis.RequestedSkillFromRequestScope(scope)
-	if err != nil {
-		return "", fmt.Errorf("%w: requestScope.requestedSkill: %v", diagnosis.ErrInvalidTask, err)
-	}
-	if value == "" {
-		return agent.SkillTicketDiagnosis, nil
-	}
-	requested := agent.SkillID(value)
-	if err := (agent.RunRequest{UserQuery: "validation", RequestedSkill: requested}).Validate(); err != nil {
-		return "", fmt.Errorf("%w: %v", diagnosis.ErrInvalidTask, err)
-	}
-	return requested, nil
-}
-
-func taskCapabilitiesFromScope(scope map[string]any) ([]agent.ToolCapability, error) {
-	values, err := diagnosis.TaskCapabilitiesFromRequestScope(scope)
-	if err != nil {
-		return nil, fmt.Errorf("%w: requestScope.allowedCapabilities: %v", diagnosis.ErrInvalidTask, err)
-	}
-	result := make([]agent.ToolCapability, 0, len(values))
-	for _, value := range values {
-		switch value {
-		case diagnosis.TaskCapabilityCase:
-			result = append(result, agent.ToolCapabilityCase)
-		case diagnosis.TaskCapabilityCode:
-			result = append(result, agent.ToolCapabilityCode)
-		case diagnosis.TaskCapabilitySQL:
-			result = append(result, agent.ToolCapabilitySQL)
-		case diagnosis.TaskCapabilityKnowledge:
-			result = append(result, agent.ToolCapabilityKnowledge)
-		case diagnosis.TaskCapabilityWebSearch:
-			result = append(result, agent.ToolCapabilityWebSearch)
-		case diagnosis.TaskCapabilityAttachment:
-			result = append(result, agent.ToolCapabilityAttachment)
-		default:
-			return nil, fmt.Errorf("%w: unsupported task capability %q", diagnosis.ErrInvalidTask, value)
-		}
-	}
-	return result, nil
 }
 
 type executionCaseSnapshotContextKey struct{}

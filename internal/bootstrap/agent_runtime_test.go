@@ -282,7 +282,7 @@ func TestBuildAgentRuntimeSkipsSQLToolWhenSQLServerIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestBuildAgentRuntimeRegistersOrDegradesWebResearchAsOneDependency(t *testing.T) {
+func TestBuildAgentRuntimeRegistersOrDegradesWebResearch(t *testing.T) {
 	cfg := testAgentConfig()
 	cfg.WebSearch = config.WebSearchConfig{
 		Enabled: true, Provider: "firecrawl", BaseURL: "https://api.firecrawl.dev",
@@ -303,8 +303,8 @@ func TestBuildAgentRuntimeRegistersOrDegradesWebResearchAsOneDependency(t *testi
 		t.Fatalf("buildAgentRuntime: %v", err)
 	}
 	defer runtime.close()
-	if runtime.webResearch == nil || !slices.Contains(runtime.availableDependencies, agent.ToolDependencyWebSearch) {
-		t.Fatalf("web research dependency was not registered: %+v", runtime.availableDependencies)
+	if runtime.webResearch == nil {
+		t.Fatal("web research service was not registered")
 	}
 
 	cfg.WebSearch.APIKeyEnv = "MISSING_FIRECRAWL_KEY_TEST"
@@ -320,8 +320,8 @@ func TestBuildAgentRuntimeRegistersOrDegradesWebResearchAsOneDependency(t *testi
 		t.Fatalf("buildAgentRuntime degraded: %v", err)
 	}
 	defer degraded.close()
-	if degraded.webResearch != nil || slices.Contains(degraded.availableDependencies, agent.ToolDependencyWebSearch) {
-		t.Fatalf("unavailable web research was exposed: %+v", degraded.availableDependencies)
+	if degraded.webResearch != nil {
+		t.Fatal("unavailable web research service was exposed")
 	}
 }
 

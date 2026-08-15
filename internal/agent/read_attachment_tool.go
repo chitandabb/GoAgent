@@ -82,11 +82,12 @@ func NewReadAttachmentTool(reader attachment.Reader) (tool.InvokableTool, error)
 					commandContext.UserMessageID, attachmentID, attachment.DefaultReadRunes,
 				)
 			} else if taskID, ok := diagnosisAttachmentTaskID(ctx); ok {
-				scope, scopeOK := TaskScopeFromContext(ctx)
-				if !scopeOK || scope.TaskType() != TaskTypeDiagnosis || scope.UserID() == uuid.Nil {
-					return readAttachmentResponse{}, ErrTaskScopeRequired
+				// Diagnosis 任务附件：Actor 来自权威 v2 RunAccess。
+				access, accessOK := agentruntime.RunAccessFromContext(ctx)
+				if !accessOK || access.Actor().UserID == uuid.Nil {
+					return readAttachmentResponse{}, ErrRunAccessRequired
 				}
-				result, err = reader.ReadForTask(ctx, scope.UserID(), taskID, attachmentID, attachment.DefaultReadRunes)
+				result, err = reader.ReadForTask(ctx, access.Actor().UserID, taskID, attachmentID, attachment.DefaultReadRunes)
 			} else {
 				return readAttachmentResponse{}, conversation.ErrCommandContextRequired
 			}

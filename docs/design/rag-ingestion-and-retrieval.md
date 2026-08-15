@@ -6,7 +6,7 @@
 - 简历主线：第三条“混合文档解析与 Agentic RAG”
 - 用途：记录本阶段已验证基线、架构决策、反对意见、评测口径和未决问题
 - 规则：未在“已确认决策”中出现的内容都不能视为实现承诺或简历事实
-- Agent 授权口径：本文后续出现的 `TaskScope/Capability` 描述保留为当前 v1 实现与历史决策记录；统一 Runtime v2 目标以 [`../decisions/005-unified-agent-runtime-and-stable-tool-profiles.md`](../decisions/005-unified-agent-runtime-and-stable-tool-profiles.md) 为准，知识检索作为 Conversation/Diagnosis 共享 Tool，由 `RunAccess` 授权。
+- Agent 授权口径：统一 Runtime v2 已完成硬切，知识检索作为 Conversation/Diagnosis 共享 Tool；启动 Epoch 的固定 `ToolProfile` 决定 Schema，`RunAccess`/ResourceGrant 决定单次执行，Diagnosis 任务权限来自创建时冻结的 `InvestigationPolicy`。下文旧 `TaskScope/Capability` 字样仅属于日期化历史决策记录，不代表当前实现。
 
 ## 当前已验证基线
 
@@ -204,7 +204,7 @@ ToolCallingChatModel`。静态校验覆盖所有已配置 Profile，但只有 ac
 `reasoning_content`；DashScope 把 `thinkingMode` 映射为 `enable_thinking`。不支持的组合启动/构建即失败，
 不会静默忽略。
 
-Chat 的 ReAct 循环、TaskScope、Tool 参数策略和 Evidence Gate 不依赖 StepFun；换模型不会获得额外
+Chat 的 ReAct 循环、固定 ToolProfile、RunAccess、Tool 参数策略和 Evidence Gate 不依赖 StepFun；换模型不会获得额外
 权限，也不会改变确定性门禁。Provider 差异集中在模型能力：有的模型支持 `reasoning_effort`，有的
 通过模型 ID 或其他字段控制推理，有的完全不支持该旋钮。适配器必须显式映射、忽略或拒绝，不能
 把 `low/medium/high` 盲传给所有 OpenAI-compatible endpoint。Eino OpenAI 扩展提供自定义 `BaseURL`、
@@ -562,7 +562,7 @@ Embedding 不但成本高，还可能把表格、错误栈和步骤列表切坏�
 | 2026-08-04 | 单 active Embedding Profile 并通过固定集后切换 | 避免不同向量空间混检，模型升级不伪造文档换版 | 需要后台回填、回滚窗口和 profile 审计 | 已确认 |
 | 2026-08-04 | 首版使用精确余弦与 RRF 双路融合 | 先建立带权限过滤的召回正确性基线，再由规模证据决定 HNSW | 精确检索在数据增长后可能不满足延迟目标 | 已确认 |
 | 2026-08-04 | 检索权限过滤下推 SQL 且支持单路降级 | 防止未授权候选离开数据库，并区分空结果与系统故障 | 两路结果与降级状态需要统一响应契约 | 已确认 |
-| 2026-08-04 | 诊断任务可由后端授权知识 Tool 且用户不选 Tool | 保留 Agent 自主调查与 TaskScope 授权边界 | 需要修改当前 diagnosis 禁止 knowledge 的代码约束 | 已确认 |
+| 2026-08-04 | 诊断任务可由后端授权知识 Tool 且用户不选 Tool | 保留 Agent 自主调查与后端授权边界 | 旧 TaskScope 方案已由 InvestigationPolicy/RunAccess 硬切替代 | 已确认，授权实现已演进 |
 | 2026-08-04 | 高层 search_knowledge 封装 Advanced RAG | 防止 Agent 操纵底层通道、权限和候选预算 | Tool 内部需要可观测的阶段轨迹 | 已确认 |
 | 2026-08-04 | 知识结论执行 Chunk 引用门禁并显示来源 | 防止生成内容无法复核 | partial/degraded 来源需要影响结论强度 | 已确认 |
 | 2026-08-04 | Web Search 采用 Firecrawl 且公开证据独立治理 | 补充知识库没有的公开技术信息，不污染企业知识 | 需要脱敏、SSRF、来源评级和网页提示注入隔离 | 已确认 |
@@ -761,19 +761,19 @@ Advanced RAG 是一次 `search_knowledge` Tool 调用内部的确定性流水线
 不能直接选择 FTS/Vector 权重、绕过权限、指定 object key 或无限扩展上下文。
 
 Tool 输入只允许业务查询和有限筛选，例如 `query`、可选 `documentIds`、`timeHint` 和
-`maxResults`；用户身份、scope、session、active profile、候选规模上限和预算由服务端 TaskScope
+`maxResults`；用户身份、会话、active profile、资源授权、候选规模上限和预算由服务端运行上下文
 注入。Tool 输出统一包含 chunks、引用定位、融合/重排分数、degraded/missingChannels、查询改写
 摘要和是否仍缺证据，不向模型暴露原始向量或对象存储地址。
 
 ### 诊断任务与知识库授权
 
-`NormalizeTaskRequestScope` 在任务创建时保留用户对 `code`/`sql` 的有限声明，然后始终追加 `knowledge` 并写入冻结的 `requestScope`。用户显式提交 `knowledge` 会被拒绝，这表示它是后端策略而不是前端开关。Worker 根据已持久化的能力构造 `TaskScope`，因此旧任务仍按当时快照执行。
+诊断任务创建时由后端根据部署上限、任务绑定资源和只读数据源冻结 `InvestigationPolicy`，其中可包含 `knowledge.read`；用户和模型不能提交 Permission、Tool 名单或 Policy。Worker 从冻结 Policy 与当前 access ceiling 的交集派生 `RunAccess`，因此任务不会因后续部署扩权而自动获得新资源。
 
-Agent 的 `ticket-diagnosis` Skill 规定从工单开始，根据证据缺口在业务 SQL、企业知识和 GitHub 代码之间自主升级；Tool 的实际可见性仍同时受角色、数据源、依赖健康和只读政策约束。
+Agent 的 `ticket-diagnosis` Skill 规定从工单开始，根据证据缺口在业务 SQL、企业知识和 GitHub 代码之间自主升级；固定 `ToolProfile` 决定启动 Epoch 内的模型可见 Schema，实际执行仍由 `RunAccess`、资源 Grant、只读账号和各 Tool 的安全控制共同约束。
 
 ### 第七轮结论
 
-- 已确认 TaskScope 由后端授予知识能力、单一高层 Tool、规则保护后的 Query 改写、对话独立问题、
+- 已确认知识 Permission 由后端 Policy/RunAccess 授予、单一高层 Tool、规则保护后的 Query 改写、对话独立问题、
   配置化 Rerank、受预算约束的上下文、最多两轮 Agentic 重检索和事实引用门禁。
 - 回答必须显式展示来源，而不是只在内部保留 `sourceRef`。知识来源显示文档标题、版本、页/Sheet/
   Slide、章节和片段定位；点击预览仍通过授权 API，不暴露 MinIO 地址。
@@ -973,7 +973,7 @@ Web 页面是不可信数据。抓取内容不能成为系统指令，不能触�
 - `[webSearch]` 现在用 `searchProvider`/`contentProvider` 独立选择发现和正文 Provider；旧版单一
   `provider` 配置仍可兼容读取。默认配置保持 Firecrawl，密钥通过 Provider 配置中的 `apiKeyEnv`
   读取；密钥缺失、认证失败或 Provider 不可用时不注册 Web Tool，其他诊断能力继续运行。新诊断
-  任务由后端自动冻结 `web_search` capability，前端不提供 Tool 开关。
+  任务由后端在 `InvestigationPolicy` 中冻结 Web Permission，前端不提供 Tool 开关。
 - Firecrawl `/v2/search`/`/v2/scrape`、SearXNG JSON `/search` 和 Direct HTML/Text Client、
   `web_search`/`fetch_public_page` Tool、Run 级
   2 Search/3 Fetch 预算和 `web` Evidence 已实现。Search 结果生成同 Run 随机 `resultId`，
@@ -983,7 +983,7 @@ Web 页面是不可信数据。抓取内容不能成为系统指令，不能触�
   Direct Provider 在每一跳重定向前执行 URL Gate；Firecrawl 内部不可见的中间重定向仍依赖其
   服务端 SSRF 防护，不能描述为 MESGuard 完整观察了每一跳。
 - 网页以 Provider 提取文本、控制字符清洗、`untrustedContent=true` 和系统级“只作数据”
-  约束进入模型，不能授权 Tool 或改变 TaskScope。来源等级由配置化域名表确定，未命中一律保守为
+  约束进入模型，不能授权 Tool、改变固定 ToolProfile、RunAccess 或 InvestigationPolicy。来源等级由配置化域名表确定，未命中一律保守为
   C；C 级来源不能独立支撑 conclusive 诊断。离线合同测试已完成，真实公网 smoke 尚未产生费用。
 
 ## 第十轮：失败恢复、可观测性与实施顺序
@@ -1015,7 +1015,7 @@ Chunk 快照和 Embedding 缓存的生命周期不同，清理器只能删除数
   30 天清理，上传后数据库事务失败的孤儿对象立即做有界补偿删除，补偿失败进入后续 GC 审计。
 - 已确认按文档/OCR/VLM/Embedding 分资源设置有界并发，并统一记录 trace、任务、版本、阶段、
   attempt、队列延迟、P50/P95、重试/失败、缓存命中和外部调用成本；日志禁止输出敏感原文和凭据。
-- 已确认知识文档属于不可信数据，只能作为引用证据进入模型，不能授权 Tool、改变 TaskScope 或成为
+- 已确认知识文档属于不可信数据，只能作为引用证据进入模型，不能授权 Tool、改变 ToolProfile/RunAccess/InvestigationPolicy 或成为
   系统指令；Web Search 排在企业知识主链路之后，不抢占第三条简历的关键路径。
 - 后端实施顺序已冻结为：对象存储与版本引用 -> 入库任务/Outbox/恢复 -> 确定性多格式解析与
   artifact -> 分块/FTS -> Embedding/混合检索/Rerank -> `search_knowledge` -> 固定集评测。

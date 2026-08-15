@@ -2,7 +2,6 @@ package diagnosis
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -50,7 +49,7 @@ func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testi
 	result, err := service.Create(context.Background(), TaskActor{UserID: ownerID}, CreateTaskInput{
 		ExternalCaseID: caseID, ExpectedSourceFingerprint: "sha256:source",
 		EvidenceDataSourceIDs: []uuid.UUID{secondSourceID, firstSourceID, firstSourceID},
-		RequestText:           "  请检查数据库状态  ", RequestScope: map[string]any{"timeRange": map[string]any{"from": "today"}},
+		RequestText:           "  请检查数据库状态  ",
 		IdempotencyKey: uuid.NewString(), CorrelationID: uuid.New(),
 	})
 	if err != nil {
@@ -76,84 +75,6 @@ func TestDiagnosisTaskServiceCreateBuildsRedactedSnapshotAndFingerprint(t *testi
 	}
 	if !strings.HasPrefix(repo.createInput.RequestFingerprint, "sha256:") {
 		t.Fatalf("request fingerprint = %q", repo.createInput.RequestFingerprint)
-	}
-	var persistedScope map[string]any
-	if err := json.Unmarshal(repo.createInput.RequestScope, &persistedScope); err != nil {
-		t.Fatalf("decode persisted request scope: %v", err)
-	}
-	capabilities, err := TaskCapabilitiesFromRequestScope(persistedScope)
-	if err != nil || len(capabilities) != 3 || capabilities[0] != TaskCapabilityCase ||
-		capabilities[1] != TaskCapabilityKnowledge || capabilities[2] != TaskCapabilityWebSearch {
-		t.Fatalf("default capabilities = %v, err=%v", capabilities, err)
-	}
-}
-
-func TestNormalizeTaskRequestScopeValidatesCapabilitiesAndSkill(t *testing.T) {
-	tests := []struct {
-		name    string
-		scope   map[string]any
-		want    []TaskCapability
-		wantErr bool
-	}{
-		{name: "defaults to backend managed capabilities", scope: nil, want: []TaskCapability{TaskCapabilityCase, TaskCapabilityKnowledge, TaskCapabilityWebSearch}},
-		{
-			name:  "legacy code skill infers capability",
-			scope: map[string]any{RequestScopeKeyRequestedSkill: RequestedSkillCodeInvestigation},
-			want:  []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilityKnowledge, TaskCapabilityWebSearch},
-		},
-		{
-			name: "sql investigation", scope: map[string]any{
-				RequestScopeKeyRequestedSkill:      RequestedSkillSQLInvestigation,
-				RequestScopeKeyAllowedCapabilities: []string{"sql", "case"},
-			},
-			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityKnowledge, TaskCapabilitySQL, TaskCapabilityWebSearch},
-		},
-		{
-			name: "broad ticket diagnosis", scope: map[string]any{
-				RequestScopeKeyRequestedSkill:      RequestedSkillTicketDiagnosis,
-				RequestScopeKeyAllowedCapabilities: []string{"sql", "code", "case"},
-			},
-			want: []TaskCapability{TaskCapabilityCase, TaskCapabilityCode, TaskCapabilityKnowledge, TaskCapabilitySQL, TaskCapabilityWebSearch},
-		},
-		{name: "missing case", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"sql"}}, wantErr: true},
-		{name: "duplicate", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "case"}}, wantErr: true},
-		{name: "unknown", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "shell"}}, wantErr: true},
-		{name: "knowledge is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "knowledge"}}, wantErr: true},
-		{name: "web search is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "web_search"}}, wantErr: true},
-		{name: "attachment is backend managed", scope: map[string]any{RequestScopeKeyAllowedCapabilities: []string{"case", "attachment"}}, wantErr: true},
-		{
-			name: "code skill without capability", scope: map[string]any{
-				RequestScopeKeyRequestedSkill:      RequestedSkillCodeInvestigation,
-				RequestScopeKeyAllowedCapabilities: []string{"case"},
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			normalized, err := NormalizeTaskRequestScope(tt.scope)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("NormalizeTaskRequestScope accepted invalid scope")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("NormalizeTaskRequestScope: %v", err)
-			}
-			got, err := TaskCapabilitiesFromRequestScope(normalized)
-			if err != nil {
-				t.Fatalf("TaskCapabilitiesFromRequestScope: %v", err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("capabilities = %v, want %v", got, tt.want)
-			}
-			for index := range got {
-				if got[index] != tt.want[index] {
-					t.Fatalf("capabilities = %v, want %v", got, tt.want)
-				}
-			}
-		})
 	}
 }
 
@@ -214,13 +135,16 @@ func TestDiagnosisTaskServiceFreezesMessageAuthorizedAttachments(t *testing.T) {
 		repo.createInput.AttachmentSource.MessageID != messageID {
 		t.Fatalf("repository attachment input=%+v source=%+v", repo.createInput.Attachments, repo.createInput.AttachmentSource)
 	}
-	var persistedScope map[string]any
-	if err := json.Unmarshal(repo.createInput.RequestScope, &persistedScope); err != nil {
-		t.Fatalf("decode persisted request scope: %v", err)
+	// 附件必须同时冻结进 Policy 的 Grant（attachment.read 授权事实）。
+	if len(repo.createInput.InvestigationPolicy) == 0 {
+		t.Fatal("frozen policy payload is missing")
 	}
-	capabilities, err := TaskCapabilitiesFromRequestScope(persistedScope)
-	if err != nil || !slicesContainsCapability(capabilities, TaskCapabilityAttachment) {
-		t.Fatalf("request scope capabilities=%v error=%v", capabilities, err)
+	policy, err := agentruntime.UnmarshalInvestigationPolicy(repo.createInput.InvestigationPolicy)
+	if err != nil {
+		t.Fatalf("decode frozen policy: %v", err)
+	}
+	if !policy.Grants().AllowsAttachment(attachmentID) || !policy.Permissions().Has(agentruntime.PermissionAttachmentRead) {
+		t.Fatalf("frozen policy lost attachment grant: %v", policy)
 	}
 }
 

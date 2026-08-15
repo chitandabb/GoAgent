@@ -98,22 +98,23 @@ func TestReadExternalCaseToolConversationGrantEnforcedBeforeGetter(t *testing.T)
 	}
 }
 
-func TestReadExternalCaseToolDiagnosisCompatPathFailsClosedWithoutGrant(t *testing.T) {
+func TestReadExternalCaseToolDiagnosisAccessFailsClosedWithoutGrant(t *testing.T) {
 	getter := &countingExternalCaseGetter{item: &externalcase.ExternalCase{ID: runnerTestCaseID, ExternalCaseKey: "TKT-1"}}
 	current, err := NewReadExternalCaseTool(getter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Diagnosis 兼容 RunAccess（TaskScope 适配器）不携带 ExternalCaseIDs
-	// Grant：v2 通用资源 Guard 必须 fail-closed，getter 零调用。旧链路
-	// 由 Worker 从有效 RunAccess 反向生成 TaskScope + 权威 v2 RunAccess。
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-	}})
+	// Diagnosis RunAccess 只带 sql.read/数据源 Grant、不带 ExternalCaseIDs：
+	// v2 通用资源 Guard 必须 fail-closed，getter 零调用。旧 TaskScope 兼容
+	// 适配器已硬切删除，不存在绕过 Grant 的路径。
+	access := mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionSQLRead},
+		agentruntime.ResourceGrantsConfig{DataSourceIDs: []uuid.UUID{uuid.New()}},
+	)
 	if _, err := current.InvokableRun(
-		WithTaskScope(context.Background(), scope), `{"externalCaseId":"`+runnerTestCaseID.String()+`"}`,
+		withTestRunAccess(context.Background(), access), `{"externalCaseId":"`+runnerTestCaseID.String()+`"}`,
 	); !errors.Is(err, ErrResourceNotGranted) {
-		t.Fatalf("diagnosis compat error = %v, want ErrResourceNotGranted", err)
+		t.Fatalf("diagnosis access error = %v, want ErrResourceNotGranted", err)
 	}
 	if getter.calls != 0 {
 		t.Fatalf("getter calls = %d, want 0", getter.calls)

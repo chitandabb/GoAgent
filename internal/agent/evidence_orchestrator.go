@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/compose"
 	"go.uber.org/zap"
@@ -303,8 +304,8 @@ func (o *EvidenceOrchestrator) prepareContext(ctx context.Context, state *eviden
 	if err := state.request.Validate(); err != nil {
 		return nil, err
 	}
-	if _, ok := TaskScopeFromContext(ctx); !ok {
-		return nil, ErrTaskScopeRequired
+	if _, ok := agentruntime.RunAccessFromContext(ctx); !ok {
+		return nil, ErrRunAccessRequired
 	}
 	return state, nil
 }

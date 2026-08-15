@@ -58,15 +58,6 @@ export function TasksPage() {
       render: (task) => <code className="text-[12px] text-ink-48">{shortId(task.taskId)}</code>,
     },
     {
-      key: 'scope',
-      title: '调查范围',
-      render: (task) => (
-        <span className="text-[13px]">
-          {(task.requestScope.allowedCapabilities ?? ['case']).join(' / ')}
-        </span>
-      ),
-    },
-    {
       key: 'status',
       title: '状态',
       render: (task) => (

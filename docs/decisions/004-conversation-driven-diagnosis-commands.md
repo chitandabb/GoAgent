@@ -92,9 +92,9 @@ an existing task; later evidence always creates a new task rather than appending
 
 The Tool is a controlled command with an internal side effect, not an evidence-reading Tool.
 It belongs only to the Conversation Tool Profile and must not be available inside the Diagnosis
-Worker's ReAct loop. The legacy implementation still uses `TaskScope`; the v2 target uses
-`RunAccess`, while role checks, message-reference guards, rate limits, active-task limits and
-audit logs remain mandatory.
+Worker's ReAct loop. The hard-cut v2 implementation uses fixed `ToolProfile` plus
+execution-time `RunAccess`; role checks, message-reference guards, rate limits,
+active-task limits and audit logs remain mandatory.
 
 The idempotency key is derived by the server from the actor, user message, command kind and
 case ID. Model retries therefore return the same task instead of creating duplicate snapshots,

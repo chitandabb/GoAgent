@@ -121,7 +121,7 @@ MESGuard 将在现有领域评测器和运行 Observation 之上增加统一评�
 12. As an administrator, I want cache TTL, capacity, timeout and active Provider to be configurable, so that the deployment can be tuned without changing domain code.
 13. As an administrator, I want Personal knowledge to remain outside the first semantic-answer-cache release, so that cross-user isolation risks are avoided while Personal remains a placeholder capability.
 14. As an operator, I want every degradation to have a stable operation, reason code and trace identity, so that I can distinguish an expected fallback from silent data loss.
-15. As an operator, I want authorization, TaskScope, SQL safety checks and state commits to fail closed, so that a reliability feature cannot weaken security or consistency.
+15. As an operator, I want ToolProfile/RunAccess authorization, SQL safety checks and state commits to fail closed, so that a reliability feature cannot weaken security or consistency.
 16. As an operator, I want Query Rewrite, Rerank, semantic cache and telemetry export to degrade to a safe base path, so that optional enhancements do not become availability dependencies.
 17. As an operator, I want structured model outputs to receive only a bounded repair attempt, so that malformed output does not cause unlimited retries or unpredictable cost.
 18. As an operator, I want OCR and VLM processing failures to leave a retryable task instead of publishing incomplete knowledge as complete, so that document quality remains explicit.
@@ -197,7 +197,7 @@ MESGuard 将在现有领域评测器和运行 Observation 之上增加统一评�
   - `strict`: failure terminates the operation and cannot be bypassed;
   - `repair_then_fail`: one bounded repair/retry path is allowed, then the operation fails explicitly;
   - `best_effort`: failure emits a Degradation Event and falls back to a defined base path.
-- Authorization, TaskScope, SQL safety validation, state commits and external side-effect commands are `strict`.
+- ToolProfile/RunAccess authorization, SQL safety validation, state commits and external side-effect commands are `strict`.
 - Strict structured outputs such as conversation summaries, diagnosis report contracts and critical citation structures
   are `repair_then_fail` unless their existing contract requires immediate failure.
 - Query Rewrite, Rerank, semantic answer cache and telemetry export are `best_effort`.
@@ -440,7 +440,7 @@ Degradation Event，并进入 `search_knowledge` Tool 结果和 Zap Observer。�
 不含底层错误的结构化 `all_channels_failed`，不能伪装成空检索结果。
 
 Ticket 03 已把统一语义接入真实 Agent 边界。Tool 注册必须显式声明失败策略：创建诊断任务等副作用命令为
-`strict`，普通只读 Tool 为 `best_effort`；TaskScope、授权和 SQL Query Guard 仍在回退之前 fail closed。
+`strict`，普通只读 Tool 为 `best_effort`；ToolProfile/RunAccess 授权和 SQL Query Guard 仍在回退之前 fail closed。
 只读 Tool 的失败会先分类：安全/授权错误严格传播，参数错误结构化为不可重试拒绝，只有明确标记的暂时依赖故障
 才返回脱敏 Tool Error 并产生一次 `best_effort -> agent_selects_alternative_source` Degradation Event；诊断任务 ID
 或会话 User Message ID 作为 Run ID。SQL Query Guard、Catalog 授权和数据源授权保持 strict，数据库暂时不可用

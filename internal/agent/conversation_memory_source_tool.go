@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
 	"github.com/chitandabb/GoAgent/internal/resilience"
@@ -44,10 +43,14 @@ func NewConversationMemorySourceTool(reader ConversationMemorySourceReader) (too
 				commandContext.UserMessageID == uuid.Nil {
 				return conversationmemory.SourceReadResult{}, conversation.ErrCommandContextRequired
 			}
-			scope, ok := TaskScopeFromContext(ctx)
-			if !ok || scope.TaskType() != TaskTypeConversation ||
-				scope.UserID() != commandContext.Actor.UserID || !scope.CapabilityAllowed(ToolCapabilityMemory) {
-				return conversationmemory.SourceReadResult{}, ErrTaskScopeRequired
+			// 执行期授权只来自 RunAccess：memory.read Permission 必须存在，
+			// Actor 必须与命令上下文一致。
+			access, ok := agentruntime.RunAccessFromContext(ctx)
+			if !ok || !access.Allows(agentruntime.PermissionMemoryRead) {
+				return conversationmemory.SourceReadResult{}, ErrRunAccessRequired
+			}
+			if access.Actor().UserID != commandContext.Actor.UserID {
+				return conversationmemory.SourceReadResult{}, ErrRunAccessRequired
 			}
 			input.EntryID = strings.TrimSpace(input.EntryID)
 			input.ContinuationCursor = strings.TrimSpace(input.ContinuationCursor)
@@ -100,9 +103,6 @@ func NewConversationMemorySourceToolRegistration(
 	}
 	return ToolRegistration{
 		Tool: current, FailurePolicy: resilience.PolicyBestEffort,
-		AllowedRoles:         []auth.Role{auth.RoleAnalyst, auth.RoleAdmin},
-		AllowedTaskTypes:     []TaskType{TaskTypeConversation},
-		RequiredCapabilities: []ToolCapability{ToolCapabilityMemory},
-		RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionMemoryRead},
+		RequiredPermissions: []agentruntime.Permission{agentruntime.PermissionMemoryRead},
 	}, nil
 }

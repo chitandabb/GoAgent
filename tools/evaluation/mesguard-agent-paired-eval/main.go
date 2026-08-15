@@ -14,13 +14,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
@@ -81,6 +85,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	maxCases := flags.Int("max-cases", 0, "maximum evidence-gate cases authorized for this Provider run")
 	maxProviderCalls := flags.Int("max-provider-calls", 0, "maximum estimated Provider calls authorized for this evidence-gate run")
 	maxProviderTokens := flags.Int("max-provider-tokens", 0, "maximum total Token budget authorized across both evidence-gate arms")
+	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-reasoning-effort provider-value]: %w", err)
 	}
@@ -116,6 +121,25 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return err
 	}
 	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
+	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision 与
+	// 最终模型 Profile 指纹，再决定是否允许继续。
+	identity, identityErr := resolveImplementationIdentity()
+	if identityErr != nil && !*allowDirty {
+		return fmt.Errorf("resolve implementation revision: %w (pass -allow-dirty for local smoke)", identityErr)
+	}
+	identity, decisionErr := evaluateImplementationIdentity(identity, *allowDirty)
+	if decisionErr != nil {
+		return decisionErr
+	}
+	if identityErr != nil || identity.dirty || identity.revision == "unknown" {
+		log.Warn("dirty or unknown implementation revision accepted for local smoke only; observations are NOT formal metrics",
+			zap.String("revision", identity.revision), zap.Bool("dirty", identity.dirty))
+	}
+	// 指纹基于写回后的最终 Profile 计算，保证记录的指纹与实际模型调用配置一致。
+	modelProfileFingerprint, fingerprintErr := profile.PromptProfileFingerprint(cfg.Models.Chat.ActiveProfileName)
+	if fingerprintErr != nil {
+		return fmt.Errorf("compute model profile fingerprint: %w", fingerprintErr)
+	}
 	if *maxTotalTokens != 0 {
 		if *maxTotalTokens < 1000 || *maxTotalTokens > 1_000_000 {
 			return errors.New("max-total-tokens must be between 1000 and 1000000")
@@ -228,12 +252,12 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	encoder := json.NewEncoder(output)
 
 	for _, definition := range cases {
-		if definition.TaskType != mesagent.TaskTypeDiagnosis {
+		if definition.TaskType != "diagnosis" {
 			return fmt.Errorf("case %q uses unsupported paired evaluation task type %q", definition.CaseID, definition.TaskType)
 		}
-		scope, scopeErr := newPairedEvaluationScope(definition, cfg)
-		if scopeErr != nil {
-			return fmt.Errorf("build scope for case %q: %w", definition.CaseID, scopeErr)
+		access, accessErr := newPairedEvaluationRunAccess(definition, cfg)
+		if accessErr != nil {
+			return fmt.Errorf("build run access for case %q: %w", definition.CaseID, accessErr)
 		}
 		pairingFingerprint, fingerprintErr := evidenceGatePairingFingerprint(definition, cfg)
 		if fingerprintErr != nil {
@@ -243,7 +267,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			orchestrator, buildErr := buildPairedEvaluationRun(
+			orchestrator, toolSchemaFingerprint, buildErr := buildPairedEvaluationRun(
 				ctx, cfg, prompts, chatModel, githubConnection.Tools, sqlObjectDefinition,
 				schemaCatalog, readonlyQuery, log, variant, *comparison,
 			)
@@ -252,10 +276,9 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 			}
 			startedAt := time.Now()
 			result, invokeErr := orchestrator.Invoke(
-				mesagent.WithTaskScope(ctx, scope),
+				agentruntime.WithRunAccess(ctx, access),
 				mesagent.RunRequest{
 					UserQuery: definition.UserQuery, ExternalCaseID: pairedEvalCaseID.String(),
-					RequestedSkill: definition.ExpectedSkill,
 				},
 			)
 			if invokeErr != nil {
@@ -286,7 +309,10 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 					continue
 				}
 			} else {
-				observation := observationFromResult(definition, variant, cfg, result, duration)
+				observation := observationFromResult(
+					definition, variant, cfg, result, duration, toolSchemaFingerprint,
+					identity, modelProfileFingerprint,
+				)
 				if err := observation.Validate(); err != nil {
 					return fmt.Errorf("validate %s observation for case %q: %w", variant, definition.CaseID, err)
 				}
@@ -316,24 +342,59 @@ func buildPairedEvaluationRun(
 	log *zap.Logger,
 	variant mesagent.EvaluationVariant,
 	comparison string,
-) (*mesagent.EvidenceOrchestrator, error) {
-	mode := mesagent.RunnerModeExperiment
+) (*mesagent.EvidenceOrchestrator, string, error) {
+	var runner *mesagent.Runner
 	if comparison == "tool-selection" && variant == mesagent.EvaluationBaseline {
-		mode = mesagent.RunnerModeBaseline
+		// wide 臂使用独立 evaluation-wide-v1 固定 Profile（全部实际注册的
+		// 业务 Tool，无 skill/read_skill_reference）。
+		wideCatalog, err := mesagent.NewEvaluationWideDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+			ExternalCases:        pairedEvalCaseGetter{},
+			GitHubTools:          githubTools,
+			SQLObjectDefinitions: sqlObjectDefinition,
+			SchemaCatalog:        schemaCatalog,
+			ReadonlyQuery:        readonlyQuery,
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("build wide evaluation Tool catalog: %w", err)
+		}
+		skillRuntime, err := mesagent.NewNativeSkillRuntime(ctx, cfg.Agent.SkillsDirectory)
+		if err != nil {
+			return nil, "", fmt.Errorf("build native Skill runtime: %w", err)
+		}
+		runner, err = mesagent.NewRunner(mesagent.RunnerConfig{
+			ChatModel: chatModel, ToolCatalog: wideCatalog, SkillRuntime: skillRuntime,
+			SystemInstruction:     prompts.SystemInstruction,
+			BaselineInstruction:   prompts.BaselineInstruction,
+			Mode:                  mesagent.RunnerModeBaseline,
+			GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
+			Logger:                log.Named(string(variant)),
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("build wide baseline Runner: %w", err)
+		}
+	} else {
+		var err error
+		runner, err = mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
+			ChatModel: chatModel, ExternalCases: pairedEvalCaseGetter{},
+			SkillRoot:           cfg.Agent.SkillsDirectory,
+			SystemInstruction:   prompts.SystemInstruction,
+			BaselineInstruction: prompts.BaselineInstruction,
+			Mode:                mesagent.RunnerModeExperiment,
+			GitHubTools:         githubTools, GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
+			SQLObjectDefinitions: sqlObjectDefinition,
+			SchemaCatalog:        schemaCatalog, ReadonlyQuery: readonlyQuery,
+			Logger: log.Named(string(variant)),
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("build Agent runner: %w", err)
+		}
 	}
-	runner, err := mesagent.NewDefaultRunner(ctx, mesagent.DefaultRunnerDependencies{
-		ChatModel: chatModel, ExternalCases: pairedEvalCaseGetter{},
-		SkillRoot:           cfg.Agent.SkillsDirectory,
-		SystemInstruction:   prompts.SystemInstruction,
-		BaselineInstruction: prompts.BaselineInstruction,
-		Mode:                mode,
-		GitHubTools:         githubTools, GitHubArgumentRewrite: githubmcp.NewArgumentRewriter(),
-		SQLObjectDefinitions: sqlObjectDefinition,
-		SchemaCatalog:        schemaCatalog, ReadonlyQuery: readonlyQuery,
-		Logger: log.Named(string(variant)),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build Agent runner: %w", err)
+	// toolSchemaFingerprint 是实验臂特有合同：由本 Runner 绑定 Profile 的
+	// 模型可见 Tool Schema 规范指纹（启动 Epoch 内固定），同 variant 跨样本
+	// 必须一致。
+	toolSchemaFingerprint, fingerprintErr := runner.ProfileToolSchemaFingerprint(ctx)
+	if fingerprintErr != nil {
+		return nil, "", fmt.Errorf("compute %s Tool Schema fingerprint: %w", variant, fingerprintErr)
 	}
 	orchestrator, err := mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runner, Logger: log.Named("evidence_" + string(variant)),
@@ -344,9 +405,9 @@ func buildPairedEvaluationRun(
 		ReportContractInstruction: prompts.ReportContractInstruction,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build Evidence orchestrator: %w", err)
+		return nil, "", fmt.Errorf("build Evidence orchestrator: %w", err)
 	}
-	return orchestrator, nil
+	return orchestrator, toolSchemaFingerprint, nil
 }
 
 type evidenceGateProviderBudget struct {
@@ -479,36 +540,45 @@ func evidenceGateInvocationErrorType(err error) string {
 	}
 }
 
-func newPairedEvaluationScope(definition mesagent.EvaluationCase, cfg config.Config) (mesagent.TaskScope, error) {
-	dependencies := []mesagent.ToolDependency{mesagent.ToolDependencyExternalCase}
-	dataSources := []mesagent.ScopedDataSource{{
-		ID:   uuid.MustParse("33333333-3333-3333-3333-333333333333"),
-		Role: mesagent.DataSourceRoleCaseSource, SafetyMode: mesagent.DataSourceSafetyReadOnly,
-	}}
-	capabilities := []mesagent.ToolCapability{mesagent.ToolCapabilityCase}
+// newPairedEvaluationRunAccess 构造评测用的诊断 RunAccess：授权事实直接来自
+// 冻结 Policy 与 ceiling（case.read + 按 tag 附加 code/sql），不再经过旧
+// TaskScope。Diagnosis 入口 Skill 由 Runner 固定为 ticket-diagnosis。
+func newPairedEvaluationRunAccess(definition mesagent.EvaluationCase, cfg config.Config) (agentruntime.RunAccess, error) {
+	permissions := []agentruntime.Permission{agentruntime.PermissionCaseRead}
+	grantsConfig := agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{pairedEvalCaseID},
+		DataSourceIDs: []uuid.UUID{
+			uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+		},
+	}
 	if containsString(definition.Tags, "github-enabled") {
-		dependencies = append(dependencies, mesagent.ToolDependencyGitHubMCP)
-		capabilities = append(capabilities, mesagent.ToolCapabilityCode)
+		permissions = append(permissions, agentruntime.PermissionCodeRead)
 	}
 	if containsString(definition.Tags, "sql-enabled") || containsString(definition.Tags, "sql-query-enabled") {
 		dataSourceID, err := uuid.Parse(cfg.SQLServer.ID)
 		if err != nil {
-			return mesagent.TaskScope{}, fmt.Errorf("parse SQL data source id: %w", err)
+			return agentruntime.RunAccess{}, fmt.Errorf("parse SQL data source id: %w", err)
 		}
-		dependencies = append(dependencies, mesagent.ToolDependencySQLServer)
-		capabilities = append(capabilities, mesagent.ToolCapabilitySQL)
-		dataSources = append(dataSources, mesagent.ScopedDataSource{
-			ID: dataSourceID, Role: mesagent.DataSourceRoleProduction,
-			SafetyMode: mesagent.DataSourceSafetyReadOnly,
-		})
+		permissions = append(permissions, agentruntime.PermissionSQLRead)
+		grantsConfig.DataSourceIDs = append(grantsConfig.DataSourceIDs, dataSourceID)
 	}
-	return mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
-		Role:   auth.RoleAnalyst, TaskType: mesagent.TaskTypeDiagnosis,
-		DataSources:           dataSources,
-		AllowedCapabilities:   capabilities,
-		AvailableDependencies: dependencies,
-	})
+	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	grants, err := agentruntime.NewResourceGrants(grantsConfig)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissionSet, grants)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	return agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst},
+		agentruntime.AccessCeiling{Permissions: permissionSet, Grants: grants},
+	)
 }
 
 func evaluationDatasetHasTag(cases []mesagent.EvaluationCase, tag string) bool {
@@ -526,6 +596,9 @@ func observationFromResult(
 	cfg config.Config,
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
+	toolSchemaFingerprint string,
+	identity implementationIdentity,
+	modelProfileFingerprint string,
 ) mesagent.EvaluationObservation {
 	profile, _ := cfg.Models.Chat.ActiveProfile()
 	actualTools := make([]string, 0, len(result.ToolExecutions))
@@ -539,26 +612,128 @@ func observationFromResult(
 			evidence = append(evidence, value)
 		}
 	}
-	return mesagent.EvaluationObservation{
-		DatasetVersion:   definition.DatasetVersion,
-		CaseID:           definition.CaseID,
-		Variant:          variant,
-		RunID:            fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		Model:            profile.Provider,
-		ModelVersion:     profile.Model,
-		ReasoningEffort:  profile.ReasoningEffort,
-		PromptVersion:    cfg.Agent.PromptVersion,
-		SelectedSkill:    result.SelectedSkill,
-		ActualToolCalls:  actualTools,
-		AllowedTools:     result.AllowedTools,
-		Evidence:         evidence,
-		Limitations:      result.Report.Limitations,
-		ConclusionStatus: result.Report.ConclusionStatus,
-		Partial:          result.Partial,
-		Usage:            result.Usage,
-		DurationMillis:   duration.Milliseconds(),
-		ErrorType:        result.StopReason,
+	// ToolProfileID 是实验臂特有合同：baseline 固定 evaluation-wide-v1（评测
+	// wide 合同），experiment 固定生产 diagnosis-default。
+	toolProfileID := string(agentruntime.ToolProfileDiagnosis)
+	if variant == mesagent.EvaluationBaseline {
+		toolProfileID = string(agentruntime.ToolProfileEvaluationWide)
 	}
+	return mesagent.EvaluationObservation{
+		DatasetVersion:           definition.DatasetVersion,
+		CaseID:                   definition.CaseID,
+		Variant:                  variant,
+		RunID:                    fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
+		ObservationSchemaVersion: mesagent.EvaluationObservationV2,
+		Model:                    profile.Provider,
+		ModelVersion:             profile.Model,
+		ReasoningEffort:          profile.ReasoningEffort,
+		PromptVersion:            cfg.Agent.PromptVersion,
+		ToolProfileID:            toolProfileID,
+		ToolSchemaFingerprint:    toolSchemaFingerprint,
+		ModelProfileFingerprint:  modelProfileFingerprint,
+		ImplementationRevision:   identity.revision,
+		ImplementationDirty:      identity.dirty,
+		SelectedSkill:            result.SelectedSkill,
+		ActualToolCalls:          actualTools,
+		AllowedTools:             result.AllowedTools,
+		Evidence:                 evidence,
+		Limitations:              result.Report.Limitations,
+		ConclusionStatus:         result.Report.ConclusionStatus,
+		Partial:                  result.Partial,
+		Usage:                    result.Usage,
+		DurationMillis:           duration.Milliseconds(),
+		ErrorType:                result.StopReason,
+	}
+}
+
+// implementationIdentity 记录评测运行时的实现身份：revision 来自 vcs 元数据
+// （build info 的 vcs.revision 优先，git 兜底），dirty 表示工作树有未提交
+// 修改。dirty/unknown 的观测只能用于本地 smoke，不是正式指标。
+type implementationIdentity struct {
+	revision string
+	dirty    bool
+}
+
+const (
+	gitRevParseTimeout = 2 * time.Second
+	gitStatusTimeout   = 2 * time.Second
+)
+
+// git 命令执行 seam：评测命令默认走真实 git；测试替换为桩函数，避免依赖
+// 真实 git 工作树状态或故障注入。
+var (
+	gitRevParseShortHead = func(ctx context.Context) (string, error) {
+		output, err := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
+		return string(output), err
+	}
+	gitStatusPorcelain = func(ctx context.Context) (string, error) {
+		output, err := exec.CommandContext(ctx, "git", "status", "--porcelain").Output()
+		return string(output), err
+	}
+)
+
+// resolveImplementationIdentity fail-closed 地解析实现身份：优先读取 Go
+// build info 的 VCS 元数据，且必须同时确认 revision 与 modified 状态；
+// BuildInfo 缺失或不完整时回退到带独立超时的 git 命令。git status 失败时
+// 不能默认 clean——无法确认工作树状态一律返回 error，且 identity 保留
+// gitFallbackIdentity 已经取得的已知 revision + dirty=true，不得覆盖成
+// unknown。
+func resolveImplementationIdentity() (implementationIdentity, error) {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		var revision, modified string
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
+		}
+		if revision != "" && modified != "" {
+			return implementationIdentity{revision: revision, dirty: modified == "true"}, nil
+		}
+	}
+	identity, err := gitFallbackIdentity()
+	if err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func gitFallbackIdentity() (implementationIdentity, error) {
+	revCtx, cancelRev := context.WithTimeout(context.Background(), gitRevParseTimeout)
+	defer cancelRev()
+	revisionOutput, err := gitRevParseShortHead(revCtx)
+	if err != nil {
+		return implementationIdentity{revision: "unknown", dirty: true}, fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	revision := strings.TrimSpace(revisionOutput)
+	if revision == "" {
+		return implementationIdentity{revision: "unknown", dirty: true}, errors.New("git rev-parse returned an empty revision")
+	}
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), gitStatusTimeout)
+	defer cancelStatus()
+	statusOutput, err := gitStatusPorcelain(statusCtx)
+	if err != nil {
+		// git status 失败不能默认 dirty=false：无法确认工作树状态。
+		return implementationIdentity{revision: revision, dirty: true}, fmt.Errorf("git status failed: %w", err)
+	}
+	return implementationIdentity{
+		revision: revision, dirty: len(bytes.TrimSpace([]byte(statusOutput))) > 0,
+	}, nil
+}
+
+// evaluateImplementationIdentity 决定身份是否可用于正式评测。formal 模式
+// 下 dirty/unknown 直接拒绝；-allow-dirty 模式接受并强制记录 dirty=true，
+// 结果仅用于本地 smoke。
+func evaluateImplementationIdentity(identity implementationIdentity, allowDirty bool) (implementationIdentity, error) {
+	if identity.revision == "unknown" || identity.dirty {
+		if !allowDirty {
+			return implementationIdentity{}, errors.New("implementation revision is dirty or unknown; refuse formal evaluation (pass -allow-dirty for local smoke)")
+		}
+		return implementationIdentity{revision: identity.revision, dirty: true}, nil
+	}
+	return identity, nil
 }
 
 func readEvaluationCases(path string) ([]mesagent.EvaluationCase, error) {

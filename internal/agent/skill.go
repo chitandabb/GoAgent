@@ -1,7 +1,8 @@
 // Package agent 定义 MESGuard 的技能化 Agent 编排模型。
 //
 // Skill 不是可执行代码插件，而是供单个 Eino ADK Agent 按需读取的调查指南。
-// Tool 授权由 TaskScope 和 ToolCatalog 决定，不能由 Skill Prompt 授予。
+// Tool 授权只由固定 ToolProfile（Schema 可见性）与 RunAccess（执行期
+// Permission/ResourceGrant）决定，Skill 文本不能授予任何权限。
 package agent
 
 import (
@@ -14,7 +15,6 @@ const (
 	SkillTicketDiagnosis   SkillID = "ticket-diagnosis"
 	SkillCodeInvestigation SkillID = "code-investigation"
 	SkillSQLInvestigation  SkillID = "sql-investigation"
-	SkillKnowledgeQA       SkillID = "knowledge-qa"
 )
 
 var (

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
@@ -45,7 +44,6 @@ type ConversationRunnerConfig struct {
 	ModelProvider                string
 	ModelID                      string
 	PromptVersion                string
-	AvailableDependencies        []ToolDependency
 	Logger                       *zap.Logger
 	MaxIterations                int
 	MaxToolCalls                 int
@@ -75,7 +73,6 @@ type ConversationRunner struct {
 	modelProvider                string
 	modelID                      string
 	promptVersion                string
-	availableDependencies        []ToolDependency
 	log                          *zap.Logger
 	maxIterations                int
 	maxToolCalls                 int
@@ -163,15 +160,6 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 			"conversation runner requires a conversation-default catalog, got profile %q", boundProfileID,
 		)
 	}
-	dependencies := append([]ToolDependency(nil), cfg.AvailableDependencies...)
-	for _, dependency := range dependencies {
-		if !dependency.Valid() {
-			return nil, fmt.Errorf("conversation runner dependency %q is invalid", dependency)
-		}
-	}
-	if hasDuplicate(dependencies) {
-		return nil, errors.New("conversation runner dependencies contain duplicates")
-	}
 	if err := cfg.ContextPreflight.validate(cfg.ModelProvider, cfg.ModelID); err != nil {
 		return nil, err
 	}
@@ -179,7 +167,6 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		chatModel: cfg.ChatModel, citationRepairer: cfg.CitationRepairer, toolCatalog: cfg.ToolCatalog,
 		toolProfileID: agentruntime.ToolProfileConversation, systemInstruction: cfg.SystemInstruction,
 		modelProvider: cfg.ModelProvider, modelID: cfg.ModelID, promptVersion: cfg.PromptVersion,
-		availableDependencies: dependencies,
 		log:                   cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
@@ -255,14 +242,9 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	if err != nil {
 		return conversation.AgentResponse{}, fmt.Errorf("build conversation run context: %w", err)
 	}
-	scope, err := r.conversationScope(commandContext.Actor, request.UserMessage)
-	if err != nil {
-		return conversation.AgentResponse{}, err
-	}
-	// WithTaskScope 保留给仍读取旧 TaskScope 的 Tool 做兼容迁移；权威 v2
-	// RunAccess 必须在它之后写入，保证 TaskScope 兼容转换不会覆盖直接构造的值。
-	runCtx := WithTaskScope(ctx, scope)
-	runCtx = agentruntime.WithRunAccess(runCtx, runContext.Access())
+	// 权威 v2 RunAccess 直接由固定 Profile + 当前消息引用派生并绑定；
+	// 旧 TaskScope/WithTaskScope 双写已硬切删除。
+	runCtx := agentruntime.WithRunAccess(ctx, runContext.Access())
 	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
 		RunID: request.UserMessage.ID.String(), ConversationID: request.Conversation.ID.String(),
 	})
@@ -537,36 +519,6 @@ func conversationAgentErrorType(err error) string {
 	default:
 		return "agent_execution_failed"
 	}
-}
-
-func (r *ConversationRunner) conversationScope(actor conversation.Actor, message conversation.Message) (TaskScope, error) {
-	role := auth.RoleAnalyst
-	if actor.IsAdmin {
-		role = auth.RoleAdmin
-	}
-	capabilities := []ToolCapability{ToolCapabilityKnowledge, ToolCapabilityWebSearch}
-	if r.memorySourceRecoveryEnabled {
-		capabilities = append(capabilities, ToolCapabilityMemory)
-	}
-	selected := 0
-	for _, reference := range message.CaseReferences {
-		if reference.Kind == conversation.ReferenceKindSelected {
-			selected++
-		}
-	}
-	if selected == 1 {
-		capabilities = append(capabilities, ToolCapabilityCase)
-	}
-	if len(message.TaskReferences) > 0 {
-		capabilities = append(capabilities, ToolCapabilityTask)
-	}
-	if len(message.Attachments) > 0 {
-		capabilities = append(capabilities, ToolCapabilityAttachment)
-	}
-	return NewTaskScope(TaskScopeConfig{
-		UserID: actor.UserID, Role: role, TaskType: TaskTypeConversation,
-		AllowedCapabilities: capabilities, AvailableDependencies: r.availableDependencies,
-	})
 }
 
 type conversationPromptProjection struct {

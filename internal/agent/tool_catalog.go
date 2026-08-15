@@ -5,45 +5,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/observability"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
-	"github.com/google/uuid"
 )
 
 type ToolRegistration struct {
-	Tool                 tool.BaseTool
-	FailurePolicy        resilience.Policy
-	DegradationObserver  resilience.Observer
-	AllowedRoles         []auth.Role
-	AllowedTaskTypes     []TaskType
-	AllowedDataRoles     []DataSourceRole
-	AllowedSafetyModes   []DataSourceSafetyMode
-	RequiredCapabilities []ToolCapability
-	RequiredDependencies []ToolDependency
-	RequiredPermissions  []agentruntime.Permission
+	Tool                tool.BaseTool
+	FailurePolicy       resilience.Policy
+	DegradationObserver resilience.Observer
+	RequiredPermissions []agentruntime.Permission
 }
 
 type catalogEntry struct {
-	name                 string
-	tool                 tool.BaseTool
-	failurePolicy        resilience.Policy
-	degradationObserver  resilience.Observer
-	allowedRoles         []auth.Role
-	allowedTaskTypes     []TaskType
-	allowedDataRoles     []DataSourceRole
-	allowedSafetyModes   []DataSourceSafetyMode
-	requiredCapabilities []ToolCapability
-	requiredDependencies []ToolDependency
-	requiredPermissions  []agentruntime.Permission
+	name                string
+	tool                tool.BaseTool
+	failurePolicy       resilience.Policy
+	degradationObserver resilience.Observer
+	requiredPermissions []agentruntime.Permission
 }
 
 // ResolvedToolProfile 是一次 Profile 解析的完整结果：Tools 是已包装
@@ -202,12 +187,6 @@ func newCatalogEntry(ctx context.Context, registration ToolRegistration) (catalo
 	return catalogEntry{
 		name: info.Name, tool: registration.Tool, failurePolicy: registration.FailurePolicy,
 		degradationObserver:  registration.DegradationObserver,
-		allowedRoles:         append([]auth.Role(nil), registration.AllowedRoles...),
-		allowedTaskTypes:     append([]TaskType(nil), registration.AllowedTaskTypes...),
-		allowedDataRoles:     append([]DataSourceRole(nil), registration.AllowedDataRoles...),
-		allowedSafetyModes:   append([]DataSourceSafetyMode(nil), registration.AllowedSafetyModes...),
-		requiredCapabilities: append([]ToolCapability(nil), registration.RequiredCapabilities...),
-		requiredDependencies: append([]ToolDependency(nil), registration.RequiredDependencies...),
 		requiredPermissions:  append([]agentruntime.Permission(nil), registration.RequiredPermissions...),
 	}, nil
 }
@@ -217,52 +196,12 @@ func validatePolicyValues(registration ToolRegistration) error {
 		registration.FailurePolicy != resilience.PolicyBestEffort {
 		return errors.New("failure policy must be strict or best_effort")
 	}
-	if len(registration.AllowedRoles) == 0 {
-		return errors.New("allowed roles are required")
-	}
-	if len(registration.AllowedTaskTypes) == 0 {
-		return errors.New("allowed task types are required")
-	}
-	for _, role := range registration.AllowedRoles {
-		if !role.Valid() {
-			return fmt.Errorf("invalid role %q", role)
-		}
-	}
-	for _, taskType := range registration.AllowedTaskTypes {
-		if !taskType.Valid() {
-			return fmt.Errorf("invalid task type %q", taskType)
-		}
-	}
-	for _, role := range registration.AllowedDataRoles {
-		if !role.Valid() {
-			return fmt.Errorf("invalid data source role %q", role)
-		}
-	}
-	for _, safetyMode := range registration.AllowedSafetyModes {
-		if !safetyMode.Valid() {
-			return fmt.Errorf("invalid safety mode %q", safetyMode)
-		}
-	}
-	for _, capability := range registration.RequiredCapabilities {
-		if !capability.Valid() {
-			return fmt.Errorf("invalid capability %q", capability)
-		}
-	}
-	for _, dependency := range registration.RequiredDependencies {
-		if !dependency.Valid() {
-			return fmt.Errorf("invalid dependency %q", dependency)
-		}
-	}
 	for _, permission := range registration.RequiredPermissions {
 		if !permission.Valid() {
 			return fmt.Errorf("invalid permission %q", permission)
 		}
 	}
-	if hasDuplicate(registration.AllowedRoles) || hasDuplicate(registration.AllowedTaskTypes) ||
-		hasDuplicate(registration.AllowedDataRoles) || hasDuplicate(registration.AllowedSafetyModes) ||
-		hasDuplicate(registration.RequiredCapabilities) ||
-		hasDuplicate(registration.RequiredDependencies) ||
-		hasDuplicate(registration.RequiredPermissions) {
+	if hasDuplicate(registration.RequiredPermissions) {
 		return errors.New("policy contains duplicate values")
 	}
 	return nil
@@ -279,77 +218,6 @@ func hasDuplicate[T comparable](values []T) bool {
 	return false
 }
 
-func (c *ToolCatalog) ToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseTool, error) {
-	if err := validateToolScope(c, scope); err != nil {
-		return nil, err
-	}
-	tools := make([]tool.BaseTool, 0, len(c.entries))
-	for _, entry := range c.entries {
-		if entry.authorized(scope) {
-			guarded, err := entry.scopedTool()
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, guarded)
-		}
-	}
-	return tools, nil
-}
-
-// EvaluationBaselineToolsFor 返回评测 baseline 所需的宽 Tool Schema 集合。
-//
-// 这个集合只按角色和任务类型筛选，故意不套用本次 TaskScope 的数据源与依赖
-// 过滤；它用于和 experiment 的最小运行时 Schema 做 paired evaluation，不能
-// 作为生产授权策略使用。Skill reference Tool 也不属于 baseline，因为 baseline
-// 不启用 Skill 渐进式读取。
-func (c *ToolCatalog) EvaluationBaselineToolsFor(_ context.Context, scope TaskScope) ([]tool.BaseTool, error) {
-	if err := validateToolScope(c, scope); err != nil {
-		return nil, err
-	}
-	tools := make([]tool.BaseTool, 0, len(c.entries))
-	for _, entry := range c.entries {
-		if entry.name == ToolReadSkillReference || !entry.matchesRoleAndTask(scope) {
-			continue
-		}
-		tools = append(tools, entry.tool)
-	}
-	return tools, nil
-}
-
-func validateToolScope(c *ToolCatalog, scope TaskScope) error {
-	if c == nil {
-		return errors.New("tool catalog is nil")
-	}
-	if scope.userID == uuid.Nil || !scope.role.Valid() || !scope.taskType.Valid() ||
-		(len(scope.allowedCapabilities) == 0 && scope.taskType != TaskTypeConversation) {
-		return errors.New("task scope is invalid")
-	}
-	return nil
-}
-
-func (entry catalogEntry) matchesRoleAndTask(scope TaskScope) bool {
-	return slices.Contains(entry.allowedRoles, scope.role) &&
-		slices.Contains(entry.allowedTaskTypes, scope.taskType)
-}
-
-func (entry catalogEntry) authorized(scope TaskScope) bool {
-	if !entry.matchesRoleAndTask(scope) ||
-		!scope.matchesDataSource(entry.allowedDataRoles, entry.allowedSafetyModes) {
-		return false
-	}
-	for _, capability := range entry.requiredCapabilities {
-		if !scope.CapabilityAllowed(capability) {
-			return false
-		}
-	}
-	for _, dependency := range entry.requiredDependencies {
-		if !scope.DependencyAvailable(dependency) {
-			return false
-		}
-	}
-	return true
-}
-
 func (entry catalogEntry) scopedTool() (tool.BaseTool, error) {
 	invokable, ok := entry.tool.(tool.InvokableTool)
 	if !ok {
@@ -358,11 +226,10 @@ func (entry catalogEntry) scopedTool() (tool.BaseTool, error) {
 	return &accessGuardedTool{inner: invokable, entry: entry}, nil
 }
 
-// accessGuardedTool 是执行期授权 Guard。生产 Schema 来自固定 ToolProfile
-// （ResolveProfile 按 Profile 名单装配），不再由 ToolsFor 的 v1 过滤决定；
-// ToolsFor 只保留给历史评测。执行期它读取 v2 RunAccess 做粗粒度 Permission
-// 校验。具体 ResourceGrant 的统一投影与 Tool 内部检查尚未全部迁移完成：
-// 当前部分 Tool 继续使用原有的 CommandContext/owner 校验。
+// accessGuardedTool 是执行期授权 Guard。生产 Schema 只来自固定 ToolProfile
+// （ResolveProfile 按 Profile 名单装配），不随引用、权限、依赖健康或调用
+// 次数变化。执行期它读取 v2 RunAccess 做粗粒度 Permission 校验；具体
+// ResourceGrant 由 Tool 内部的运行时通用 Guard 校验。
 type accessGuardedTool struct {
 	inner tool.InvokableTool
 	entry catalogEntry

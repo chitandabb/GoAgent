@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
@@ -132,14 +131,14 @@ func withRunnerTestUsage(message *schema.Message) *schema.Message {
 func TestRunnerUsesOneADKLoopForMultipleSkillsAndTools(t *testing.T) {
 	state := &runnerModelState{github: true}
 	runner := newRunnerTest(t, state)
-	scope := runnerTestScope(t, ToolDependencyExternalCase, ToolDependencyGitHubMCP)
-	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), scope), RunRequest{
+	access := runnerTestAccess(t, agentruntime.PermissionCaseRead, agentruntime.PermissionCodeRead)
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), access), RunRequest{
 		UserQuery: "请诊断工单并在有明确线索时查找代码", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
-	if result.SkillID != SkillTicketDiagnosis || result.RouteReason != "task_scope_default" {
+	if result.SkillID != SkillTicketDiagnosis || result.RouteReason != "fixed_diagnosis_entry" {
 		t.Fatalf("entry route = %s/%s", result.SkillID, result.RouteReason)
 	}
 	wantTools := []string{ToolReadExternalCase, ToolSkill, "search_code"}
@@ -174,9 +173,12 @@ func TestRunnerUsesOneADKLoopForMultipleSkillsAndTools(t *testing.T) {
 
 func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.T) {
 	state := &runnerModelState{}
-	runner := newRunnerTest(t, state)
-	scope := runnerTestScopeWithCapabilities(t, []ToolCapability{ToolCapabilityCase, ToolCapabilityCode}, ToolDependencyExternalCase)
-	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), scope), RunRequest{
+	// 启动 Epoch 未装配 GitHub MCP：search_code 不在固定 diagnosis-default
+	// Profile 中（Profile 是成功构造 Adapter 的装配快照）。执行期由 RunAccess
+	// 收窄、未装配由 Profile 名单表达，二者都不删 Schema、也都 fail-closed。
+	runner := newRunnerTestWithoutGitHub(t, state)
+	access := runnerTestAccess(t, agentruntime.PermissionCaseRead, agentruntime.PermissionCodeRead)
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), access), RunRequest{
 		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
@@ -185,16 +187,15 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 	if !strings.Contains(result.Answer, "已根据工单证据") || !strings.Contains(result.Answer, githubUnavailableMessage) {
 		t.Fatalf("degraded answer = %q", result.Answer)
 	}
-	// 固定 Diagnosis Profile：依赖健康状态不能删除 GitHub Tool Schema，
-	// 但执行由 RunAccess/降级链路 fail-closed。
-	if !slices.Contains(result.AllowedTools, "search_code") {
-		t.Fatalf("GitHub Tool Schema must stay visible with the stable profile: %v", result.AllowedTools)
+	if slices.Contains(result.AllowedTools, "search_code") {
+		t.Fatalf("unassembled GitHub Tool leaked into the fixed Profile: %v", result.AllowedTools)
 	}
 }
 
-func TestRunnerBaselineBindsBroadRoleTaskToolsWithoutSkillMiddleware(t *testing.T) {
+func TestRunnerBaselineBindsWideProfileWithoutSkillMiddleware(t *testing.T) {
 	runner := newRunnerTestWithMode(t, &runnerModelState{baseline: true}, RunnerModeBaseline)
-	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{
+	access := runnerTestAccess(t, agentruntime.PermissionCaseRead)
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), access), RunRequest{
 		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
@@ -249,11 +250,53 @@ func TestNewRunnerDefaultsToExperimentMode(t *testing.T) {
 	}
 }
 
-func TestRunnerRequiresTaskScope(t *testing.T) {
+func TestRunnerProfileToolSchemaFingerprintIncludesFinalSkillMiddlewareSchema(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	runner := newRunnerTest(t, &runnerModelState{})
+	resolved, err := runner.toolCatalog.ResolveProfile(ctx, runner.toolProfileID)
+	if err != nil {
+		t.Fatalf("ResolveProfile: %v", err)
+	}
+	catalogOnly, err := CanonicalToolContractFingerprint(ctx, resolved.Tools)
+	if err != nil {
+		t.Fatalf("catalog-only fingerprint: %v", err)
+	}
+	_, finalCtx, err := runner.skillRuntime.Middleware.BeforeAgent(
+		ctx,
+		&adk.ChatModelAgentContext{Tools: append([]tool.BaseTool(nil), resolved.Tools...)},
+	)
+	if err != nil {
+		t.Fatalf("append skill Tool: %v", err)
+	}
+	finalNames, err := ToolNamesFromTools(ctx, finalCtx.Tools)
+	if err != nil {
+		t.Fatalf("final Tool names: %v", err)
+	}
+	if !slices.Contains(finalNames, ToolSkill) {
+		t.Fatalf("final model-visible Schema misses %q: %v", ToolSkill, finalNames)
+	}
+	want, err := CanonicalToolContractFingerprint(ctx, finalCtx.Tools)
+	if err != nil {
+		t.Fatalf("final fingerprint: %v", err)
+	}
+	got, err := runner.ProfileToolSchemaFingerprint(ctx)
+	if err != nil {
+		t.Fatalf("ProfileToolSchemaFingerprint: %v", err)
+	}
+	if got != want {
+		t.Fatalf("fingerprint = %s, want final model-visible %s", got, want)
+	}
+	if got == catalogOnly {
+		t.Fatal("final fingerprint ignored the Middleware-owned skill Tool")
+	}
+}
+
+func TestRunnerRequiresRunAccess(t *testing.T) {
 	runner := newRunnerTest(t, &runnerModelState{})
 	_, err := runner.Invoke(context.Background(), RunRequest{UserQuery: "诊断"})
-	if !errors.Is(err, ErrTaskScopeRequired) {
-		t.Fatalf("missing TaskScope error = %v", err)
+	if !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("missing RunAccess error = %v", err)
 	}
 }
 
@@ -448,8 +491,7 @@ func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 	state := &runnerModelState{block: make(chan struct{})}
 	runner := newRunnerTest(t, state)
 	baseCtx, cancel := context.WithCancel(context.Background())
-	scope := runnerTestScope(t, ToolDependencyExternalCase)
-	runCtx := withRunnerTestRunAccess(baseCtx, scope)
+	runCtx := withRunnerTestRunAccess(baseCtx, runnerTestAccess(t, agentruntime.PermissionCaseRead))
 	done := make(chan error, 1)
 	go func() {
 		_, err := runner.Invoke(runCtx, RunRequest{UserQuery: "等待取消"})
@@ -463,7 +505,7 @@ func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 
 	loopRunner := newRunnerTest(t, &runnerModelState{loop: true})
 	loopRunner.maxIterations = 2
-	_, err := loopRunner.Invoke(withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{UserQuery: "循环"})
+	_, err := loopRunner.Invoke(withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead)), RunRequest{UserQuery: "循环"})
 	if !errors.Is(err, adk.ErrExceedMaxIterations) {
 		t.Fatalf("max iterations error = %v", err)
 	}
@@ -484,7 +526,7 @@ func TestRunnerBlocksGrowingDiagnosisPromptBeforeSecondProviderCall(t *testing.T
 	}}
 	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
 	result, err := runner.Invoke(
-		withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)),
+		withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead)),
 		RunRequest{
 			UserQuery: "诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 			CaseSnapshot: `{"id":"11111111-1111-1111-1111-111111111111","title":"报工状态未更新"}`,
@@ -506,7 +548,7 @@ func TestRunnerBlocksGrowingDiagnosisPromptBeforeSecondProviderCall(t *testing.T
 	}
 }
 
-func TestRunnerDoesNotApplyDiagnosisPreflightToKnowledgeTask(t *testing.T) {
+func TestRunnerRequiresCaseSnapshotForDiagnosisPreflight(t *testing.T) {
 	runner := newRunnerTest(t, &runnerModelState{})
 	inner := &diagnosisGuardModel{}
 	runner.chatModel = inner
@@ -515,25 +557,22 @@ func TestRunnerDoesNotApplyDiagnosisPreflightToKnowledgeTask(t *testing.T) {
 		ExceedsHardWindow: true, EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
 	}}}
 	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
-	scope := runnerTestScope(t, ToolDependencyExternalCase)
-	scope.taskType = TaskTypeKnowledge
-
-	result, err := runner.Invoke(
-		WithTaskScope(context.Background(), scope),
+	// 诊断 Runner 只服务 Diagnosis Runtime：preflight 对所有诊断 Run 生效，
+	// 缺失工单快照时 fail-closed。
+	if _, err := runner.Invoke(
+		withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead)),
 		RunRequest{UserQuery: "解释事务超时"},
-	)
-	if err != nil {
-		t.Fatalf("Invoke knowledge task: %v", err)
+	); err == nil || !strings.Contains(err.Error(), "case snapshot is required") {
+		t.Fatalf("missing snapshot Invoke error = %v", err)
 	}
-	if result.Answer != "ok" || inner.callCount() != 1 || len(planner.requestSnapshot()) != 0 {
-		t.Fatalf("result=%+v modelCalls=%d preflights=%d", result, inner.callCount(), len(planner.requestSnapshot()))
+	if inner.callCount() != 0 || len(planner.requestSnapshot()) != 0 {
+		t.Fatalf("modelCalls=%d preflights=%d, want zero provider interaction", inner.callCount(), len(planner.requestSnapshot()))
 	}
 }
 
 func TestRunnerCreatesIsolatedAgentForConcurrentRuns(t *testing.T) {
 	runner := newRunnerTest(t, &runnerModelState{})
-	scope := runnerTestScope(t, ToolDependencyExternalCase)
-	runCtx := withRunnerTestRunAccess(context.Background(), scope)
+	runCtx := withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead))
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
@@ -557,6 +596,22 @@ func newRunnerTest(t *testing.T, state *runnerModelState) *Runner {
 	return newRunnerTestWithMode(t, state, RunnerModeExperiment)
 }
 
+func newRunnerTestWithoutGitHub(t *testing.T, state *runnerModelState) *Runner {
+	t.Helper()
+	modelInstance := &runnerTestModel{state: state}
+	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+		ChatModel: modelInstance, ExternalCases: runnerTestCaseGetter{},
+		SkillRoot:           filepath.Join("..", "..", "config", "skills"),
+		SystemInstruction:   runnerTestSystemInstruction,
+		BaselineInstruction: runnerTestBaselineInstruction,
+		Logger:              zap.NewNop(),
+	})
+	if err != nil {
+		t.Fatalf("NewDefaultRunner: %v", err)
+	}
+	return runner
+}
+
 func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMode) *Runner {
 	t.Helper()
 	modelInstance := &runnerTestModel{state: state}
@@ -568,14 +623,42 @@ func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMod
 	if err != nil {
 		t.Fatalf("build search Tool: %v", err)
 	}
-	runner, err := NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
+	gitHubArgumentRewrite := func(_ context.Context, _, arguments string) (string, error) { return arguments, nil }
+	skillRuntime, err := NewNativeSkillRuntime(context.Background(), filepath.Join("..", "..", "config", "skills"))
+	if err != nil {
+		t.Fatalf("NewNativeSkillRuntime: %v", err)
+	}
+	var runner *Runner
+	if mode == RunnerModeBaseline {
+		// wide 臂：独立 evaluation-wide-v1 Profile（全部业务 Tool，无 Skill
+		// 中间件）。
+		wideCatalog, catalogErr := NewEvaluationWideDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+			ExternalCases: runnerTestCaseGetter{}, GitHubTools: []tool.BaseTool{searchTool},
+		})
+		if catalogErr != nil {
+			t.Fatalf("NewEvaluationWideDefaultToolCatalog: %v", catalogErr)
+		}
+		runner, err = NewRunner(RunnerConfig{
+			ChatModel: modelInstance, ToolCatalog: wideCatalog, SkillRuntime: skillRuntime,
+			SystemInstruction:     runnerTestSystemInstruction,
+			BaselineInstruction:   runnerTestBaselineInstruction,
+			Mode:                  RunnerModeBaseline,
+			GitHubArgumentRewrite: gitHubArgumentRewrite,
+			Logger:                zap.NewNop(),
+		})
+		if err != nil {
+			t.Fatalf("NewRunner(baseline): %v", err)
+		}
+		return runner
+	}
+	runner, err = NewDefaultRunner(context.Background(), DefaultRunnerDependencies{
 		ChatModel: modelInstance, ExternalCases: runnerTestCaseGetter{},
 		SkillRoot:             filepath.Join("..", "..", "config", "skills"),
 		SystemInstruction:     runnerTestSystemInstruction,
 		BaselineInstruction:   runnerTestBaselineInstruction,
 		Mode:                  mode,
 		GitHubTools:           []tool.BaseTool{searchTool},
-		GitHubArgumentRewrite: func(_ context.Context, _, arguments string) (string, error) { return arguments, nil },
+		GitHubArgumentRewrite: gitHubArgumentRewrite,
 		Logger:                zap.NewNop(),
 	})
 	if err != nil {
@@ -584,84 +667,21 @@ func newRunnerTestWithMode(t *testing.T, state *runnerModelState, mode RunnerMod
 	return runner
 }
 
-func runnerTestScope(t *testing.T, dependencies ...ToolDependency) TaskScope {
+// runnerTestAccess 构造测试用诊断 RunAccess：permissions 即冻结 Policy 的
+// 权限集合，Grant 固定包含 runnerTestCaseID（+ 一个只读工单数据源）。
+func runnerTestAccess(t *testing.T, permissions ...agentruntime.Permission) agentruntime.RunAccess {
 	t.Helper()
-	capabilities := []ToolCapability{ToolCapabilityCase}
-	for _, dependency := range dependencies {
-		switch dependency {
-		case ToolDependencyGitHubMCP:
-			capabilities = append(capabilities, ToolCapabilityCode)
-		case ToolDependencySQLServer:
-			capabilities = append(capabilities, ToolCapabilitySQL)
-		}
+	full := append([]agentruntime.Permission(nil), permissions...)
+	if !slices.Contains(full, agentruntime.PermissionCaseRead) {
+		full = append(full, agentruntime.PermissionCaseRead)
 	}
-	return runnerTestScopeWithCapabilities(t, capabilities, dependencies...)
-}
-
-func runnerTestScopeWithCapabilities(t *testing.T, capabilities []ToolCapability, dependencies ...ToolDependency) TaskScope {
-	t.Helper()
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
-		DataSources:           []ScopedDataSource{{ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly}},
-		AllowedCapabilities:   capabilities,
-		AvailableDependencies: dependencies,
-	})
-	if err != nil {
-		t.Fatalf("NewTaskScope: %v", err)
-	}
-	return scope
-}
-
-// withRunnerTestRunAccess 按生产绑定顺序构造测试 Context：WithTaskScope 先
-// 写入兼容上下文，权威 v2 Diagnosis RunAccess（Policy 镜像测试 scope 能力 +
-// runnerTestCaseID case Grant + 只读数据源 Grant）最后覆盖。它模拟 Worker
-// 从有效 RunAccess 反向生成 TaskScope 后的绑定结果。
-func withRunnerTestRunAccess(ctx context.Context, scope TaskScope) context.Context {
-	ctx = WithTaskScope(ctx, scope)
-	permissions := []agentruntime.Permission{agentruntime.PermissionCaseRead}
-	if scope.CapabilityAllowed(ToolCapabilityCode) {
-		permissions = append(permissions, agentruntime.PermissionCodeRead)
-	}
-	if scope.CapabilityAllowed(ToolCapabilitySQL) {
-		permissions = append(permissions, agentruntime.PermissionSQLRead)
-	}
-	if scope.CapabilityAllowed(ToolCapabilityKnowledge) {
-		permissions = append(permissions, agentruntime.PermissionKnowledgeRead)
-	}
-	if scope.CapabilityAllowed(ToolCapabilityWebSearch) {
-		permissions = append(permissions, agentruntime.PermissionWebRead)
-	}
-	if scope.CapabilityAllowed(ToolCapabilityAttachment) {
-		permissions = append(permissions, agentruntime.PermissionAttachmentRead)
-	}
-	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
-	if err != nil {
-		panic(err)
-	}
-	dataSourceIDs := make([]uuid.UUID, 0, len(scope.DataSources()))
-	for _, source := range scope.DataSources() {
-		if source.SafetyMode == DataSourceSafetyReadOnly {
-			dataSourceIDs = append(dataSourceIDs, source.ID)
-		}
-	}
-	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+	return mustDiagnosisTestRunAccess(t, uuid.New(), full, agentruntime.ResourceGrantsConfig{
 		ExternalCaseIDs: []uuid.UUID{runnerTestCaseID},
-		DataSourceIDs:   dataSourceIDs,
 	})
-	if err != nil {
-		panic(err)
-	}
-	policy, err := agentruntime.NewInvestigationPolicy(1, permissionSet, grants)
-	if err != nil {
-		panic(err)
-	}
-	access, err := agentruntime.DeriveDiagnosisRunAccess(
-		policy,
-		agentruntime.Actor{UserID: scope.UserID(), Role: scope.Role()},
-		agentruntime.AccessCeiling{Permissions: permissionSet, Grants: grants},
-	)
-	if err != nil {
-		panic(err)
-	}
+}
+
+// withRunnerTestRunAccess 把权威 v2 RunAccess 绑定为测试 Context（与 Worker/
+// Conversation Runner 的生产绑定一致，不再有任何 TaskScope 双写）。
+func withRunnerTestRunAccess(ctx context.Context, access agentruntime.RunAccess) context.Context {
 	return agentruntime.WithRunAccess(ctx, access)
 }

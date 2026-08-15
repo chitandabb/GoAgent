@@ -238,8 +238,6 @@ export function TaskDetailPage() {
           <Card className="p-6">
             <CardTitle className="mb-3">任务输入</CardTitle>
             <dl className="flex flex-col gap-3 text-[13px]">
-              <div><dt className="text-ink-48">首选技能</dt><dd className="mt-0.5 break-words">{value.requestScope.requestedSkill || 'ticket-diagnosis'}</dd></div>
-              <div><dt className="text-ink-48">允许能力</dt><dd className="mt-1 flex flex-wrap gap-1.5">{(value.requestScope.allowedCapabilities ?? ['case']).map((item) => <Badge key={item} tone="blue">{item}</Badge>)}</dd></div>
               <div><dt className="text-ink-48">补充说明</dt><dd className="mt-0.5 whitespace-pre-wrap break-words">{value.requestText}</dd></div>
               <div><dt className="text-ink-48">快照 ID</dt><dd className="mt-0.5"><code className="text-[12px] text-ink-48">{shortId(value.caseSnapshotId)}</code></dd></div>
               {value.retryOfTaskId && <div><dt className="text-ink-48">重试自</dt><dd className="mt-0.5"><Link className="text-primary" to={`/tasks/${value.retryOfTaskId}`}>{shortId(value.retryOfTaskId)}</Link></dd></div>}
@@ -278,7 +276,7 @@ export function TaskDetailPage() {
           </>
         }
       >
-        <p className="mb-4 text-[13px] leading-[1.7] text-ink-80">恢复会保留原任务与调查范围，并由后端判断当前错误、依赖和状态是否仍允许恢复。</p>
+        <p className="mb-4 text-[13px] leading-[1.7] text-ink-80">恢复会保留原任务输入与创建时冻结的授权策略，并由后端判断当前错误、依赖和状态是否仍允许恢复。</p>
         <FieldLabel htmlFor="recover-reason">恢复原因</FieldLabel>
         <TextArea id="recover-reason" value={recoverReason} maxLength={1000} onChange={(event) => setRecoverReason(event.target.value)} />
         {recover.isError && <p className="mt-3 text-[13px] text-danger">{recover.error instanceof Error ? recover.error.message : '恢复失败'}</p>}

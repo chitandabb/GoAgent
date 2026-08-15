@@ -592,22 +592,23 @@ Conversation `turn_context`/Text-to-SQL slice (including execution-time
 `RunAccess.Grants` validation) are documented in
 [`decisions/005-unified-agent-runtime-and-stable-tool-profiles.md`](decisions/005-unified-agent-runtime-and-stable-tool-profiles.md)
 and [`design/agent-orchestration.md`](design/agent-orchestration.md).
-`TaskScope`, `ToolCatalog`, argument policies, database accounts, and upstream
-credentials remain the authorization boundary even if a Prompt file is edited
-incorrectly.
+`ToolProfile`, `RunAccess`, frozen Diagnosis `InvestigationPolicy`, argument
+policies, database accounts, and upstream credentials remain the authorization
+boundary even if a Prompt or Skill file is edited incorrectly.
 
 GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
-If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only
-`code-investigation` is removed from the compiled Graph.
+If the GitHub Adapter cannot be constructed at startup, its Tools are absent from
+that startup Epoch's fixed Profile. A transient execution failure does not mutate
+the Profile; the Tool returns a structured unavailable/degraded result instead.
 
 Public Web Search is enabled in the tracked runtime profiles but remains an optional,
 fail-closed dependency. Its search and content providers are configured independently
 with `searchProvider` and `contentProvider` under `[webSearch]`. The legacy single
-`provider`, `baseURL` and `apiKeyEnv` fields remain accepted for migration. A missing
-or rejected provider credential hides `web_search`/`fetch_public_page`; diagnosis
-continues with its other evidence channels. New diagnosis tasks receive the
-backend-managed `web_search` capability together with `knowledge`; users do not select
-either Tool.
+`provider`, `baseURL` and `apiKeyEnv` fields remain accepted for migration. If a Web
+Adapter cannot be constructed at startup, the corresponding Tool is absent from that
+Epoch's Profile; transient provider failure is reported at execution time. New
+diagnosis tasks freeze the backend-managed Web/knowledge Permissions allowed by the
+deployment policy; users do not select either Tool.
 
 `[webSearch.redaction]` configures public-query input/output rune budgets. To add
 company or internal product names to the deterministic dictionary, set
@@ -756,7 +757,7 @@ call after Tool results have been appended. A failed estimator is fail-closed on
 activation; observation-only rollout remains fail-open. Oversized Tool output is kept only in a bounded,
 in-memory store owned by the current Agent Run. The model receives a preview, stable `sha256` reference
 and original byte count, then can page the exact result through `read_conversation_tool_result`. The Tool
-is always present in the frozen Conversation Tool Schema, is authorized by TaskScope, limits each read,
+is always present in the frozen Conversation Tool Schema, is authorized by the current `RunAccess`, limits each read,
 cannot search the store, and cannot resolve a reference after the Run ends. Results above the bounded
 store capacity fail safely instead of creating an unresolvable handle. Diagnosis now reuses the same
 Provider-independent preflight and persists bounded high-water/block observations without adding

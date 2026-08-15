@@ -108,7 +108,7 @@ func TestDiagnosisTaskRepositoryPersistsAndReplaysFirstFrozenPolicy(t *testing.T
 	firstService := fixture.newService(t, firstBuilder)
 	input := diagnosis.CreateTaskInput{
 		ExternalCaseID: caseID, ExpectedSourceFingerprint: "sha256:policy-source",
-		RequestText: "检查任务状态", RequestScope: map[string]any{"source": "integration"},
+		RequestText: "检查任务状态",
 		IdempotencyKey: "policy-replay-key", CorrelationID: uuid.New(),
 	}
 	created, err := firstService.Create(fixture.ctx, diagnosis.TaskActor{UserID: fixture.ownerID}, input)
@@ -121,18 +121,17 @@ func TestDiagnosisTaskRepositoryPersistsAndReplaysFirstFrozenPolicy(t *testing.T
 	var stored struct {
 		Policy  []byte `gorm:"column:investigation_policy"`
 		Version int    `gorm:"column:investigation_policy_schema_version"`
-		Mode    string `gorm:"column:investigation_policy_mode"`
 	}
 	if err := fixture.tx.Raw(`
-SELECT investigation_policy, investigation_policy_schema_version, investigation_policy_mode
+SELECT investigation_policy, investigation_policy_schema_version
 FROM diagnosis_tasks WHERE id = ?`, created.Task.ID).Scan(&stored).Error; err != nil {
 		t.Fatalf("read stored policy: %v", err)
 	}
 	if stored.Version != diagnosis.InvestigationPolicySchemaVersion {
 		t.Fatalf("stored schema version = %d", stored.Version)
 	}
-	if stored.Mode != string(diagnosis.InvestigationPolicyModeFrozen) {
-		t.Fatalf("stored policy mode = %q, want %q", stored.Mode, diagnosis.InvestigationPolicyModeFrozen)
+	if len(stored.Policy) == 0 {
+		t.Fatal("stored policy payload must be non-empty")
 	}
 	firstPolicy, err := agentruntime.UnmarshalInvestigationPolicy(stored.Policy)
 	if err != nil {
@@ -165,16 +164,9 @@ SELECT investigation_policy FROM diagnosis_tasks WHERE id = ?`, created.Task.ID)
 	if !replayedPolicy.Grants().AllowsDataSource(sourceID) {
 		t.Fatalf("replay replaced the first frozen policy: %v", replayedPolicy)
 	}
-	if err := fixture.tx.Raw(`
-SELECT investigation_policy_mode FROM diagnosis_tasks WHERE id = ?`, created.Task.ID).Scan(&stored.Mode).Error; err != nil {
-		t.Fatalf("re-read stored mode: %v", err)
-	}
-	if stored.Mode != string(diagnosis.InvestigationPolicyModeFrozen) {
-		t.Fatalf("replay mutated policy mode to %q", stored.Mode)
-	}
 }
 
-func TestDiagnosisWorkerRepositoryLoadsFrozenLegacyAndRejectsCorruptPolicy(t *testing.T) {
+func TestDiagnosisWorkerRepositoryLoadsFrozenPolicyAndRejectsCorruptRows(t *testing.T) {
 	fixture := newPolicyIntegrationFixture(t)
 	taskService := fixture.newService(t, mustIntegrationPolicyBuilder(t, fixture.dataSourceID))
 	created, err := taskService.Create(fixture.ctx, diagnosis.TaskActor{UserID: fixture.ownerID}, diagnosis.CreateTaskInput{
@@ -194,13 +186,10 @@ func TestDiagnosisWorkerRepositoryLoadsFrozenLegacyAndRejectsCorruptPolicy(t *te
 	}
 	workerRepository := NewDiagnosisWorkerRepository(fixture.tx)
 
-	// 1. 新任务：LoadTask 解码出与冻结完全一致的 Policy。
+	// 1. 新任务：LoadTask 解码出与冻结完全一致的 Policy（非指针值）。
 	task, err := workerRepository.LoadTask(fixture.ctx, *claim.Lease, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("LoadTask(): %v", err)
-	}
-	if task.Policy == nil {
-		t.Fatal("new task lost its frozen policy")
 	}
 	if task.Policy.SchemaVersion() != diagnosis.InvestigationPolicySchemaVersion ||
 		!task.Policy.Permissions().Has(agentruntime.PermissionCaseRead) ||
@@ -209,25 +198,37 @@ func TestDiagnosisWorkerRepositoryLoadsFrozenLegacyAndRejectsCorruptPolicy(t *te
 		t.Fatalf("loaded policy = %v", task.Policy)
 	}
 
-	// 2. migration 前旧任务：mode='legacy' + 双 NULL 是唯一合法兼容状态，
-	//    Policy=nil；双 NULL 本身不再单独代表 legacy。
-	if err := fixture.tx.Exec(`
-UPDATE diagnosis_tasks SET investigation_policy_mode = 'legacy',
-    investigation_policy = NULL, investigation_policy_schema_version = NULL
-WHERE id = ?`, created.Task.ID).Error; err != nil {
-		t.Fatalf("null policy columns: %v", err)
+	// 2. 缺失 Policy 的行无法落库：两列 NOT NULL（00035），NULL 写入被
+	//    数据库直接拒绝——不存在 legacy fallback。
+	violations := []struct {
+		name   string
+		sql    string
+	}{
+		{
+			name: "null policy payload",
+			sql:  `UPDATE diagnosis_tasks SET investigation_policy = NULL WHERE id = ?`,
+		},
+		{
+			name: "null schema version",
+			sql:  `UPDATE diagnosis_tasks SET investigation_policy_schema_version = NULL WHERE id = ?`,
+		},
 	}
-	task, err = workerRepository.LoadTask(fixture.ctx, *claim.Lease, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("legacy LoadTask(): %v", err)
-	}
-	if task.Policy != nil {
-		t.Fatalf("legacy task policy = %v, want nil", task.Policy)
+	for _, violation := range violations {
+		if err := fixture.tx.Exec("SAVEPOINT policy_violation").Error; err != nil {
+			t.Fatalf("savepoint: %v", err)
+		}
+		result := fixture.tx.Exec(violation.sql, created.Task.ID)
+		if result.Error == nil {
+			t.Fatalf("violation %q was accepted by the database", violation.name)
+		}
+		if err := fixture.tx.Exec("ROLLBACK TO SAVEPOINT policy_violation").Error; err != nil {
+			t.Fatalf("rollback to savepoint: %v", err)
+		}
 	}
 
 	// 3. 未知字段的 JSONB（语义损坏）：strict codec 拒绝，fail-closed。
 	if err := fixture.tx.Exec(`
-UPDATE diagnosis_tasks SET investigation_policy_mode = 'frozen',
+UPDATE diagnosis_tasks SET
     investigation_policy = '{"schemaVersion":1,"permissions":["case.read"],"grants":{},"unknownField":true}'::jsonb,
     investigation_policy_schema_version = 1
 WHERE id = ?`, created.Task.ID).Error; err != nil {
@@ -239,7 +240,7 @@ WHERE id = ?`, created.Task.ID).Error; err != nil {
 
 	// 4. 列版本与 payload 版本不一致：同样 fail-closed。
 	if err := fixture.tx.Exec(`
-UPDATE diagnosis_tasks SET investigation_policy_mode = 'frozen',
+UPDATE diagnosis_tasks SET
     investigation_policy = '{"schemaVersion":1,"permissions":["case.read"],"grants":{}}'::jsonb,
     investigation_policy_schema_version = 2
 WHERE id = ?`, created.Task.ID).Error; err != nil {
@@ -248,62 +249,13 @@ WHERE id = ?`, created.Task.ID).Error; err != nil {
 	if _, err := workerRepository.LoadTask(fixture.ctx, *claim.Lease, time.Now().UTC()); !errors.Is(err, diagnosis.ErrInvalidTask) {
 		t.Fatalf("mismatched policy LoadTask() error = %v, want ErrInvalidTask", err)
 	}
-
-	// 5. mode 与两列组合不一致时数据库拒绝：每条违例都用 SAVEPOINT 隔离，
-	//    避免前一条 CHECK 失败把事务置为 aborted 后掩盖后续断言。
-	violations := []struct {
-		name       string
-		constraint string
-		sql        string
-	}{
-		{
-			name:       "legacy with policy columns",
-			constraint: "diagnosis_tasks_investigation_policy_mode_legacy_pair_check",
-			sql: `UPDATE diagnosis_tasks SET investigation_policy_mode = 'legacy',
-    investigation_policy = '{"schemaVersion":1,"permissions":["case.read"],"grants":{}}'::jsonb,
-    investigation_policy_schema_version = 1 WHERE id = ?`,
-		},
-		{
-			name:       "frozen with NULL policy columns",
-			constraint: "diagnosis_tasks_investigation_policy_mode_frozen_pair_check",
-			sql: `UPDATE diagnosis_tasks SET investigation_policy_mode = 'frozen',
-    investigation_policy = NULL, investigation_policy_schema_version = NULL WHERE id = ?`,
-		},
-		{
-			name:       "illegal mode value",
-			constraint: "diagnosis_tasks_investigation_policy_mode_check",
-			sql:        `UPDATE diagnosis_tasks SET investigation_policy_mode = 'Frozen' WHERE id = ?`,
-		},
-		{
-			name:       "legacy with one-sided payload",
-			constraint: "diagnosis_tasks_investigation_policy_pair_check",
-			sql: `UPDATE diagnosis_tasks SET investigation_policy_mode = 'legacy',
-    investigation_policy = '{}'::jsonb, investigation_policy_schema_version = NULL WHERE id = ?`,
-		},
-	}
-	for _, violation := range violations {
-		if err := fixture.tx.Exec("SAVEPOINT policy_violation").Error; err != nil {
-			t.Fatalf("savepoint: %v", err)
-		}
-		result := fixture.tx.Exec(violation.sql, created.Task.ID)
-		if result.Error == nil {
-			t.Fatalf("violation %q was accepted by the database", violation.name)
-		}
-		if !strings.Contains(result.Error.Error(), violation.constraint) {
-			t.Fatalf("violation %q error = %v, want constraint %q",
-				violation.name, result.Error, violation.constraint)
-		}
-		if err := fixture.tx.Exec("ROLLBACK TO SAVEPOINT policy_violation").Error; err != nil {
-			t.Fatalf("rollback to savepoint: %v", err)
-		}
-	}
 }
 
-// TestDiagnosisTaskRepositoryRejectsPolicyModeContractViolationsAgainstPostgres
-// 验证 Repository 创建路径的 mode 合同：frozen + 有效 Policy 可写入；mode 非
-// frozen、payload 缺失、版本非法/不一致或 codec 损坏都在 INSERT 前 fail-closed，
-// 不产生任何任务行，也绝不把缺失 Policy 的新任务自动转换成 legacy。
-func TestDiagnosisTaskRepositoryRejectsPolicyModeContractViolationsAgainstPostgres(t *testing.T) {
+// TestDiagnosisTaskRepositoryRejectsPolicyContractViolationsAgainstPostgres
+// 验证 Repository 创建路径的 Policy 合同：有效 Policy 可写入；payload 缺失、
+// 版本非法/不一致或 codec 损坏都在 INSERT 前 fail-closed，不产生任何任务行。
+// 旧授权体系已硬切删除，不存在把缺失 Policy 的新任务转换成 legacy 的路径。
+func TestDiagnosisTaskRepositoryRejectsPolicyContractViolationsAgainstPostgres(t *testing.T) {
 	fixture := newPolicyIntegrationFixture(t)
 	repository := NewDiagnosisTaskRepository(fixture.tx)
 	validPayload, validVersion := mustValidFrozenPolicyBytes(t)
@@ -315,11 +267,8 @@ func TestDiagnosisTaskRepositoryRejectsPolicyModeContractViolationsAgainstPostgr
 			IdempotencyKey:                   "policy-validation-key",
 			RequestFingerprint:               "sha256:policy-validation",
 			RequestText:                      "检查任务状态",
-			RequestScope:                     json.RawMessage(`{}`),
-			RequestScopeSchemaVersion:        1,
 			InvestigationPolicy:              append(json.RawMessage(nil), validPayload...),
 			InvestigationPolicySchemaVersion: validVersion,
-			InvestigationPolicyMode:          diagnosis.InvestigationPolicyModeFrozen,
 			Snapshot: diagnosis.CaseSnapshotRecord{
 				Payload: json.RawMessage(`{}`), PayloadSchemaVersion: 1, ContentHash: "sha256:snap",
 				SourceReadAt: time.Now().UTC(), RedactionStatus: "redacted", TruncationStatus: "complete",
@@ -337,16 +286,16 @@ func TestDiagnosisTaskRepositoryRejectsPolicyModeContractViolationsAgainstPostgr
 		return count
 	}
 
-	// 1. frozen + 有效 Policy：完整写入成功。
+	// 1. 有效 Policy：完整写入成功。
 	created, err := repository.CreateTask(fixture.ctx, baseRecord())
 	if err != nil {
-		t.Fatalf("valid frozen CreateTask: %v", err)
+		t.Fatalf("valid CreateTask: %v", err)
 	}
 	if created.Replayed || created.Task.ID == uuid.Nil {
-		t.Fatalf("valid frozen result = %+v", created)
+		t.Fatalf("valid result = %+v", created)
 	}
 	if countRows("diagnosis_tasks") != 1 || countRows("case_snapshots") != 1 {
-		t.Fatalf("valid frozen create did not insert exactly one task/snapshot row")
+		t.Fatalf("valid create did not insert exactly one task/snapshot row")
 	}
 
 	// 2. 合同违例：全部在 INSERT 前拒绝，且行数不增长。
@@ -354,18 +303,6 @@ func TestDiagnosisTaskRepositoryRejectsPolicyModeContractViolationsAgainstPostgr
 		name   string
 		mutate func(*diagnosis.CreateTaskRecord)
 	}{
-		{
-			name: "legacy mode",
-			mutate: func(record *diagnosis.CreateTaskRecord) {
-				record.InvestigationPolicyMode = diagnosis.InvestigationPolicyModeLegacy
-			},
-		},
-		{
-			name: "empty mode",
-			mutate: func(record *diagnosis.CreateTaskRecord) {
-				record.InvestigationPolicyMode = ""
-			},
-		},
 		{
 			name: "nil policy payload",
 			mutate: func(record *diagnosis.CreateTaskRecord) {

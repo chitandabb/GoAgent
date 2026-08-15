@@ -17,7 +17,9 @@ import (
 	"unicode/utf8"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
@@ -30,6 +32,30 @@ import (
 )
 
 var smokeCaseID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+// buildSmokeRunAccess 构造 smoke 用诊断 RunAccess：授权事实直接来自冻结
+// Policy 与 ceiling（case.read + smoke 工单 Grant）。
+func buildSmokeRunAccess(caseID uuid.UUID) (agentruntime.RunAccess, error) {
+	permissions, err := agentruntime.NewPermissionSet(agentruntime.PermissionCaseRead)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{caseID},
+	})
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissions, grants)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	return agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: uuid.New(), Role: auth.RoleAnalyst},
+		agentruntime.AccessCeiling{Permissions: permissions, Grants: grants},
+	)
+}
 
 type syntheticCaseGetter struct{}
 
@@ -198,20 +224,14 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("build Evidence orchestrator: %w", err)
 	}
-	scope, err := mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: mesagent.TaskTypeDiagnosis,
-		DataSources: []mesagent.ScopedDataSource{{
-			ID: uuid.New(), Role: mesagent.DataSourceRoleCaseSource,
-			SafetyMode: mesagent.DataSourceSafetyReadOnly,
-		}},
-		AllowedCapabilities:   []mesagent.ToolCapability{mesagent.ToolCapabilityCase},
-		AvailableDependencies: []mesagent.ToolDependency{mesagent.ToolDependencyExternalCase},
-	})
+	// smoke RunAccess：授权事实直接来自冻结 Policy ∩ ceiling（case.read +
+	// smoke 工单 Grant），不再经过旧 TaskScope。
+	runAccess, err := buildSmokeRunAccess(smokeCaseID)
 	if err != nil {
-		return fmt.Errorf("build smoke TaskScope: %w", err)
+		return fmt.Errorf("build smoke run access: %w", err)
 	}
 	startedAt := time.Now()
-	result, err := orchestrator.Invoke(mesagent.WithTaskScope(ctx, scope), mesagent.RunRequest{
+	result, err := orchestrator.Invoke(agentruntime.WithRunAccess(ctx, runAccess), mesagent.RunRequest{
 		UserQuery:      "请读取工单，分析最可能的故障方向并形成证据化报告。",
 		ExternalCaseID: smokeCaseID.String(),
 	})

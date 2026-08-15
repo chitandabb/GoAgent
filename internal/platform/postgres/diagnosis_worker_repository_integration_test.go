@@ -78,7 +78,7 @@ VALUES (?, ?, ?, 'incident', now())`, externalCaseID, dataSourceID, "WORKER-"+uu
 	}
 	created, err := taskService.Create(ctx, diagnosis.TaskActor{UserID: ownerID}, diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: caseItem.SourceFingerprint,
-		RequestText: "检查工单状态", RequestScope: map[string]any{"requestedSkill": "ticket-diagnosis"},
+		RequestText: "检查工单状态",
 		IdempotencyKey: uuid.NewString(), CorrelationID: uuid.New(),
 	})
 	if err != nil {

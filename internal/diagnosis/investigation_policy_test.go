@@ -13,21 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestInvestigationPolicyModeContractValues(t *testing.T) {
-	if InvestigationPolicyModeLegacy != "legacy" || InvestigationPolicyModeFrozen != "frozen" {
-		t.Fatalf("policy mode constants drifted: legacy=%q frozen=%q",
-			InvestigationPolicyModeLegacy, InvestigationPolicyModeFrozen)
-	}
-	if !InvestigationPolicyModeLegacy.Valid() || !InvestigationPolicyModeFrozen.Valid() {
-		t.Fatal("legacy/frozen modes must be valid")
-	}
-	for _, invalid := range []InvestigationPolicyMode{"", "FROZEN", "Legacy", "froze", "unknown"} {
-		if invalid.Valid() {
-			t.Fatalf("invalid policy mode %q reported valid", invalid)
-		}
-	}
-}
-
 func mustInvestigationPolicyBuilder(
 	t *testing.T,
 	basePermissions []agentruntime.Permission,
@@ -183,8 +168,8 @@ func TestDiagnosisTaskServiceFreezesInvestigationPolicyIntoCreateRecord(t *testi
 	if repo.createInput.InvestigationPolicySchemaVersion != InvestigationPolicySchemaVersion {
 		t.Fatalf("policy schema version = %d", repo.createInput.InvestigationPolicySchemaVersion)
 	}
-	if repo.createInput.InvestigationPolicyMode != InvestigationPolicyModeFrozen {
-		t.Fatalf("policy mode = %q, want %q", repo.createInput.InvestigationPolicyMode, InvestigationPolicyModeFrozen)
+	if len(repo.createInput.InvestigationPolicy) == 0 {
+		t.Fatal("policy payload must be non-empty")
 	}
 	policy, err := agentruntime.UnmarshalInvestigationPolicy(repo.createInput.InvestigationPolicy)
 	if err != nil {

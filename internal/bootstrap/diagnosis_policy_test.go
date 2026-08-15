@@ -122,12 +122,14 @@ type diagnosisExecutorCaseGetter struct {
 	item   *externalcase.ExternalCase
 	access agentruntime.RunAccess
 	ok     bool
+	calls  int
 }
 
 func (s *diagnosisExecutorCaseGetter) Get(ctx context.Context, id uuid.UUID) (*externalcase.ExternalCase, error) {
 	access, ok := agentruntime.RunAccessFromContext(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	s.access, s.ok = access, ok
 	if s.item == nil || s.item.ID != id {
 		return nil, errors.New("case not found")
@@ -236,9 +238,6 @@ func diagnosisWorkerTestTask(caseID uuid.UUID) diagnosisworker.Task {
 	return diagnosisworker.Task{
 		ID: uuid.New(), CreatedBy: uuid.New(), Role: auth.RoleAnalyst,
 		RequestText: "检查工单状态",
-		RequestScope: map[string]any{
-			diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case", "knowledge", "web_search"},
-		},
 		CaseSnapshot: externalcase.ExternalCase{
 			ID: caseID, DataSourceID: sourceID, ExternalCaseKey: "TKT-1", Title: "报工状态未更新",
 			SourceFingerprint: "sha256:source",
@@ -264,7 +263,7 @@ func TestDiagnosisWorkerExecutorBindsPolicyRunAccessAndTaskContext(t *testing.T)
 		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead},
 		agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{caseID}},
 	)
-	task.Policy = &policy
+	task.Policy = policy
 
 	result, err := executor.Execute(context.Background(), task)
 	if err != nil {
@@ -292,7 +291,7 @@ func TestDiagnosisWorkerExecutorBindsPolicyRunAccessAndTaskContext(t *testing.T)
 	}
 }
 
-func TestDiagnosisWorkerExecutorFrozenPolicyDoesNotDeriveFromLegacyScope(t *testing.T) {
+func TestDiagnosisWorkerExecutorRunAccessIsFrozenPolicyIntersectCeiling(t *testing.T) {
 	cfg := testAgentConfig()
 	caseID := uuid.New()
 	getter := &diagnosisExecutorCaseGetter{item: &externalcase.ExternalCase{
@@ -300,23 +299,22 @@ func TestDiagnosisWorkerExecutorFrozenPolicyDoesNotDeriveFromLegacyScope(t *test
 		ExternalCaseKey: "TKT-1", Title: "报工状态未更新", SourceFingerprint: "sha256:source",
 	}}
 	chatModel := &diagnosisExecutorChatModel{caseID: caseID.String()}
-	runtime := buildDiagnosisWorkerTestRuntime(t, cfg, chatModel, getter, true)
-	if !slices.Contains(runtime.diagnosisToolNames, agent.ToolSearchKnowledge) {
-		t.Fatalf("fixture profile lacks the knowledge Tool: %v", runtime.diagnosisToolNames)
+	// ceiling Profile 不含 SQL Tool（sqlTool=false）：Policy 授予 sql.read 也
+	// 必须被 ceiling 截断，绝不存在 legacy 或其他派生为任务补回权限。
+	runtime := buildDiagnosisWorkerTestRuntime(t, cfg, chatModel, getter, false)
+	if slices.Contains(runtime.diagnosisToolNames, agent.ToolSearchSchemaCatalog) {
+		t.Fatalf("fixture profile must not contain SQL Tool: %v", runtime.diagnosisToolNames)
 	}
 	executor := diagnosisAgentExecutor{runtime: runtime}
 	task := diagnosisWorkerTestTask(caseID)
-	// 冻结 request_scope 只有 case 能力；但 frozen Policy 授予 case+knowledge。
-	// 新任务必须只走 frozen Policy，绝不能退回 legacy 派生（否则会丢掉
-	// knowledge.read）。
-	task.RequestScope = map[string]any{
-		diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case"},
-	}
 	policy := mustDiagnosisPolicyForBootstrapTest(t,
-		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead},
-		agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{caseID}},
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionSQLRead},
+		agentruntime.ResourceGrantsConfig{
+			ExternalCaseIDs: []uuid.UUID{caseID},
+			DataSourceIDs:   []uuid.UUID{uuid.MustParse(diagnosisWorkerTestSQLSourceID)},
+		},
 	)
-	task.Policy = &policy
+	task.Policy = policy
 
 	result, err := executor.Execute(context.Background(), task)
 	if err != nil {
@@ -329,12 +327,18 @@ func TestDiagnosisWorkerExecutorFrozenPolicyDoesNotDeriveFromLegacyScope(t *test
 	if !ok || !access.Allows(agentruntime.PermissionCaseRead) {
 		t.Fatalf("frozen access = %+v ok=%t", access, ok)
 	}
-	if !access.Allows(agentruntime.PermissionKnowledgeRead) {
-		t.Fatalf("frozen policy lost knowledge.read that legacy scope lacks: %v", access.Permissions().Values())
+	// 授权事实只来自 frozen Policy ∩ ceiling：Policy 授予 sql.read，但
+	// 当前 ceiling 没有 SQL Tool，有效 RunAccess 必须不含 sql.read，且
+	// 数据源 Grant 被一并截断。
+	if access.Allows(agentruntime.PermissionSQLRead) {
+		t.Fatalf("effective access gained sql.read beyond the ceiling: %v", access.Permissions().Values())
+	}
+	if len(access.Grants().DataSourceIDs()) != 0 {
+		t.Fatalf("effective access gained data source grants beyond the ceiling: %v", access.Grants().DataSourceIDs())
 	}
 }
 
-func TestDiagnosisWorkerExecutorLegacyTaskCannotGainSQLFromCeiling(t *testing.T) {
+func TestDiagnosisWorkerExecutorRejectsTaskWithoutPolicy(t *testing.T) {
 	cfg := testAgentConfig()
 	caseID := uuid.New()
 	getter := &diagnosisExecutorCaseGetter{item: &externalcase.ExternalCase{
@@ -342,47 +346,16 @@ func TestDiagnosisWorkerExecutorLegacyTaskCannotGainSQLFromCeiling(t *testing.T)
 		ExternalCaseKey: "TKT-1", Title: "报工状态未更新", SourceFingerprint: "sha256:source",
 	}}
 	chatModel := &diagnosisExecutorChatModel{caseID: caseID.String()}
-	// ceiling Profile 包含 SQL Tool（schema catalog），但旧任务 Policy=NULL。
 	runtime := buildDiagnosisWorkerTestRuntime(t, cfg, chatModel, getter, true)
-	if !slices.Contains(runtime.diagnosisToolNames, agent.ToolSearchSchemaCatalog) {
-		t.Fatalf("fixture profile lacks the SQL Tool: %v", runtime.diagnosisToolNames)
-	}
 	executor := diagnosisAgentExecutor{runtime: runtime}
 	task := diagnosisWorkerTestTask(caseID)
-	task.Policy = nil
-	// 冻结 scope 只有 case/knowledge/web_search：legacy 派生绝不能从新
-	// 部署 ceiling 拿到 sql.read。
-	result, err := executor.Execute(context.Background(), task)
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if result.Orchestration.AgentRuns < 1 {
-		t.Fatalf("execution result = %+v", result.Orchestration)
-	}
-	access, ok := getter.snapshot()
-	if !ok || !access.Allows(agentruntime.PermissionCaseRead) {
-		t.Fatalf("legacy access = %+v ok=%t", access, ok)
-	}
-	// legacy 派生不能从新部署 ceiling 拿到 sql.read 权限；数据源 Grant 只对
-	// SQL Tool 有意义，权限缺失时 Tool 边界仍 fail-closed（零底层调用）。
-	if access.Allows(agentruntime.PermissionSQLRead) {
-		t.Fatalf("legacy task gained sql.read from the ceiling: %v", access.Permissions().Values())
-	}
-	if access.Allows(agentruntime.PermissionCodeRead) {
-		t.Fatalf("legacy task gained code.read from the ceiling: %v", access.Permissions().Values())
-	}
-}
-
-func TestDiagnosisWorkerExecutorFailsClosedOnInvalidPersistedScope(t *testing.T) {
-	cfg := testAgentConfig()
-	runtime := buildDiagnosisWorkerTestRuntime(t, cfg, &diagnosisExecutorChatModel{}, &diagnosisExecutorCaseGetter{}, false)
-	executor := diagnosisAgentExecutor{runtime: runtime}
-	task := diagnosisWorkerTestTask(uuid.New())
-	task.RequestScope = map[string]any{
-		diagnosis.RequestScopeKeyAllowedCapabilities: []any{"case", "shell"},
-	}
+	// Policy 是零值（缺失）：任务无法执行，必须 ErrInvalidTask，不能有任何
+	// legacy fallback，也不能触碰 getter 或模型。
 	if _, err := executor.Execute(context.Background(), task); !errors.Is(err, diagnosis.ErrInvalidTask) {
 		t.Fatalf("Execute error = %v, want ErrInvalidTask", err)
+	}
+	if getter.calls != 0 {
+		t.Fatalf("case getter calls = %d, want 0", getter.calls)
 	}
 }
 

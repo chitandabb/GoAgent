@@ -1758,12 +1758,6 @@ components:
           type: string
           minLength: 1
           maxLength: 20000
-        requestScope:
-          $ref: "#/components/schemas/DiagnosisTaskRequestScope"
-        requestScopeSchemaVersion:
-          type: integer
-          minimum: 1
-          default: 1
         attachments:
           type: array
           description: 当前版本暂不接受非空附件列表
@@ -1773,26 +1767,6 @@ components:
         retryOfTaskId:
           type: [string, "null"]
           format: uuid
-    DiagnosisTaskRequestScope:
-      type: object
-      additionalProperties: true
-      description: >-
-        创建时冻结的任务调查范围。allowedCapabilities 表示本任务允许使用的业务能力，
-        不表示对应外部依赖当前健康；未提供时后端按 requestedSkill 推导，仍未提供则默认 [case]。
-      properties:
-        requestedSkill:
-          type: string
-          enum: [ticket-diagnosis, code-investigation, sql-investigation]
-          default: ticket-diagnosis
-        allowedCapabilities:
-          type: array
-          minItems: 1
-          maxItems: 3
-          uniqueItems: true
-          default: [case]
-          items:
-            type: string
-            enum: [case, code, sql]
     DiagnosisTaskCreateData:
       type: object
       required: [taskId, status, replayed, createdAt]
@@ -1818,16 +1792,13 @@ components:
               $ref: "#/components/schemas/DiagnosisTaskCreateData"
     DiagnosisTask:
       type: object
-      required: [taskId, externalCaseId, caseSnapshotId, requestText, requestScope, requestScopeSchemaVersion, status, attemptCount, createdAt, updatedAt, reportAvailable, attachments]
+      required: [taskId, externalCaseId, caseSnapshotId, requestText, status, attemptCount, createdAt, updatedAt, reportAvailable, attachments]
       properties:
         taskId: {type: string, format: uuid}
         externalCaseId: {type: string, format: uuid}
         caseSnapshotId: {type: string, format: uuid}
         retryOfTaskId: {type: string, format: uuid}
         requestText: {type: string}
-        requestScope:
-          $ref: "#/components/schemas/DiagnosisTaskRequestScope"
-        requestScopeSchemaVersion: {type: integer, minimum: 1}
         status:
           type: string
           enum: [pending, running, cancel_requested, succeeded, failed, cancelled]

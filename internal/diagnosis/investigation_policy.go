@@ -10,30 +10,11 @@ import (
 )
 
 // InvestigationPolicySchemaVersion 是当前冻结 Policy JSON 的持久化协议版本
-// （Diagnosis InvestigationPolicy JSON Schema v1）。与 request_scope_schema_version
-// 相互独立：request_scope 只为旧 API 与 RequestedSkill 兼容保留，Policy 才是
-// 新任务的授权事实。Unified Agent Runtime 的架构版本是 v2，与本协议版本无关。
+// （Diagnosis InvestigationPolicy JSON Schema v1）。Policy 是新任务的唯一
+// 授权事实；Unified Agent Runtime 的架构版本是 v2，与本协议版本无关。
+// 数据库两列均为 NOT NULL（migration 00035），缺失/损坏/版本不一致一律
+// fail-closed。
 const InvestigationPolicySchemaVersion = 1
-
-// InvestigationPolicyMode 标识 diagnosis_tasks 行的 Policy 来源：
-//   - legacy：migration 00034 之前的旧任务（Policy 两列必须同时为 NULL），
-//     Worker 只能从冻结 request_scope 与任务资源做 legacy 派生；
-//   - frozen：新任务创建时冻结的 Policy（两列必须同时非 NULL），Worker
-//     直接使用持久化 Policy。
-//
-// mode 与两列的配对关系由 migration 00034 的数据库 CHECK 约束强制，
-// Repository 与 Worker 解码侧再各自 fail-closed 校验。
-type InvestigationPolicyMode string
-
-const (
-	InvestigationPolicyModeLegacy InvestigationPolicyMode = "legacy"
-	InvestigationPolicyModeFrozen InvestigationPolicyMode = "frozen"
-)
-
-// Valid 大小写敏感：数据库约束同样只接受这两个精确值。
-func (m InvestigationPolicyMode) Valid() bool {
-	return m == InvestigationPolicyModeLegacy || m == InvestigationPolicyModeFrozen
-}
 
 // InvestigationPolicyBuilder 在任务创建事务内冻结 InvestigationPolicy。
 // diagnosis 包只定义纯领域输入/输出，不依赖 platform/config：部署配置
