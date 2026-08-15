@@ -98,6 +98,28 @@ https://opencode.ai/zen/go/v1`，`apiKeyEnv = MESGUARD_OPENCODE_GO_API_KEY`，
   `conversationMemoryProfile`（StepFun），两者均不注入该 Key。未配置该 Key 时，
   保持 StepFun activeProfile 的现有部署照常启动。
 
+生产 Conversation Text-to-SQL 的命名 Profile 单 Case 验证使用独立选择参数，
+不需要修改 `[models.chat].activeProfile`。必须显式提供成本上限和 `output/`
+路径，避免单 Case smoke 覆盖 `testdata/` 中的完整评测资产：
+
+```powershell
+go run ./tools/evaluation/mesguard-text2sql-eval `
+  -mode conversation `
+  -profile opencode-deepseek-main `
+  -case-id sql-new-count `
+  -allow-provider-calls `
+  -max-cases 1 `
+  -max-provider-calls 8 `
+  -max-provider-tokens 16000 `
+  -timeout 2m `
+  -output output/evaluation/text-to-sql-opencode-sql-new-count.observations.jsonl `
+  -summary output/evaluation/text-to-sql-opencode-sql-new-count.summary.json
+```
+
+`-max-cases` 是授权上限，不会隐式截断数据集；低成本单例运行必须同时使用
+`-case-id`。正式指标要求 clean revision；工作区存在无关草稿改动时，应从同一
+commit 的独立干净 worktree 运行，而不是使用 `-allow-dirty` 冒充正式结果。
+
 ### Agent Prompt configuration
 
 Agent instructions are stored under `config/prompts/` instead of Go constants:
