@@ -262,7 +262,9 @@ queued/running/retry/completed/failed 生命周期和最终消息引用。前端
 - 基线：一次绑定全部授权 Tool Schema，不使用 Skill 渐进式读取；
 - 实验：按旧动态 `TaskScope` 过滤 Tool，并使用 Skill 渐进式读取。
 
-该结果只证明已被硬切删除的旧动态 `TaskScope` 方案，不能作为 v2 简历结果，也不代表当前生产实现。当前 Tool Selection v2 评测验证的是"固定 Profile 装配机制 + 真实 Eino Skill Middleware + 受控评测 Tool 合同"（experiment 臂基于固定 `diagnosis-default` Profile 经真实 Middleware 链装配，wide 臂使用独立的 `evaluation-wide-v1` 评测合同），它不声称已复现所有生产 Knowledge/Web/Attachment Adapter。正式 v2 生产入口重测必须从真实 Conversation/Diagnosis 生产入口复测：同一实验臂内固定 Tool Profile 指纹，对比稳定 Profile、执行期 Guard 和 Diagnosis 渐进式 Skill；Text-to-SQL 必须从自然语言 Conversation 输入触发，不能由评测器直接强制调用 SQL Tool。Conversation SQL/`turn_context` 已在本切片接线，重测本身仍要求干净 Git 修订 + post-commit（按既定规程，本轮未执行）。
+该结果只证明已被硬切删除的旧动态 `TaskScope` 方案，不能作为 v2 简历结果，也不代表当前生产实现。当前 Tool Selection v2 评测验证的是"固定 Profile 装配机制 + 真实 Eino Skill Middleware + 受控评测 Tool 合同"（experiment 臂基于固定 `diagnosis-default` Profile 经真实 Middleware 链装配，wide 臂使用独立的 `evaluation-wide-v1` 评测合同），它不声称已复现所有生产 Knowledge/Web/Attachment Adapter。正式 v2 生产入口重测必须从真实 Conversation/Diagnosis 生产入口复测：同一实验臂内固定 Tool Profile 指纹，对比稳定 Profile、执行期 Guard 和 Diagnosis 渐进式 Skill；Text-to-SQL 必须从自然语言 Conversation 输入触发，不能由评测器直接强制调用 SQL Tool。Conversation SQL/`turn_context` 已在本切片接线。
+
+2026-08-15 在 clean revision `3d40582` 上完成了 1 条工单、2 个实验臂的 post-commit 生产入口试跑（StepFun `step-3.7-flash`，low）：两臂均正确选择 `ticket-diagnosis` 和 `read_external_case`，任务完成率 100%，越权/禁止 Tool 调用为 0；共 4 次模型调用、18,384 Token。该试跑同时证伪了当前 Token paired 变量：`evaluation-wide-v1` 在本部署实际只有 7 个业务 Tool，而 `diagnosis-default` 通过真实 Middleware 暴露 9 个 Tool（额外包含 `skill`、`read_skill_reference`），因此 experiment 输入 Token 从 5,991 增至 9,536（增加 59.17%），耗时从 12.08 秒增至 14.22 秒。这个结果不得写成负优化结论，也不得扩大样本；必须先让 baseline/experiment 使用等价依赖与 Middleware 装配，或退役“Tool Schema Token 降幅”指标，改测稳定 Schema、执行期越权拦截和生产任务质量。自然语言 Conversation Text-to-SQL 仍需独立小样本验收。
 
 | 指标 | 定义 |
 | --- | --- |
