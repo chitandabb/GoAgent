@@ -575,6 +575,30 @@ func TestConversationEvaluationRejectsQueryWithoutSchemaSearch(t *testing.T) {
 	}
 }
 
+func TestConversationEvaluationAllowsRepeatedSchemaSearchesBeforeSingleQuery(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"TicketID","limit":5}`},
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"Status","limit":5}`},
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"TKT-999","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("observation Validate: %v", err)
+	}
+	if !observation.Correct || !observation.ToolSequenceCorrect || observation.ActualToolCallCount != 4 {
+		t.Fatalf("repeated-search observation = %+v", observation)
+	}
+}
+
 func TestConversationEvaluationFailurePreservesRunUsage(t *testing.T) {
 	executor := newTextToSQLFixtureExecutor(t)
 	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{

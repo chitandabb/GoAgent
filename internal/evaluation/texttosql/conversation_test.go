@@ -179,6 +179,24 @@ func TestEvaluateTextToSQLConversationAllowsUniformDirtySmokeButMarksNonFormal(t
 	}
 }
 
+func TestTextToSQLConversationToolTraceAllowsRepeatedSchemaSearchesBeforeOneQuery(t *testing.T) {
+	calls := []TextToSQLConversationToolCall{
+		{ToolName: mesagent.ToolSearchSchemaCatalog, Succeeded: true},
+		{ToolName: mesagent.ToolSearchSchemaCatalog, Succeeded: true},
+		{ToolName: mesagent.ToolSearchSchemaCatalog, Succeeded: true},
+		{ToolName: mesagent.ToolExecuteReadonlyQuery, QueryHash: "sha256:" + strings.Repeat("f", 64), Succeeded: true},
+	}
+	complete, sequenceCorrect := TextToSQLConversationToolTraceMatchesRequiredSequence(4, calls)
+	if !complete || !sequenceCorrect {
+		t.Fatalf("repeated schema searches should be accepted: complete=%t sequence=%t", complete, sequenceCorrect)
+	}
+	calls = append(calls, TextToSQLConversationToolCall{ToolName: mesagent.ToolExecuteReadonlyQuery, QueryHash: "sha256:" + strings.Repeat("e", 64), Succeeded: true})
+	complete, sequenceCorrect = TextToSQLConversationToolTraceMatchesRequiredSequence(5, calls)
+	if !complete || sequenceCorrect {
+		t.Fatalf("repeated readonly queries must be rejected: complete=%t sequence=%t", complete, sequenceCorrect)
+	}
+}
+
 func TestEvaluateTextToSQLConversationRejectsHistoricalDirectV1Mixing(t *testing.T) {
 	definitions := []mesagent.TextToSQLEvaluationCase{{
 		DatasetVersion: "text-to-sql-v1", CaseID: "case-1",
