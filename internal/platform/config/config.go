@@ -361,9 +361,9 @@ func (c ChatModelConfig) Profile(name string) (ChatModelProfileConfig, error) {
 
 func (c ChatModelProfileConfig) Validate() error {
 	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
-	case "stepfun", "deepseek", "dashscope":
+	case "stepfun", "deepseek", "dashscope", "opencode-go":
 	default:
-		return errors.New("provider must be stepfun, deepseek, or dashscope")
+		return errors.New("provider must be stepfun, deepseek, dashscope, or opencode-go")
 	}
 	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || endpoint.Host == "" {

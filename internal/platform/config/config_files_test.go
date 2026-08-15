@@ -27,6 +27,33 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if memoryProfile.EffectiveToolExposureStrategy() != ToolExposureStrategyStaticFrozen {
 				t.Fatalf("%q conversation memory Tool exposure is not static_frozen", path)
 			}
+			opencode, ok := cfg.Models.Chat.Profiles["opencode-deepseek-main"]
+			if !ok {
+				t.Fatalf("%q must configure the opencode-deepseek-main profile", path)
+			}
+			if opencode.Provider != "opencode-go" ||
+				opencode.BaseURL != "https://opencode.ai/zen/go/v1" ||
+				opencode.APIKeyEnv != "MESGUARD_OPENCODE_GO_API_KEY" ||
+				opencode.Model != "deepseek-v4-flash" ||
+				opencode.ResponseFormat != "text" {
+				t.Fatalf("%q opencode-deepseek-main = %+v", path, opencode)
+			}
+			if opencode.ReasoningEffort != "" || opencode.ThinkingMode != "" {
+				t.Fatalf("%q opencode-deepseek-main must not configure reasoningEffort/thinkingMode: %+v", path, opencode)
+			}
+			if cfg.Models.Chat.ActiveProfileName != "stepfun-main" ||
+				cfg.Models.Chat.ConversationMemoryProfileName != "stepfun-conversation-memory" {
+				t.Fatalf("%q must keep activeProfile=stepfun-main and conversationMemoryProfile=stepfun-conversation-memory", path)
+			}
+			active := cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName]
+			if opencode.ContextWindowTokens != active.ContextWindowTokens ||
+				opencode.MaxOutputTokens != active.MaxOutputTokens ||
+				opencode.PromptSafetyMarginTokens != active.PromptSafetyMarginTokens ||
+				opencode.PromptSafetyMarginRatio != active.PromptSafetyMarginRatio ||
+				opencode.TokenizerStrategy != active.TokenizerStrategy ||
+				opencode.ToolExposureStrategy != active.ToolExposureStrategy {
+				t.Fatalf("%q opencode-deepseek-main context contract must match stepfun-main for the first comparison: %+v vs %+v", path, opencode, active)
+			}
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
 				!cfg.Agent.ContextMemory.DiagnosisPreflightEnabled ||
 				!cfg.Agent.ContextMemory.ContinuousTailEnabled ||

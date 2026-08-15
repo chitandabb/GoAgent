@@ -67,6 +67,30 @@ cmd / tools
 - 新增全新 Provider 可以修改组合根和对应能力 Factory，但不能要求领域服务理解供应商参数。
 - 不创建一个覆盖 Chat、Embedding、Rerank、OCR、VLM 的万能 Provider 接口；不同能力保留独立合同。
 
+### OpenCode Go 方言 Adapter（第一阶段）
+
+- `provider = "opencode-go"` 是独立方言 Adapter（`opencodeGoAdapter`），复用
+  共享的 Eino OpenAI Chat Completions transport（`openai.NewChatModel`），不
+  升级或重写 Eino SDK，不引入全局 Registry，不使用 `init()` 自注册，不新增
+  万能 ModelProvider 大接口。
+- `providerAdapter` 不是一整套模型客户端：它只负责校验 Provider 专有参数、
+  声明 Provider 能力、把专有参数映射到共享 `openai.ChatModelConfig`。opencode-go
+  与 deepSeekAdapter 是两个不同方言：deepseek 表达 DeepSeek 官方接口并注入
+  `thinking`/`reasoning_effort`；opencode-go 是另一个网关，不注入任何
+  thinking 参数。Provider 是唯一路由键，模型名含 "deepseek" 不会路由到
+  deepSeekAdapter。
+- opencode-go 的 `reasoningEffort`/`thinkingMode`/`responseFormat` 能力约束在
+  Adapter 创建阶段验证，config 包不复制 Provider 专有参数校验；配置包仍
+  fail-closed 拒绝未知 Provider 名称。
+- 密钥按 Profile 选择性读取：`NewActive` 只读 activeProfile 的 `apiKeyEnv`，
+  `NewProfile` 只读被指定 Profile 的 `apiKeyEnv`，配置加载阶段不批量读取所有
+  Provider Key。缺 Key 时按 Profile fail-closed，不影响其他 Profile。
+- OpenCode Go 的基础流式 Tool Calling 已于 2026-08-15 通过一次受控真实 Smoke；
+  该结果只证明 Tool Call → Tool Result → 最终回答与 Usage 回传，不代表
+  Conversation/Diagnosis 生产质量已验收。ReasoningEffort/ThinkingMode/
+  ReasoningContentRequired/JSONOutput/JSONSchemaOutput 均为 false；JSON Object/
+  JSON Schema 当前未声明。
+
 ## 当前已知结构债务
 
 以下问题已确认，但不属于 2026-08-10 的目录迁移范围：
