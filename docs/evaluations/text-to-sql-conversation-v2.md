@@ -46,7 +46,28 @@ Conversation v2 使用独立的 `text-to-sql-conversation-observation-v2` 合同
 
 失败 Case `sql-total-cases` 连续 7 次调用 `search_schema_catalog`，未调用 `execute_readonly_query`，最终以 `invalid_tool_sequence` 失败。它说明当前生产瓶颈不是 QueryGuard 或数据库执行，而是模型在 schema 探索阶段缺少收敛：固定 Tool Schema 与授权边界正确，但仅靠 SOP 仍可能重复搜索直至迭代预算耗尽。
 
-下一步不应立即扩大固定集，而应先验证低成本收敛策略：在 Conversation Prompt 中明确“已有足够对象/列信息后必须执行查询”，并考虑对 `search_schema_catalog` 设置每轮可配置调用上限。该限制属于执行期 Tool policy，不改变固定 Profile Schema，也不应通过隐藏 Tool 破坏 Prompt Cache。优化后再用同一 3 Case 和相同身份合同复测，随后才扩展到 20 Case。
+该轮结果只能说明 StepFun 在这一小组 Case 上存在 schema 探索不收敛，不能直接推出所有 Provider 都需要相同的硬调用上限。后续必须通过命名 Profile 在同一生产入口上做受控对照，再决定是模型选择、Prompt 引导还是执行期 Tool policy 问题。
+
+## 2026-08-15 OpenCode Go 命名 Profile 单 Case 正式复测
+
+评测器在 clean revision `2c6dcf6` 增加 `-profile` 与 `-case-id`：命名 Profile 选择不会修改生产 `activeProfile`，Profile 指纹、Provider 构造和 Observation 身份都来自实际选择的最终 Profile；单 Case 选择发生在成本预算和 Provider 创建之前。以下是两个相同 revision/Profile/Prompt/Tool Schema 身份下的独立正式单 Case 运行，不作为完整 2 Case 或 20 Case 固定集汇总：
+
+- Provider/Profile：OpenCode Go `opencode-deepseek-main`；
+- 模型：`deepseek-v4-flash`；
+- reasoning effort：`none`；
+- Prompt：`conversation-v7`；
+- Tool Profile：`conversation-default`；
+- 每次上限：1 Case、8 次 Provider 调用、16,000 Token；
+- 原始 Observation/Summary：本地忽略目录 `output/evaluation/text-to-sql-opencode-*.{observations.jsonl,summary.json}`。
+
+| Case | 结果 | Tool 顺序 | 模型调用 | Total Token | Cached Token | 耗时 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `sql-new-count` | 端到端正确 | schema search ×2 → readonly query | 3 | 7,024 | 4,352 | 6.531 秒 |
+| `sql-total-cases` | 端到端正确 | schema search ×3 → readonly query | 4 | 8,619 | 7,680 | 9.771 秒 |
+
+两次运行共消耗 7 次模型调用、15,643 Token，其中 12,032 Cached Token；价格仍不在程序侧估算。`sql-total-cases` 从 StepFun 的 7 次 schema search 后未执行 SQL，变为 OpenCode Go 的 3 次 search 后正确执行 `SELECT COUNT(*) AS Total FROM dbo.v_MESGuardExternalCases` 并回答 `4`。这证明生产 SQL Tool、RunAccess、QueryGuard 和数据库执行链路能够完成该 Case，原失败至少部分是模型行为差异，而不是统一运行时能力断裂。
+
+当前不设置 `search_schema_catalog=2` 的生产硬上限：正确的 `sql-total-cases` 已实际需要 3 次 search，而且现有 `agentToolRunPolicy` 超限会终止整轮 Conversation，而不是把可恢复结果交还模型。重复 search 仍是 Token/延迟优化项；下一步应先在同一 3 Case 上做 StepFun/OpenCode 可比复测，再以不改变固定 Tool Schema、不牺牲正确率为前提评估 Prompt 收敛或可恢复的执行期反馈。扩大到 20 Case 仍需等待可比小样本稳定。
 
 ## 被丢弃的试跑
 
