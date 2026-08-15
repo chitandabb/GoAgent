@@ -1,0 +1,36 @@
+{
+  "datasetVersion": "text-to-sql-v1",
+  "observationSchemaVersion": "text-to-sql-conversation-observation-v2",
+  "entryMode": "conversation",
+  "modelProvider": "stepfun",
+  "modelId": "step-3.7-flash",
+  "reasoningEffort": "medium",
+  "promptVersion": "conversation-v7",
+  "modelProfileFingerprint": "d7e758d50843b5b2d89ff3fd12762b6ce06eac5933f817d6cc2bbfede73ebb46",
+  "implementationRevision": "332a4c1",
+  "toolProfileId": "conversation-default",
+  "toolSchemaFingerprint": "b19b36e98e47aab2d2e4cf970f29f0cba3a486099a2df456c341924717fbdb7c",
+  "implementationDirty": false,
+  "formal": true,
+  "cases": 3,
+  "toolSequenceCorrect": 2,
+  "executionCorrect": 2,
+  "answerCorrect": 2,
+  "endToEndCorrect": 2,
+  "executionAccuracy": 0.6666666666666666,
+  "answerAccuracy": 0.6666666666666666,
+  "endToEndAccuracy": 0.6666666666666666,
+  "toolSequenceAccuracy": 0.6666666666666666,
+  "usage": {
+    "modelCalls": 18,
+    "promptTokens": 39147,
+    "completionTokens": 1966,
+    "totalTokens": 41113,
+    "cachedTokens": 33088,
+    "reasoningTokens": 0
+  },
+  "averageDurationMillis": 6748.666666666667,
+  "failureTypes": {
+    "invalid_tool_sequence": 1
+  }
+}
