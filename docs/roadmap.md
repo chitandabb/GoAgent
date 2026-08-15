@@ -47,6 +47,17 @@ Ordered next slices are maintained directly in this file.
       owner-scoped attachment metadata and exposes the same bounded `read_attachment` Tool through a
       task-id fence, producing `attachment` evidence.
 - [ ] Frontend adoption of turn SSE, attachment upload/read traces, and citation preview.
+- [x] OpenCode Go 主模型配置化切换第一阶段：`provider = "opencode-go"` 独立方言
+      Adapter（复用共享 Eino OpenAI Chat Completions transport，不注入
+      `thinking`/`reasoning_effort`/`enable_thinking`，不建 Registry/init 自注册），
+      命名 Profile `opencode-deepseek-main`（`deepseek-v4-flash`，与 stepfun-main
+      相同的 131072/4096 上下文合同作对照基线），按 Profile 选择性读取
+      `MESGUARD_OPENCODE_GO_API_KEY`，`mesguard-model-smoke -profile`/
+      `-allow-provider-calls` 成本护栏与 usage 未提供/为 0 区分。`activeProfile`
+      未切换；切换 = 命名 Profile + 进程重启，不支持 Run 中途切换。2026-08-15
+      受控真实 Smoke 已完成 Tool Call → Tool Result → 最终回答：两次模型调用，
+      1,013 Tokens、3.152 秒，第二次调用返回 384 Cached Tokens。该结果仅验收
+      基础流式 Tool 协议与 Usage，不代表生产入口质量；JSON Object/Schema 未声明。
 
 ## Active Slice: Unified Agent Runtime v2 and Production-Entry Re-evaluation
 

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func validChatModelProfileConfig() ChatModelProfileConfig {
 	return ChatModelProfileConfig{
@@ -84,6 +87,24 @@ func TestChatModelProfileConfigValidate(t *testing.T) {
 		valid  bool
 	}{
 		{name: "valid StepFun", valid: true},
+		{name: "valid opencode-go", mutate: func(c *ChatModelProfileConfig) {
+			c.Provider = "opencode-go"
+			c.BaseURL = "https://opencode.ai/zen/go/v1"
+			c.APIKeyEnv = "MESGUARD_OPENCODE_GO_API_KEY"
+			c.Model = "deepseek-v4-flash"
+			c.ReasoningEffort = ""
+			c.ThinkingMode = ""
+			c.ResponseFormat = "text"
+		}, valid: true},
+		{name: "opencode-go with empty response format", mutate: func(c *ChatModelProfileConfig) {
+			c.Provider = "opencode-go"
+			c.BaseURL = "https://opencode.ai/zen/go/v1"
+			c.APIKeyEnv = "MESGUARD_OPENCODE_GO_API_KEY"
+			c.Model = "deepseek-v4-flash"
+			c.ReasoningEffort = ""
+			c.ThinkingMode = ""
+			c.ResponseFormat = ""
+		}, valid: true},
 		{name: "valid DeepSeek root URL", mutate: func(c *ChatModelProfileConfig) {
 			c.Provider = "deepseek"
 			c.BaseURL = "https://api.deepseek.com"
@@ -197,6 +218,86 @@ func TestChatModelProfilePromptFingerprintTracksBehaviorButNotAPIKeyLocation(t *
 	}
 	if withResponseSchema == withResponseFormat {
 		t.Fatal("response schema change did not change prompt fingerprint")
+	}
+}
+
+func TestOpenCodeGoPromptFingerprintTracksProviderBaseURLModelButNotKeyLocation(t *testing.T) {
+	profile := validChatModelProfileConfig()
+	profile.Provider = "opencode-go"
+	profile.BaseURL = "https://opencode.ai/zen/go/v1"
+	profile.APIKeyEnv = "MESGUARD_OPENCODE_GO_API_KEY"
+	profile.Model = "deepseek-v4-flash"
+	profile.ReasoningEffort = ""
+	profile.ThinkingMode = ""
+
+	original, err := profile.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(original) != 64 {
+		t.Fatalf("prompt fingerprint = %q, want a 64-hex SHA-256 digest", original)
+	}
+
+	changed := profile
+	changed.Provider = "stepfun"
+	changed.ReasoningEffort = "medium"
+	withProvider, err := changed.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withProvider == original {
+		t.Fatal("provider change did not change prompt fingerprint")
+	}
+
+	changed = profile
+	changed.BaseURL = "https://opencode.ai/zen/go/v2"
+	withBaseURL, err := changed.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withBaseURL == original {
+		t.Fatal("baseURL change did not change prompt fingerprint")
+	}
+
+	changed = profile
+	changed.Model = "deepseek-v4-pro"
+	withModel, err := changed.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withModel == original {
+		t.Fatal("model change did not change prompt fingerprint")
+	}
+
+	changed = profile
+	changed.APIKeyEnv = "MESGUARD_ALTERNATE_OPENCODE_GO_API_KEY"
+	withoutKeyLocation, err := changed.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutKeyLocation != original {
+		t.Fatalf("API key environment name changed prompt fingerprint: %q != %q", withoutKeyLocation, original)
+	}
+	if strings.Contains(original, "MESGUARD_OPENCODE_GO_API_KEY") {
+		t.Fatal("prompt fingerprint must not embed the API key environment name")
+	}
+}
+
+// TestChatModelConfigValidateReadsNoAPIKeys 证明配置加载与校验阶段不会批量读取
+// 任何 Provider 的 API Key：零个密钥环境变量存在时校验仍然通过，密钥只在
+// chatmodel.New*/NewActive/NewProfile 按所选 Profile 逐个读取。
+func TestChatModelConfigValidateReadsNoAPIKeys(t *testing.T) {
+	cfg := validChatModelConfig()
+	profile := cfg.Profiles["stepfun-main"]
+	profile.APIKeyEnv = "MESGUARD_NEVER_SET_CHAT_KEY_A"
+	cfg.Profiles["stepfun-main"] = profile
+	memory := cfg.Profiles["conversation-memory"]
+	memory.APIKeyEnv = "MESGUARD_NEVER_SET_CHAT_KEY_B"
+	cfg.Profiles["conversation-memory"] = memory
+	t.Setenv("MESGUARD_NEVER_SET_CHAT_KEY_A", "")
+	t.Setenv("MESGUARD_NEVER_SET_CHAT_KEY_B", "")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validation must not read API keys: %v", err)
 	}
 }
 

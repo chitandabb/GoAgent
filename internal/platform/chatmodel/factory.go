@@ -171,6 +171,8 @@ func resolveAdapter(provider string) (providerAdapter, error) {
 		return deepSeekAdapter{}, nil
 	case "dashscope":
 		return dashScopeAdapter{}, nil
+	case "opencode-go":
+		return opencodeGoAdapter{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported chat model provider %q", provider)
 	}
@@ -268,3 +270,32 @@ func reasoningEffort(value string) openai.ReasoningEffortLevel {
 		return openai.ReasoningEffortLevelMedium
 	}
 }
+
+// opencodeGoAdapter 表达 OpenCode Go 网关（OpenAI Chat Completions 兼容）的方言。
+// 它复用 openai.NewChatModel，但它是另一个网关：不能假设接受 DeepSeek 官方
+// 接口的 thinking/reasoning_effort 专有参数，因此不注入任何 thinking 参数。
+type opencodeGoAdapter struct{}
+
+// validate 只约束 opencode-go 专有能力：reasoningEffort 与 thinkingMode 一律
+// 拒绝；responseFormat 的 json_object/json_schema 拒绝由 newInstance 基于
+// capabilities 统一检查（本阶段未声明），text/空 均允许。
+func (opencodeGoAdapter) validate(profile config.ChatModelProfileConfig) error {
+	if strings.TrimSpace(profile.ReasoningEffort) != "" {
+		return errors.New("opencode-go does not support reasoningEffort")
+	}
+	if strings.TrimSpace(profile.ThinkingMode) != "" {
+		return errors.New("opencode-go does not support thinkingMode")
+	}
+	return nil
+}
+
+// capabilities 是 opencode-go 的保守能力声明：基础流式 Tool Calling 已通过
+// 受控真实 Smoke；JSON Object/JSON Schema 等未验证能力仍不声明。
+func (opencodeGoAdapter) capabilities(config.ChatModelProfileConfig) Capabilities {
+	return Capabilities{ToolCalling: true}
+}
+
+// configure 只使用共享 ChatModelConfig 的 APIKey/BaseURL/Model/Timeout/
+// MaxTokens 与可选 Temperature：不创建 ExtraFields，不发送 thinking、
+// enable_thinking 或 reasoning_effort。
+func (opencodeGoAdapter) configure(*openai.ChatModelConfig, config.ChatModelProfileConfig) {}

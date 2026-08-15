@@ -161,6 +161,26 @@ tokenizerStrategy = "local_calibrated"
 toolExposureStrategy = "static_frozen"
 providerNativeCompactionEnabled = false
 
+# OpenCode Go 网关（OpenAI Chat Completions 兼容）DeepSeek V4 Flash 主模型
+# 候选 Profile。第一阶段与 stepfun-main 使用相同的 131072/4096 上下文合同，
+# 保证后续对照测试只改变 Provider。不配置 reasoningEffort/thinkingMode：
+# opencode-go Adapter 在创建阶段拒绝这两项。不配置 temperature。
+# activeProfile 暂不切换；切换方式为命名 Profile + 进程重启。
+[models.chat.profiles.opencode-deepseek-main]
+provider = "opencode-go"
+baseURL = "https://opencode.ai/zen/go/v1"
+apiKeyEnv = "MESGUARD_OPENCODE_GO_API_KEY"
+model = "deepseek-v4-flash"
+responseFormat = "text"
+timeoutMillis = 120000
+contextWindowTokens = 131072
+maxOutputTokens = 4096
+promptSafetyMarginTokens = 2048
+promptSafetyMarginRatio = 0.05
+tokenizerStrategy = "local_calibrated"
+toolExposureStrategy = "static_frozen"
+providerNativeCompactionEnabled = false
+
 [models.judge]
 enabled = false
 provider = "dashscope"

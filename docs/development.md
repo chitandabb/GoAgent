@@ -64,6 +64,40 @@ configuration, Docker environment, or a production secret store. Do not put the
 key in TOML or logs. When the key is absent, authentication and ticket APIs
 remain available while the Agent runtime is disabled.
 
+### OpenCode Go 主模型候选（第一阶段）
+
+`config/mesguard.toml` 与 `config/mesguard.docker.toml` 已新增命名 Profile
+`opencode-deepseek-main`（`provider = "opencode-go"`，`baseURL =
+https://opencode.ai/zen/go/v1`，`apiKeyEnv = MESGUARD_OPENCODE_GO_API_KEY`，
+`model = deepseek-v4-flash`）。第一阶段要点：
+
+- **切换方式**：切换 = 修改 `[models.chat].activeProfile` + 进程重启。不支持
+  Agent Run 中途切换 Provider，也没有运行中热加载。
+- **模型职责边界**：主 Agent、Conversation Memory、Query Rewrite、Judge、
+  OCR/VLM、Embedding/Rerank 是独立模型职责，各自绑定独立命名 Profile。
+  OpenCode Go 只接管主 Agent Profile（`activeProfile`）；`conversationMemoryProfile`
+  仍使用已验证的 StepFun `json_schema` Profile（`stepfun-conversation-memory`）。
+- **方言边界**：`opencode-go` 是独立 Provider 方言 Adapter（
+  `internal/platform/chatmodel`），它复用共享的 Eino OpenAI Chat Completions
+  transport（`openai.NewChatModel`），但不注入 `thinking`、
+  `reasoning_effort`、`enable_thinking`，不创建 `ExtraFields`。DeepSeek 官方
+  接口方言仍由 `deepSeekAdapter` 表达；OpenCode Go 网关不能假设接受相同的
+  专有参数。
+- **能力声明**：`opencode-go` 的 Tool Calling 已于 2026-08-15 通过一次受控真实
+  Smoke：模型完成 Tool Call → Tool Result → 最终回答，两次调用共 1,013 Tokens，
+  总耗时 3.152 秒，第二次调用返回 384 Cached Tokens。该结果只证明基础流式 Tool
+  协议与 Usage 回传，不替代 Conversation/Diagnosis 生产入口质量评测；JSON Object /
+  JSON Schema 输出当前仍未声明。
+- **对照基线**：第一次对照故意与 `stepfun-main` 使用相同的
+  131072/4096 上下文合同，保证对照测试只改变 Provider；后续才单独评估
+  OpenCode Go 的更长窗口（如 256K）。
+- **Docker**：`docker-compose.yml` 仅向创建 active chat profile 的服务
+  （`diagnosis-worker`、`conversation-worker`）传递
+  `MESGUARD_OPENCODE_GO_API_KEY: ${MESGUARD_OPENCODE_GO_API_KEY:-}`；`backend`
+  不创建 active chat profile，`memory-worker` 只使用
+  `conversationMemoryProfile`（StepFun），两者均不注入该 Key。未配置该 Key 时，
+  保持 StepFun activeProfile 的现有部署照常启动。
+
 ### Agent Prompt configuration
 
 Agent instructions are stored under `config/prompts/` instead of Go constants:
@@ -684,10 +718,11 @@ go test -tags=integration ./internal/platform/queryrewrite `
 It verifies the strict JSON/protected-signal contract, not Recall, ranking quality, latency SLA,
 or cost reduction. See `docs/evaluations/query-rewrite-v1.md` for the current smoke observations.
 
-`[models.chat]` is a named-profile model assembly layer. `activeProfile` selects the diagnosis
-Agent model, while `conversationMemoryProfile` independently selects the future fast conversation
-compaction model without duplicating Provider credentials. Other roles resolve their own profile. The Factory currently registers StepFun,
-DeepSeek and DashScope adapters and returns normalized profile/provider/model/capability identity.
+`[models.chat]` is a named-profile model assembly layer. `activeProfile` selects the shared main
+Conversation/Diagnosis Agent model, while `conversationMemoryProfile` independently selects the
+fast conversation compaction model without duplicating Provider credentials. Other roles resolve
+their own profile. The Factory currently registers StepFun, DeepSeek, DashScope and OpenCode Go
+adapters and returns normalized profile/provider/model/capability identity.
 All configured profiles are statically validated, but only a selected profile reads its API key.
 StepFun maps `reasoningEffort`; DeepSeek requires explicit thinking mode and rejects effort while
 thinking is disabled; DashScope maps thinking mode to `enable_thinking`. Unsupported combinations
@@ -858,15 +893,20 @@ profile to `activeProfile` until non-streaming/streaming Tool loops, strict JSON
 Evidence Gate and paired quality probes pass. The exact acceptance matrix and official links are in
 the same design section.
 
-After configuring the StepFun key, run the provider smoke test once:
+After configuring the selected Profile's key, run the provider smoke test once. Provider access is
+always explicit; omitting `-allow-provider-calls` fails before model creation:
 
 ```powershell
-go run ./tools/smoke/mesguard-model-smoke
+go run ./tools/smoke/mesguard-model-smoke `
+  -profile stepfun-main `
+  -allow-provider-calls
 ```
 
 The command asks the model to return one harmless Tool Call and prints only the
-model name, Tool name, and provider-reported Token usage. It does not execute
-database, GitHub, or write-capable tools.
+Profile/provider/model identity, Tool name, timing, and provider-reported Token usage. It performs
+exactly two model calls and does not execute database, GitHub, or write-capable tools. Aggregate
+Usage is reported as `provided`, `partial`, or `not-provided`; 429, timeout, and protocol failures
+use stable `provider_error_type` values.
 
 To verify the complete non-streaming ReAct loop and multi-call Token
 aggregation against a fixed synthetic ticket, run:
