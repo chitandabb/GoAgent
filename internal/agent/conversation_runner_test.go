@@ -756,9 +756,9 @@ func TestConversationRunnerContinuousTailCountsBoundedAttachmentReferencesAndKee
 	inputs := append([][]string(nil), state.inputs...)
 	state.mu.Unlock()
 	if len(inputs) != 1 || len(inputs[0]) != 2 || strings.Contains(inputs[0][1], "previous") ||
-		!strings.Contains(inputs[0][1], "attachment id="+attachmentID.String()) ||
-		!strings.Contains(inputs[0][1], "case id="+caseID.String()) ||
-		!strings.Contains(inputs[0][1], "task id="+taskID.String()) ||
+		!strings.Contains(inputs[0][1], `"attachmentId":"`+attachmentID.String()+`"`) ||
+		!strings.Contains(inputs[0][1], `"externalCaseId":"`+caseID.String()+`"`) ||
+		!strings.Contains(inputs[0][1], `"taskId":"`+taskID.String()+`"`) ||
 		!strings.Contains(inputs[0][1], "inspect") {
 		t.Fatalf("attachment-aware model input = %v", inputs)
 	}
@@ -1575,7 +1575,7 @@ func TestConversationModelMessagesBoundsHistoryAndDropsInternalRoles(t *testing.
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleTool, Content: "原始工具结果"},
 		current,
-	}, current, 8)
+	}, current, 8, "")
 	messages := projection.messages
 
 	if len(messages) != 2 || messages[0].Role != schema.Assistant || messages[0].Content != "上轮回答" ||
@@ -1681,7 +1681,7 @@ func TestConversationMessageReferencePromptIncludesStructuredReportReference(t *
 	prompt := conversationMessageReferencePrompt(conversation.Message{
 		ReportReferences: []conversation.ReportReference{{ReferenceID: referenceID}},
 	})
-	if !strings.Contains(prompt, "report id="+referenceID) || !strings.Contains(prompt, "<message_references>") {
+	if !strings.Contains(prompt, `"referenceId":"`+referenceID+`"`) || !strings.Contains(prompt, "<message_references>") {
 		t.Fatalf("report reference prompt = %q", prompt)
 	}
 }

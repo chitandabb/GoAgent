@@ -57,6 +57,10 @@ type ConversationRunnerConfig struct {
 	MemorySourceRecoveryMaxCalls int
 	EnableStreaming              bool
 	ContextPreflight             ConversationContextPreflightConfig
+	// SQLDataSourceID 是启动期解析的只读数据源 UUID；非零时 Conversation
+	// RunAccess 获得 sql.read 并把该 ID 作为唯一数据源 Grant。零值表示
+	// 部署未配置 Conversation 只读数据源，不授予任何 sql.read。
+	SQLDataSourceID uuid.UUID
 }
 
 // ConversationRunner executes one lightweight workbench turn. It is separate
@@ -83,6 +87,7 @@ type ConversationRunner struct {
 	memorySourceRecoveryMaxCalls int
 	enableStreaming              bool
 	contextPreflight             ConversationContextPreflightConfig
+	sqlDataSourceID              uuid.UUID
 }
 
 func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, error) {
@@ -175,13 +180,14 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		toolProfileID: agentruntime.ToolProfileConversation, systemInstruction: cfg.SystemInstruction,
 		modelProvider: cfg.ModelProvider, modelID: cfg.ModelID, promptVersion: cfg.PromptVersion,
 		availableDependencies: dependencies,
-		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
+		log:                   cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
 		memorySourceRecoveryEnabled:  cfg.MemorySourceRecoveryEnabled,
 		memorySourceRecoveryMaxCalls: cfg.MemorySourceRecoveryMaxCalls,
 		enableStreaming:              cfg.EnableStreaming,
 		contextPreflight:             cfg.ContextPreflight,
+		sqlDataSourceID:              cfg.SQLDataSourceID,
 	}, nil
 }
 
@@ -236,11 +242,27 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 		request.UserMessage.Role != conversation.MessageRoleUser {
 		return conversation.AgentResponse{}, conversation.ErrInvalidMessage
 	}
+	// 每轮只解析一次固定 Conversation Profile：用同一份 resolved.ModelVisibleNames
+	// 推导 RunAccess，并复用同一份 resolved.Tools 执行，禁止再次解析或读取内部
+	// Profile。Tool Schema 因此不随消息引用或 RunAccess 收窄而变化。
+	resolved, err := r.toolCatalog.ResolveProfile(ctx, r.toolProfileID)
+	if err != nil {
+		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tool profile %q: %w", r.toolProfileID, err)
+	}
+	runContext, err := buildConversationRunContext(
+		commandContext.Actor, request.UserMessage, resolved.ModelVisibleNames, r.sqlDataSourceID,
+	)
+	if err != nil {
+		return conversation.AgentResponse{}, fmt.Errorf("build conversation run context: %w", err)
+	}
 	scope, err := r.conversationScope(commandContext.Actor, request.UserMessage)
 	if err != nil {
 		return conversation.AgentResponse{}, err
 	}
+	// WithTaskScope 保留给仍读取旧 TaskScope 的 Tool 做兼容迁移；权威 v2
+	// RunAccess 必须在它之后写入，保证 TaskScope 兼容转换不会覆盖直接构造的值。
 	runCtx := WithTaskScope(ctx, scope)
+	runCtx = agentruntime.WithRunAccess(runCtx, runContext.Access())
 	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
 		RunID: request.UserMessage.ID.String(), ConversationID: request.Conversation.ID.String(),
 	})
@@ -275,16 +297,13 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	runCtx = withConversationReportReferenceTrace(runCtx, reportReferenceTrace)
 	usageTrace = &modelUsageTrace{onUsage: budget.recordUsage}
 	observeFailure = true
-	resolved, err := r.toolCatalog.ResolveProfile(runCtx, r.toolProfileID)
-	if err != nil {
-		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tool profile %q: %w", r.toolProfileID, err)
-	}
 	tools := resolved.Tools
+	turnContext := runContext.TurnContext()
 	var projection conversationPromptProjection
 	if r.contextPreflight.SummaryTailEnabled {
-		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request)
+		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request, turnContext)
 	} else {
-		projection, err = r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage)
+		projection, err = r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage, turnContext)
 		if err == nil {
 			promptManifest, err = r.buildConversationPromptManifest(runCtx, tools, projection)
 		}
@@ -554,6 +573,7 @@ type conversationPromptProjection struct {
 	messages                []*schema.Message
 	selected                []conversation.Message
 	currentMessageID        uuid.UUID
+	currentUserContent      string
 	tailFromSeq             int64
 	tailThroughSeq          int64
 	tailContinuous          bool
@@ -568,16 +588,17 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 	ctx context.Context,
 	history []conversation.Message,
 	current conversation.Message,
+	turnContext string,
 ) (conversationPromptProjection, error) {
 	if r.contextPreflight.FullHistoryEnabled {
-		return buildFullConversationPromptProjection(history, current)
+		return buildFullConversationPromptProjection(history, current, turnContext)
 	}
 	if !r.contextPreflight.ContinuousTailEnabled {
-		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes), nil
+		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes, turnContext), nil
 	}
 	tailBudget := int(math.Floor(float64(r.contextPreflight.ModelProfile.ContextWindowTokens) *
 		r.contextPreflight.TailMaxRatio))
-	return r.buildConversationPromptProjectionWithTailBudget(ctx, history, current, tailBudget)
+	return r.buildConversationPromptProjectionWithTailBudget(ctx, history, current, tailBudget, turnContext)
 }
 
 func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
@@ -585,6 +606,7 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	history []conversation.Message,
 	current conversation.Message,
 	tailBudget int,
+	turnContext string,
 ) (conversationPromptProjection, error) {
 	if tailBudget < 1 {
 		return conversationPromptProjection{}, ErrConversationContextPreparationFailed
@@ -596,7 +618,8 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	tailMessages := make([]contextgovernance.TailMessage, 0, len(candidates))
 	for _, item := range candidates {
 		tailMessages = append(tailMessages, contextgovernance.TailMessage{
-			Sequence: item.Seq, Content: conversationMessagePrompt(item), Current: item.ID == current.ID,
+			Sequence: item.Seq, Content: conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext)),
+			Current: item.ID == current.ID,
 		})
 	}
 	selectionCtx, cancel := context.WithTimeout(ctx, r.contextPreflight.effectiveTimeout())
@@ -610,7 +633,7 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	selectedDomain := candidates[len(candidates)-len(selection.Messages):]
 	selected := make([]*schema.Message, 0, len(selectedDomain))
 	for _, item := range selectedDomain {
-		content := conversationMessagePrompt(item)
+		content := conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext))
 		if item.Role == conversation.MessageRoleUser {
 			selected = append(selected, schema.UserMessage(content))
 		} else {
@@ -619,9 +642,38 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	}
 	return conversationPromptProjection{
 		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
-		tailFromSeq: selectedDomain[0].Seq, tailThroughSeq: selectedDomain[len(selectedDomain)-1].Seq,
+		currentUserContent: conversationCurrentUserContent(selectedDomain, current, turnContext),
+		tailFromSeq:        selectedDomain[0].Seq, tailThroughSeq: selectedDomain[len(selectedDomain)-1].Seq,
 		tailContinuous: true,
 	}, nil
+}
+
+// turnContextForMessage 只把本轮 turn_context 附加到当前 user message；
+// 历史消息永不携带本轮数据源授权，只保留各自已持久化引用。
+func turnContextForMessage(
+	item conversation.Message,
+	current conversation.Message,
+	turnContext string,
+) string {
+	if item.ID == current.ID && item.Role == conversation.MessageRoleUser {
+		return turnContext
+	}
+	return ""
+}
+
+// conversationCurrentUserContent 返回当前 user message 渲染后的完整内容
+// （含尾部 turn_context），供 Token 预算与 PromptManifest 统计追加内容。
+func conversationCurrentUserContent(
+	selected []conversation.Message,
+	current conversation.Message,
+	turnContext string,
+) string {
+	for _, item := range selected {
+		if item.ID == current.ID {
+			return strings.TrimSpace(conversationMessagePrompt(item, turnContext))
+		}
+	}
+	return ""
 }
 
 func continuousConversationCandidates(
@@ -635,7 +687,7 @@ func continuousConversationCandidates(
 		item := ordered[index]
 		if item.Seq != nextSequence-1 ||
 			(item.Role != conversation.MessageRoleUser && item.Role != conversation.MessageRoleAssistant) ||
-			conversationMessagePrompt(item) == "" {
+			conversationMessagePrompt(item, "") == "" {
 			break
 		}
 		candidates = append(candidates, item)
@@ -652,6 +704,7 @@ func buildRuneConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
 	maxRunes int,
+	turnContext string,
 ) conversationPromptProjection {
 	ordered := conversationHistoryThroughCurrent(history, current)
 	selected := make([]*schema.Message, 0, len(ordered))
@@ -659,7 +712,7 @@ func buildRuneConversationPromptProjection(
 	usedRunes := 0
 	for index := len(ordered) - 1; index >= 0; index-- {
 		item := ordered[index]
-		content := conversationMessagePrompt(item)
+		content := conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext))
 		if content == "" {
 			continue
 		}
@@ -684,7 +737,8 @@ func buildRuneConversationPromptProjection(
 	slices.Reverse(selectedDomain)
 	projection := conversationPromptProjection{
 		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
-		tailContinuous: true,
+		currentUserContent: conversationCurrentUserContent(selectedDomain, current, turnContext),
+		tailContinuous:     true,
 	}
 	if len(selectedDomain) > 0 {
 		projection.tailFromSeq = selectedDomain[0].Seq
@@ -721,44 +775,31 @@ func conversationHistoryThroughCurrent(history []conversation.Message, current c
 	return ordered
 }
 
-func conversationMessagePrompt(message conversation.Message) string {
+// conversationMessagePrompt 渲染一条消息的模型可见正文。结构化上下文一律
+// 追加在正文尾部（用户原文 + 换行 + 上下文块），绝不放在原文前面：
+//   - 当前 user message 携带本轮 turnContext（含授权只读 dataSourceId）；
+//   - 历史消息只保留各自已持久化引用，引用块同样位于该消息正文尾部，
+//     且永远不携带本轮数据源授权。
+func conversationMessagePrompt(message conversation.Message, turnContext string) string {
 	content := strings.TrimSpace(message.Content)
 	if content == "" {
 		return ""
+	}
+	if turnContext != "" {
+		return content + "\n" + turnContext
 	}
 	references := conversationMessageReferencePrompt(message)
 	if references == "" {
 		return content
 	}
-	return references + content
+	return content + "\n" + references
 }
 
+// conversationMessageReferencePrompt 渲染历史消息各自已持久化引用的安全 JSON
+// 投影（<message_references> 块），委托共享渲染器（conversation_context_projection.go）；
+// 永不携带本轮数据源授权。
 func conversationMessageReferencePrompt(message conversation.Message) string {
-	if len(message.CaseReferences) == 0 && len(message.TaskReferences) == 0 &&
-		len(message.ReportReferences) == 0 && len(message.Attachments) == 0 {
-		return ""
-	}
-	var contextBlock strings.Builder
-	contextBlock.WriteString("<message_references>\n")
-	for _, reference := range message.CaseReferences {
-		fmt.Fprintf(&contextBlock, "case id=%s kind=%s\n", reference.ExternalCaseID, reference.Kind)
-	}
-	for _, reference := range message.TaskReferences {
-		fmt.Fprintf(&contextBlock, "task id=%s kind=%s\n", reference.TaskID, reference.Kind)
-	}
-	for _, reference := range message.ReportReferences {
-		fmt.Fprintf(&contextBlock, "report id=%s\n", reference.ReferenceID)
-	}
-	for _, reference := range message.Attachments {
-		fmt.Fprintf(
-			&contextBlock,
-			"attachment id=%s name=%q media_type=%s purpose=%s size_bytes=%d status=%s\n",
-			reference.AttachmentID, reference.OriginalName, reference.MediaType,
-			reference.Purpose, reference.SizeBytes, reference.Status,
-		)
-	}
-	contextBlock.WriteString("</message_references>\n")
-	return contextBlock.String()
+	return renderConversationMessageReferences(message)
 }
 
 func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddleware {

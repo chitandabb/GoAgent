@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -60,6 +61,13 @@ func NewReadExternalCaseTool(getter ExternalCaseGetter) (tool.InvokableTool, err
 			id, err := uuid.Parse(input.ExternalCaseID)
 			if err != nil {
 				return externalCaseEvidence{}, errors.New("externalCaseId must be a valid UUID")
+			}
+			// Conversation 运行时：externalCaseId 必须在本轮 RunAccess 的
+			// ExternalCaseIDs Grant 中，否则在 getter.Get 前拒绝（未授权零调用）。
+			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+				return grants.AllowsExternalCase(id)
+			}); err != nil {
+				return externalCaseEvidence{}, err
 			}
 			item, err := getter.Get(ctx, id)
 			if err != nil {

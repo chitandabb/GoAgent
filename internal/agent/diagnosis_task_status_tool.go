@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
@@ -53,6 +54,13 @@ func NewGetDiagnosisTaskStatusTool(reader DiagnosisTaskStatusReader) (tool.Invok
 			taskID, err := uuid.Parse(strings.TrimSpace(input.TaskID))
 			if err != nil {
 				return getDiagnosisTaskStatusResponse{}, errors.New("taskId must be a valid UUID")
+			}
+			// Conversation 运行时：taskId 必须在本轮 RunAccess 的 TaskIDs
+			// Grant 中；服务端 owner/admin 校验保留为第二层。
+			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+				return grants.AllowsTask(taskID)
+			}); err != nil {
+				return getDiagnosisTaskStatusResponse{}, err
 			}
 			result, err := reader.GetDiagnosisTaskStatus(ctx, taskID)
 			if err != nil {

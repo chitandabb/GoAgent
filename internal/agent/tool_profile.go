@@ -6,10 +6,12 @@ import "github.com/chitandabb/GoAgent/internal/agentruntime"
 // 配置。它故意不包含 actor、消息引用、资源授权或依赖瞬时健康状态字段；
 // 一个进程启动后 Profile 不再变化，临时 Tool 执行失败也不能删除 Schema。
 //
-// 本切片接线状态：SQL Tool 只进入 Diagnosis Profile；Conversation Profile
-// 暂不含 SQL（下一切片完成 RunAccess/ResourceGrant 与 SQL Tool 内部资源检查后
-// 再开放）。Web 两件套与 SQL 三件套按各自成功构造分别声明，部分构造不会
-// 让 Profile 引用未注册的 Tool。
+// 本切片接线状态：search_schema_catalog 与 execute_readonly_query 在成功构造
+// 后同时进入 Conversation 与 Diagnosis 两个固定 Profile（Conversation 经
+// RunAccess sql.read + 只读数据源 Grant 执行期授权）；get_database_object_definition
+// 按最小 Tool 集原则继续仅供 Diagnosis（Text-to-SQL 不需要对象 DDL）。Web
+// 两件套与 SQL 三件套按各自成功构造分别声明，部分构造不会让 Profile 引用
+// 未注册的 Tool。
 type ToolProfileConfig struct {
 	ExternalCaseConfigured           bool
 	SkillReferenceConfigured         bool
@@ -58,16 +60,20 @@ func BuildDefaultToolProfiles(config ToolProfileConfig) (agentruntime.ToolProfil
 		conversationNames = append(conversationNames, ToolReadAttachment)
 		diagnosisNames = append(diagnosisNames, ToolReadAttachment)
 	}
-	// SQL 三件套按"实际成功构造"逐个加入 Diagnosis Profile；本切片不加入
-	// Conversation Profile。同一组 Tool 只成功构造一部分时，Profile 只声明
-	// 实际注册的名字，避免引用不存在的 Catalog Tool。
+	// SQL 三件套按"实际成功构造"逐个声明：search_schema_catalog 与
+	// execute_readonly_query 同时进入 Conversation 与 Diagnosis Profile；
+	// get_database_object_definition 按最小 Tool 集原则仅供 Diagnosis。
+	// 同一组 Tool 只成功构造一部分时，Profile 只声明实际注册的名字，避免
+	// 引用不存在的 Catalog Tool。
 	if config.SQLObjectDefinitionsConfigured {
 		diagnosisNames = append(diagnosisNames, ToolDatabaseObjectDefinition)
 	}
 	if config.SchemaCatalogConfigured {
+		conversationNames = append(conversationNames, ToolSearchSchemaCatalog)
 		diagnosisNames = append(diagnosisNames, ToolSearchSchemaCatalog)
 	}
 	if config.ReadonlyQueryConfigured {
+		conversationNames = append(conversationNames, ToolExecuteReadonlyQuery)
 		diagnosisNames = append(diagnosisNames, ToolExecuteReadonlyQuery)
 	}
 	if len(config.GitHubToolNames) != 0 {

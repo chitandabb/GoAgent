@@ -584,19 +584,17 @@ persisted diagnosis reports or evaluation observations. The current mechanism
 is intentionally file-based and does not provide hot reload or a Prompt release
 platform.
 
-Prompt and Skill text cannot grant capabilities. The Tool Profile (model-visible
-Schema) is the startup assembly snapshot of one process-start/deployment Epoch:
-its content is fixed by which Adapters complete construction at startup, and
-after the Runtime starts, current message references, `TaskScope`/`RunAccess`
-narrowing and temporary dependency health never remove Schema. A restart that
-fails to construct an Adapter is a new startup Profile/Epoch with a new Tool
-Schema fingerprint; do not mix its evaluation data with the old Epoch. The
-execution-time Permission Guard is wired; the unified `ResourceGrant`
-projection and Tool-internal checks land in the `turn_context` + Conversation
-Text-to-SQL slice, and existing attachment/task Tools keep their
-`CommandContext`/owner checks until then. `TaskScope`, `ToolCatalog`, argument
-policies, database accounts, and upstream credentials remain the authorization
-boundary even if a Prompt file is edited incorrectly.
+Prompt and Skill text cannot grant capabilities. The Tool Profile is the startup
+assembly snapshot of one process-start/deployment Epoch; a restart that fails to
+construct an Adapter is a new Epoch with a new Tool Schema fingerprint, so do not
+mix its evaluation data with the old Epoch. The full runtime contract and the
+Conversation `turn_context`/Text-to-SQL slice (including execution-time
+`RunAccess.Grants` validation) are documented in
+[`decisions/005-unified-agent-runtime-and-stable-tool-profiles.md`](decisions/005-unified-agent-runtime-and-stable-tool-profiles.md)
+and [`design/agent-orchestration.md`](design/agent-orchestration.md).
+`TaskScope`, `ToolCatalog`, argument policies, database accounts, and upstream
+credentials remain the authorization boundary even if a Prompt file is edited
+incorrectly.
 
 GitHub code investigation additionally requires `MESGUARD_GITHUB_MCP_TOKEN`.
 If GitHub MCP cannot connect, `ticket-diagnosis` remains active and only

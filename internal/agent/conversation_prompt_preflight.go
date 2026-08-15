@@ -322,17 +322,21 @@ func CanonicalToolContractFingerprint(
 	return contract.Fingerprint, nil
 }
 
+// conversationPromptSegments 把投影拆成 Token 预算段。当前 user message 的
+// 内容使用渲染后的 currentUserContent（含尾部 turn_context，因此追加内容
+// 一定被统计），其引用不再重复计入 DynamicReferences 段；历史消息继续把
+// 各自引用计入 DynamicReferences 段。
 func conversationPromptSegments(projection conversationPromptProjection) (history, dynamicReferences, currentUser string) {
 	var historyBuilder strings.Builder
 	var referenceBuilder strings.Builder
 	for _, message := range projection.selected {
+		if message.ID == projection.currentMessageID {
+			currentUser = projection.currentUserContent
+			continue
+		}
 		references := conversationMessageReferencePrompt(message)
 		if references != "" {
 			fmt.Fprintf(&referenceBuilder, "message_seq=%d\n%s", message.Seq, references)
-		}
-		if message.ID == projection.currentMessageID {
-			currentUser = strings.TrimSpace(message.Content)
-			continue
 		}
 		fmt.Fprintf(&historyBuilder, "role=%s seq=%d\n%s\n", message.Role, message.Seq, strings.TrimSpace(message.Content))
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/components/tool"
@@ -50,14 +51,7 @@ func NewSearchSchemaCatalogTool(searcher SchemaCatalogSearcher) (tool.InvokableT
 		ToolSearchSchemaCatalog,
 		"在管理员发布的 SQL Schema Catalog 中检索未知的表、视图和字段语义；只返回 queryable 元数据，不接受 SQL 片段、不读取业务行数据，也不替代实际数据查询",
 		func(ctx context.Context, input schemaCatalogInput) ([]schemaCatalogResult, error) {
-			scope, ok := TaskScopeFromContext(ctx)
-			if !ok {
-				return nil, ErrTaskScopeRequired
-			}
-			if !scope.DependencyAvailable(ToolDependencySQLServer) {
-				return nil, resilience.RetryableFailure(errors.New("SQL Server dependency is unavailable"))
-			}
-			dataSourceID, err := resolveCatalogDataSource(scope, input.DataSourceID)
+			dataSourceID, err := resolveGrantedSQLDataSource(ctx, input.DataSourceID)
 			if err != nil {
 				return nil, resilience.StrictFailure(err)
 			}
@@ -98,31 +92,38 @@ func NewSearchSchemaCatalogTool(searcher SchemaCatalogSearcher) (tool.InvokableT
 	)
 }
 
-func resolveCatalogDataSource(scope TaskScope, rawID string) (uuid.UUID, error) {
-	if scope.taskType != TaskTypeDiagnosis {
-		return uuid.Nil, errors.New("schema catalog is available only for diagnosis tasks")
+// resolveGrantedSQLDataSource 从本轮 RunAccess.Grants 校验只读 SQL 数据源：
+//   - 显式 ID 必须在 Grant 中；
+//   - 省略 ID 时仅允许恰好一个授权数据源；
+//   - 无 RunAccess、无 sql.read、零个或多个候选均拒绝（fail-closed）。
+//
+// 授权完全来自 RunAccess，不把依赖健康状态当成授权；瞬时连接故障由
+// Adapter 以现有 retryable/degraded 结果返回。
+func resolveGrantedSQLDataSource(ctx context.Context, rawID string) (uuid.UUID, error) {
+	access, ok := agentruntime.RunAccessFromContext(ctx)
+	if !ok {
+		return uuid.Nil, ErrRunAccessRequired
 	}
-	allowed := make([]ScopedDataSource, 0, len(scope.dataSources))
-	for _, source := range scope.dataSources {
-		if source.SafetyMode == DataSourceSafetyReadOnly &&
-			(source.Role == DataSourceRoleCaseSource || source.Role == DataSourceRoleProduction || source.Role == DataSourceRoleProductReplica) {
-			allowed = append(allowed, source)
-		}
+	if !access.Allows(agentruntime.PermissionSQLRead) {
+		return uuid.Nil, errors.New("sql.read permission is not granted")
 	}
+	candidates := access.Grants().DataSourceIDs()
 	if rawID != "" {
 		id, err := uuid.Parse(rawID)
 		if err != nil {
 			return uuid.Nil, errors.New("dataSourceId must be a valid UUID")
 		}
-		for _, source := range allowed {
-			if source.ID == id {
+		for _, candidate := range candidates {
+			if candidate == id {
 				return id, nil
 			}
 		}
-		return uuid.Nil, errors.New("data source is not authorized for schema catalog")
+		return uuid.Nil, errors.New("data source is not authorized for read-only SQL access")
 	}
-	if len(allowed) != 1 {
-		return uuid.Nil, fmt.Errorf("dataSourceId is required when %d read-only data sources are authorized", len(allowed))
+	if len(candidates) != 1 {
+		return uuid.Nil, fmt.Errorf(
+			"dataSourceId is required when %d read-only data sources are authorized", len(candidates),
+		)
 	}
-	return allowed[0].ID, nil
+	return candidates[0], nil
 }

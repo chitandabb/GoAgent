@@ -28,19 +28,10 @@ func NewExecuteReadonlyQueryTool(executor repository.ReadonlyQueryExecutor) (too
 		ToolExecuteReadonlyQuery,
 		"在已授权 SQL Server 数据源上执行模型根据用户请求生成的单条只读 T-SQL；执行器应用 QueryGuard、已发布 Schema Catalog、超时、行数、字节数和并发限制。用于读取记录、核对值或聚合统计，不要用 Schema Catalog 检索代替实际数据查询",
 		func(ctx context.Context, input readonlyQueryInput) (repository.ReadonlyQueryResult, error) {
-			scope, ok := TaskScopeFromContext(ctx)
-			if !ok {
-				return repository.ReadonlyQueryResult{}, ErrTaskScopeRequired
-			}
-			if !scope.DependencyAvailable(ToolDependencySQLServer) {
-				return repository.ReadonlyQueryResult{}, resilience.RetryableFailure(
-					errors.New("SQL Server dependency is unavailable"),
-				)
-			}
 			if strings.TrimSpace(input.Query) == "" {
 				return repository.ReadonlyQueryResult{}, errors.New("query must be non-empty")
 			}
-			dataSourceID, err := resolveCatalogDataSource(scope, input.DataSourceID)
+			dataSourceID, err := resolveGrantedSQLDataSource(ctx, input.DataSourceID)
 			if err != nil {
 				return repository.ReadonlyQueryResult{}, resilience.StrictFailure(err)
 			}

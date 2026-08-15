@@ -34,16 +34,16 @@ func TestDefaultToolProfilesShareReadToolsButKeepCommandsRuntimeSpecific(t *test
 	}
 	for _, name := range []string{
 		ToolSearchKnowledge, ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus,
-		ToolReadConversationToolResult,
+		ToolReadConversationToolResult, ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery,
 	} {
 		if !conversation.Has(name) {
 			t.Fatalf("conversation Tool Profile is missing %q: %v", name, conversation.ToolNames())
 		}
 	}
-	// 本切片接线状态：Conversation Profile 不含 SQL、Skill 与代码调查工具。
+	// 本切片接线状态：Conversation Profile 含成功构造的 Schema Catalog 与
+	// 只读查询 Tool，但按最小 Tool 集原则不含对象定义、Skill 与代码调查工具。
 	for _, name := range []string{
-		ToolSearchSchemaCatalog, ToolDatabaseObjectDefinition, ToolExecuteReadonlyQuery,
-		ToolSkill, ToolReadSkillReference,
+		ToolDatabaseObjectDefinition, ToolSkill, ToolReadSkillReference,
 	} {
 		if conversation.Has(name) {
 			t.Fatalf("conversation Tool Profile leaked diagnosis-only tool %q: %v", name, conversation.ToolNames())
@@ -101,10 +101,21 @@ func TestDefaultToolProfilesSQLToolsFollowPartialConstruction(t *testing.T) {
 			t.Fatalf("full SQL profile missing %q: %v", name, fullDiagnosis.ToolNames())
 		}
 	}
-	// Conversation 无论 SQL 配置如何都不含 SQL（本切片接线状态）。
+	// Schema Catalog 与只读查询成功构造后进入 Conversation Profile，
+	// 但对象定义按最小 Tool 集原则仍仅供 Diagnosis。
 	fullConversation, _ := full.Profile(agentruntime.ToolProfileConversation)
-	if fullConversation.Has(ToolExecuteReadonlyQuery) {
-		t.Fatalf("conversation profile received SQL tools: %v", fullConversation.ToolNames())
+	for _, name := range []string{ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery} {
+		if !fullConversation.Has(name) {
+			t.Fatalf("conversation profile missing constructed SQL tool %q: %v", name, fullConversation.ToolNames())
+		}
+	}
+	if fullConversation.Has(ToolDatabaseObjectDefinition) {
+		t.Fatalf("conversation profile must not receive object definition tool: %v", fullConversation.ToolNames())
+	}
+	// 只有对象定义成功构造时，Conversation Profile 仍不含任何 SQL Tool。
+	partialConversation, _ := partial.Profile(agentruntime.ToolProfileConversation)
+	if partialConversation.Has(ToolSearchSchemaCatalog) || partialConversation.Has(ToolExecuteReadonlyQuery) {
+		t.Fatalf("partial SQL profile leaked tools into conversation: %v", partialConversation.ToolNames())
 	}
 }
 
