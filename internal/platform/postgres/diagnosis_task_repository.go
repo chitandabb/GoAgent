@@ -60,11 +60,11 @@ func (r *DiagnosisTaskRepository) createTaskInTx(
 ) (diagnosis.TaskCreateResult, error) {
 	db := ResolveDB(ctx, r.db)
 
-	// 先做 Policy fail-closed 校验：新任务必须显式 frozen 且 Policy 完整，
-	// 缺失/损坏/版本不一致时在触碰任何表之前拒绝，绝不自动降级为 legacy。
-	if err := validateTaskInvestigationPolicy(
-		input.InvestigationPolicyMode, input.InvestigationPolicy, input.InvestigationPolicySchemaVersion,
-	); err != nil {
+	// 先做 Policy fail-closed 校验：新任务必须携带完整 Policy（非空 payload、
+	// 非零且与 payload 内 schemaVersion 一致的列版本、严格 codec），任何缺失
+	// 都在触碰任何表之前拒绝。旧授权体系（legacy/mode/request_scope）已硬切
+	// 删除，不存在降级路径。
+	if err := validateTaskInvestigationPolicy(input.InvestigationPolicy, input.InvestigationPolicySchemaVersion); err != nil {
 		return diagnosis.TaskCreateResult{}, err
 	}
 
@@ -134,16 +134,15 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	row := db.Raw(`
 INSERT INTO diagnosis_tasks
     (id, created_by, external_case_id, case_snapshot_id, retry_of, idempotency_key,
-     request_fingerprint, request_text, request_scope, request_scope_schema_version,
-     investigation_policy, investigation_policy_schema_version, investigation_policy_mode,
+     request_fingerprint, request_text,
+     investigation_policy, investigation_policy_schema_version,
      status, attempt_count, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
 ON CONFLICT (created_by, idempotency_key) DO NOTHING
 RETURNING id`,
 		taskID, input.CreatedBy, input.ExternalCaseID, snapshotID, input.RetryOfTaskID,
-		input.IdempotencyKey, input.RequestFingerprint, input.RequestText, input.RequestScope,
-		input.RequestScopeSchemaVersion, input.InvestigationPolicy, input.InvestigationPolicySchemaVersion,
-		string(input.InvestigationPolicyMode),
+		input.IdempotencyKey, input.RequestFingerprint, input.RequestText,
+		input.InvestigationPolicy, input.InvestigationPolicySchemaVersion,
 		input.CreatedAt, input.CreatedAt,
 	).Row()
 	scanErr := row.Scan(&insertedID)
@@ -300,9 +299,8 @@ VALUES (?, 'diagnosis.execute', 'diagnosis_task', ?, ?, NULL, ?, 1, 0, ?, 0, ?)`
 	task, err := diagnosisTaskFromRecord(diagnosisTaskRecord{
 		ID: taskID, CreatedBy: input.CreatedBy, ExternalCaseID: input.ExternalCaseID,
 		CaseSnapshotID: snapshotID, RetryOfTaskID: input.RetryOfTaskID,
-		RequestText: input.RequestText, RequestScope: input.RequestScope,
-		RequestScopeSchemaVersion: input.RequestScopeSchemaVersion,
-		Status:                    diagnosis.TaskPending, AttemptCount: 0,
+		RequestText: input.RequestText,
+		Status:      diagnosis.TaskPending, AttemptCount: 0,
 		CreatedAt: input.CreatedAt, UpdatedAt: input.CreatedAt,
 	})
 	if err != nil {
@@ -344,8 +342,7 @@ func (r *DiagnosisTaskRepository) GetTask(ctx context.Context, taskID uuid.UUID)
 	var record diagnosisTaskRecord
 	result := ResolveDB(ctx, r.db).Raw(`
 SELECT task.id, task.created_by, task.external_case_id, task.case_snapshot_id,
-       task.retry_of, task.request_text, task.request_scope,
-       task.request_scope_schema_version, task.status, task.attempt_count,
+       task.retry_of, task.request_text, task.status, task.attempt_count,
        task.last_error_code, task.last_error_message, task.started_at,
        task.completed_at, task.created_at, task.updated_at, report.id AS report_id,
        task.request_fingerprint
@@ -598,7 +595,7 @@ func selectDiagnosisTaskForUpdate(db *gorm.DB, taskID uuid.UUID) (diagnosisTaskR
 	var record diagnosisTaskRecord
 	result := db.Raw(`
 SELECT id, created_by, external_case_id, case_snapshot_id, retry_of,
-       request_fingerprint, request_text, request_scope, request_scope_schema_version,
+       request_fingerprint, request_text,
        status, attempt_count, last_error_code, last_error_message, started_at,
        completed_at, created_at, updated_at
 FROM diagnosis_tasks
@@ -687,25 +684,23 @@ func taskEventFromRecord(record taskEventRecord) (diagnosis.TaskEvent, error) {
 
 // diagnosisTaskRecord 是 PostgreSQL 行映射，避免领域包依赖 GORM 标签和数据库类型。
 type diagnosisTaskRecord struct {
-	ID                        uuid.UUID            `gorm:"column:id"`
-	CreatedBy                 uuid.UUID            `gorm:"column:created_by"`
-	ExternalCaseID            uuid.UUID            `gorm:"column:external_case_id"`
-	CaseSnapshotID            uuid.UUID            `gorm:"column:case_snapshot_id"`
-	RetryOfTaskID             *uuid.UUID           `gorm:"column:retry_of"`
-	IdempotencyKey            string               `gorm:"column:idempotency_key"`
-	RequestFingerprint        string               `gorm:"column:request_fingerprint"`
-	RequestText               string               `gorm:"column:request_text"`
-	RequestScope              []byte               `gorm:"column:request_scope"`
-	RequestScopeSchemaVersion int                  `gorm:"column:request_scope_schema_version"`
-	Status                    diagnosis.TaskStatus `gorm:"column:status"`
-	AttemptCount              int                  `gorm:"column:attempt_count"`
-	LastErrorCode             string               `gorm:"column:last_error_code"`
-	LastErrorMessage          string               `gorm:"column:last_error_message"`
-	StartedAt                 *time.Time           `gorm:"column:started_at"`
-	CompletedAt               *time.Time           `gorm:"column:completed_at"`
-	CreatedAt                 time.Time            `gorm:"column:created_at"`
-	UpdatedAt                 time.Time            `gorm:"column:updated_at"`
-	ReportID                  string               `gorm:"column:report_id"`
+	ID                 uuid.UUID            `gorm:"column:id"`
+	CreatedBy          uuid.UUID            `gorm:"column:created_by"`
+	ExternalCaseID     uuid.UUID            `gorm:"column:external_case_id"`
+	CaseSnapshotID     uuid.UUID            `gorm:"column:case_snapshot_id"`
+	RetryOfTaskID      *uuid.UUID           `gorm:"column:retry_of"`
+	IdempotencyKey     string               `gorm:"column:idempotency_key"`
+	RequestFingerprint string               `gorm:"column:request_fingerprint"`
+	RequestText        string               `gorm:"column:request_text"`
+	Status             diagnosis.TaskStatus `gorm:"column:status"`
+	AttemptCount       int                  `gorm:"column:attempt_count"`
+	LastErrorCode      string               `gorm:"column:last_error_code"`
+	LastErrorMessage   string               `gorm:"column:last_error_message"`
+	StartedAt          *time.Time           `gorm:"column:started_at"`
+	CompletedAt        *time.Time           `gorm:"column:completed_at"`
+	CreatedAt          time.Time            `gorm:"column:created_at"`
+	UpdatedAt          time.Time            `gorm:"column:updated_at"`
+	ReportID           string               `gorm:"column:report_id"`
 }
 
 type diagnosisTaskAttachmentRecord struct {
@@ -720,14 +715,8 @@ type diagnosisTaskAttachmentRecord struct {
 
 func (diagnosisTaskRecord) TableName() string { return "diagnosis_tasks" }
 
-// diagnosisTaskFromRecord 将数据库行转换为领域摘要，并对 JSONB 解码失败 fail closed。
+// diagnosisTaskFromRecord 将数据库行转换为领域摘要。
 func diagnosisTaskFromRecord(record diagnosisTaskRecord) (diagnosis.DiagnosisTask, error) {
-	scope := map[string]any{}
-	if len(record.RequestScope) > 0 {
-		if err := json.Unmarshal(record.RequestScope, &scope); err != nil {
-			return diagnosis.DiagnosisTask{}, fmt.Errorf("decode diagnosis task request scope: %w", err)
-		}
-	}
 	var reportID *uuid.UUID
 	if record.ReportID != "" {
 		if parsed, err := uuid.Parse(record.ReportID); err == nil {
@@ -737,8 +726,7 @@ func diagnosisTaskFromRecord(record diagnosisTaskRecord) (diagnosis.DiagnosisTas
 	return diagnosis.DiagnosisTask{
 		ID: record.ID, CreatedBy: record.CreatedBy, ExternalCaseID: record.ExternalCaseID,
 		CaseSnapshotID: record.CaseSnapshotID, RetryOfTaskID: record.RetryOfTaskID,
-		RequestText: record.RequestText, RequestScope: scope,
-		RequestScopeSchemaVersion: record.RequestScopeSchemaVersion, Status: record.Status,
+		RequestText: record.RequestText, Status: record.Status,
 		AttemptCount: record.AttemptCount, LastErrorCode: record.LastErrorCode,
 		LastErrorMessage: record.LastErrorMessage, StartedAt: record.StartedAt,
 		CompletedAt: record.CompletedAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,

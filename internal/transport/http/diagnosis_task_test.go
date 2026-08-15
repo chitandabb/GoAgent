@@ -31,8 +31,7 @@ func TestDiagnosisTaskRoutesCreateReturnsAcceptedAndLocation(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/diagnosis-tasks", strings.NewReader(`{
 "externalCaseId":"`+caseID.String()+`",
 "expectedSourceFingerprint":"sha256:source",
-"requestText":"请检查数据库",
-"requestScope":{"timeRange":{"from":"today"}}
+"requestText":"请检查数据库"
 }`))
 	request.Header.Set("Content-Type", "application/json")
 	idempotencyKey := uuid.NewString()

@@ -60,10 +60,11 @@ const (
 	// 加上完整身份（Profile 合同、模型可见名单、模型 Profile 指纹、实现
 	// revision/dirty）。历史 v1 资产没有该字段，按 v1 处理以保持可重放。
 	ToolSelectionObservationV2 = "tool-selection-observation-v2"
-	// ToolSelectionEvaluationWideProfile 是 wide 实验臂的评测合同 ID。wide
-	// baseline 不是生产 Runtime Profile，因此不进入 agentruntime.ToolProfileID
-	// 枚举；ToolProfileID 字段直接记录该评测合同，避免与 diagnosis-default
-	// 混同。
+	// ToolSelectionEvaluationWideProfile 是 wide 实验臂的评测合同 ID，与
+	// agentruntime.ToolProfileEvaluationWide（evaluation-wide-v1）一致。wide
+	// baseline 不是生产 Runtime Profile，生产两个 Runner 只绑定
+	// conversation-default/diagnosis-default；ToolProfileID 字段记录该评测
+	// 合同，避免与 diagnosis-default 混同。
 	ToolSelectionEvaluationWideProfile = "evaluation-wide-v1"
 )
 

@@ -148,7 +148,6 @@ func TestSingleSearchQualityModelLetsRunnerAnswerAfterFirstSearch(t *testing.T) 
 	runner, err := mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
 		ChatModel: qualityModel, ToolCatalog: catalog, SystemInstruction: "answer with exact citations",
 		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v2",
-		AvailableDependencies: []mesagent.ToolDependency{mesagent.ToolDependencyKnowledge},
 		Logger:                zap.NewNop(), MaxIterations: 3, MaxToolCalls: 2, MaxTotalTokens: 6_000,
 		MaxContextRunes: conversation.MaxContentRunes,
 	})

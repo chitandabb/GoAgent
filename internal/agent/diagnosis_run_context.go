@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/diagnosis"
 
 	"github.com/google/uuid"
 )
@@ -26,11 +25,10 @@ type DiagnosisCeilingDataSource struct {
 
 // DiagnosisRunContextInput 是单次诊断任务执行的纯输入。
 type DiagnosisRunContextInput struct {
-	// Policy 是任务创建时冻结的 InvestigationPolicy；nil 仅表示 mode=legacy
-	// 的 migration 前旧任务，此时只能从冻结 request_scope 能力
-	// （LegacyCapabilities）与任务资源做 legacy 派生，绝不能读取新部署
-	// 配置扩大旧任务权限。
-	Policy *agentruntime.InvestigationPolicy
+	// Policy 是任务创建时冻结的 InvestigationPolicy，也是任务的唯一授权
+	// 事实。旧授权体系（legacy 派生/request_scope）已硬切删除：缺失、损坏
+	// 或版本不一致的任务在执行前已被 Worker 仓储拒绝为 ErrInvalidTask。
+	Policy agentruntime.InvestigationPolicy
 	// Actor 是当前有效用户（Worker 仓储已校验 active + 合法角色）。
 	Actor agentruntime.Actor
 	// ProfileToolNames 是启动 Epoch 内固定 diagnosis-default Profile 的
@@ -42,24 +40,17 @@ type DiagnosisRunContextInput struct {
 	DataSources []DiagnosisCeilingDataSource
 	// AttachmentIDs 是当前仍 uploaded 且属于任务的附件（ceiling 输入）。
 	AttachmentIDs []uuid.UUID
-	// LegacyCapabilities 仅在 Policy==nil 时用于 legacy 派生（冻结
-	// request_scope 的能力值）。
-	LegacyCapabilities []ToolCapability
 }
 
 // DiagnosisRunContext 是诊断运行上下文的唯一生成点（深模块）：一次集中产出
 //   - 有效 RunAccess（frozen Policy ∩ current ceiling）
-//   - 从有效 RunAccess 反向生成的兼容 TaskScope
 //   - 安全、确定性的 task_context JSON 投影（system 指令尾部）
 type DiagnosisRunContext struct {
 	access      agentruntime.RunAccess
-	scope       TaskScope
 	taskContext string
 }
 
 func (c DiagnosisRunContext) Access() agentruntime.RunAccess { return c.access }
-
-func (c DiagnosisRunContext) Scope() TaskScope { return c.scope }
 
 func (c DiagnosisRunContext) TaskContext() string { return c.taskContext }
 
@@ -87,18 +78,8 @@ func BuildDiagnosisRunContext(input DiagnosisRunContextInput) (DiagnosisRunConte
 		return DiagnosisRunContext{}, fmt.Errorf("build diagnosis run context: %w", err)
 	}
 
-	// 1. frozen Policy：新任务直接使用持久化 Policy；NULL 旧任务只从冻结
-	//    request_scope 能力与任务资源派生 legacy Policy。
+	// 1. 授权事实 = 持久化 frozen Policy，直接使用，不存在 legacy fallback。
 	policy := input.Policy
-	if policy == nil {
-		derived, deriveErr := deriveLegacyDiagnosisPolicy(
-			profileTools, input.LegacyCapabilities, input.ExternalCaseID, attachmentIDs, ceilingSources,
-		)
-		if deriveErr != nil {
-			return DiagnosisRunContext{}, fmt.Errorf("build diagnosis run context: %w", deriveErr)
-		}
-		policy = &derived
-	}
 
 	// 2. current AccessCeiling：固定 Profile 实际 Tool、active/read_only 且
 	//    角色允许的数据源、仍 uploaded 的附件与当前有效用户状态。
@@ -112,7 +93,7 @@ func BuildDiagnosisRunContext(input DiagnosisRunContextInput) (DiagnosisRunConte
 	}
 
 	// 3. 有效 RunAccess = frozen Policy ∩ current ceiling。
-	access, err := agentruntime.DeriveDiagnosisRunAccess(*policy, input.Actor, agentruntime.AccessCeiling{
+	access, err := agentruntime.DeriveDiagnosisRunAccess(policy, input.Actor, agentruntime.AccessCeiling{
 		Permissions: ceilingPermissions,
 		Grants:      ceilingGrants,
 	})
@@ -120,17 +101,9 @@ func BuildDiagnosisRunContext(input DiagnosisRunContextInput) (DiagnosisRunConte
 		return DiagnosisRunContext{}, fmt.Errorf("build diagnosis run access: %w", err)
 	}
 
-	// 4. 反向生成兼容 TaskScope：从有效 RunAccess 推导能力与数据源，旧
-	//    Runner/Skill 代码与 system 文案不再读取 request_scope 授权。
-	scope, err := diagnosisTaskScopeFromRunAccess(access, profileTools, ceilingSources)
-	if err != nil {
-		return DiagnosisRunContext{}, fmt.Errorf("build diagnosis run context scope: %w", err)
-	}
-
 	return DiagnosisRunContext{
 		access:      access,
-		scope:       scope,
-		taskContext: renderDiagnosisTaskContext(*policy, access, ceilingSources),
+		taskContext: renderDiagnosisTaskContext(policy, access, ceilingSources),
 	}, nil
 }
 
@@ -250,120 +223,6 @@ func diagnosisCeilingGrants(
 		AttachmentIDs:   attachmentIDs,
 		DataSourceIDs:   dataSourceIDs,
 	})
-}
-
-// deriveLegacyDiagnosisPolicy 仅从冻结 request_scope 能力、工单、附件与
-// 只读任务数据源派生 legacy Policy。它不能读取新部署配置，因此旧任务
-// 最多保留旧 scope 已有能力，绝不被扩大。
-func deriveLegacyDiagnosisPolicy(
-	profileTools []string,
-	capabilities []ToolCapability,
-	caseID uuid.UUID,
-	attachmentIDs []uuid.UUID,
-	sources []DiagnosisCeilingDataSource,
-) (agentruntime.InvestigationPolicy, error) {
-	permissions := make([]agentruntime.Permission, 0, len(capabilities))
-	seen := make(map[agentruntime.Permission]struct{}, len(capabilities))
-	for _, capability := range capabilities {
-		permission, ok := capabilityPermission[capability]
-		if !ok {
-			return agentruntime.InvestigationPolicy{}, fmt.Errorf("legacy capability %q has no v2 permission mapping", capability)
-		}
-		if _, duplicate := seen[permission]; duplicate {
-			return agentruntime.InvestigationPolicy{}, fmt.Errorf("duplicate legacy permission %q", permission)
-		}
-		seen[permission] = struct{}{}
-		permissions = append(permissions, permission)
-	}
-	if _, ok := seen[agentruntime.PermissionCaseRead]; !ok {
-		return agentruntime.InvestigationPolicy{}, errors.New("legacy diagnosis policy requires case.read")
-	}
-	grants, err := diagnosisCeilingGrants(profileTools, caseID, attachmentIDs, sources)
-	if err != nil {
-		return agentruntime.InvestigationPolicy{}, err
-	}
-	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
-	if err != nil {
-		return agentruntime.InvestigationPolicy{}, err
-	}
-	return agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissionSet, grants)
-}
-
-// diagnosisPermissionCapability 是 v2 Permission 到旧 ToolCapability 的
-// 反向映射（只覆盖诊断可能出现的权限）。
-var diagnosisPermissionCapability = map[agentruntime.Permission]ToolCapability{
-	agentruntime.PermissionCaseRead:       ToolCapabilityCase,
-	agentruntime.PermissionCodeRead:       ToolCapabilityCode,
-	agentruntime.PermissionSQLRead:        ToolCapabilitySQL,
-	agentruntime.PermissionKnowledgeRead:  ToolCapabilityKnowledge,
-	agentruntime.PermissionAttachmentRead: ToolCapabilityAttachment,
-	agentruntime.PermissionWebRead:        ToolCapabilityWebSearch,
-}
-
-// diagnosisTaskScopeFromRunAccess 从"有效 RunAccess"反向生成旧代码使用的
-// TaskScope。能力只来自有效 Permission；数据源只列出任务绑定的只读源
-// （与 ceiling 一致的描述性集合，SQL 执行仍由 RunAccess.Grants 校验）；
-// 依赖可用性来自同一 Epoch 的固定 Profile Tool 名单。request_scope 不再
-// 参与任何授权事实。
-func diagnosisTaskScopeFromRunAccess(
-	access agentruntime.RunAccess,
-	profileTools []string,
-	sources []DiagnosisCeilingDataSource,
-) (TaskScope, error) {
-	capabilities := make([]ToolCapability, 0, len(diagnosisPermissionCapability))
-	for _, permission := range access.Permissions().Values() {
-		capability, ok := diagnosisPermissionCapability[permission]
-		if !ok {
-			continue
-		}
-		capabilities = append(capabilities, capability)
-	}
-	allowedRoles := diagnosisSQLToolRoles()
-	dataSources := make([]ScopedDataSource, 0, len(sources))
-	for _, source := range sources {
-		if source.SafetyMode != DataSourceSafetyReadOnly || !slices.Contains(allowedRoles, source.Role) {
-			continue
-		}
-		dataSources = append(dataSources, ScopedDataSource{
-			ID: source.ID, Role: source.Role, SafetyMode: source.SafetyMode,
-		})
-	}
-	dependencies := diagnosisProfileDependencies(profileTools)
-	return NewTaskScope(TaskScopeConfig{
-		UserID: access.Actor().UserID, Role: access.Actor().Role, TaskType: TaskTypeDiagnosis,
-		DataSources: dataSources, AllowedCapabilities: capabilities, AvailableDependencies: dependencies,
-	})
-}
-
-func diagnosisProfileDependencies(profileTools []string) []ToolDependency {
-	has := func(name string) bool {
-		index := sort.SearchStrings(profileTools, name)
-		return index < len(profileTools) && profileTools[index] == name
-	}
-	dependencies := []ToolDependency{ToolDependencyExternalCase}
-	if has(ToolSearchKnowledge) {
-		dependencies = append(dependencies, ToolDependencyKnowledge)
-	}
-	if has(ToolWebSearch) || has(ToolFetchPublicPage) {
-		dependencies = append(dependencies, ToolDependencyWebSearch)
-	}
-	hasGitHub := false
-	for _, name := range GitHubReadOnlyTools {
-		if has(name) {
-			hasGitHub = true
-			break
-		}
-	}
-	if hasGitHub {
-		dependencies = append(dependencies, ToolDependencyGitHubMCP)
-	}
-	if has(ToolSearchSchemaCatalog) || has(ToolExecuteReadonlyQuery) || has(ToolDatabaseObjectDefinition) {
-		dependencies = append(dependencies, ToolDependencySQLServer)
-	}
-	if has(ToolReadAttachment) {
-		dependencies = append(dependencies, ToolDependencyAttachment)
-	}
-	return dependencies
 }
 
 // diagnosisDataSourceProjection 是 task_context 中当前授权数据源的安全投影。

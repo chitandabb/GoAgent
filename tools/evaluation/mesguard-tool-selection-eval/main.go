@@ -26,6 +26,7 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
@@ -125,16 +126,20 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("build native Skill runtime: %w", err)
 	}
-	catalog, err := buildSelectionCatalog(ctx, githubConnection.Tools, skillRuntime)
+	catalog, wideCatalog, err := buildSelectionCatalogs(ctx, githubConnection.Tools, skillRuntime)
 	if err != nil {
 		return err
 	}
 	// 与生产 Diagnosis Runner 相同的装配入口：固定 diagnosis-default Profile
 	// 由 Middleware 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加
-	// 真实 skill Tool。
+	// 真实 skill Tool。wide 臂使用独立 evaluation-wide-v1 Profile。
 	authorization, err := mesagent.NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		return fmt.Errorf("build Tool authorization middleware: %w", err)
+	}
+	wideAuthorization, err := mesagent.NewToolAuthorizationMiddleware(wideCatalog, agentruntime.ToolProfileEvaluationWide)
+	if err != nil {
+		return fmt.Errorf("build wide Tool authorization middleware: %w", err)
 	}
 
 	outputTempPath := *outputPath + ".tmp-" + uuid.NewString()
@@ -177,7 +182,8 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 				currentResult := caseResult{observations: make([]mesagent.ToolSelectionObservation, 0, 2)}
 				for _, variant := range variants {
 					observation, observeErr := observeToolSelection(
-						evalCtx, chatModel, catalog, authorization, skillRuntime.Middleware,
+						evalCtx, chatModel, wideCatalog, authorization, wideAuthorization,
+						skillRuntime.Middleware,
 						current.definition, variant, basePromptTokens, identity,
 						modelProfileFingerprint, modelProfile,
 					)
@@ -273,8 +279,9 @@ func replaceEvaluationFile(source, target string) error {
 func observeToolSelection(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
-	catalog *mesagent.ToolCatalog,
+	wideCatalog *mesagent.ToolCatalog,
 	authorization *mesagent.ToolAuthorizationMiddleware,
+	wideAuthorization *mesagent.ToolAuthorizationMiddleware,
 	skillMiddleware adk.ChatModelAgentMiddleware,
 	definition mesagent.ToolSelectionCase,
 	variant mesagent.ToolSelectionVariant,
@@ -283,33 +290,41 @@ func observeToolSelection(
 	modelProfileFingerprint string,
 	modelProfile config.ChatModelProfileConfig,
 ) (mesagent.ToolSelectionObservation, error) {
-	scope, err := selectionScope(definition.Scope)
-	if err != nil {
-		return mesagent.ToolSelectionObservation{}, err
-	}
 	var available []tool.BaseTool
 	var toolProfileID string
 	var modelVisibleNames []string
 	if variant == mesagent.ToolSelectionWide {
-		// wide baseline 只保留评测用途：宽角色/任务 Schema，不是生产接口。
-		// 它的合同 ID 是 evaluation-wide-v1，不得伪装成 diagnosis-default。
-		available, err = catalog.EvaluationBaselineToolsFor(ctx, scope)
+		// wide baseline 使用独立 evaluation-wide-v1 固定 Profile：全部实际
+		// 注册的业务 Tool（无 skill/read_skill_reference），不得伪装成
+		// diagnosis-default。它不再依赖 ToolsFor(TaskScope)。
+		// wide 臂不使用 Skill 中间件，直接以 Profile 名单作为最终 Schema。
+		accessCtx, err := withSelectionRunAccess(ctx)
 		if err != nil {
-			return mesagent.ToolSelectionObservation{}, fmt.Errorf("resolve wide baseline tools: %w", err)
+			return mesagent.ToolSelectionObservation{}, err
 		}
+		_, authorizedCtx, authErr := wideAuthorization.BeforeAgent(
+			accessCtx, &adk.ChatModelAgentContext{Tools: nil},
+		)
+		if authErr != nil {
+			return mesagent.ToolSelectionObservation{}, fmt.Errorf("assemble wide Tool schema: %w", authErr)
+		}
+		available = authorizedCtx.Tools
 		names, namesErr := mesagent.ToolNamesFromTools(ctx, available)
 		if namesErr != nil {
 			return mesagent.ToolSelectionObservation{}, namesErr
 		}
 		modelVisibleNames = names
-		toolProfileID = mesagent.ToolSelectionEvaluationWideProfile
+		toolProfileID = string(agentruntime.ToolProfileEvaluationWide)
 	} else {
 		// experiment 基于固定 diagnosis-default Profile，并使用与生产
 		// Diagnosis Runner 相同的最终 Schema 装配：ToolAuthorizationMiddleware
 		// 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加真实 skill。
 		// ModelVisibleNames、AvailableTools 与 ToolSchemaHash 都描述同一份
 		// 真正传给模型的 Schema。
-		accessCtx := mesagent.WithTaskScope(ctx, scope)
+		accessCtx, err := withSelectionRunAccess(ctx)
+		if err != nil {
+			return mesagent.ToolSelectionObservation{}, err
+		}
 		_, authorizedCtx, authErr := authorization.BeforeAgent(
 			accessCtx, &adk.ChatModelAgentContext{Tools: nil},
 		)
@@ -463,58 +478,72 @@ func selectionToolSchemas(
 	return infos, names, "sha256:" + hex.EncodeToString(digest[:]), len(encoded), nil
 }
 
-func selectionScope(kind mesagent.ToolSelectionScope) (mesagent.TaskScope, error) {
-	dependencies := []mesagent.ToolDependency{mesagent.ToolDependencyExternalCase}
-	dataSources := []mesagent.ScopedDataSource{{
-		ID: selectionCaseSourceID, Role: mesagent.DataSourceRoleCaseSource,
-		SafetyMode: mesagent.DataSourceSafetyReadOnly,
-	}}
-	capabilities := []mesagent.ToolCapability{mesagent.ToolCapabilityCase}
-	switch kind {
-	case mesagent.ToolSelectionTicket:
-	case mesagent.ToolSelectionGitHub:
-		dependencies = append(dependencies, mesagent.ToolDependencyGitHubMCP)
-		capabilities = append(capabilities, mesagent.ToolCapabilityCode)
-	case mesagent.ToolSelectionSQL:
-		dependencies = append(dependencies, mesagent.ToolDependencySQLServer)
-		capabilities = append(capabilities, mesagent.ToolCapabilitySQL)
-		dataSources = append(dataSources, mesagent.ScopedDataSource{
-			ID: selectionSQLSourceID, Role: mesagent.DataSourceRoleProduction,
-			SafetyMode: mesagent.DataSourceSafetyReadOnly,
-		})
-	default:
-		return mesagent.TaskScope{}, fmt.Errorf("unsupported selection scope %q", kind)
+// withSelectionRunAccess 为评测 Schema 装配绑定一个合法诊断 RunAccess：
+// 装配层只校验 RunAccess 存在与 Profile 匹配，评测不执行任何 Tool，因此
+// 权限集合是全部允许的诊断权限，资源 Grant 与工具选择无关。
+func withSelectionRunAccess(ctx context.Context) (context.Context, error) {
+	permissions, err := agentruntime.NewPermissionSet(
+		agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead,
+		agentruntime.PermissionSQLRead, agentruntime.PermissionCodeRead,
+		agentruntime.PermissionAttachmentRead, agentruntime.PermissionWebRead,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: selectionUserID, Role: auth.RoleAnalyst, TaskType: mesagent.TaskTypeDiagnosis,
-		DataSources: dataSources, AllowedCapabilities: capabilities, AvailableDependencies: dependencies,
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{selectionCaseSourceID},
 	})
+	if err != nil {
+		return nil, err
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissions, grants)
+	if err != nil {
+		return nil, err
+	}
+	access, err := agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: selectionUserID, Role: auth.RoleAnalyst},
+		agentruntime.AccessCeiling{Permissions: permissions, Grants: grants},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return agentruntime.WithRunAccess(ctx, access), nil
 }
 
-func buildSelectionCatalog(
+func buildSelectionCatalogs(
 	ctx context.Context,
 	githubTools []tool.BaseTool,
 	skillRuntime *mesagent.NativeSkillRuntime,
-) (*mesagent.ToolCatalog, error) {
+) (*mesagent.ToolCatalog, *mesagent.ToolCatalog, error) {
 	objectDefinition, err := mesagent.NewDatabaseObjectDefinitionTool(selectionSQLStub{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	catalogSearch, err := mesagent.NewSearchSchemaCatalogTool(selectionSQLStub{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	readonlyQuery, err := mesagent.NewExecuteReadonlyQueryTool(selectionSQLStub{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// 注册真实 Skill reference Tool，使 read_skill_reference 与生产 Diagnosis
 	// Profile 一致；skill 本身由 Eino Skill Middleware 拥有，Catalog 不伪造。
-	return mesagent.NewDiagnosisDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+	dependencies := mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: selectionExternalCases{}, SkillReference: skillRuntime.ReferenceTool,
 		GitHubTools:          githubTools,
 		SQLObjectDefinitions: objectDefinition, SchemaCatalog: catalogSearch, ReadonlyQuery: readonlyQuery,
-	})
+	}
+	filtered, err := mesagent.NewDiagnosisDefaultToolCatalog(ctx, dependencies)
+	if err != nil {
+		return nil, nil, err
+	}
+	wide, err := mesagent.NewEvaluationWideDefaultToolCatalog(ctx, dependencies)
+	if err != nil {
+		return nil, nil, err
+	}
+	return filtered, wide, nil
 }
 
 // implementationIdentity 记录实现提交与其工作树状态。正式评测要求

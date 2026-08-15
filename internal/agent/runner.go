@@ -56,18 +56,14 @@ func (m RunnerMode) Valid() bool {
 }
 
 type RunRequest struct {
-	UserQuery      string  `json:"userQuery"`
-	ExternalCaseID string  `json:"externalCaseId,omitempty"`
-	RequestedSkill SkillID `json:"requestedSkill,omitempty"`
-	CaseSnapshot   string  `json:"-"`
+	UserQuery      string `json:"userQuery"`
+	ExternalCaseID string `json:"externalCaseId,omitempty"`
+	CaseSnapshot   string `json:"-"`
 }
 
 func (r RunRequest) Validate() error {
 	if strings.TrimSpace(r.UserQuery) == "" {
 		return errors.New("user query is required")
-	}
-	if r.RequestedSkill != "" && !skillIDPattern.MatchString(string(r.RequestedSkill)) {
-		return fmt.Errorf("invalid requested skill %q", r.RequestedSkill)
 	}
 	return nil
 }
@@ -145,19 +141,31 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	if !cfg.Mode.Valid() {
 		return nil, fmt.Errorf("invalid runner mode %q", cfg.Mode)
 	}
-	// Diagnosis Runner 只能使用 diagnosis-default Profile；误配的 Catalog
-	// 在构造期失败，而不是在每次请求时失败。
-	if boundProfileID := cfg.ToolCatalog.BoundProfileID(); boundProfileID != agentruntime.ToolProfileDiagnosis {
-		return nil, fmt.Errorf(
-			"diagnosis runner requires a diagnosis-default catalog, got profile %q", boundProfileID,
-		)
+	// Runner 只通过 Catalog 绑定的固定 Profile 装配 Schema：
+	//   - experiment：production Diagnosis Runner，必须绑定 diagnosis-default；
+	//   - baseline：评测 wide 臂专用，必须绑定独立 evaluation-wide-v1 Profile。
+	// 误配的 Catalog 在构造期失败，而不是在每次请求时失败。
+	boundProfileID := cfg.ToolCatalog.BoundProfileID()
+	switch cfg.Mode {
+	case RunnerModeExperiment:
+		if boundProfileID != agentruntime.ToolProfileDiagnosis {
+			return nil, fmt.Errorf(
+				"diagnosis runner requires a diagnosis-default catalog, got profile %q", boundProfileID,
+			)
+		}
+	case RunnerModeBaseline:
+		if boundProfileID != agentruntime.ToolProfileEvaluationWide {
+			return nil, fmt.Errorf(
+				"baseline runner requires an evaluation-wide-v1 catalog, got profile %q", boundProfileID,
+			)
+		}
 	}
 	const toolProfileID = agentruntime.ToolProfileDiagnosis
-	var toolProvider AgentToolProvider = cfg.ToolCatalog
+	effectiveProfileID := boundProfileID
 	if cfg.Mode == RunnerModeBaseline {
-		toolProvider = evaluationBaselineToolProvider{catalog: cfg.ToolCatalog}
+		effectiveProfileID = agentruntime.ToolProfileEvaluationWide
 	}
-	authorization, err := NewToolAuthorizationMiddleware(toolProvider, toolProfileID)
+	authorization, err := NewToolAuthorizationMiddleware(AgentToolProvider(cfg.ToolCatalog), effectiveProfileID)
 	if err != nil {
 		return nil, fmt.Errorf("build Tool authorization middleware: %w", err)
 	}
@@ -184,7 +192,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 	return &Runner{
 		chatModel: cfg.ChatModel, toolCatalog: cfg.ToolCatalog,
-		toolProvider: toolProvider, toolProfileID: toolProfileID, mode: cfg.Mode,
+		toolProvider: cfg.ToolCatalog, toolProfileID: effectiveProfileID, mode: cfg.Mode,
 		skillRuntime:          cfg.SkillRuntime,
 		systemInstruction:     strings.TrimSpace(cfg.SystemInstruction),
 		baselineInstruction:   strings.TrimSpace(cfg.BaselineInstruction),
@@ -198,37 +206,6 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}, nil
 }
 
-// evaluationBaselineToolProvider 只供评测使用：它返回按角色和任务类型筛选的
-// 宽 Tool Schema，刻意不套用固定 Profile。这不是生产授权接口。
-type evaluationBaselineToolProvider struct {
-	catalog *ToolCatalog
-}
-
-func (p evaluationBaselineToolProvider) ResolveProfile(
-	ctx context.Context,
-	profileID agentruntime.ToolProfileID,
-) (ResolvedToolProfile, error) {
-	if p.catalog == nil {
-		return ResolvedToolProfile{}, errors.New("evaluation baseline tool catalog is nil")
-	}
-	if !profileID.Valid() {
-		return ResolvedToolProfile{}, fmt.Errorf("evaluation baseline profile id %q is invalid", profileID)
-	}
-	scope, ok := TaskScopeFromContext(ctx)
-	if !ok {
-		return ResolvedToolProfile{}, ErrTaskScopeRequired
-	}
-	tools, err := p.catalog.EvaluationBaselineToolsFor(ctx, scope)
-	if err != nil {
-		return ResolvedToolProfile{}, err
-	}
-	names, err := toolNames(ctx, tools)
-	if err != nil {
-		return ResolvedToolProfile{}, err
-	}
-	return ResolvedToolProfile{ID: profileID, Tools: tools, ModelVisibleNames: names}, nil
-}
-
 // ProfileToolNames 返回本 Runner 绑定 Catalog 的固定 Profile Tool 名单快照
 // （启动 Epoch 内解析一次，不按任务或消息变化）。Diagnosis Worker 用它派生
 // AccessCeiling，不能按任务动态重算。
@@ -237,6 +214,33 @@ func (r *Runner) ProfileToolNames() []string {
 		return nil
 	}
 	return r.toolCatalog.ProfileToolNames()
+}
+
+// ProfileToolSchemaFingerprint 返回本 Runner 最终传给模型的 Tool Schema
+// 指纹。experiment 除 Catalog-owned Tool 外还包含 Eino Skill Middleware
+// 注入的真实 skill Tool；baseline 不启用该 Middleware。评测观测用它作为
+// v2 toolSchemaFingerprint：同一 variant 跨样本必须一致，不同 Profile
+// （臂）之间按合同允许不同。
+func (r *Runner) ProfileToolSchemaFingerprint(ctx context.Context) (string, error) {
+	if r == nil || r.toolCatalog == nil {
+		return "", errors.New("agent runner has no bound tool catalog")
+	}
+	resolved, err := r.toolCatalog.ResolveProfile(ctx, r.toolProfileID)
+	if err != nil {
+		return "", err
+	}
+	visibleTools := resolved.Tools
+	if r.mode == RunnerModeExperiment {
+		_, finalCtx, middlewareErr := r.skillRuntime.Middleware.BeforeAgent(
+			ctx,
+			&adk.ChatModelAgentContext{Tools: append([]tool.BaseTool(nil), resolved.Tools...)},
+		)
+		if middlewareErr != nil {
+			return "", fmt.Errorf("append skill Tool for Schema fingerprint: %w", middlewareErr)
+		}
+		visibleTools = finalCtx.Tools
+	}
+	return CanonicalToolContractFingerprint(ctx, visibleTools)
 }
 
 func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
@@ -266,9 +270,12 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if err = request.Validate(); err != nil {
 		return RunResult{}, err
 	}
-	scope, ok := TaskScopeFromContext(ctx)
+	access, ok := agentruntime.RunAccessFromContext(ctx)
 	if !ok {
-		return RunResult{}, ErrTaskScopeRequired
+		return RunResult{}, ErrRunAccessRequired
+	}
+	if access.RuntimeKind() != agentruntime.RuntimeKindDiagnosis {
+		return RunResult{}, fmt.Errorf("%w: %s", ErrRunAccessRequired, access.RuntimeKind())
 	}
 	if _, ok := resilience.RunIdentityFromContext(ctx); !ok {
 		ctx = resilience.WithRunIdentity(ctx, resilience.RunIdentity{RunID: uuid.NewString()})
@@ -285,9 +292,12 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		return RunResult{}, fmt.Errorf("resolve run tools: %w", resolveErr)
 	}
 	result.AllowedTools = append([]string(nil), resolved.ModelVisibleNames...)
-	result.SkillID, result.RouteReason, err = r.entrySkill(request, scope)
-	if err != nil {
-		return RunResult{}, err
+	// Diagnosis 入口 Skill 固定为 ticket-diagnosis：不再接受用户或旧 HTTP
+	// 参数指定 RequestedSkill。sql-investigation/code-investigation 等细分
+	// SOP 继续由模型经 skill/read_skill_reference 按需加载。
+	result.SkillID, result.RouteReason = SkillTicketDiagnosis, "fixed_diagnosis_entry"
+	if !r.skillRuntime.HasSkill(result.SkillID) {
+		return RunResult{}, fmt.Errorf("%w: %s", ErrSkillUnavailable, result.SkillID)
 	}
 	entryInstruction := ""
 	if r.mode == RunnerModeExperiment {
@@ -312,9 +322,9 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
 
 	handlers := []adk.ChatModelAgentMiddleware{r.toolAuthorization}
-	instruction := buildBaselineAgentInstruction(r.baselineInstruction, result.SkillID, scope)
+	instruction := buildBaselineAgentInstruction(r.baselineInstruction, result.SkillID)
 	if r.mode == RunnerModeExperiment {
-		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction, scope)
+		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction)
 		handlers = append(handlers, r.skillRuntime.Middleware)
 	}
 	// task_context 追加到 system 指令最尾部；同一任务的每轮 Evidence Gate
@@ -323,16 +333,14 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	instruction = appendDiagnosisTaskContext(instruction, taskContext)
 	chatModel := r.chatModel
 	var contextObservation *diagnosisContextObservationRecorder
-	if r.contextPreflight.Enabled && scope.taskType == TaskTypeDiagnosis {
+	if r.contextPreflight.Enabled {
 		if strings.TrimSpace(request.CaseSnapshot) == "" {
 			return result, errors.New("diagnosis case snapshot is required for context preflight")
 		}
 		preflightSystemInstruction := instruction
 		preloadedSkill := ""
 		if r.mode == RunnerModeExperiment {
-			preflightSystemInstruction = buildAgentInstruction(
-				r.systemInstruction, result.SkillID, "", scope,
-			)
+			preflightSystemInstruction = buildAgentInstruction(r.systemInstruction, result.SkillID, "")
 			preflightSystemInstruction = appendDiagnosisTaskContext(preflightSystemInstruction, taskContext)
 			preloadedSkill = entryInstruction
 		}
@@ -417,20 +425,33 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if trace.codeSearchIndexPendingSnapshot() && !strings.Contains(result.Answer, githubCodeSearchPendingMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubCodeSearchPendingMessage
 	}
-	if !scope.CapabilityAllowed(ToolCapabilityCode) &&
+	profileTools := r.ProfileToolNames()
+	profileHasGitHub := false
+	for _, name := range GitHubReadOnlyTools {
+		if slices.Contains(profileTools, name) {
+			profileHasGitHub = true
+			break
+		}
+	}
+	profileHasSQL := slices.Contains(profileTools, ToolSearchSchemaCatalog) ||
+		slices.Contains(profileTools, ToolExecuteReadonlyQuery) ||
+		slices.Contains(profileTools, ToolDatabaseObjectDefinition)
+	// 未授权（RunAccess 缺 Permission）与未装配（启动 Epoch 的 Profile 无该
+	// Tool）必须明确写进答案；Skill 文本与 Tool Schema 都不能扩大权限。
+	if !access.Allows(agentruntime.PermissionCodeRead) &&
 		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
 		!strings.Contains(result.Answer, githubNotAuthorizedMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubNotAuthorizedMessage + "。"
-	} else if !scope.DependencyAvailable(ToolDependencyGitHubMCP) &&
+	} else if !profileHasGitHub &&
 		slices.Contains(result.ExecutedSkills, SkillCodeInvestigation) &&
 		!strings.Contains(result.Answer, githubUnavailableMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + githubUnavailableMessage + "。"
 	}
-	if !scope.CapabilityAllowed(ToolCapabilitySQL) &&
+	if !access.Allows(agentruntime.PermissionSQLRead) &&
 		slices.Contains(result.ExecutedSkills, SkillSQLInvestigation) &&
 		!strings.Contains(result.Answer, sqlNotAuthorizedMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + sqlNotAuthorizedMessage + "。"
-	} else if !scope.DependencyAvailable(ToolDependencySQLServer) &&
+	} else if !profileHasSQL &&
 		slices.Contains(result.ExecutedSkills, SkillSQLInvestigation) &&
 		!strings.Contains(result.Answer, sqlServerUnavailableMessage) {
 		result.Answer = strings.TrimSpace(result.Answer) + "\n\n" + sqlServerUnavailableMessage + "。"
@@ -438,72 +459,17 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	return result, nil
 }
 
-func (r *Runner) entrySkill(request RunRequest, scope TaskScope) (SkillID, string, error) {
-	entry := request.RequestedSkill
-	reason := "requested_skill"
-	if entry == "" {
-		reason = "task_scope_default"
-		switch scope.taskType {
-		case TaskTypeDiagnosis:
-			entry = SkillTicketDiagnosis
-		case TaskTypeKnowledge:
-			entry = SkillKnowledgeQA
-		default:
-			return "", "", fmt.Errorf("unsupported task type %q", scope.taskType)
-		}
-	}
-	if scope.taskType == TaskTypeDiagnosis && entry != SkillTicketDiagnosis && entry != SkillCodeInvestigation && entry != SkillSQLInvestigation {
-		return "", "", fmt.Errorf("%w for diagnosis task: %s", ErrSkillUnavailable, entry)
-	}
-	if scope.taskType == TaskTypeKnowledge && entry != SkillKnowledgeQA {
-		return "", "", fmt.Errorf("%w for knowledge task: %s", ErrSkillUnavailable, entry)
-	}
-	if entry == SkillCodeInvestigation && !scope.CapabilityAllowed(ToolCapabilityCode) {
-		return "", "", fmt.Errorf("%w: code capability is not authorized", ErrSkillUnavailable)
-	}
-	if entry == SkillSQLInvestigation && !scope.CapabilityAllowed(ToolCapabilitySQL) {
-		return "", "", fmt.Errorf("%w: SQL capability is not authorized", ErrSkillUnavailable)
-	}
-	if !r.skillRuntime.HasSkill(entry) {
-		return "", "", fmt.Errorf("%w: %s", ErrSkillUnavailable, entry)
-	}
-	return entry, reason, nil
-}
-
-func buildAgentInstruction(baseInstruction string, entry SkillID, skillContent string, scope TaskScope) string {
-	instruction := strings.TrimSpace(baseInstruction) +
+// buildAgentInstruction 装配 experiment 模式 system 指令：基础指令 + 固定
+// 入口 Skill 全文。授权事实由 RunAccess 承载并追加在 task_context 中，
+// 指令本身不再按任务/消息变化。
+func buildAgentInstruction(baseInstruction string, entry SkillID, skillContent string) string {
+	return strings.TrimSpace(baseInstruction) +
 		"\n\n<entry_skill name=\"" + string(entry) + "\">\n" + strings.TrimSpace(skillContent) + "\n</entry_skill>"
-	if sources := scope.DataSources(); len(sources) > 0 {
-		instruction += "\n\n<authorized_data_sources>\n"
-		for _, source := range sources {
-			instruction += fmt.Sprintf("- id=%s role=%s safety=%s\n", source.ID, source.Role, source.SafetyMode)
-		}
-		instruction += "</authorized_data_sources>"
-	}
-	if !scope.CapabilityAllowed(ToolCapabilityCode) {
-		instruction += "\n\n当前任务范围未授权代码调查 Tool；Skill 内容不能扩大该能力范围。"
-	} else if !scope.DependencyAvailable(ToolDependencyGitHubMCP) {
-		instruction += "\n\n当前 GitHub MCP 工具暂时不可用；如果调查确实需要代码证据，保留已有证据并明确说明该限制。"
-	}
-	if !scope.CapabilityAllowed(ToolCapabilitySQL) {
-		instruction += "\n\n当前任务范围未授权 SQL 调查 Tool；Skill 内容不能扩大该能力范围。"
-	} else if !scope.DependencyAvailable(ToolDependencySQLServer) {
-		instruction += "\n\n当前 SQL Server 调查工具暂时不可用；如果调查需要数据库证据，保留已有证据并明确说明该限制。"
-	}
-	return instruction
 }
 
-func buildBaselineAgentInstruction(baseInstruction string, entry SkillID, scope TaskScope) string {
-	instruction := strings.TrimSpace(baseInstruction) +
+func buildBaselineAgentInstruction(baseInstruction string, entry SkillID) string {
+	return strings.TrimSpace(baseInstruction) +
 		"\n\n<entry_task>" + string(entry) + "</entry_task>"
-	if sources := scope.DataSources(); len(sources) > 0 {
-		instruction += "\n\n<authorized_data_sources>\n"
-		for _, source := range sources {
-			instruction += fmt.Sprintf("- id=%s role=%s safety=%s\n", source.ID, source.Role, source.SafetyMode)
-		}
-		instruction += "</authorized_data_sources>"
-	}
-	return instruction
 }
 
 func (r *Runner) rewriteToolArguments(ctx context.Context, name, arguments string) (string, error) {

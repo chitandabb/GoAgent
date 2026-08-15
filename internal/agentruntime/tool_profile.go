@@ -13,10 +13,14 @@ type ToolProfileID string
 const (
 	ToolProfileConversation ToolProfileID = "conversation-default"
 	ToolProfileDiagnosis    ToolProfileID = "diagnosis-default"
+	// ToolProfileEvaluationWide 是评测 wide 臂专用的固定宽 Profile。它不是
+	// 生产授权接口：生产两个 Runner 只绑定 conversation-default 与
+	// diagnosis-default；评测用它与 diagnosis-default 的窄 Schema 配对。
+	ToolProfileEvaluationWide ToolProfileID = "evaluation-wide-v1"
 )
 
 func (id ToolProfileID) Valid() bool {
-	return id == ToolProfileConversation || id == ToolProfileDiagnosis
+	return id == ToolProfileConversation || id == ToolProfileDiagnosis || id == ToolProfileEvaluationWide
 }
 
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)

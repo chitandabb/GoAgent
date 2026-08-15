@@ -981,8 +981,7 @@ func TestConversationRunnerGuardsEveryReActModelCallAfterToolGrowth(t *testing.T
 		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
 		SystemInstruction: "conversation runtime window guard test",
 		ModelProvider:     "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
-		MaxContextRunes: conversation.MaxContentRunes, ContextPreflight: preflight,
+		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes, ContextPreflight: preflight,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1044,7 +1043,7 @@ func TestConversationRunnerProducesOneCorrelatedAgentTrace(t *testing.T) {
 	runner, err := NewConversationRunner(ConversationRunnerConfig{
 		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
 		SystemInstruction: "tracing fixture", ModelProvider: "fixture", ModelID: "fixture-v1",
-		PromptVersion: "conversation-test-v1", AvailableDependencies: []ToolDependency{ToolDependencyKnowledge},
+		PromptVersion: "conversation-test-v1",
 		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
 	})
 	if err != nil {
@@ -1341,24 +1340,26 @@ func TestConversationRunnerRejectsTaskCreationWithoutCaseReference(t *testing.T)
 }
 
 func TestConversationRunnerScopesAttachmentToolToReferencedMessages(t *testing.T) {
-	runner := &ConversationRunner{availableDependencies: []ToolDependency{ToolDependencyAttachment}}
 	actor := conversation.Actor{UserID: uuid.New()}
-	withoutAttachment, err := runner.conversationScope(actor, conversation.Message{})
+	profileNames := []string{ToolReadAttachment, ToolCreateDiagnosisTask, ToolSearchKnowledge}
+	withoutAttachment, err := buildConversationRunContext(actor, conversation.Message{}, profileNames, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withoutAttachment.CapabilityAllowed(ToolCapabilityAttachment) {
-		t.Fatal("attachment capability was exposed without a message attachment")
+	if withoutAttachment.Access().Allows(agentruntime.PermissionAttachmentRead) ||
+		len(withoutAttachment.Access().Grants().AttachmentIDs()) != 0 {
+		t.Fatalf("attachment access exposed without a message attachment: %v", withoutAttachment.Access())
 	}
-	withAttachment, err := runner.conversationScope(actor, conversation.Message{Attachments: []conversation.MessageAttachment{{
-		AttachmentID: uuid.New(), Position: 0, Purpose: "context", Status: "uploaded",
-	}}})
+	attachmentID := uuid.New()
+	withAttachment, err := buildConversationRunContext(actor, conversation.Message{Attachments: []conversation.MessageAttachment{{
+		AttachmentID: attachmentID, Position: 0, Purpose: "context", Status: "uploaded",
+	}}}, profileNames, uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !withAttachment.CapabilityAllowed(ToolCapabilityAttachment) ||
-		!withAttachment.DependencyAvailable(ToolDependencyAttachment) {
-		t.Fatalf("attachment scope=%+v", withAttachment)
+	if !withAttachment.Access().Allows(agentruntime.PermissionAttachmentRead) ||
+		!withAttachment.Access().Grants().AllowsAttachment(attachmentID) {
+		t.Fatalf("attachment access=%v", withAttachment.Access())
 	}
 }
 
@@ -1452,8 +1453,7 @@ func TestConversationRunnerPersistsOnlyCitedSameRunKnowledgeSource(t *testing.T)
 		}},
 		ToolCatalog: catalog, SystemInstruction: "conversation citation test",
 		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
-		MaxContextRunes: conversation.MaxContentRunes,
+		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1509,8 +1509,7 @@ func TestConversationRunnerRepairsZeroCitationAnswerOnce(t *testing.T) {
 		CitationRepairer: repairer, CitationRepairPolicy: resilience.PolicyRepairThenFail,
 		ToolCatalog: catalog, SystemInstruction: "conversation citation repair test",
 		ModelProvider: "fixture", ModelID: "fixture-v1", PromptVersion: "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyKnowledge}, Logger: zap.NewNop(),
-		MaxContextRunes: conversation.MaxContentRunes,
+		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1616,7 +1615,6 @@ func newConversationRunnerTestWithPreflight(
 		ModelProvider:         "fixture",
 		ModelID:               "fixture-v1",
 		PromptVersion:         "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase},
 		Logger:                zap.NewNop(),
 		MaxContextRunes:       conversation.MaxContentRunes,
 		ContextPreflight:      preflight,

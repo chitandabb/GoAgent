@@ -64,25 +64,11 @@ export interface ExternalCaseListData {
   total: number
 }
 
-export type InvestigationCapability = 'case' | 'code' | 'sql'
-export type RequestedSkill =
-  | 'ticket-diagnosis'
-  | 'code-investigation'
-  | 'sql-investigation'
-
-export interface DiagnosisTaskRequestScope {
-  requestedSkill?: RequestedSkill
-  allowedCapabilities?: InvestigationCapability[]
-  [key: string]: unknown
-}
-
 export interface CreateDiagnosisTaskInput {
   externalCaseId: string
   expectedSourceFingerprint: string
   evidenceDataSourceIds?: string[]
   requestText: string
-  requestScope: DiagnosisTaskRequestScope
-  requestScopeSchemaVersion?: number
   attachments?: never[]
   retryOfTaskId?: string | null
 }
@@ -108,8 +94,6 @@ export interface DiagnosisTask {
   caseSnapshotId: string
   retryOfTaskId?: string
   requestText: string
-  requestScope: DiagnosisTaskRequestScope
-  requestScopeSchemaVersion: number
   status: TaskStatus
   attemptCount: number
   lastErrorCode?: string

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/repository"
 	"github.com/google/uuid"
 )
@@ -36,11 +36,11 @@ func TestExecuteReadonlyQueryToolUsesAuthorizedSingleDataSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
 	}
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: dataSourceID, Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencySQLServer)
+	// 授权完全来自 RunAccess.Grants：唯一数据源在 Grant 内，省略 dataSourceId。
+	ctx := agentruntime.WithRunAccess(context.Background(),
+		mustConversationSQLAccess(t, []uuid.UUID{dataSourceID}))
 	result, err := current.InvokableRun(
-		WithTaskScope(context.Background(), scope),
+		ctx,
 		`{"query":"SELECT * FROM dbo.Tickets"}`,
 	)
 	if err != nil {
@@ -54,39 +54,50 @@ func TestExecuteReadonlyQueryToolUsesAuthorizedSingleDataSource(t *testing.T) {
 	}
 }
 
-func TestExecuteReadonlyQueryToolRejectsMissingDependencyOrAmbiguousSource(t *testing.T) {
+func TestExecuteReadonlyQueryToolRejectsMissingGrantOrAmbiguousSource(t *testing.T) {
 	executor := &stubReadonlyQueryExecutor{}
 	current, err := NewExecuteReadonlyQueryTool(executor)
 	if err != nil {
 		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
 	}
 	dataSourceID := uuid.New()
-	withoutDependency := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: dataSourceID, Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-	}})
+	// 1. 没有任何数据源 Grant：fail-closed，executor 零调用。
+	ctx := agentruntime.WithRunAccess(context.Background(), mustConversationSQLAccess(t, nil))
 	if _, err = current.InvokableRun(
-		WithTaskScope(context.Background(), withoutDependency),
+		ctx,
 		`{"query":"SELECT * FROM dbo.Tickets"}`,
 	); err == nil {
-		t.Fatal("query Tool accepted unavailable SQL Server dependency")
+		t.Fatal("query Tool accepted a run with zero granted data sources")
 	}
 	if executor.calls != 0 {
-		t.Fatal("query Tool reached executor without SQL dependency")
+		t.Fatal("query Tool reached executor without a granted data source")
 	}
 
+	// 2. 两个数据源在 Grant 但未指定 ID：歧义必须拒绝。
 	secondID := uuid.New()
-	ambiguous := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{
-		{ID: dataSourceID, Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly},
-		{ID: secondID, Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyReadOnly},
-	}, ToolDependencySQLServer)
+	ctx = agentruntime.WithRunAccess(context.Background(),
+		mustConversationSQLAccess(t, []uuid.UUID{dataSourceID, secondID}))
 	if _, err = current.InvokableRun(
-		WithTaskScope(context.Background(), ambiguous),
+		ctx,
 		`{"query":"SELECT * FROM dbo.Tickets"}`,
 	); err == nil {
-		t.Fatal("query Tool accepted ambiguous data source")
+		t.Fatal("query Tool accepted an ambiguous data source")
 	}
 	if executor.calls != 0 {
 		t.Fatal("query Tool reached executor with ambiguous source")
+	}
+
+	// 3. 指定了 Grant 之外的 dataSourceId：必须拒绝。
+	ctx = agentruntime.WithRunAccess(context.Background(),
+		mustConversationSQLAccess(t, []uuid.UUID{dataSourceID}))
+	if _, err = current.InvokableRun(
+		ctx,
+		`{"dataSourceId":"`+secondID.String()+`","query":"SELECT * FROM dbo.Tickets"}`,
+	); err == nil {
+		t.Fatal("query Tool accepted a dataSourceId outside the Grant")
+	}
+	if executor.calls != 0 {
+		t.Fatal("query Tool reached executor with an un-granted data source")
 	}
 }
 
@@ -96,11 +107,10 @@ func TestExecuteReadonlyQueryToolPropagatesContextAndSafeExecutorErrors(t *testi
 	if err != nil {
 		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
 	}
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencySQLServer)
+	ctx := agentruntime.WithRunAccess(context.Background(),
+		mustConversationSQLAccess(t, []uuid.UUID{uuid.New()}))
 	if _, err = current.InvokableRun(
-		WithTaskScope(context.Background(), scope), `{"query":"SELECT * FROM dbo.Tickets"}`,
+		ctx, `{"query":"SELECT * FROM dbo.Tickets"}`,
 	); err == nil || !strings.Contains(err.Error(), "readonly query unavailable") {
 		t.Fatalf("executor error = %v", err)
 	}

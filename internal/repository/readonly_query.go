@@ -24,7 +24,7 @@ type ReadonlyQueryResult struct {
 }
 
 // ReadonlyQueryExecutor 只接受已经通过 QueryGuard 和已发布 Catalog 复核的查询。
-// dataSourceID 是本次 TaskScope 选中的数据源，不包含连接信息或凭证。
+// dataSourceID 是本轮 RunAccess 数据源 Grant 选中的只读源，不包含连接信息或凭证。
 type ReadonlyQueryExecutor interface {
 	Execute(ctx context.Context, dataSourceID uuid.UUID, query string) (ReadonlyQueryResult, error)
 }

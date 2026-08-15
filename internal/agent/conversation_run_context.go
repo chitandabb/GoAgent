@@ -21,8 +21,8 @@ import (
 //
 // 本模块不读取 Context、不访问任何 Service、不保存状态，也不新增全局
 // Registry、意图分类器、Skill-Tool 绑定或数据库表。调用方（ConversationRunner）
-// 负责把生成的 RunAccess 用 WithRunAccess 绑定为权威 v2 值，并保证 TaskScope
-// 兼容转换不会覆盖它。
+// 把生成的 RunAccess 用 WithRunAccess 绑定为权威值；旧 TaskScope 兼容
+// 双写已硬切删除。
 type conversationRunContext struct {
 	access      agentruntime.RunAccess
 	turnContext string

@@ -20,7 +20,9 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
@@ -194,7 +196,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		scope, err := evaluationScope()
+		scope, err := evaluationRunAccess()
 		if err != nil {
 			return err
 		}
@@ -214,10 +216,9 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		}
 		startedAt := time.Now()
 		result, invokeErr := orchestrator.Invoke(
-			mesagent.WithTaskScope(ctx, scope),
+			agentruntime.WithRunAccess(ctx, scope),
 			mesagent.RunRequest{
 				UserQuery: definition.UserQuery, ExternalCaseID: agenticEvaluationCaseID,
-				RequestedSkill: mesagent.SkillTicketDiagnosis,
 			},
 		)
 		observation := observationFromResult(definition, profile, cfg.Agent.PromptVersion, result, time.Since(startedAt), invokeErr)
@@ -327,17 +328,31 @@ func selectCases(cases []mesagent.AgenticRetrievalEvaluationCase, caseID string,
 	return append([]mesagent.AgenticRetrievalEvaluationCase(nil), cases...), nil
 }
 
-func evaluationScope() (mesagent.TaskScope, error) {
-	return mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst,
-		TaskType: mesagent.TaskTypeDiagnosis,
-		DataSources: []mesagent.ScopedDataSource{{
-			ID:   uuid.MustParse("33333333-3333-3333-3333-333333333333"),
-			Role: mesagent.DataSourceRoleCaseSource, SafetyMode: mesagent.DataSourceSafetyReadOnly,
-		}},
-		AllowedCapabilities:   []mesagent.ToolCapability{mesagent.ToolCapabilityCase, mesagent.ToolCapabilityKnowledge},
-		AvailableDependencies: []mesagent.ToolDependency{mesagent.ToolDependencyExternalCase, mesagent.ToolDependencyKnowledge},
+// evaluationRunAccess 构造评测用的诊断 RunAccess：授权事实直接来自冻结
+// Policy 与 ceiling（case.read + knowledge.read + 评测工单 Grant），不再经过
+// 旧 TaskScope。入口 Skill 由 Runner 固定为 ticket-diagnosis。
+func evaluationRunAccess() (agentruntime.RunAccess, error) {
+	permissions, err := agentruntime.NewPermissionSet(
+		agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead,
+	)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{uuid.MustParse(agenticEvaluationCaseID)},
 	})
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissions, grants)
+	if err != nil {
+		return agentruntime.RunAccess{}, err
+	}
+	return agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst},
+		agentruntime.AccessCeiling{Permissions: permissions, Grants: grants},
+	)
 }
 
 func seededRunResult(definition mesagent.AgenticRetrievalEvaluationCase) (mesagent.RunResult, error) {

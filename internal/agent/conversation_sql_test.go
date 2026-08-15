@@ -143,8 +143,11 @@ func TestConversationProfileSchemaAndFingerprintStableAcrossReferences(t *testin
 			return agentruntime.WithRunAccess(context.Background(), access)
 		},
 		func() context.Context {
-			scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeConversation, nil)
-			return WithTaskScope(context.Background(), scope)
+			access := mustConversationTestRunAccess(t, uuid.New(),
+				[]agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+				agentruntime.ResourceGrantsConfig{},
+			)
+			return agentruntime.WithRunAccess(context.Background(), access)
 		},
 	} {
 		resolved, resolveErr := catalog.ResolveProfile(ctxBuilder(), agentruntime.ToolProfileConversation)
@@ -340,41 +343,45 @@ func TestSearchSchemaCatalogRejectsBeforeSearcherCall(t *testing.T) {
 	}
 }
 
-func TestDiagnosisCompatRunAccessKeepsReadOnlySQLPath(t *testing.T) {
+func TestDiagnosisRunAccessKeepsReadOnlySQLPath(t *testing.T) {
 	dataSourceID := uuid.New()
 	executor := &countingReadonlyQueryExecutor{}
 	current, err := NewExecuteReadonlyQueryTool(executor)
 	if err != nil {
 		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
 	}
-	// Diagnosis 经 WithTaskScope 产生的兼容 RunAccess 必须继续可用。
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: dataSourceID, Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencySQLServer)
+	// Diagnosis RunAccess 直接由冻结 Policy ∩ ceiling 派生：read_only
+	// 生产源进入 Grant，SQL 路径保持可用。
+	access := mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionSQLRead},
+		agentruntime.ResourceGrantsConfig{DataSourceIDs: []uuid.UUID{dataSourceID}},
+	)
 	if _, err := current.InvokableRun(
-		WithTaskScope(context.Background(), scope), `{"query":"SELECT Status FROM dbo.v_Tickets"}`,
+		withTestRunAccess(context.Background(), access), `{"query":"SELECT Status FROM dbo.v_Tickets"}`,
 	); err != nil {
-		t.Fatalf("diagnosis compat path failed: %v", err)
+		t.Fatalf("diagnosis SQL path failed: %v", err)
 	}
 	if calls, gotID, _, _, _ := executor.snapshot(); calls != 1 || gotID != dataSourceID {
 		t.Fatalf("executor call = %d/%s", calls, gotID)
 	}
 }
 
-func TestDiagnosisCompatRunAccessExcludesBoundedLabSource(t *testing.T) {
+func TestDiagnosisRunAccessExcludesBoundedLabSource(t *testing.T) {
 	executor := &countingReadonlyQueryExecutor{}
 	current, err := NewExecuteReadonlyQueryTool(executor)
 	if err != nil {
 		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
 	}
-	// bounded_lab 数据源不得进入只读 SQL Grant：兼容转换必须保持旧过滤语义。
-	scope := mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-	}}, ToolDependencySQLServer)
+	// bounded_lab 数据源永不进入只读 SQL Grant：Policy 构造只允许
+	// read_only 源，RunAccess 派生同样只保留只读源。
+	access := mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionSQLRead},
+		agentruntime.ResourceGrantsConfig{DataSourceIDs: []uuid.UUID{}},
+	)
 	if _, err := current.InvokableRun(
-		WithTaskScope(context.Background(), scope), `{"query":"SELECT 1"}`,
+		withTestRunAccess(context.Background(), access), `{"query":"SELECT 1"}`,
 	); err == nil {
-		t.Fatal("query Tool accepted a bounded_lab data source through the compat path")
+		t.Fatal("query Tool accepted a run without any data source grant")
 	}
 	if calls, _, _, _, _ := executor.snapshot(); calls != 0 {
 		t.Fatalf("executor calls = %d, want 0", calls)
@@ -489,7 +496,6 @@ func TestConversationRunnerSelectsAndExecutesReadonlySQLTool(t *testing.T) {
 		ModelProvider:         "fixture",
 		ModelID:               "fixture-v1",
 		PromptVersion:         "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase, ToolDependencySQLServer},
 		Logger:                zap.NewNop(),
 		MaxContextRunes:       conversation.MaxContentRunes,
 		SQLDataSourceID:       sqlDataSourceID,
@@ -586,7 +592,6 @@ func TestConversationRunnerRunAccessDerivedFromResolvedProfileNames(t *testing.T
 		ModelProvider:         "fixture",
 		ModelID:               "fixture-v1",
 		PromptVersion:         "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase, ToolDependencySQLServer},
 		Logger:                zap.NewNop(),
 		MaxContextRunes:       conversation.MaxContentRunes,
 		SQLDataSourceID:       sqlDataSourceID,
@@ -634,13 +639,12 @@ func TestConversationRunnerWithoutSQLGrantRejectsQueryWithZeroExecutorCalls(t *t
 	modelInstance := &scriptedSQLConversationModel{state: state}
 	runner, err := NewConversationRunner(ConversationRunnerConfig{
 		ChatModel: modelInstance, ToolCatalog: catalog,
-		SystemInstruction:     "conversation SQL rejection fixture",
-		ModelProvider:         "fixture",
-		ModelID:               "fixture-v1",
-		PromptVersion:         "conversation-test-v1",
-		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase, ToolDependencySQLServer},
-		Logger:                zap.NewNop(),
-		MaxContextRunes:       conversation.MaxContentRunes,
+		SystemInstruction: "conversation SQL rejection fixture",
+		ModelProvider:     "fixture",
+		ModelID:           "fixture-v1",
+		PromptVersion:     "conversation-test-v1",
+		Logger:            zap.NewNop(),
+		MaxContextRunes:   conversation.MaxContentRunes,
 	})
 	if err != nil {
 		t.Fatal(err)

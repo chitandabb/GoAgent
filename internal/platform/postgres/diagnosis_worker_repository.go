@@ -38,10 +38,9 @@ func (r *DiagnosisWorkerRepository) LoadTask(
 	}
 	var record workerTaskRecord
 	result := ResolveDB(ctx, r.db).Raw(`
-SELECT task.id, task.created_by, task.request_text, task.request_scope,
+SELECT task.id, task.created_by, task.request_text,
        task.external_case_id, snapshot.payload AS case_snapshot,
        task.investigation_policy, task.investigation_policy_schema_version,
-       task.investigation_policy_mode,
        user_record.role, user_record.status AS user_status
 FROM diagnosis_tasks task
 JOIN users user_record ON user_record.id = task.created_by
@@ -59,10 +58,6 @@ WHERE task.id = ? AND task.status = 'running' AND task.claim_owner = ?
 	if record.UserStatus != string(auth.UserStatusActive) || !record.Role.Valid() {
 		return diagnosisworker.Task{}, diagnosis.ErrTaskForbidden
 	}
-	requestScope := map[string]any{}
-	if err := json.Unmarshal(record.RequestScope, &requestScope); err != nil {
-		return diagnosisworker.Task{}, fmt.Errorf("decode worker request scope: %w", diagnosis.ErrInvalidTask)
-	}
 	caseSnapshot, err := diagnosis.DecodeCaseSnapshot(record.CaseSnapshot)
 	if err != nil {
 		return diagnosisworker.Task{}, err
@@ -70,6 +65,8 @@ WHERE task.id = ? AND task.status = 'running' AND task.claim_owner = ?
 	if caseSnapshot.ID != record.ExternalCaseID {
 		return diagnosisworker.Task{}, diagnosis.ErrInvalidTaskSnapshot
 	}
+	// 旧授权体系已硬切删除：Policy 是任务的唯一授权事实，没有 legacy
+	// fallback。缺失/损坏/版本不一致一律 ErrInvalidTask。
 	policy, err := decodeWorkerInvestigationPolicy(record)
 	if err != nil {
 		return diagnosisworker.Task{}, err
@@ -121,62 +118,32 @@ ORDER BY reference.created_at, reference.attachment_id`, lease.TaskID, record.Cr
 			MediaType: current.MediaType, SizeBytes: current.SizeBytes, ContentSHA256: current.ContentSHA256,
 		})
 	}
-	capabilities, err := diagnosis.TaskCapabilitiesFromRequestScope(requestScope)
-	if err != nil {
-		return diagnosisworker.Task{}, fmt.Errorf("%w: attachment capability: %v", diagnosis.ErrInvalidTask, err)
-	}
-	hasAttachmentCapability := false
-	for _, capability := range capabilities {
-		if capability == diagnosis.TaskCapabilityAttachment {
-			hasAttachmentCapability = true
-			break
-		}
-	}
-	if hasAttachmentCapability != (len(attachments) > 0) {
-		return diagnosisworker.Task{}, fmt.Errorf("%w: attachment scope and frozen task attachments disagree", diagnosis.ErrInvalidTask)
-	}
 	return diagnosisworker.Task{
 		ID: record.ID, CreatedBy: record.CreatedBy, Role: record.Role,
-		RequestText: record.RequestText, RequestScope: requestScope,
+		RequestText: record.RequestText,
 		CaseSnapshot: caseSnapshot, DataSources: dataSources, Attachments: attachments,
 		Policy: policy,
 	}, nil
 }
 
-// decodeWorkerInvestigationPolicy 严格按 policy mode 判断行语义：
-//   - mode=legacy：Policy 两列必须同时 NULL，返回 nil（执行器只从冻结
-//     request_scope 与任务资源做 legacy 派生，绝不读取新部署配置扩权）；
-//   - mode=frozen：Policy 两列必须同时存在，严格 JSON 解码后 payload 内
-//     schemaVersion 必须等于列值，成功后返回冻结 Policy；
-//   - mode 缺失、非法、大小写不匹配或与两列组合不一致：fail-closed
-//     （ErrInvalidTask）。
-//
-// 双 NULL 不再单独代表 legacy：只有 mode=legacy 且双 NULL 才是合法旧任务，
-// frozen + 双 NULL 是"新任务漏写 Policy"，必须拒绝。
-func decodeWorkerInvestigationPolicy(record workerTaskRecord) (*agentruntime.InvestigationPolicy, error) {
+// decodeWorkerInvestigationPolicy 严格解码持久化 Policy：payload 与 schema
+// version 必须同时存在（数据库两列 NOT NULL，缺一即为行损坏），严格 JSON
+// 解码后 payload 内 schemaVersion 必须等于列值。任何不一致都 fail-closed
+// （ErrInvalidTask）；旧授权体系的 legacy fallback 已硬切删除。
+func decodeWorkerInvestigationPolicy(record workerTaskRecord) (agentruntime.InvestigationPolicy, error) {
 	hasPayload := len(record.InvestigationPolicy) > 0
 	hasVersion := record.InvestigationPolicySchemaVersion != nil
-	switch diagnosis.InvestigationPolicyMode(record.InvestigationPolicyMode) {
-	case diagnosis.InvestigationPolicyModeLegacy:
-		if hasPayload || hasVersion {
-			return nil, fmt.Errorf("%w: legacy task must not carry an investigation policy", diagnosis.ErrInvalidTask)
-		}
-		return nil, nil
-	case diagnosis.InvestigationPolicyModeFrozen:
-		if !hasPayload || !hasVersion {
-			return nil, fmt.Errorf("%w: frozen task is missing its investigation policy", diagnosis.ErrInvalidTask)
-		}
-		policy, err := agentruntime.UnmarshalInvestigationPolicy(record.InvestigationPolicy)
-		if err != nil {
-			return nil, fmt.Errorf("%w: decode investigation policy: %v", diagnosis.ErrInvalidTask, err)
-		}
-		if policy.SchemaVersion() != *record.InvestigationPolicySchemaVersion {
-			return nil, fmt.Errorf("%w: investigation policy schema version mismatch", diagnosis.ErrInvalidTask)
-		}
-		return &policy, nil
-	default:
-		return nil, fmt.Errorf("%w: unknown investigation policy mode %q", diagnosis.ErrInvalidTask, record.InvestigationPolicyMode)
+	if !hasPayload || !hasVersion {
+		return agentruntime.InvestigationPolicy{}, fmt.Errorf("%w: diagnosis task is missing its investigation policy", diagnosis.ErrInvalidTask)
 	}
+	policy, err := agentruntime.UnmarshalInvestigationPolicy(record.InvestigationPolicy)
+	if err != nil {
+		return agentruntime.InvestigationPolicy{}, fmt.Errorf("%w: decode investigation policy: %v", diagnosis.ErrInvalidTask, err)
+	}
+	if policy.SchemaVersion() != *record.InvestigationPolicySchemaVersion {
+		return agentruntime.InvestigationPolicy{}, fmt.Errorf("%w: investigation policy schema version mismatch", diagnosis.ErrInvalidTask)
+	}
+	return policy, nil
 }
 
 func (r *DiagnosisWorkerRepository) Complete(
@@ -586,12 +553,10 @@ type workerTaskRecord struct {
 	ID                               uuid.UUID       `gorm:"column:id"`
 	CreatedBy                        uuid.UUID       `gorm:"column:created_by"`
 	RequestText                      string          `gorm:"column:request_text"`
-	RequestScope                     []byte          `gorm:"column:request_scope"`
 	ExternalCaseID                   uuid.UUID       `gorm:"column:external_case_id"`
 	CaseSnapshot                     json.RawMessage `gorm:"column:case_snapshot"`
 	InvestigationPolicy              []byte          `gorm:"column:investigation_policy"`
 	InvestigationPolicySchemaVersion *int            `gorm:"column:investigation_policy_schema_version"`
-	InvestigationPolicyMode          string          `gorm:"column:investigation_policy_mode"`
 	Role                             auth.Role       `gorm:"column:role"`
 	UserStatus                       string          `gorm:"column:user_status"`
 }

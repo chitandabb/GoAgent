@@ -75,8 +75,6 @@ type diagnosisTaskCreateRequest struct {
 	ExpectedSourceFingerprint string                       `json:"expectedSourceFingerprint" binding:"required,max=128"`
 	EvidenceDataSourceIDs     []string                     `json:"evidenceDataSourceIds"`
 	RequestText               string                       `json:"requestText" binding:"required,max=20000"`
-	RequestScope              map[string]any               `json:"requestScope"`
-	RequestScopeSchemaVersion int                          `json:"requestScopeSchemaVersion" binding:"omitempty,min=1"`
 	Attachments               []diagnosisTaskAttachmentReq `json:"attachments"`
 	RetryOfTaskID             string                       `json:"retryOfTaskId"`
 }
@@ -157,7 +155,6 @@ func (r *DiagnosisTaskRoutes) create(c *gin.Context) {
 	}, diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: strings.TrimSpace(request.ExpectedSourceFingerprint),
 		EvidenceDataSourceIDs: evidenceDataSourceIDs, RequestText: request.RequestText,
-		RequestScope: request.RequestScope, RequestScopeSchemaVersion: request.RequestScopeSchemaVersion,
 		Attachments: attachments, RetryOfTaskID: retryOfTaskID, IdempotencyKey: idempotencyKey,
 		CorrelationID: correlationID,
 	})
@@ -492,24 +489,22 @@ func (r *DiagnosisTaskRoutes) cancel(c *gin.Context) {
 }
 
 type diagnosisTaskResponse struct {
-	TaskID                    string                            `json:"taskId"`
-	ExternalCaseID            string                            `json:"externalCaseId"`
-	CaseSnapshotID            string                            `json:"caseSnapshotId"`
-	RetryOfTaskID             string                            `json:"retryOfTaskId,omitempty"`
-	RequestText               string                            `json:"requestText"`
-	RequestScope              map[string]any                    `json:"requestScope"`
-	RequestScopeSchemaVersion int                               `json:"requestScopeSchemaVersion"`
-	Status                    diagnosis.TaskStatus              `json:"status"`
-	AttemptCount              int                               `json:"attemptCount"`
-	LastErrorCode             string                            `json:"lastErrorCode,omitempty"`
-	LastErrorMessage          string                            `json:"lastErrorMessage,omitempty"`
-	StartedAt                 *string                           `json:"startedAt,omitempty"`
-	CompletedAt               *string                           `json:"completedAt,omitempty"`
-	CreatedAt                 string                            `json:"createdAt"`
-	UpdatedAt                 string                            `json:"updatedAt"`
-	ReportAvailable           bool                              `json:"reportAvailable"`
-	ReportID                  string                            `json:"reportId,omitempty"`
-	Attachments               []diagnosisTaskAttachmentResponse `json:"attachments"`
+	TaskID          string                            `json:"taskId"`
+	ExternalCaseID  string                            `json:"externalCaseId"`
+	CaseSnapshotID  string                            `json:"caseSnapshotId"`
+	RetryOfTaskID   string                            `json:"retryOfTaskId,omitempty"`
+	RequestText     string                            `json:"requestText"`
+	Status          diagnosis.TaskStatus              `json:"status"`
+	AttemptCount    int                               `json:"attemptCount"`
+	LastErrorCode   string                            `json:"lastErrorCode,omitempty"`
+	LastErrorMessage string                           `json:"lastErrorMessage,omitempty"`
+	StartedAt       *string                           `json:"startedAt,omitempty"`
+	CompletedAt     *string                           `json:"completedAt,omitempty"`
+	CreatedAt       string                            `json:"createdAt"`
+	UpdatedAt       string                            `json:"updatedAt"`
+	ReportAvailable bool                              `json:"reportAvailable"`
+	ReportID        string                            `json:"reportId,omitempty"`
+	Attachments     []diagnosisTaskAttachmentResponse `json:"attachments"`
 }
 
 type diagnosisTaskAttachmentResponse struct {
@@ -525,8 +520,7 @@ type diagnosisTaskAttachmentResponse struct {
 func diagnosisTaskResponseFrom(task diagnosis.DiagnosisTask) diagnosisTaskResponse {
 	response := diagnosisTaskResponse{
 		TaskID: task.ID.String(), ExternalCaseID: task.ExternalCaseID.String(), CaseSnapshotID: task.CaseSnapshotID.String(),
-		RequestText: task.RequestText, RequestScope: task.RequestScope,
-		RequestScopeSchemaVersion: task.RequestScopeSchemaVersion, Status: task.Status,
+		RequestText: task.RequestText, Status: task.Status,
 		AttemptCount: task.AttemptCount, LastErrorCode: task.LastErrorCode,
 		LastErrorMessage: task.LastErrorMessage, CreatedAt: task.CreatedAt.UTC().Format(timeRFC3339Nano),
 		UpdatedAt: task.UpdatedAt.UTC().Format(timeRFC3339Nano), ReportAvailable: task.ReportID != nil,

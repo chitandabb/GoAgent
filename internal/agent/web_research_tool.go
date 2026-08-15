@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -48,7 +49,7 @@ func NewWebSearchTool(service WebResearcher) (tool.InvokableTool, error) {
 			if query == "" || query != input.Query {
 				return webresearch.SearchResponse{}, errors.New("public query must be non-empty and trimmed")
 			}
-			response, err := service.Search(ctx, scope.UserID().String(), query, input.MaxResults)
+			response, err := service.Search(ctx, scope.Actor().UserID.String(), query, input.MaxResults)
 			if err != nil {
 				return webresearch.SearchResponse{}, safeWebResearchError(err)
 			}
@@ -73,7 +74,7 @@ func NewFetchPublicPageTool(service WebResearcher) (tool.InvokableTool, error) {
 			if resultID == "" || resultID != input.ResultID || len(resultID) > 64 {
 				return webresearch.PageSnapshot{}, errors.New("resultId is invalid")
 			}
-			response, err := service.Fetch(ctx, scope.UserID().String(), resultID)
+			response, err := service.Fetch(ctx, scope.Actor().UserID.String(), resultID)
 			if err != nil {
 				return webresearch.PageSnapshot{}, safeWebResearchError(err)
 			}
@@ -82,15 +83,15 @@ func NewFetchPublicPageTool(service WebResearcher) (tool.InvokableTool, error) {
 	)
 }
 
-func authorizedWebResearchScope(ctx context.Context) (TaskScope, error) {
-	scope, ok := TaskScopeFromContext(ctx)
+func authorizedWebResearchScope(ctx context.Context) (agentruntime.RunAccess, error) {
+	access, ok := agentruntime.RunAccessFromContext(ctx)
 	if !ok {
-		return TaskScope{}, ErrTaskScopeRequired
+		return agentruntime.RunAccess{}, ErrRunAccessRequired
 	}
-	if !scope.CapabilityAllowed(ToolCapabilityWebSearch) || !scope.DependencyAvailable(ToolDependencyWebSearch) {
-		return TaskScope{}, ErrToolNotAllowed
+	if !access.Allows(agentruntime.PermissionWebRead) {
+		return agentruntime.RunAccess{}, ErrToolNotAllowed
 	}
-	return scope, nil
+	return access, nil
 }
 
 func safeWebResearchError(err error) error {

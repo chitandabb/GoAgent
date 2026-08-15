@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 )
 
 type EvaluationVariant string
@@ -12,6 +15,13 @@ type EvaluationVariant string
 const (
 	EvaluationBaseline   EvaluationVariant = "baseline"
 	EvaluationExperiment EvaluationVariant = "experiment"
+
+	// EvaluationObservationV2 是通用 Agent 评测的 v2 数据合同：显式
+	// observationSchemaVersion 加上完整身份（Tool Profile 合同
+	// toolProfileId/toolSchemaFingerprint、模型 Profile 指纹、实现
+	// revision/dirty）。active evaluator 不保留 v1 兼容分支：历史 v1 资产
+	// 只能标记 historical，不得进入正式归约。
+	EvaluationObservationV2 = "evaluation-observation-v2"
 )
 
 func (v EvaluationVariant) Valid() bool {
@@ -19,10 +29,12 @@ func (v EvaluationVariant) Valid() bool {
 }
 
 // EvaluationCase 是版本化评测集中的人工标注，不包含任何一次运行的实际结果。
+// TaskType 只保留 "diagnosis" 单值以兼容既有数据集格式：统一 Runtime v2
+// 的评测只针对 Diagnosis 入口，不再按旧 TaskType 过滤 Schema。
 type EvaluationCase struct {
 	DatasetVersion               string             `json:"datasetVersion"`
 	CaseID                       string             `json:"caseId"`
-	TaskType                     TaskType           `json:"taskType"`
+	TaskType                     string             `json:"taskType"`
 	UserQuery                    string             `json:"userQuery"`
 	ExpectedSkill                SkillID            `json:"expectedSkill"`
 	ExpectedFirstTool            string             `json:"expectedFirstTool,omitempty"`
@@ -39,7 +51,7 @@ func (c EvaluationCase) Validate() error {
 	if strings.TrimSpace(c.DatasetVersion) == "" || strings.TrimSpace(c.CaseID) == "" {
 		return errors.New("datasetVersion and caseId are required")
 	}
-	if !c.TaskType.Valid() || strings.TrimSpace(c.UserQuery) == "" {
+	if c.TaskType != "diagnosis" || strings.TrimSpace(c.UserQuery) == "" {
 		return errors.New("taskType and userQuery are required")
 	}
 	if !skillIDPattern.MatchString(string(c.ExpectedSkill)) {
@@ -75,28 +87,38 @@ func (c EvaluationCase) Validate() error {
 
 // EvaluationObservation 是 baseline 或 experiment 的一次真实运行记录。
 // Usage 必须来自供应商响应，不能用字符数或静态 Schema 字节数代替。
+// v2 身份字段：ObservationSchemaVersion 必须等于 EvaluationObservationV2
+// （无 v1 兼容分支）；ToolProfileID/ToolSchemaFingerprint 是实验臂特有合同
+// （baseline=evaluation-wide-v1，experiment=diagnosis-default），同一 variant
+// 跨样本必须一致，两臂之间按合同允许不同。
 type EvaluationObservation struct {
-	DatasetVersion   string            `json:"datasetVersion"`
-	CaseID           string            `json:"caseId"`
-	Variant          EvaluationVariant `json:"variant"`
-	RunID            string            `json:"runId"`
-	Model            string            `json:"model"`
-	ModelVersion     string            `json:"modelVersion"`
-	ReasoningEffort  string            `json:"reasoningEffort"`
-	PromptVersion    string            `json:"promptVersion"`
-	SelectedSkill    SkillID           `json:"selectedSkill"`
-	ActualToolCalls  []string          `json:"actualToolCalls"`
-	AllowedTools     []string          `json:"allowedTools"`
-	Evidence         []string          `json:"evidence,omitempty"`
-	Limitations      []string          `json:"limitations,omitempty"`
-	ConclusionStatus ConclusionStatus  `json:"conclusionStatus"`
-	RootCauseMatched bool              `json:"rootCauseMatched"`
-	HumanReviewed    bool              `json:"humanReviewed"`
-	Partial          bool              `json:"partial"`
-	Usage            ModelUsage        `json:"usage"`
-	TTFTMillis       int64             `json:"ttftMillis"`
-	DurationMillis   int64             `json:"durationMillis"`
-	ErrorType        string            `json:"errorType,omitempty"`
+	DatasetVersion           string            `json:"datasetVersion"`
+	CaseID                   string            `json:"caseId"`
+	Variant                  EvaluationVariant `json:"variant"`
+	RunID                    string            `json:"runId"`
+	ObservationSchemaVersion string            `json:"observationSchemaVersion,omitempty"`
+	Model                    string            `json:"model"`
+	ModelVersion             string            `json:"modelVersion"`
+	ReasoningEffort          string            `json:"reasoningEffort"`
+	PromptVersion            string            `json:"promptVersion"`
+	ToolProfileID            string            `json:"toolProfileId,omitempty"`
+	ToolSchemaFingerprint    string            `json:"toolSchemaFingerprint,omitempty"`
+	ModelProfileFingerprint  string            `json:"modelProfileFingerprint,omitempty"`
+	ImplementationRevision   string            `json:"implementationRevision,omitempty"`
+	ImplementationDirty      bool              `json:"implementationDirty,omitempty"`
+	SelectedSkill            SkillID           `json:"selectedSkill"`
+	ActualToolCalls          []string          `json:"actualToolCalls"`
+	AllowedTools             []string          `json:"allowedTools"`
+	Evidence                 []string          `json:"evidence,omitempty"`
+	Limitations              []string          `json:"limitations,omitempty"`
+	ConclusionStatus         ConclusionStatus  `json:"conclusionStatus"`
+	RootCauseMatched         bool              `json:"rootCauseMatched"`
+	HumanReviewed            bool              `json:"humanReviewed"`
+	Partial                  bool              `json:"partial"`
+	Usage                    ModelUsage        `json:"usage"`
+	TTFTMillis               int64             `json:"ttftMillis"`
+	DurationMillis           int64             `json:"durationMillis"`
+	ErrorType                string            `json:"errorType,omitempty"`
 }
 
 func (o EvaluationObservation) Validate() error {
@@ -106,6 +128,17 @@ func (o EvaluationObservation) Validate() error {
 	}
 	if !o.Variant.Valid() {
 		return fmt.Errorf("invalid evaluation variant %q", o.Variant)
+	}
+	// 数据合同：v2 是唯一支持的合同，不保留 v1 兼容分支。历史 v1 资产
+	// （没有 observationSchemaVersion）只能标记 historical，不得进入正式归约。
+	if o.ObservationSchemaVersion != EvaluationObservationV2 {
+		return fmt.Errorf(
+			"unsupported observationSchemaVersion %q: the active evaluator has no v1 compatibility branch; historical v1 assets must be marked historical and excluded from formal reduction",
+			o.ObservationSchemaVersion,
+		)
+	}
+	if err := o.validateV2Identity(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(o.Model) == "" || strings.TrimSpace(o.ModelVersion) == "" ||
 		strings.TrimSpace(o.ReasoningEffort) == "" || strings.TrimSpace(o.PromptVersion) == "" {
@@ -132,6 +165,41 @@ func (o EvaluationObservation) Validate() error {
 		o.Usage.TotalTokens < 0 || o.Usage.CachedTokens < 0 || o.Usage.ReasoningTokens < 0 ||
 		o.TTFTMillis < 0 || o.DurationMillis < 0 {
 		return errors.New("usage and duration values cannot be negative")
+	}
+	return nil
+}
+
+// validateV2Identity 强制执行 v2 身份合同。ToolProfileID 是实验臂特有合同：
+// baseline 固定 evaluation-wide-v1（评测 wide 合同，不是生产 Runtime
+// Profile），experiment 固定生产 diagnosis-default；两臂不得互相伪装。
+// ToolSchemaFingerprint/ModelProfileFingerprint 必须是合法 SHA-256；
+// implementationRevision 非空，unknown 且 clean 拒绝（unknown 且 dirty 仅限
+// 本地 smoke）。
+func (o EvaluationObservation) validateV2Identity() error {
+	switch o.Variant {
+	case EvaluationBaseline:
+		if o.ToolProfileID != string(agentruntime.ToolProfileEvaluationWide) {
+			return fmt.Errorf("v2 baseline toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileEvaluationWide)
+		}
+	case EvaluationExperiment:
+		if o.ToolProfileID != string(agentruntime.ToolProfileDiagnosis) {
+			return fmt.Errorf("v2 experiment toolProfileId = %q, want %q", o.ToolProfileID, agentruntime.ToolProfileDiagnosis)
+		}
+	default:
+		return fmt.Errorf("invalid evaluation variant %q", o.Variant)
+	}
+	if !contextgovernance.IsSHA256Hex(o.ToolSchemaFingerprint) {
+		return errors.New("v2 observation requires a valid SHA-256 toolSchemaFingerprint")
+	}
+	if !contextgovernance.IsSHA256Hex(o.ModelProfileFingerprint) {
+		return errors.New("v2 observation requires a valid SHA-256 modelProfileFingerprint")
+	}
+	revision := strings.TrimSpace(o.ImplementationRevision)
+	if revision == "" {
+		return errors.New("v2 observation requires an implementationRevision")
+	}
+	if revision == "unknown" && !o.ImplementationDirty {
+		return errors.New("v2 observation with unknown revision must set implementationDirty=true (local smoke only)")
 	}
 	return nil
 }
@@ -225,6 +293,9 @@ func EvaluateDataset(cases []EvaluationCase, observations []EvaluationObservatio
 			summary.FailureTypes[observation.ErrorType]++
 		}
 	}
+	if err := checkVariantToolProfileConsistency(observations); err != nil {
+		return EvaluationSummary{}, err
+	}
 	summary.Baseline = summarizeVariant(scores, EvaluationBaseline)
 	summary.Experiment = summarizeVariant(scores, EvaluationExperiment)
 	calculatePairedMetrics(&summary, pairs)
@@ -232,6 +303,36 @@ func EvaluateDataset(cases []EvaluationCase, observations []EvaluationObservatio
 		summary.FailureTypes = nil
 	}
 	return summary, nil
+}
+
+// checkVariantToolProfileConsistency 对同一 variant 跨样本执行 fail-closed
+// 一致性检查：同一实验臂的所有样本必须保持同一个 ToolProfileID 与
+// toolSchemaFingerprint（启动 Epoch 的固定装配合同）。ToolProfileID/Schema
+// 指纹是实验臂特有合同，两臂之间允许（且预期）不同，这里只做臂内检查。
+func checkVariantToolProfileConsistency(observations []EvaluationObservation) error {
+	type contract struct {
+		profileID         string
+		schemaFingerprint string
+	}
+	byVariant := make(map[EvaluationVariant]contract, 2)
+	for _, observation := range observations {
+		previous, exists := byVariant[observation.Variant]
+		if !exists {
+			byVariant[observation.Variant] = contract{
+				profileID: observation.ToolProfileID, schemaFingerprint: observation.ToolSchemaFingerprint,
+			}
+			continue
+		}
+		if previous.profileID != observation.ToolProfileID ||
+			previous.schemaFingerprint != observation.ToolSchemaFingerprint {
+			return fmt.Errorf(
+				"variant %s mixes Tool Profile contracts (toolProfileId=%q toolSchemaFingerprint=%q vs %q/%q): same variant across samples must keep one Profile ID and Schema fingerprint",
+				observation.Variant, previous.profileID, previous.schemaFingerprint,
+				observation.ToolProfileID, observation.ToolSchemaFingerprint,
+			)
+		}
+	}
+	return nil
 }
 
 func indexEvaluationCases(cases []EvaluationCase) (map[string]EvaluationCase, string, error) {
@@ -379,8 +480,18 @@ func calculatePairedMetrics(
 			}
 			continue
 		}
+		// 配对只允许相同运行身份：model/modelVersion/reasoningEffort/promptVersion/
+		// modelProfileFingerprint/implementationRevision 必须一致，且两臂
+		// implementationDirty 都必须为 false（dirty 观测只保留单臂统计供本地
+		// smoke，不进入正式 paired 归约）。ToolProfileID 与 toolSchemaFingerprint
+		// 刻意不参与比较：它们是实验臂特有合同，两臂按设计不同，臂内一致性由
+		// checkVariantToolProfileConsistency 在 EvaluateDataset 层 fail-closed。
 		if baseline.Model != experiment.Model || baseline.ModelVersion != experiment.ModelVersion ||
-			baseline.ReasoningEffort != experiment.ReasoningEffort {
+			baseline.ReasoningEffort != experiment.ReasoningEffort ||
+			baseline.PromptVersion != experiment.PromptVersion ||
+			baseline.ModelProfileFingerprint != experiment.ModelProfileFingerprint ||
+			baseline.ImplementationRevision != experiment.ImplementationRevision ||
+			baseline.ImplementationDirty || experiment.ImplementationDirty {
 			summary.UnpairedRuns += 2
 			continue
 		}

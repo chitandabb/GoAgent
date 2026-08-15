@@ -14,7 +14,7 @@ func TestReadObservationsRejectsInvalidJSONL(t *testing.T) {
 }
 
 func TestReadObservationsRequiresActualAllowedTools(t *testing.T) {
-	_, err := readObservations(strings.NewReader(`{"datasetVersion":"dev-v1","caseId":"sample","variant":"experiment","runId":"run-1","model":"stepfun","modelVersion":"step-3.7-flash","reasoningEffort":"medium","promptVersion":"v1","selectedSkill":"ticket-diagnosis"}` + "\n"))
+	_, err := readObservations(strings.NewReader(`{"datasetVersion":"dev-v1","caseId":"sample","variant":"experiment","runId":"run-1","observationSchemaVersion":"evaluation-observation-v2","model":"stepfun","modelVersion":"step-3.7-flash","reasoningEffort":"medium","promptVersion":"v1","toolProfileId":"diagnosis-default","toolSchemaFingerprint":"` + strings.Repeat("2", 64) + `","modelProfileFingerprint":"` + strings.Repeat("a", 64) + `","implementationRevision":"git:test","selectedSkill":"ticket-diagnosis"}` + "\n"))
 	if err == nil || !strings.Contains(err.Error(), "allowedTools") {
 		t.Fatalf("readObservations error = %v", err)
 	}

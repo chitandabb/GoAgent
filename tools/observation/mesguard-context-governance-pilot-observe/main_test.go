@@ -578,7 +578,7 @@ func pilotMemoryCandidateAt(
 }
 
 // TestPilotToolSchemaMatchesConversationProfile 证明 Pilot 的工具合同来自固定
-// conversation-default Profile，且不随空 TaskScope/capability 变化。该测试
+// conversation-default Profile，且不随 RunAccess 权限/引用变化。该测试
 // 不调用任何模型或 Provider。
 func TestPilotToolSchemaMatchesConversationProfile(t *testing.T) {
 	catalog, err := mesagent.NewConversationDefaultToolCatalog(context.Background(),
@@ -598,41 +598,56 @@ func TestPilotToolSchemaMatchesConversationProfile(t *testing.T) {
 		t.Fatalf("CanonicalToolContract: %v", err)
 	}
 
-	// 空 capability 的会话 TaskScope 与带能力/引用的 scope 都不改变 Schema。
-	scopes := []mesagent.TaskScope{
-		mustPilotConversationScope(t, nil),
-		mustPilotConversationScope(t, []mesagent.ToolCapability{
-			mesagent.ToolCapabilityCase, mesagent.ToolCapabilityKnowledge,
-			mesagent.ToolCapabilityTask, mesagent.ToolCapabilityAttachment,
-		}),
+	// 不同权限与引用的会话 RunAccess 都不改变 Schema：授权事实只影响
+	// 执行期 Guard，不参与 Profile 解析。
+	contexts := []context.Context{
+		pilotConversationRunAccessContext(t, nil, agentruntime.ResourceGrantsConfig{}),
+		pilotConversationRunAccessContext(t,
+			[]agentruntime.Permission{
+				agentruntime.PermissionCaseRead, agentruntime.PermissionKnowledgeRead,
+				agentruntime.PermissionTaskRead, agentruntime.PermissionAttachmentRead,
+			},
+			agentruntime.ResourceGrantsConfig{
+				ExternalCaseIDs: []uuid.UUID{uuid.New()}, TaskIDs: []uuid.UUID{uuid.New()},
+				AttachmentIDs: []uuid.UUID{uuid.New()},
+			},
+		),
 	}
-	for _, scope := range scopes {
-		resolved, err := catalog.ResolveProfile(
-			mesagent.WithTaskScope(context.Background(), scope),
-			agentruntime.ToolProfileConversation,
-		)
+	for index, ctx := range contexts {
+		resolved, err := catalog.ResolveProfile(ctx, agentruntime.ToolProfileConversation)
 		if err != nil {
-			t.Fatalf("ResolveProfile(scoped): %v", err)
+			t.Fatalf("ResolveProfile(access %d): %v", index, err)
 		}
 		contract, err := mesagent.CanonicalToolContract(context.Background(), resolved.Tools)
 		if err != nil {
-			t.Fatalf("CanonicalToolContract(scoped): %v", err)
+			t.Fatalf("CanonicalToolContract(access %d): %v", index, err)
 		}
 		if contract.Fingerprint != baseContract.Fingerprint {
-			t.Fatalf("TaskScope changed the Pilot Tool Schema fingerprint: %v vs %v",
-				contract.Fingerprint, baseContract.Fingerprint)
+			t.Fatalf("RunAccess %d changed the Pilot Tool Schema fingerprint: %v vs %v",
+				index, contract.Fingerprint, baseContract.Fingerprint)
 		}
 	}
 }
 
-func mustPilotConversationScope(t *testing.T, capabilities []mesagent.ToolCapability) mesagent.TaskScope {
+func pilotConversationRunAccessContext(
+	t *testing.T,
+	permissions []agentruntime.Permission,
+	grantsConfig agentruntime.ResourceGrantsConfig,
+) context.Context {
 	t.Helper()
-	scope, err := mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: mesagent.TaskTypeConversation,
-		AllowedCapabilities: capabilities,
-	})
+	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
 	if err != nil {
-		t.Fatalf("NewTaskScope: %v", err)
+		t.Fatalf("NewPermissionSet: %v", err)
 	}
-	return scope
+	grants, err := agentruntime.NewResourceGrants(grantsConfig)
+	if err != nil {
+		t.Fatalf("NewResourceGrants: %v", err)
+	}
+	access, err := agentruntime.NewConversationRunAccess(
+		agentruntime.Actor{UserID: uuid.New(), Role: auth.RoleAnalyst}, permissionSet, grants,
+	)
+	if err != nil {
+		t.Fatalf("NewConversationRunAccess: %v", err)
+	}
+	return agentruntime.WithRunAccess(context.Background(), access)
 }

@@ -9,24 +9,18 @@ import (
 )
 
 // validateTaskInvestigationPolicy 是 DiagnosisTaskRepository 创建路径的
-// fail-closed 校验：新任务必须显式携带 frozen mode、非空 Policy payload、
-// 非零且与 payload 内 schemaVersion 一致的列版本，并且 payload 必须通过
-// 严格 codec。任何一条不满足都返回 ErrInvalidTask 且不执行任何 INSERT。
+// fail-closed 校验：新任务必须携带非空 Policy payload、非零且与 payload 内
+// schemaVersion 一致的列版本，并且 payload 必须通过严格 codec。任何一条
+// 不满足都返回 ErrInvalidTask 且不执行任何 INSERT。
 //
-// Repository 绝不把缺失 Policy 的新任务自动转换成 legacy：mode 必须由
-// 调用方显式声明，legacy 只属于 migration 00034 之前的既有行。
+// 旧授权体系（legacy mode / request_scope 派生）已硬切删除：不存在把缺失
+// Policy 的新任务降级执行的路径，Policy 是任务的唯一授权事实。
 func validateTaskInvestigationPolicy(
-	mode diagnosis.InvestigationPolicyMode,
 	payload json.RawMessage,
 	schemaVersion int,
 ) error {
-	if mode != diagnosis.InvestigationPolicyModeFrozen {
-		return fmt.Errorf("%w: new diagnosis tasks must freeze an investigation policy (mode=%q)",
-			diagnosis.ErrInvalidTask, mode)
-	}
 	if len(payload) == 0 {
-		return fmt.Errorf("%w: investigation policy payload is required for frozen tasks",
-			diagnosis.ErrInvalidTask)
+		return fmt.Errorf("%w: investigation policy payload is required", diagnosis.ErrInvalidTask)
 	}
 	if schemaVersion <= 0 {
 		return fmt.Errorf("%w: investigation policy schema version must be positive (got %d)",

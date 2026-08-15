@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 
@@ -82,80 +82,120 @@ func mustDefaultToolCatalogForProfile(
 	return catalog
 }
 
-func TestDefaultToolCatalogDiagnosisExcludesTaskCreationAndStatus(t *testing.T) {
-	catalog := mustFullyConfiguredDefaultToolCatalog(t)
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencyExternalCase, ToolDependencySQLServer, ToolDependencyKnowledge, ToolDependencyGitHubMCP)
-	tools, err := catalog.ToolsFor(context.Background(), scope)
+// TestDefaultToolCatalogDiagnosisProfileExcludesTaskCommands 证明 Diagnosis
+// 固定 Profile 不暴露任务创建/状态命令，但包含只读证据 Tool 与 SQL 三件套；
+// 名单不随任何 per-run 状态变化。
+func TestDefaultToolCatalogDiagnosisProfileExcludesTaskCommands(t *testing.T) {
+	catalog := mustDiagnosisConfiguredDefaultCatalogForTest(t)
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
 	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
+		t.Fatalf("ResolveProfile: %v", err)
 	}
-	names := toolNamesForTest(t, tools)
+	names := resolved.ModelVisibleNames
 	for _, forbidden := range []string{ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus} {
 		if slices.Contains(names, forbidden) {
-			t.Fatalf("diagnosis received conversation command %q: %v", forbidden, names)
+			t.Fatalf("diagnosis profile received conversation command %q: %v", forbidden, names)
 		}
 	}
 	for _, required := range []string{
 		ToolReadExternalCase, ToolSearchKnowledge,
 		ToolSearchSchemaCatalog, ToolDatabaseObjectDefinition, ToolExecuteReadonlyQuery,
+		ToolSkill,
 	} {
 		if !slices.Contains(names, required) {
-			t.Fatalf("diagnosis missing %q: %v", required, names)
+			t.Fatalf("diagnosis profile missing %q: %v", required, names)
 		}
+	}
+	// 重复解析名单不变。
+	again, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(again.ModelVisibleNames, names) {
+		t.Fatal("diagnosis profile names changed between resolutions")
 	}
 }
 
-func TestDefaultToolCatalogConversationGetsTaskCreationButNeverSQL(t *testing.T) {
+// TestDefaultToolCatalogConversationProfileContainsTextToSQLButNotObjectDDL
+// 证明 Conversation 固定 Profile：任务创建/状态命令与 Text-to-SQL 两件套在
+// 名单中（执行期由 RunAccess 收窄），对象定义 Tool 按最小 Tool 集原则仅供
+// Diagnosis。
+func TestDefaultToolCatalogConversationProfileContainsTextToSQLButNotObjectDDL(t *testing.T) {
 	catalog := mustFullyConfiguredDefaultToolCatalog(t)
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeConversation, nil,
-		[]ToolCapability{
-			ToolCapabilityCase, ToolCapabilityKnowledge, ToolCapabilityTask,
-			ToolCapabilityAttachment, ToolCapabilityWebSearch, ToolCapabilityMemory,
-		},
-		ToolDependencyExternalCase, ToolDependencyKnowledge,
-		ToolDependencyWebSearch, ToolDependencyAttachment)
-	tools, err := catalog.ToolsFor(context.Background(), scope)
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
 	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
+		t.Fatalf("ResolveProfile: %v", err)
 	}
-	names := toolNamesForTest(t, tools)
-	if !slices.Contains(names, ToolCreateDiagnosisTask) {
-		t.Fatalf("conversation missing create_diagnosis_task: %v", names)
-	}
-	for _, forbidden := range []string{
-		ToolSearchSchemaCatalog, ToolDatabaseObjectDefinition, ToolExecuteReadonlyQuery,
+	names := resolved.ModelVisibleNames
+	for _, required := range []string{
+		ToolCreateDiagnosisTask, ToolGetDiagnosisTaskStatus,
+		ToolSearchSchemaCatalog, ToolExecuteReadonlyQuery,
 	} {
-		if slices.Contains(names, forbidden) {
-			t.Fatalf("conversation received SQL Tool %q: %v", forbidden, names)
+		if !slices.Contains(names, required) {
+			t.Fatalf("conversation profile missing %q: %v", required, names)
 		}
 	}
+	if slices.Contains(names, ToolDatabaseObjectDefinition) {
+		t.Fatalf("conversation profile must not contain object definition: %v", names)
+	}
 }
 
-func TestDefaultToolCatalogConversationWithoutCaseHasNoTaskCreation(t *testing.T) {
-	catalog := mustFullyConfiguredDefaultToolCatalog(t)
-	scope := mustTaskScopeWithCapabilities(t, auth.RoleAnalyst, TaskTypeConversation, nil,
-		[]ToolCapability{ToolCapabilityKnowledge}, ToolDependencyKnowledge)
-	tools, err := catalog.ToolsFor(context.Background(), scope)
+// TestDefaultToolCatalogConversationCommandGatedByRunAccess 证明 Schema 可见
+// 不等于可执行：create_diagnosis_task 始终在 Conversation Profile，但没有
+// diagnosis.create Permission 时执行期 Guard fail-closed、creator 零调用。
+func TestDefaultToolCatalogConversationCommandGatedByRunAccess(t *testing.T) {
+	creator := &diagnosisToolCreatorStub{}
+	catalog := mustDefaultToolCatalogForProfile(t, func(ctx context.Context, deps DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+		deps.CreateDiagnosisTask = creator
+		return NewConversationDefaultToolCatalog(ctx, deps)
+	})
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
 	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
+		t.Fatalf("ResolveProfile: %v", err)
 	}
-	if names := toolNamesForTest(t, tools); slices.Contains(names, ToolCreateDiagnosisTask) {
-		t.Fatalf("conversation without case received task creation: %v", names)
+	var createTool tool.InvokableTool
+	for _, current := range resolved.Tools {
+		info, infoErr := current.Info(context.Background())
+		if infoErr != nil {
+			t.Fatalf("Tool.Info: %v", infoErr)
+		}
+		if info.Name == ToolCreateDiagnosisTask {
+			createTool = current.(tool.InvokableTool)
+			break
+		}
+	}
+	if createTool == nil {
+		t.Fatal("create_diagnosis_task missing from the fixed conversation profile")
+	}
+	withoutPermission := mustConversationTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
+	ctx := withTestRunAccess(context.Background(), withoutPermission)
+	ctx = conversation.WithCommandContext(ctx, conversation.CommandContext{
+		ConversationID: uuid.New(), UserMessageID: uuid.New(),
+		Actor: conversation.Actor{UserID: uuid.New()},
+	})
+	if _, err := createTool.InvokableRun(ctx, `{"externalCaseId":"`+runnerTestCaseID.String()+`","diagnosisGoal":"检查"}`); !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("create without diagnosis.create error = %v, want ErrToolNotAllowed", err)
+	}
+	if creator.calls != 0 {
+		t.Fatalf("creator calls = %d, want 0", creator.calls)
 	}
 }
 
+// TestDefaultToolCatalogMemoryToolPassesGuardWithMemoryPermission 证明执行期
+// Guard 只读 RunAccess：memory.read 存在时 Guard 放行，错误来自 Tool 内部
+// 缺少 CommandContext。
 func TestDefaultToolCatalogMemoryToolPassesGuardWithMemoryPermission(t *testing.T) {
 	catalog := mustFullyConfiguredDefaultToolCatalog(t)
 	userID := uuid.New()
-	scope := sourceRecoveryConversationScope(t, userID)
-	tools, err := catalog.ToolsFor(context.Background(), scope)
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
 	if err != nil {
-		t.Fatalf("ToolsFor: %v", err)
+		t.Fatalf("ResolveProfile: %v", err)
 	}
 	var memoryTool tool.InvokableTool
-	for _, current := range tools {
+	for _, current := range resolved.Tools {
 		info, infoErr := current.Info(context.Background())
 		if infoErr != nil {
 			t.Fatalf("Tool.Info: %v", infoErr)
@@ -166,11 +206,10 @@ func TestDefaultToolCatalogMemoryToolPassesGuardWithMemoryPermission(t *testing.
 		}
 	}
 	if memoryTool == nil {
-		t.Fatalf("memory Tool missing for memory-capable scope: %v", toolNamesForTest(t, tools))
+		t.Fatalf("memory Tool missing from fixed conversation profile: %v", resolved.ModelVisibleNames)
 	}
-	// 执行期 Guard 必须放行 memory.read（scope 已授权 memory 能力），
-	// 错误应来自 Tool 内部缺少 CommandContext，而不是 Guard 拒绝。
-	_, err = memoryTool.InvokableRun(WithTaskScope(context.Background(), scope), `{"entryId":"fact-1"}`)
+	ctx := withTestRunAccess(context.Background(), sourceRecoveryConversationAccess(t, userID))
+	_, err = memoryTool.InvokableRun(ctx, `{"entryId":"fact-1"}`)
 	if !errors.Is(err, conversation.ErrCommandContextRequired) {
 		t.Fatalf("memory Tool error = %v, want CommandContextRequired (guard must pass memory.read)", err)
 	}

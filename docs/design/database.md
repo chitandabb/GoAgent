@@ -345,8 +345,8 @@ UNIQUE(external_case_id, snapshot_no)
 - `idempotency_key`；
 - `request_fingerprint`；
 - `request_text`；
-- `request_scope JSONB`，保存用户选择的数据范围和诊断选项；
-- `request_scope_schema_version INTEGER NOT NULL`；
+- `investigation_policy JSONB NOT NULL`，保存任务创建时由后端冻结的授权策略；
+- `investigation_policy_schema_version INTEGER NOT NULL`；
 - `status`，`pending`、`running`、`cancel_requested`、`succeeded`、`failed`、`cancelled`；
 - `attempt_count`；
 - `claim_owner`、`claimed_at`、`lease_until`；
@@ -358,6 +358,7 @@ UNIQUE(external_case_id, snapshot_no)
 约束：
 
 - `(created_by, idempotency_key)`建立唯一约束；相同Key但`request_fingerprint`不同必须返回冲突；
+- `investigation_policy` 必须是对象且协议版本为正数；旧 `request_scope` 和 `investigation_policy_mode` 已由不可逆 migration `00035` 删除；
 - `retry_of` 只建立历史关联，不复用原任务的步骤、事件或报告；
 - `succeeded` 只表示执行完成，不代表报告结论正确；
 - 状态转换由领域用例控制，数据库只通过枚举或 CHECK 约束阻止非法字符串。

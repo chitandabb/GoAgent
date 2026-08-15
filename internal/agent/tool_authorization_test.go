@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
-	"github.com/chitandabb/GoAgent/internal/auth"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -21,7 +20,8 @@ import (
 )
 
 // bindDiagnosisProfileForTest 把测试 Catalog 的 test 工具绑定为固定 Diagnosis
-// Profile，供 Middleware/并发测试使用；ToolsFor 的 v1 语义不受影响。
+// Profile，供 Middleware/并发测试使用；Schema 与 RunAccess 解耦，执行期
+// Guard 仍按 RunAccess 校验。
 func bindDiagnosisProfileForTest(t *testing.T, catalog *ToolCatalog) {
 	t.Helper()
 	profile := mustToolProfileForTest(t, agentruntime.ToolProfileDiagnosis, []string{
@@ -46,10 +46,11 @@ func TestToolAuthorizationMiddlewareRequiresRunAccessAndReplacesStaticTools(t *t
 	if _, _, err = middleware.BeforeAgent(context.Background(), runCtx); !errors.Is(err, ErrRunAccessRequired) {
 		t.Fatalf("missing RunAccess error = %v, want ErrRunAccessRequired", err)
 	}
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}}, ToolDependencyExternalCase)
-	_, got, err := middleware.BeforeAgent(WithTaskScope(context.Background(), scope), runCtx)
+	ctx := agentruntime.WithRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
+	_, got, err := middleware.BeforeAgent(ctx, runCtx)
 	if err != nil {
 		t.Fatalf("BeforeAgent: %v", err)
 	}
@@ -83,11 +84,12 @@ func TestToolAuthorizationMiddlewareRejectsInvalidProviderOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewToolAuthorizationMiddleware: %v", err)
 	}
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}})
+	ctx := agentruntime.WithRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
 	_, _, err = middleware.BeforeAgent(
-		WithTaskScope(context.Background(), scope),
+		ctx,
 		&adk.ChatModelAgentContext{},
 	)
 	if err == nil {
@@ -108,10 +110,10 @@ func TestToolAuthorizationMiddlewareKeepsBlockedToolsInSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-	}})
-	ctx := WithTaskScope(context.Background(), scope)
+	ctx := agentruntime.WithRunAccess(context.Background(), mustDiagnosisTestRunAccess(t, uuid.New(),
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+		agentruntime.ResourceGrantsConfig{},
+	))
 	ctx = withAgentToolRunPolicy(ctx, newAgentToolRunPolicy([]string{ToolSearchKnowledge}, nil))
 	_, got, err := middleware.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
 	if err != nil {
@@ -204,23 +206,28 @@ func TestToolAuthorizationMiddlewareIsolatesConcurrentADKRuns(t *testing.T) {
 			fmt.Sprintf("production-%02d", i),
 		)
 	}
-	scopes := []TaskScope{
-		mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-			ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-		}}, ToolDependencyExternalCase),
-		mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-			ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-		}}, ToolDependencySQLServer),
-		mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-			ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-		}}, ToolDependencySQLServer),
+	// 三类运行使用不同的 RunAccess（case / bounded-lab / production），
+	// 但必须看到完全相同的固定 Profile Schema。
+	accesses := []agentruntime.RunAccess{
+		mustDiagnosisTestRunAccess(t, uuid.New(),
+			[]agentruntime.Permission{agentruntime.PermissionCaseRead},
+			agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{uuid.New()}},
+		),
+		mustDiagnosisTestRunAccess(t, uuid.New(),
+			[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionSQLRead},
+			agentruntime.ResourceGrantsConfig{DataSourceIDs: []uuid.UUID{uuid.New()}},
+		),
+		mustDiagnosisTestRunAccess(t, uuid.New(),
+			[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionSQLRead},
+			agentruntime.ResourceGrantsConfig{DataSourceIDs: []uuid.UUID{uuid.New()}},
+		),
 	}
 
 	var wg sync.WaitGroup
 	errorsFound := make(chan error, len(runs))
 	for index, query := range runs {
 		query := query
-		scope := scopes[index%len(scopes)]
+		access := accesses[index%len(accesses)]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -229,7 +236,7 @@ func TestToolAuthorizationMiddlewareIsolatesConcurrentADKRuns(t *testing.T) {
 				errorsFound <- fmt.Errorf("%s: build runner: %w", query, buildErr)
 				return
 			}
-			runCtx := WithTaskScope(context.Background(), scope)
+			runCtx := agentruntime.WithRunAccess(context.Background(), access)
 			iterator := runner.Query(runCtx, query)
 			for {
 				event, ok := iterator.Next()

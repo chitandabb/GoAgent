@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/conversationmemory"
@@ -83,8 +83,8 @@ func TestConversationMemorySourceToolInjectsCurrentConversationScope(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := sourceRecoveryConversationScope(t, userID)
-	ctx := conversation.WithCommandContext(WithTaskScope(context.Background(), scope), conversation.CommandContext{
+	scope := sourceRecoveryConversationAccess(t, userID)
+	ctx := conversation.WithCommandContext(withTestRunAccess(context.Background(), scope), conversation.CommandContext{
 		ConversationID: conversationID, UserMessageID: messageID,
 		Actor: conversation.Actor{UserID: userID},
 	})
@@ -127,8 +127,8 @@ func TestConversationMemorySourceToolRejectsInvalidQueryAndOffsetCombinations(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := sourceRecoveryConversationScope(t, userID)
-	ctx := conversation.WithCommandContext(WithTaskScope(context.Background(), scope), conversation.CommandContext{
+	scope := sourceRecoveryConversationAccess(t, userID)
+	ctx := conversation.WithCommandContext(withTestRunAccess(context.Background(), scope), conversation.CommandContext{
 		ConversationID: uuid.New(), UserMessageID: uuid.New(),
 		Actor: conversation.Actor{UserID: userID},
 	})
@@ -181,17 +181,17 @@ func TestConversationMemorySourceToolRejectsMissingOrMismatchedRunScope(t *testi
 	command := conversation.CommandContext{
 		ConversationID: uuid.New(), UserMessageID: uuid.New(), Actor: conversation.Actor{UserID: userID},
 	}
-	wrongUserScope := sourceRecoveryConversationScope(t, uuid.New())
-	ctx := conversation.WithCommandContext(WithTaskScope(context.Background(), wrongUserScope), command)
-	if _, err := current.InvokableRun(ctx, `{"entryId":"fact-1"}`); !errors.Is(err, ErrTaskScopeRequired) {
-		t.Fatalf("mismatched TaskScope error = %v", err)
+	wrongUserAccess := sourceRecoveryConversationAccess(t, uuid.New())
+	ctx := conversation.WithCommandContext(withTestRunAccess(context.Background(), wrongUserAccess), command)
+	if _, err := current.InvokableRun(ctx, `{"entryId":"fact-1"}`); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("mismatched RunAccess error = %v", err)
 	}
 	if reader.calls != 0 {
 		t.Fatalf("source recovery reader calls = %d, want 0", reader.calls)
 	}
 }
 
-func TestDefaultToolCatalogRequiresMemoryCapabilityForSourceRecovery(t *testing.T) {
+func TestConversationProfileAlwaysExposesConfiguredMemorySourceTool(t *testing.T) {
 	reader := &sourceRecoveryReaderStub{}
 	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
 		ExternalCases: runnerTestCaseGetter{}, ConversationMemorySources: reader,
@@ -199,42 +199,33 @@ func TestDefaultToolCatalogRequiresMemoryCapabilityForSourceRecovery(t *testing.
 	if err != nil {
 		t.Fatalf("NewConversationDefaultToolCatalog(): %v", err)
 	}
-	userID := uuid.New()
-	withMemory := sourceRecoveryConversationScope(t, userID)
-	tools, err := catalog.ToolsFor(WithTaskScope(context.Background(), withMemory), withMemory)
+	// Schema 只由固定 conversation-default Profile 决定：配置了 memory
+	// source 后 Tool 始终可见，不随 RunAccess 或消息引用变化。
+	resolved, err := catalog.ResolveProfile(context.Background(), agentruntime.ToolProfileConversation)
 	if err != nil {
-		t.Fatalf("ToolsFor(memory): %v", err)
+		t.Fatalf("ResolveProfile(): %v", err)
 	}
-	found := false
-	for _, current := range tools {
-		info, infoErr := current.Info(context.Background())
-		if infoErr != nil {
-			t.Fatalf("Tool Info(): %v", infoErr)
-		}
-		found = found || info.Name == ToolReadConversationMemorySources
-	}
+	found := slices.Contains(resolved.ModelVisibleNames, ToolReadConversationMemorySources)
 	if !found {
-		t.Fatalf("memory Tool not exposed: %+v", tools)
+		t.Fatalf("memory Tool not in fixed Profile: %v", resolved.ModelVisibleNames)
 	}
 
-	withoutMemory, err := NewTaskScope(TaskScopeConfig{
-		UserID: userID, Role: auth.RoleAnalyst, TaskType: TaskTypeConversation,
+	// 执行期授权仍由 RunAccess 决定：没有 memory.read 时零调用 fail-closed。
+	userID := uuid.New()
+	ctx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+		ConversationID: uuid.New(), UserMessageID: uuid.New(),
+		Actor: conversation.Actor{UserID: userID},
 	})
-	if err != nil {
-		t.Fatalf("NewTaskScope(without memory): %v", err)
+	withoutMemory := mustConversationTestRunAccess(t, userID,
+		[]agentruntime.Permission{agentruntime.PermissionKnowledgeRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
+	memoryTool := sourceRecoveryToolFromCatalog(t, catalog, ctx)
+	if _, err := memoryTool.InvokableRun(withTestRunAccess(ctx, withoutMemory), `{"entryId":"fact-1"}`); !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("memory Tool without memory.read error = %v, want ErrToolNotAllowed", err)
 	}
-	tools, err = catalog.ToolsFor(WithTaskScope(context.Background(), withoutMemory), withoutMemory)
-	if err != nil {
-		t.Fatalf("ToolsFor(without memory): %v", err)
-	}
-	for _, current := range tools {
-		info, infoErr := current.Info(context.Background())
-		if infoErr != nil {
-			t.Fatalf("Tool Info(): %v", infoErr)
-		}
-		if info.Name == ToolReadConversationMemorySources {
-			t.Fatal("memory Tool exposed without memory capability")
-		}
+	if reader.calls != 0 {
+		t.Fatalf("memory Tool without permission reached the reader: calls=%d", reader.calls)
 	}
 }
 
@@ -281,13 +272,13 @@ func TestConversationMemorySourceToolAppliesRecoveryBoundsAndCursorEndToEnd(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := sourceRecoveryConversationScope(t, userID)
-	ctx := conversation.WithCommandContext(WithTaskScope(context.Background(), scope), conversation.CommandContext{
+	scope := sourceRecoveryConversationAccess(t, userID)
+	ctx := conversation.WithCommandContext(withTestRunAccess(context.Background(), scope), conversation.CommandContext{
 		ConversationID: conversationID, UserMessageID: messageID,
 		Actor: conversation.Actor{UserID: userID},
 	})
 	ctx = conversationmemory.WithSourceRecoveryRun(ctx)
-	current := sourceRecoveryToolFromCatalog(t, catalog, ctx, scope)
+	current := sourceRecoveryToolFromCatalog(t, catalog, ctx)
 
 	raw, err := current.InvokableRun(ctx, `{"entryId":"goal_sources"}`)
 	if err != nil {
@@ -341,16 +332,11 @@ func TestConversationMemorySourceToolAppliesRecoveryBoundsAndCursorEndToEnd(t *t
 	}
 }
 
-func TestConversationRunnerEnablesMemoryCapabilityAndLimitsSourceRecoveryCalls(t *testing.T) {
+func TestConversationRunnerMemorySourceRecoveryBoundsAndLimitsCalls(t *testing.T) {
 	userID, conversationID, messageID := uuid.New(), uuid.New(), uuid.New()
-	runner := &ConversationRunner{memorySourceRecoveryEnabled: true}
-	scope, err := runner.conversationScope(conversation.Actor{UserID: userID}, conversation.Message{})
-	if err != nil {
-		t.Fatalf("conversationScope(): %v", err)
-	}
-	if !scope.CapabilityAllowed(ToolCapabilityMemory) {
-		t.Fatal("conversation scope does not include memory capability")
-	}
+	// 执行期授权只来自 RunAccess：memory.read 由会话 RunContext 按固定
+	// Profile 授予；这里直接构造与生产等价的值。
+	scope := sourceRecoveryConversationAccess(t, userID)
 
 	reader := &sourceRecoveryReaderStub{result: conversationmemory.SourceReadResult{
 		Messages: []conversationmemory.SourceMessage{{
@@ -418,7 +404,7 @@ func TestConversationRunnerEnablesMemoryCapabilityAndLimitsSourceRecoveryCalls(t
 
 func TestConversationMemorySourceToolFailureEntersExecutionTrace(t *testing.T) {
 	userID := uuid.New()
-	scope := sourceRecoveryConversationScope(t, userID)
+	scope := sourceRecoveryConversationAccess(t, userID)
 	reader := &sourceRecoveryReaderStub{err: errors.New("snapshot unavailable")}
 	current, err := NewConversationMemorySourceTool(reader)
 	if err != nil {
@@ -451,12 +437,12 @@ func TestConversationMemorySourceToolFailureEntersExecutionTrace(t *testing.T) {
 }
 
 func sourceRecoveryToolRunContext(
-	scope TaskScope,
+	access agentruntime.RunAccess,
 	command conversation.CommandContext,
 	trace *executionTrace,
 ) context.Context {
 	ctx := conversation.WithCommandContext(context.Background(), command)
-	ctx = WithTaskScope(ctx, scope)
+	ctx = withTestRunAccess(ctx, access)
 	ctx = conversationmemory.WithSourceRecoveryRun(ctx)
 	ctx = withAgentToolRunPolicy(ctx, newAgentToolRunPolicy(nil, map[string]int{
 		ToolReadConversationMemorySources: 2,
@@ -514,14 +500,13 @@ func sourceRecoveryToolFromCatalog(
 	t *testing.T,
 	catalog *ToolCatalog,
 	ctx context.Context,
-	scope TaskScope,
 ) tool.InvokableTool {
 	t.Helper()
-	tools, err := catalog.ToolsFor(ctx, scope)
+	resolved, err := catalog.ResolveProfile(ctx, agentruntime.ToolProfileConversation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, current := range tools {
+	for _, current := range resolved.Tools {
 		info, infoErr := current.Info(ctx)
 		if infoErr != nil {
 			t.Fatal(infoErr)
@@ -535,25 +520,16 @@ func sourceRecoveryToolFromCatalog(
 		}
 		return invokable
 	}
-	names := make([]string, 0, len(tools))
-	for _, current := range tools {
-		if info, infoErr := current.Info(ctx); infoErr == nil && info != nil {
-			names = append(names, info.Name)
-		}
-	}
-	slices.Sort(names)
-	t.Fatalf("memory Tool not found in %v", names)
+	t.Fatalf("memory Tool not found in fixed Profile %v", resolved.ModelVisibleNames)
 	return nil
 }
 
-func sourceRecoveryConversationScope(t *testing.T, userID uuid.UUID) TaskScope {
+// sourceRecoveryConversationAccess 构造与生产会话 RunContext 等价的
+// memory.read RunAccess。
+func sourceRecoveryConversationAccess(t *testing.T, userID uuid.UUID) agentruntime.RunAccess {
 	t.Helper()
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: userID, Role: auth.RoleAnalyst, TaskType: TaskTypeConversation,
-		AllowedCapabilities: []ToolCapability{ToolCapabilityMemory},
-	})
-	if err != nil {
-		t.Fatalf("NewTaskScope(): %v", err)
-	}
-	return scope
+	return mustConversationTestRunAccess(t, userID,
+		[]agentruntime.Permission{agentruntime.PermissionMemoryRead},
+		agentruntime.ResourceGrantsConfig{},
+	)
 }

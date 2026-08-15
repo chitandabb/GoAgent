@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/components/tool"
@@ -116,18 +117,17 @@ func NewSearchKnowledgeTool(searcher KnowledgeSearcher) (tool.InvokableTool, err
 		ToolSearchKnowledge,
 		"检索当前任务授权范围内的企业知识证据；服务端自动完成关键词/语义混合召回和降级，不接受检索后端、向量或对象存储地址参数",
 		func(ctx context.Context, input searchKnowledgeInput) (searchKnowledgeResponse, error) {
-			scope, ok := TaskScopeFromContext(ctx)
-			if !ok {
-				return searchKnowledgeResponse{}, ErrTaskScopeRequired
-			}
-			if !scope.CapabilityAllowed(ToolCapabilityKnowledge) || !scope.DependencyAvailable(ToolDependencyKnowledge) {
-				return searchKnowledgeResponse{}, ErrToolNotAllowed
+			// 执行期授权只来自 RunAccess：knowledge.read Permission 必须在
+			// 本次 Run 的权限集中；检索 Actor 直接取自 RunAccess。
+			access, ok := agentruntime.RunAccessFromContext(ctx)
+			if !ok || !access.Allows(agentruntime.PermissionKnowledgeRead) {
+				return searchKnowledgeResponse{}, ErrRunAccessRequired
 			}
 			query := strings.TrimSpace(input.Query)
 			if query == "" || query != input.Query || len([]rune(query)) > knowledge.MaxKnowledgeSearchQueryRunes {
 				return searchKnowledgeResponse{}, errors.New("query must be non-empty, trimmed, and within the size limit")
 			}
-			result, err := searcher.Search(ctx, scope.UserID(), query, input.MaxResults)
+			result, err := searcher.Search(ctx, access.Actor().UserID, query, input.MaxResults)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return searchKnowledgeResponse{}, err

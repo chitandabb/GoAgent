@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
@@ -425,18 +425,7 @@ func newEvidenceOrchestratorTest(
 
 func evidenceTestContext(t *testing.T) context.Context {
 	t.Helper()
-	scope, err := NewTaskScope(TaskScopeConfig{
-		UserID: uuid.New(), Role: auth.RoleAnalyst, TaskType: TaskTypeDiagnosis,
-		DataSources: []ScopedDataSource{{
-			ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-		}},
-		AllowedCapabilities:   []ToolCapability{ToolCapabilityCase},
-		AvailableDependencies: []ToolDependency{ToolDependencyExternalCase},
-	})
-	if err != nil {
-		t.Fatalf("NewTaskScope: %v", err)
-	}
-	return withRunnerTestRunAccess(context.Background(), scope)
+	return withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead))
 }
 
 func evidenceRunResult(t *testing.T, report StructuredReport) RunResult {

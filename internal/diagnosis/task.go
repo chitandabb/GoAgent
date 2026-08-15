@@ -98,32 +98,6 @@ var (
 	ErrTaskAttachmentForbidden   = errors.New("diagnosis task attachment is not authorized by the source message")
 )
 
-const (
-	RequestScopeKeyRequestedSkill      = "requestedSkill"
-	RequestScopeKeyAllowedCapabilities = "allowedCapabilities"
-
-	RequestedSkillTicketDiagnosis   = "ticket-diagnosis"
-	RequestedSkillCodeInvestigation = "code-investigation"
-	RequestedSkillSQLInvestigation  = "sql-investigation"
-)
-
-// TaskCapability 是创建任务时冻结的业务调查能力，不表示对应外部依赖当前健康。
-type TaskCapability string
-
-const (
-	TaskCapabilityCase       TaskCapability = "case"
-	TaskCapabilityCode       TaskCapability = "code"
-	TaskCapabilitySQL        TaskCapability = "sql"
-	TaskCapabilityKnowledge  TaskCapability = "knowledge"
-	TaskCapabilityWebSearch  TaskCapability = "web_search"
-	TaskCapabilityAttachment TaskCapability = "attachment"
-)
-
-func (c TaskCapability) Valid() bool {
-	return c == TaskCapabilityCase || c == TaskCapabilityCode || c == TaskCapabilitySQL ||
-		c == TaskCapabilityKnowledge || c == TaskCapabilityWebSearch || c == TaskCapabilityAttachment
-}
-
 // TaskActor 是任务查询和创建所需的最小权限上下文。
 type TaskActor struct {
 	UserID  uuid.UUID
@@ -160,13 +134,13 @@ type TaskAttachmentSummary struct {
 }
 
 // CreateTaskInput 是创建异步诊断任务的业务输入。
+// 不再接受任何调用方声明的调查范围：授权事实只来自创建时冻结的
+// InvestigationPolicy（部署上限 ∩ 任务绑定资源）。
 type CreateTaskInput struct {
 	ExternalCaseID            uuid.UUID
 	ExpectedSourceFingerprint string
 	EvidenceDataSourceIDs     []uuid.UUID
 	RequestText               string
-	RequestScope              map[string]any
-	RequestScopeSchemaVersion int
 	Attachments               []TaskAttachment
 	AttachmentSource          *TaskAttachmentSource
 	RetryOfTaskID             *uuid.UUID
@@ -192,11 +166,8 @@ type CreateTaskRecord struct {
 	IdempotencyKey                   string
 	RequestFingerprint               string
 	RequestText                      string
-	RequestScope                     json.RawMessage
-	RequestScopeSchemaVersion        int
 	InvestigationPolicy              json.RawMessage
 	InvestigationPolicySchemaVersion int
-	InvestigationPolicyMode          InvestigationPolicyMode
 	EvidenceDataSourceIDs            []uuid.UUID
 	Attachments                      []TaskAttachment
 	AttachmentSource                 *TaskAttachmentSource
@@ -207,24 +178,22 @@ type CreateTaskRecord struct {
 
 // DiagnosisTask 是任务查询返回的安全摘要，不包含模型 Prompt、原始 SQL 或敏感证据。
 type DiagnosisTask struct {
-	ID                        uuid.UUID
-	CreatedBy                 uuid.UUID
-	ExternalCaseID            uuid.UUID
-	CaseSnapshotID            uuid.UUID
-	RetryOfTaskID             *uuid.UUID
-	RequestText               string
-	RequestScope              map[string]any
-	RequestScopeSchemaVersion int
-	Status                    TaskStatus
-	AttemptCount              int
-	LastErrorCode             string
-	LastErrorMessage          string
-	StartedAt                 *time.Time
-	CompletedAt               *time.Time
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
-	ReportID                  *uuid.UUID
-	Attachments               []TaskAttachmentSummary
+	ID             uuid.UUID
+	CreatedBy      uuid.UUID
+	ExternalCaseID uuid.UUID
+	CaseSnapshotID uuid.UUID
+	RetryOfTaskID  *uuid.UUID
+	RequestText    string
+	Status         TaskStatus
+	AttemptCount   int
+	LastErrorCode  string
+	LastErrorMessage string
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ReportID       *uuid.UUID
+	Attachments    []TaskAttachmentSummary
 }
 
 type TaskCreateResult struct {
@@ -274,7 +243,7 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 	if s == nil || s.repository == nil || s.cases == nil {
 		return TaskCreateResult{}, errors.New("diagnosis task service is unavailable")
 	}
-	input, requestScope, err := normalizeCreateTaskInput(actor, input)
+	input, err := normalizeCreateTaskInput(actor, input)
 	if err != nil {
 		return TaskCreateResult{}, err
 	}
@@ -290,10 +259,9 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 		return TaskCreateResult{}, ErrSourceChanged
 	}
 
-	// 冻结 InvestigationPolicy：授权事实来自部署上限（Builder 注入）与任务
-	// 绑定的工单/附件/数据源，request_scope 不参与 Policy 构造。Policy 不进入
-	// 幂等 fingerprint，因此同一幂等命令必须回放首次冻结的 Policy，部署配置
-	// 变化不能制造幂等冲突。
+	// 冻结 InvestigationPolicy：授权事实只来自部署上限（Builder 注入）与
+	// 任务绑定的工单/附件/数据源。Policy 不进入幂等 fingerprint，因此同一
+	// 幂等命令必须回放首次冻结的 Policy，部署配置变化不能制造幂等冲突。
 	policy, err := s.policyBuilder.Build(InvestigationPolicyInput{
 		ExternalCaseID: input.ExternalCaseID,
 		DataSourceIDs:  append([]uuid.UUID{item.DataSourceID}, input.EvidenceDataSourceIDs...),
@@ -307,11 +275,7 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 		return TaskCreateResult{}, fmt.Errorf("encode investigation policy: %w", err)
 	}
 
-	requestScopeJSON, err := json.Marshal(requestScope)
-	if err != nil {
-		return TaskCreateResult{}, fmt.Errorf("marshal task request scope: %w", err)
-	}
-	requestFingerprint, err := taskRequestFingerprint(input, requestScopeJSON)
+	requestFingerprint, err := taskRequestFingerprint(input)
 	if err != nil {
 		return TaskCreateResult{}, fmt.Errorf("fingerprint diagnosis task request: %w", err)
 	}
@@ -331,19 +295,14 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 		IdempotencyKey:                   input.IdempotencyKey,
 		RequestFingerprint:               requestFingerprint,
 		RequestText:                      input.RequestText,
-		RequestScope:                     requestScopeJSON,
-		RequestScopeSchemaVersion:        input.RequestScopeSchemaVersion,
 		InvestigationPolicy:              policyJSON,
 		InvestigationPolicySchemaVersion: policy.SchemaVersion(),
-		// 新任务必须显式声明 frozen：mode 是区分"旧任务 legacy 派生"与
-		// "新任务漏写 Policy"的唯一事实，缺省默认（legacy）绝不能用于新行。
-		InvestigationPolicyMode: InvestigationPolicyModeFrozen,
-		EvidenceDataSourceIDs:   append([]uuid.UUID(nil), input.EvidenceDataSourceIDs...),
-		Attachments:             append([]TaskAttachment(nil), input.Attachments...),
-		AttachmentSource:        cloneTaskAttachmentSource(input.AttachmentSource),
-		Snapshot:                snapshot,
-		CorrelationID:           correlationID,
-		CreatedAt:               now,
+		EvidenceDataSourceIDs:            append([]uuid.UUID(nil), input.EvidenceDataSourceIDs...),
+		Attachments:                      append([]TaskAttachment(nil), input.Attachments...),
+		AttachmentSource:                 cloneTaskAttachmentSource(input.AttachmentSource),
+		Snapshot:                         snapshot,
+		CorrelationID:                    correlationID,
+		CreatedAt:                        now,
 	})
 }
 
@@ -364,41 +323,35 @@ func (s *DiagnosisTaskService) Get(ctx context.Context, actor TaskActor, taskID 
 	return task, nil
 }
 
-func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTaskInput, map[string]any, error) {
+func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTaskInput, error) {
 	if actor.UserID == uuid.Nil {
-		return CreateTaskInput{}, nil, ErrTaskForbidden
+		return CreateTaskInput{}, ErrTaskForbidden
 	}
 	if input.ExternalCaseID == uuid.Nil || strings.TrimSpace(input.ExpectedSourceFingerprint) == "" {
-		return CreateTaskInput{}, nil, ErrInvalidTask
+		return CreateTaskInput{}, ErrInvalidTask
 	}
 	if len(input.ExpectedSourceFingerprint) > 128 || len([]rune(strings.TrimSpace(input.RequestText))) > 20000 {
-		return CreateTaskInput{}, nil, ErrInvalidTask
+		return CreateTaskInput{}, ErrInvalidTask
 	}
 	if strings.TrimSpace(input.RequestText) == "" {
-		return CreateTaskInput{}, nil, ErrInvalidTask
+		return CreateTaskInput{}, ErrInvalidTask
 	}
 	if key := strings.TrimSpace(input.IdempotencyKey); key == "" || len(key) > 128 {
-		return CreateTaskInput{}, nil, ErrInvalidTask
+		return CreateTaskInput{}, ErrInvalidTask
 	} else {
 		input.IdempotencyKey = key
 	}
-	if input.RequestScopeSchemaVersion == 0 {
-		input.RequestScopeSchemaVersion = 1
-	}
-	if input.RequestScopeSchemaVersion < 1 {
-		return CreateTaskInput{}, nil, ErrInvalidTask
-	}
 	if len(input.Attachments) > MaxTaskAttachments {
-		return CreateTaskInput{}, nil, ErrInvalidTask
+		return CreateTaskInput{}, ErrInvalidTask
 	}
 	if len(input.Attachments) == 0 {
 		if input.AttachmentSource != nil {
-			return CreateTaskInput{}, nil, ErrInvalidTask
+			return CreateTaskInput{}, ErrInvalidTask
 		}
 	} else {
 		if input.AttachmentSource == nil || input.AttachmentSource.ConversationID == uuid.Nil ||
 			input.AttachmentSource.MessageID == uuid.Nil {
-			return CreateTaskInput{}, nil, ErrAttachmentContextRequired
+			return CreateTaskInput{}, ErrAttachmentContextRequired
 		}
 		seenAttachments := make(map[uuid.UUID]struct{}, len(input.Attachments))
 		for index := range input.Attachments {
@@ -406,10 +359,10 @@ func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTas
 			current.Purpose = strings.TrimSpace(current.Purpose)
 			if current.AttachmentID == uuid.Nil || current.Purpose == "" ||
 				len([]rune(current.Purpose)) > MaxTaskAttachmentPurposeRunes {
-				return CreateTaskInput{}, nil, ErrInvalidTask
+				return CreateTaskInput{}, ErrInvalidTask
 			}
 			if _, duplicate := seenAttachments[current.AttachmentID]; duplicate {
-				return CreateTaskInput{}, nil, ErrInvalidTask
+				return CreateTaskInput{}, ErrInvalidTask
 			}
 			seenAttachments[current.AttachmentID] = struct{}{}
 		}
@@ -419,161 +372,14 @@ func normalizeCreateTaskInput(actor TaskActor, input CreateTaskInput) (CreateTas
 	}
 	for _, dataSourceID := range input.EvidenceDataSourceIDs {
 		if dataSourceID == uuid.Nil {
-			return CreateTaskInput{}, nil, ErrInvalidTask
+			return CreateTaskInput{}, ErrInvalidTask
 		}
 	}
 
 	input.ExpectedSourceFingerprint = strings.TrimSpace(input.ExpectedSourceFingerprint)
 	input.RequestText = strings.TrimSpace(input.RequestText)
 	input.EvidenceDataSourceIDs = uniqueSortedUUIDs(input.EvidenceDataSourceIDs)
-	requestScope, err := NormalizeTaskRequestScope(input.RequestScope)
-	if err != nil {
-		return CreateTaskInput{}, nil, ErrInvalidTask
-	}
-	if len(input.Attachments) > 0 {
-		requestScope, err = addManagedTaskCapability(requestScope, TaskCapabilityAttachment)
-		if err != nil {
-			return CreateTaskInput{}, nil, ErrInvalidTask
-		}
-	}
-	input.RequestScope = requestScope
-	return input, requestScope, nil
-}
-
-// NormalizeTaskRequestScope 复制并校验任务创建时可由调用方声明的窄调查范围。
-// 代码和 SQL 能力由调用方在已授权范围内声明；knowledge、web_search 和 attachment
-// 由后端策略根据运行边界授予并写入任务快照。
-func NormalizeTaskRequestScope(scope map[string]any) (map[string]any, error) {
-	if scope == nil {
-		scope = map[string]any{}
-	}
-	encoded, err := json.Marshal(scope)
-	if err != nil {
-		return nil, err
-	}
-	var normalized map[string]any
-	if err := json.Unmarshal(encoded, &normalized); err != nil {
-		return nil, err
-	}
-	if normalized == nil {
-		normalized = map[string]any{}
-	}
-
-	capabilities, err := TaskCapabilitiesFromRequestScope(normalized)
-	if err != nil {
-		return nil, err
-	}
-	if slicesContainsCapability(capabilities, TaskCapabilityKnowledge) ||
-		slicesContainsCapability(capabilities, TaskCapabilityWebSearch) ||
-		slicesContainsCapability(capabilities, TaskCapabilityAttachment) {
-		return nil, errors.New("knowledge, web_search and attachment capabilities are managed by backend policy")
-	}
-	capabilities = append(capabilities, TaskCapabilityKnowledge, TaskCapabilityWebSearch)
-	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
-	capabilityValues := make([]string, len(capabilities))
-	for index, capability := range capabilities {
-		capabilityValues[index] = string(capability)
-	}
-	normalized[RequestScopeKeyAllowedCapabilities] = capabilityValues
-
-	requestedSkill, err := RequestedSkillFromRequestScope(normalized)
-	if err != nil {
-		return nil, err
-	}
-	if requestedSkill != "" {
-		normalized[RequestScopeKeyRequestedSkill] = requestedSkill
-	}
-	if requestedSkill == RequestedSkillCodeInvestigation && !slicesContainsCapability(capabilities, TaskCapabilityCode) {
-		return nil, errors.New("code-investigation requires code capability")
-	}
-	if requestedSkill == RequestedSkillSQLInvestigation && !slicesContainsCapability(capabilities, TaskCapabilitySQL) {
-		return nil, errors.New("sql-investigation requires sql capability")
-	}
-	return normalized, nil
-}
-
-func TaskCapabilitiesFromRequestScope(scope map[string]any) ([]TaskCapability, error) {
-	raw, exists := scope[RequestScopeKeyAllowedCapabilities]
-	if !exists || raw == nil {
-		requestedSkill, err := RequestedSkillFromRequestScope(scope)
-		if err != nil {
-			return nil, err
-		}
-		switch requestedSkill {
-		case RequestedSkillCodeInvestigation:
-			return []TaskCapability{TaskCapabilityCase, TaskCapabilityCode}, nil
-		case RequestedSkillSQLInvestigation:
-			return []TaskCapability{TaskCapabilityCase, TaskCapabilitySQL}, nil
-		default:
-			return []TaskCapability{TaskCapabilityCase}, nil
-		}
-	}
-	values, ok := raw.([]any)
-	if !ok {
-		if stringsValues, stringsOK := raw.([]string); stringsOK {
-			values = make([]any, len(stringsValues))
-			for index, value := range stringsValues {
-				values[index] = value
-			}
-		} else {
-			return nil, errors.New("allowedCapabilities must be an array")
-		}
-	}
-	if len(values) == 0 || len(values) > 6 {
-		return nil, errors.New("allowedCapabilities must contain between one and six values")
-	}
-	capabilities := make([]TaskCapability, 0, len(values))
-	seen := make(map[TaskCapability]struct{}, len(values))
-	for _, rawValue := range values {
-		value, ok := rawValue.(string)
-		if !ok {
-			return nil, errors.New("allowedCapabilities values must be strings")
-		}
-		capability := TaskCapability(strings.TrimSpace(value))
-		if !capability.Valid() {
-			return nil, fmt.Errorf("invalid task capability %q", capability)
-		}
-		if _, duplicate := seen[capability]; duplicate {
-			return nil, fmt.Errorf("duplicate task capability %q", capability)
-		}
-		seen[capability] = struct{}{}
-		capabilities = append(capabilities, capability)
-	}
-	if !slicesContainsCapability(capabilities, TaskCapabilityCase) {
-		return nil, errors.New("diagnosis task requires case capability")
-	}
-	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
-	return capabilities, nil
-}
-
-func RequestedSkillFromRequestScope(scope map[string]any) (string, error) {
-	raw, exists := scope[RequestScopeKeyRequestedSkill]
-	if !exists || raw == nil {
-		return "", nil
-	}
-	value, ok := raw.(string)
-	if !ok {
-		return "", errors.New("requestedSkill must be a string")
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", nil
-	}
-	switch value {
-	case RequestedSkillTicketDiagnosis, RequestedSkillCodeInvestigation, RequestedSkillSQLInvestigation:
-		return value, nil
-	default:
-		return "", fmt.Errorf("invalid requestedSkill %q", value)
-	}
-}
-
-func slicesContainsCapability(values []TaskCapability, target TaskCapability) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return input, nil
 }
 
 func uniqueSortedUUIDs(values []uuid.UUID) []uuid.UUID {
@@ -593,23 +399,6 @@ func uniqueSortedUUIDs(values []uuid.UUID) []uuid.UUID {
 	return result
 }
 
-func addManagedTaskCapability(scope map[string]any, capability TaskCapability) (map[string]any, error) {
-	capabilities, err := TaskCapabilitiesFromRequestScope(scope)
-	if err != nil {
-		return nil, err
-	}
-	if !slicesContainsCapability(capabilities, capability) {
-		capabilities = append(capabilities, capability)
-		sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
-	}
-	values := make([]string, len(capabilities))
-	for index, current := range capabilities {
-		values[index] = string(current)
-	}
-	scope[RequestScopeKeyAllowedCapabilities] = values
-	return scope, nil
-}
-
 func cloneTaskAttachmentSource(value *TaskAttachmentSource) *TaskAttachmentSource {
 	if value == nil {
 		return nil
@@ -618,7 +407,7 @@ func cloneTaskAttachmentSource(value *TaskAttachmentSource) *TaskAttachmentSourc
 	return &copy
 }
 
-func taskRequestFingerprint(input CreateTaskInput, requestScopeJSON []byte) (string, error) {
+func taskRequestFingerprint(input CreateTaskInput) (string, error) {
 	dataSourceIDs := make([]string, 0, len(input.EvidenceDataSourceIDs))
 	for _, id := range input.EvidenceDataSourceIDs {
 		dataSourceIDs = append(dataSourceIDs, id.String())
@@ -632,16 +421,13 @@ func taskRequestFingerprint(input CreateTaskInput, requestScopeJSON []byte) (str
 		ExpectedSourceFingerprint string           `json:"expectedSourceFingerprint"`
 		EvidenceDataSourceIDs     []string         `json:"evidenceDataSourceIds"`
 		RequestText               string           `json:"requestText"`
-		RequestScope              json.RawMessage  `json:"requestScope"`
-		RequestScopeSchemaVersion int              `json:"requestScopeSchemaVersion"`
 		RetryOfTaskID             string           `json:"retryOfTaskId"`
 		Attachments               []TaskAttachment `json:"attachments"`
 		AttachmentConversationID  string           `json:"attachmentConversationId"`
 		AttachmentMessageID       string           `json:"attachmentMessageId"`
 	}{
 		ExternalCaseID: input.ExternalCaseID.String(), ExpectedSourceFingerprint: input.ExpectedSourceFingerprint,
-		EvidenceDataSourceIDs: dataSourceIDs, RequestText: input.RequestText, RequestScope: requestScopeJSON,
-		RequestScopeSchemaVersion: input.RequestScopeSchemaVersion, RetryOfTaskID: retryOf,
+		EvidenceDataSourceIDs: dataSourceIDs, RequestText: input.RequestText, RetryOfTaskID: retryOf,
 		Attachments: append([]TaskAttachment(nil), input.Attachments...),
 	}
 	if input.AttachmentSource != nil {

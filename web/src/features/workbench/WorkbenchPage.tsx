@@ -4,7 +4,6 @@ import { Files, PanelLeft, Send, ShieldCheck } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import * as api from '@/shared/api'
 import { ApiError } from '@/shared/api'
-import type { InvestigationCapability, RequestedSkill } from '@/shared/api/m1-types'
 import { Button } from '@/shared/ui/Button'
 import { Dialog } from '@/shared/ui/Dialog'
 import { EmptyState } from '@/shared/ui/EmptyState'
@@ -31,8 +30,6 @@ export function WorkbenchPage() {
   const [workspace, setWorkspace] = useState<LocalWorkspace | undefined>(() => workspaceId ? getLocalWorkspace(workspaceId) : undefined)
   const [workspaces, setWorkspaces] = useState(() => getLocalWorkspaces())
   const [requestText, setRequestText] = useState('')
-  const [requestedSkill, setRequestedSkill] = useState<RequestedSkill>('ticket-diagnosis')
-  const [capabilities, setCapabilities] = useState<InvestigationCapability[]>(['case'])
   const [selectedDataSourceIds, setSelectedDataSourceIds] = useState<string[] | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [dossierOpen, setDossierOpen] = useState(false)
@@ -44,8 +41,6 @@ export function WorkbenchPage() {
   const retryOfTaskId = searchParams.get('retryOf')
   useEffect(() => {
     setRequestText('')
-    setRequestedSkill('ticket-diagnosis')
-    setCapabilities(['case'])
     setSelectedDataSourceIds(null)
     retryPrefilled.current = ''
   }, [workspaceId])
@@ -89,9 +84,8 @@ export function WorkbenchPage() {
   useEffect(() => {
     if (!retryOfTaskId || !retryOfTask.data || retryPrefilled.current === retryOfTaskId) return
     retryPrefilled.current = retryOfTaskId
+    // 重试只恢复仍存在的业务输入（问题文本），不恢复已删除的 Skill/Capability。
     setRequestText(retryOfTask.data.requestText)
-    setRequestedSkill(retryOfTask.data.requestScope.requestedSkill ?? 'ticket-diagnosis')
-    setCapabilities(retryOfTask.data.requestScope.allowedCapabilities ?? ['case'])
   }, [retryOfTask.data, retryOfTaskId])
 
   useEffect(() => {
@@ -129,18 +123,6 @@ export function WorkbenchPage() {
     requestAnimationFrame(() => stream.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' }))
   }, [chronologicalTaskIds.length])
 
-  const changeSkill = (skill: RequestedSkill) => {
-    setRequestedSkill(skill)
-    setCapabilities((current) => {
-      const required = skill === 'code-investigation' ? 'code' : skill === 'sql-investigation' ? 'sql' : null
-      return required && !current.includes(required) ? [...current, required] : current
-    })
-  }
-  const toggleCapability = (capability: 'code' | 'sql') => {
-    const required = (requestedSkill === 'code-investigation' && capability === 'code') || (requestedSkill === 'sql-investigation' && capability === 'sql')
-    if (required) return
-    setCapabilities((current) => current.includes(capability) ? current.filter((value) => value !== capability) : [...current, capability])
-  }
   const toggleDataSource = (dataSourceId: string) => {
     setSelectedDataSourceIds((current) => {
       const selected = current ?? []
@@ -156,8 +138,6 @@ export function WorkbenchPage() {
         expectedSourceFingerprint: extCase.data.sourceFingerprint,
         evidenceDataSourceIds: checkedDataSources,
         requestText: requestText.trim(),
-        requestScope: { requestedSkill, allowedCapabilities: capabilities },
-        requestScopeSchemaVersion: 1,
         attachments: [],
         retryOfTaskId,
       },
@@ -209,12 +189,8 @@ export function WorkbenchPage() {
     <DossierPanel
       extCase={extCase.data}
       dataSources={dataSources.data ?? []}
-      requestedSkill={requestedSkill}
-      capabilities={capabilities}
       selectedDataSourceIds={checkedDataSources}
       pendingCases={pendingCases.data?.items ?? []}
-      onSkillChange={changeSkill}
-      onCapabilityToggle={toggleCapability}
       onDataSourceToggle={toggleDataSource}
       onOpenCase={openCase}
       onNewWorkspace={() => openCase(extCase.data.externalCaseId, true)}
@@ -251,7 +227,7 @@ export function WorkbenchPage() {
               <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
                 <div className="mb-4 flex size-11 items-center justify-center rounded-utility bg-ink text-white"><ShieldCheck className="size-5" /></div>
                 <h1 className="text-[20px] font-semibold text-ink">卷宗已建立</h1>
-                <p className="mt-2 max-w-md text-[13px] leading-[1.7] text-ink-48">检查右侧的调查范围和证据数据源，然后发送问题开始诊断。绑定工单不会自动运行任务。</p>
+                <p className="mt-2 max-w-md text-[13px] leading-[1.7] text-ink-48">检查右侧的证据数据源，然后发送问题开始诊断。绑定工单不会自动运行任务。</p>
               </div>
             ) : (
               chronologicalTaskIds.map((taskId) => <DiagnosisRunBlock key={taskId} taskId={taskId} />)
@@ -283,7 +259,7 @@ export function WorkbenchPage() {
               </Button>
             </div>
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1 text-[10px] text-ink-48">
-              <span>{requestedSkill} · {capabilities.join(' + ')}</span>
+              <span>诊断入口固定为工单诊断（ticket-diagnosis）</span>
               <span>任务离开页面后继续运行</span>
             </div>
           </div>

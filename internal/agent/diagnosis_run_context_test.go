@@ -59,7 +59,7 @@ func TestDiagnosisRunContextDerivesAccessFromFrozenPolicyAndCeiling(t *testing.T
 	)
 	// ceiling：Profile 实际有 case/knowledge/sql/attachment 工具，没有 GitHub/Web 工具。
 	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy: &policy,
+		Policy: policy,
 		Actor:  diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(
 			ToolReadExternalCase, ToolSearchKnowledge, ToolSearchSchemaCatalog,
@@ -95,57 +95,6 @@ func TestDiagnosisRunContextDerivesAccessFromFrozenPolicyAndCeiling(t *testing.T
 	assertRunAccessSubsetOfPolicy(t, access, policy)
 }
 
-func TestDiagnosisRunContextLegacyDerivationOnlyKeepsFrozenScopeCapabilities(t *testing.T) {
-	caseID := uuid.New()
-	readOnlySource := uuid.New()
-	labSource := uuid.New()
-	attachmentID := uuid.New()
-	// 旧任务：Policy=NULL，冻结 request_scope 只有 case/sql/knowledge/web_search
-	// 能力（附件由旧链路加入 capability）。ceiling Profile 额外有 GitHub 工具，
-	// 但 legacy 派生不能读取新部署配置扩大旧任务权限。
-	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy: nil,
-		Actor:  diagnosisTestActor(),
-		ProfileToolNames: diagnosisProfileNamesForTest(
-			ToolReadExternalCase, ToolSearchKnowledge, ToolSearchSchemaCatalog,
-			ToolExecuteReadonlyQuery, ToolReadAttachment, "search_code",
-		),
-		ExternalCaseID: caseID,
-		DataSources: []DiagnosisCeilingDataSource{
-			{ID: readOnlySource, Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly},
-			{ID: labSource, Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab},
-		},
-		AttachmentIDs:      []uuid.UUID{attachmentID},
-		LegacyCapabilities: []ToolCapability{ToolCapabilityCase, ToolCapabilitySQL, ToolCapabilityKnowledge, ToolCapabilityWebSearch, ToolCapabilityAttachment},
-	})
-	if err != nil {
-		t.Fatalf("BuildDiagnosisRunContext: %v", err)
-	}
-	access := runContext.Access()
-	if access.Allows(agentruntime.PermissionCodeRead) {
-		t.Fatal("legacy derivation expanded into code.read from the new deployment ceiling")
-	}
-	for _, want := range []agentruntime.Permission{
-		agentruntime.PermissionCaseRead, agentruntime.PermissionSQLRead,
-		agentruntime.PermissionKnowledgeRead, agentruntime.PermissionAttachmentRead,
-	} {
-		if !access.Allows(want) {
-			t.Fatalf("legacy access missing %q", want)
-		}
-	}
-	// web.read 在旧 scope 中存在，但本 ceiling 没有 Web 工具 → 被收窄。
-	if access.Allows(agentruntime.PermissionWebRead) {
-		t.Fatal("legacy web.read survived a ceiling without Web Tools")
-	}
-	if !access.Grants().AllowsExternalCase(caseID) || !access.Grants().AllowsAttachment(attachmentID) ||
-		!access.Grants().AllowsDataSource(readOnlySource) {
-		t.Fatalf("legacy grants = %v", access.Grants())
-	}
-	if access.Grants().AllowsDataSource(labSource) {
-		t.Fatal("bounded_lab data source must never enter the Grant")
-	}
-}
-
 func TestDiagnosisRunContextPolicySQLWithoutCeilingSQLTools(t *testing.T) {
 	caseID := uuid.New()
 	sqlSource := uuid.New()
@@ -156,7 +105,7 @@ func TestDiagnosisRunContextPolicySQLWithoutCeilingSQLTools(t *testing.T) {
 		},
 	)
 	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy:           &policy,
+		Policy:           policy,
 		Actor:            diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(ToolReadExternalCase, ToolSearchKnowledge),
 		ExternalCaseID:   caseID,
@@ -194,7 +143,7 @@ func TestDiagnosisRunContextRemovesUnsafeAndUnboundResourceGrants(t *testing.T) 
 		},
 	)
 	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy: &policy, Actor: diagnosisTestActor(),
+		Policy: policy, Actor: diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(
 			ToolReadExternalCase, ToolSearchSchemaCatalog, ToolReadAttachment,
 		),
@@ -250,10 +199,10 @@ func assertRunAccessSubsetOfPolicy(t *testing.T, access agentruntime.RunAccess, 
 func TestDiagnosisRunContextRejectsInvalidInputs(t *testing.T) {
 	validInput := func() DiagnosisRunContextInput {
 		return DiagnosisRunContextInput{
-			Policy: mustPointerPolicy(t, mustDiagnosisPolicyForTest(t,
+			Policy: mustDiagnosisPolicyForTest(t,
 				[]agentruntime.Permission{agentruntime.PermissionCaseRead},
 				agentruntime.ResourceGrantsConfig{ExternalCaseIDs: []uuid.UUID{uuid.New()}},
-			)),
+			),
 			Actor:            diagnosisTestActor(),
 			ProfileToolNames: diagnosisProfileNamesForTest(ToolReadExternalCase),
 			ExternalCaseID:   uuid.New(),
@@ -275,10 +224,6 @@ func TestDiagnosisRunContextRejectsInvalidInputs(t *testing.T) {
 		}},
 		{name: "nil data source id", mutate: func(in *DiagnosisRunContextInput) { in.DataSources[0].ID = uuid.Nil }},
 		{name: "nil attachment", mutate: func(in *DiagnosisRunContextInput) { in.AttachmentIDs = []uuid.UUID{uuid.Nil} }},
-		{name: "legacy without capabilities", mutate: func(in *DiagnosisRunContextInput) {
-			in.Policy = nil
-			in.LegacyCapabilities = nil
-		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -289,11 +234,6 @@ func TestDiagnosisRunContextRejectsInvalidInputs(t *testing.T) {
 			}
 		})
 	}
-}
-
-func mustPointerPolicy(t *testing.T, policy agentruntime.InvestigationPolicy) *agentruntime.InvestigationPolicy {
-	t.Helper()
-	return &policy
 }
 
 func TestDiagnosisTaskContextDeterministicSortedAndInjectionSafe(t *testing.T) {
@@ -312,7 +252,7 @@ func TestDiagnosisTaskContextDeterministicSortedAndInjectionSafe(t *testing.T) {
 		},
 	)
 	input := DiagnosisRunContextInput{
-		Policy: &policy, Actor: diagnosisTestActor(),
+		Policy: policy, Actor: diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(
 			ToolReadExternalCase, ToolSearchKnowledge, ToolSearchSchemaCatalog,
 		),
@@ -386,7 +326,7 @@ func TestDiagnosisTaskContextOmitsRevokedSourcesAndSensitiveFields(t *testing.T)
 		},
 	)
 	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy: &policy, Actor: diagnosisTestActor(),
+		Policy: policy, Actor: diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(ToolReadExternalCase, ToolSearchSchemaCatalog),
 		ExternalCaseID:   caseID,
 		DataSources: []DiagnosisCeilingDataSource{
@@ -411,7 +351,7 @@ func TestDiagnosisTaskContextOmitsRevokedSourcesAndSensitiveFields(t *testing.T)
 	}
 }
 
-func TestDiagnosisRunContextReverseScopeMatchesEffectiveAuthorization(t *testing.T) {
+func TestDiagnosisRunContextAccessBindsAuthoritatively(t *testing.T) {
 	caseID := uuid.New()
 	sourceID := uuid.New()
 	policy := mustDiagnosisPolicyForTest(t,
@@ -421,7 +361,7 @@ func TestDiagnosisRunContextReverseScopeMatchesEffectiveAuthorization(t *testing
 		},
 	)
 	runContext, err := BuildDiagnosisRunContext(DiagnosisRunContextInput{
-		Policy: &policy, Actor: diagnosisTestActor(),
+		Policy: policy, Actor: diagnosisTestActor(),
 		ProfileToolNames: diagnosisProfileNamesForTest(
 			ToolReadExternalCase, ToolSearchSchemaCatalog, ToolReadAttachment,
 		),
@@ -433,27 +373,12 @@ func TestDiagnosisRunContextReverseScopeMatchesEffectiveAuthorization(t *testing
 	if err != nil {
 		t.Fatalf("BuildDiagnosisRunContext: %v", err)
 	}
-	scope := runContext.Scope()
-	if scope.TaskType() != TaskTypeDiagnosis || scope.UserID() == uuid.Nil {
-		t.Fatalf("reverse scope = %+v", scope)
-	}
-	if !scope.CapabilityAllowed(ToolCapabilityCase) || !scope.CapabilityAllowed(ToolCapabilitySQL) {
-		t.Fatalf("reverse capabilities = %v", scope.AllowedCapabilities())
-	}
-	if scope.CapabilityAllowed(ToolCapabilityAttachment) {
-		t.Fatal("reverse scope fabricated attachment capability without attachment.read")
-	}
-	if sources := scope.DataSources(); len(sources) != 1 || sources[0].ID != sourceID ||
-		sources[0].SafetyMode != DataSourceSafetyReadOnly {
-		t.Fatalf("reverse data sources = %v", sources)
-	}
-	// 反向 TaskScope 与权威 v2 RunAccess 绑定顺序：WithTaskScope 先写入兼容
-	// 上下文，WithRunAccess 最后覆盖，兼容转换绝不能改写权威值。
-	ctx := WithTaskScope(context.Background(), scope)
-	ctx = agentruntime.WithRunAccess(ctx, runContext.Access())
+	// 权威 v2 RunAccess 直接由 WithRunAccess 绑定，不存在旧 TaskScope 双写；
+	// 绑定后执行上下文读到的是 Policy ∩ ceiling 的有效值。
+	ctx := agentruntime.WithRunAccess(context.Background(), runContext.Access())
 	bound, ok := agentruntime.RunAccessFromContext(ctx)
 	if !ok || !bound.Allows(agentruntime.PermissionSQLRead) || !bound.Grants().AllowsExternalCase(caseID) {
-		t.Fatalf("authoritative RunAccess was overridden: %+v ok=%t", bound, ok)
+		t.Fatalf("authoritative RunAccess binding failed: %+v ok=%t", bound, ok)
 	}
 }
 

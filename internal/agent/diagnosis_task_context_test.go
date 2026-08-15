@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 
 	"github.com/cloudwego/eino/components/model"
@@ -80,7 +81,7 @@ const diagnosisTaskContextBlockForTest = "<task_context>\n{\"policySchemaVersion
 func TestRunnerAppendsDiagnosisTaskContextOnlyAtSystemTail(t *testing.T) {
 	recording := &taskContextRecordingModel{}
 	runner := newTaskContextRunnerTest(t, recording)
-	ctx := withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase))
+	ctx := withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead))
 	ctx = WithDiagnosisTaskContext(ctx, diagnosisTaskContextBlockForTest)
 	result, err := runner.Invoke(ctx, RunRequest{
 		UserQuery: "诊断工单", ExternalCaseID: runnerTestCaseID.String(),
@@ -122,7 +123,7 @@ func TestDiagnosisPreflightCountsIdenticalTaskContext(t *testing.T) {
 		EstimationMethod: contextgovernance.EstimationMethodLocalCalibrated,
 	}}}
 	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
-	ctx := withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase))
+	ctx := withRunnerTestRunAccess(context.Background(), runnerTestAccess(t, agentruntime.PermissionCaseRead))
 	ctx = WithDiagnosisTaskContext(ctx, diagnosisTaskContextBlockForTest)
 	result, err := runner.Invoke(ctx, RunRequest{
 		UserQuery: "诊断工单", ExternalCaseID: runnerTestCaseID.String(),
