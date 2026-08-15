@@ -88,15 +88,25 @@ func main() {
 }
 
 func run(args []string) error {
-	return runEvaluation(args, func() (config.Config, error) { return config.Load() }, newActiveChatModel)
+	return runEvaluation(args, func() (config.Config, error) { return config.Load() }, newSelectedChatModel)
 }
 
 // textToSQLModelFactory 是 Provider 构造 seam：正式运行走真实
-// platformchatmodel.NewActive；测试替换为桩，证明护栏先于 Provider。
-type textToSQLModelFactory func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+// platformchatmodel.New（只接收本次选择的 Profile 名称与最终 Profile，绝不从
+// activeProfile 重新解析）；测试替换为桩，证明 Profile 选择、护栏与预算先于
+// Provider，且未选择 Profile 的 API Key 永远不会被读取。
+type textToSQLModelFactory func(
+	ctx context.Context,
+	profileName string,
+	profile config.ChatModelProfileConfig,
+) (model.ToolCallingChatModel, error)
 
-var newActiveChatModel textToSQLModelFactory = func(ctx context.Context, cfg config.ChatModelConfig) (model.ToolCallingChatModel, error) {
-	instance, err := platformchatmodel.NewActive(ctx, cfg)
+var newSelectedChatModel textToSQLModelFactory = func(
+	ctx context.Context,
+	profileName string,
+	profile config.ChatModelProfileConfig,
+) (model.ToolCallingChatModel, error) {
+	instance, err := platformchatmodel.New(ctx, profileName, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +122,8 @@ func runEvaluation(
 	flags.SetOutput(io.Discard)
 	mode := flags.String("mode", string(textToSQLModeDirect), "evaluation entry mode: direct (historical forced Tool Calling capability test) or conversation (production Conversation Agent entry)")
 	datasetPath := flags.String("dataset", "testdata/text-to-sql-v1.jsonl", "versioned JSONL execution cases")
+	profileFlag := flags.String("profile", "", "named [models.chat.profiles.<name>] to evaluate with (empty = activeProfile)")
+	caseID := flags.String("case-id", "", "exact dataset CaseID to evaluate (empty = whole dataset)")
 	outputPath := flags.String("output", "", "observation JSONL output (default per mode)")
 	summaryPath := flags.String("summary", "", "summary JSON output (default per mode)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "total evaluation timeout")
@@ -121,7 +133,7 @@ func runEvaluation(
 	maxProviderTokens := flags.Int("max-provider-tokens", 0, "authorized Provider Token upper bound")
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-text2sql-eval [-mode direct|conversation] [-dataset path] [-output path] [-summary path] [-timeout duration] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty]")
+		return errors.New("usage: mesguard-text2sql-eval [-mode direct|conversation] [-dataset path] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-output path] [-summary path] [-timeout duration] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty]")
 	}
 	selectedMode := textToSQLMode(strings.ToLower(strings.TrimSpace(*mode)))
 	switch selectedMode {
@@ -136,6 +148,12 @@ func runEvaluation(
 	if err != nil {
 		return err
 	}
+	// 数据集整体仍先经过现有版本、重复 ID 与字段合同校验；-case-id 的精确选择
+	// 必须发生在成本预算与 Provider 创建之前，-max-cases 仍是授权上限。
+	cases, err = selectTextToSQLCases(cases, *caseID)
+	if err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -143,17 +161,14 @@ func runEvaluation(
 	if !cfg.Models.Chat.Enabled || !cfg.SQLServer.Enabled {
 		return errors.New("chat model and SQL Server must be enabled")
 	}
-	profile, err := cfg.Models.Chat.ActiveProfile()
+	// 解析 -profile：空值使用 activeProfile，非空值使用精确命名 Profile；
+	// direct 模式的 low 变换只作用于局部副本；指纹基于最终 Profile 与其名称；
+	// 绝不写回配置 Map，绝不替换 activeProfile，绝不为 NewActive 临时切换。
+	selectedProfileName, finalProfile, modelProfileFingerprint, err :=
+		prepareTextToSQLProfile(cfg.Models.Chat, *profileFlag, selectedMode)
 	if err != nil {
 		return err
 	}
-	if selectedMode == textToSQLModeDirect {
-		// direct 模式保持历史语义：推理强度非空时固定为 low。
-		if strings.TrimSpace(profile.ReasoningEffort) != "" {
-			profile.ReasoningEffort = "low"
-		}
-	}
-	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 	dataSourceID, err := uuid.Parse(cfg.SQLServer.ID)
 	if err != nil {
 		return errors.New("configured SQL Server ID is invalid")
@@ -188,27 +203,81 @@ func runEvaluation(
 			identity.Revision, identity.Dirty)
 	}
 	fmt.Fprintf(os.Stdout,
-		"mesguard-text2sql-eval mode=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_upper_bound=%d revision=%s dirty=%t\n",
-		selectedMode, budget.Cases, budget.ProviderCalls, budget.TotalTokens, identity.Revision, identity.Dirty)
-	// 指纹基于写回后的最终 Profile 计算，保证记录的指纹与实际模型调用配置一致。
-	modelProfileFingerprint, err := profile.PromptProfileFingerprint(cfg.Models.Chat.ActiveProfileName)
-	if err != nil {
-		return fmt.Errorf("compute model profile fingerprint: %w", err)
-	}
+		"mesguard-text2sql-eval mode=%s profile=%s provider=%s model=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_upper_bound=%d revision=%s dirty=%t\n",
+		selectedMode, selectedProfileName, strings.TrimSpace(finalProfile.Provider), strings.TrimSpace(finalProfile.Model),
+		budget.Cases, budget.ProviderCalls, budget.TotalTokens, identity.Revision, identity.Dirty)
 
-	chatModel, err := newModel(ctx, cfg.Models.Chat)
+	chatModel, err := newModel(ctx, selectedProfileName, finalProfile)
 	if err != nil {
 		return fmt.Errorf("build chat model: %w", err)
 	}
 
 	switch selectedMode {
 	case textToSQLModeDirect:
-		return runDirectTextToSQL(ctx, cfg, chatModel, cases, dataSourceID, *outputPath, *summaryPath)
+		return runDirectTextToSQL(ctx, chatModel, finalProfile, cases, dataSourceID, cfg.SQLServer,
+			*outputPath, *summaryPath)
 	case textToSQLModeConversation:
-		return runConversationTextToSQL(ctx, cfg, chatModel, cases, dataSourceID, profile,
+		return runConversationTextToSQL(ctx, cfg, chatModel, cases, dataSourceID, finalProfile,
 			identity, modelProfileFingerprint, budget, *outputPath, *summaryPath)
 	}
 	return nil
+}
+
+// selectTextToSQLCases 在完整数据集校验之后、成本预算与 Provider 创建之前，按
+// 精确 CaseID 选择单个 Case；空 caseID 返回全部 Case，保持历史行为。
+// -max-cases 仍是授权上限：这里只做选择，绝不做"前 N 条"截断。
+func selectTextToSQLCases(cases []mesagent.TextToSQLEvaluationCase, caseID string) ([]mesagent.TextToSQLEvaluationCase, error) {
+	caseID = strings.TrimSpace(caseID)
+	if caseID == "" {
+		return cases, nil
+	}
+	for _, definition := range cases {
+		if definition.CaseID == caseID {
+			return []mesagent.TextToSQLEvaluationCase{definition}, nil
+		}
+	}
+	return nil, fmt.Errorf("case-id %q does not match any case in the dataset", caseID)
+}
+
+// prepareTextToSQLProfile 解析 -profile：空值使用 activeProfile，非空值使用精确
+// 命名 Profile；direct 模式仅在局部副本上把非空 ReasoningEffort 固定为 low。
+// 返回最终 Profile 名称、最终 Profile（Provider 实际收到的内容）与基于该名称和
+// 内容的指纹。绝不写回配置 Map，绝不修改或替换 activeProfile。
+func prepareTextToSQLProfile(
+	chat config.ChatModelConfig,
+	profileFlag string,
+	mode textToSQLMode,
+) (profileName string, finalProfile config.ChatModelProfileConfig, fingerprint string, err error) {
+	profileName = strings.TrimSpace(profileFlag)
+	if profileName == "" {
+		profileName = strings.TrimSpace(chat.ActiveProfileName)
+	}
+	if profileName == "" {
+		return "", config.ChatModelProfileConfig{}, "", errors.New("chat model profile name is empty")
+	}
+	selectedProfile, err := chat.Profile(profileName)
+	if err != nil {
+		return "", config.ChatModelProfileConfig{}, "", err
+	}
+	if mode == textToSQLModeDirect && strings.TrimSpace(selectedProfile.ReasoningEffort) != "" {
+		selectedProfile.ReasoningEffort = "low"
+	}
+	fingerprint, err = selectedProfile.PromptProfileFingerprint(profileName)
+	if err != nil {
+		return "", config.ChatModelProfileConfig{}, "", fmt.Errorf("compute model profile fingerprint: %w", err)
+	}
+	return profileName, selectedProfile, fingerprint, nil
+}
+
+// textToSQLObservationReasoningEffort 把 Profile 的 ReasoningEffort 归一化为观测
+// 身份：未配置的 Profile 记录稳定值 "none"。"none" 只用于观测元数据，绝不作为
+// Provider 参数写回 Profile。direct 与 conversation 共用同一规则。
+func textToSQLObservationReasoningEffort(effort string) string {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return "none"
+	}
+	return effort
 }
 
 // perCaseTextToSQLBudget 计算每个 case 的 Provider 调用与 Token 保守上界：
@@ -289,10 +358,11 @@ func validateTextToSQLProviderBudget(
 
 func runDirectTextToSQL(
 	ctx context.Context,
-	cfg config.Config,
 	chatModel model.ToolCallingChatModel,
+	profile config.ChatModelProfileConfig,
 	cases []mesagent.TextToSQLEvaluationCase,
 	dataSourceID uuid.UUID,
+	sqlServer config.SQLServerConfig,
 	outputPath, summaryPath string,
 ) error {
 	if outputPath == "" {
@@ -314,7 +384,7 @@ func runDirectTextToSQL(
 		return fmt.Errorf("bind evaluation Tool: %w", err)
 	}
 
-	db, executor, err := openTextToSQLReadonlyExecutor(ctx, cfg.SQLServer, dataSourceID)
+	db, executor, err := openTextToSQLReadonly(ctx, sqlServer, dataSourceID)
 	if err != nil {
 		return err
 	}
@@ -325,7 +395,7 @@ func runDirectTextToSQL(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		observation := observeTextToSQL(ctx, boundModel, executor, cfg, dataSourceID, definition)
+		observation := observeTextToSQL(ctx, boundModel, executor, profile, dataSourceID, definition)
 		if err := observation.Validate(); err != nil {
 			return fmt.Errorf("validate case %q: %w", definition.CaseID, err)
 		}
@@ -367,7 +437,7 @@ func runConversationTextToSQL(
 	if strings.TrimSpace(cfg.Agent.ConversationPromptVersion) == "" {
 		return errors.New("conversationPromptVersion is required")
 	}
-	db, executor, err := openTextToSQLReadonlyExecutor(ctx, cfg.SQLServer, dataSourceID)
+	db, executor, err := openTextToSQLReadonly(ctx, cfg.SQLServer, dataSourceID)
 	if err != nil {
 		return err
 	}
@@ -412,10 +482,7 @@ func runConversationTextToSQL(
 	if err != nil {
 		return err
 	}
-	reasoningEffort := strings.TrimSpace(profile.ReasoningEffort)
-	if reasoningEffort == "" {
-		reasoningEffort = "none"
-	}
+	reasoningEffort := textToSQLObservationReasoningEffort(profile.ReasoningEffort)
 	observationIdentity := conversationEvaluationIdentity{
 		modelProvider:           profile.Provider,
 		modelID:                 profile.Model,
@@ -453,6 +520,17 @@ func runConversationTextToSQL(
 		summary.EndToEndAccuracy, summary.Usage,
 	)
 	return writeTextToSQLConversationEvaluationFiles(outputPath, summaryPath, observations, summary)
+}
+
+// openTextToSQLReadonly 是 SQL Server 只读执行器构造 seam：正式运行走真实
+// platform/sqlserver 连接与 QueryGuard；测试替换为内存 fixture，验证 case 选择、
+// 预算与观测语义而不触碰真实数据库。
+var openTextToSQLReadonly = func(
+	ctx context.Context,
+	cfg config.SQLServerConfig,
+	dataSourceID uuid.UUID,
+) (*sql.DB, repository.ReadonlyQueryExecutor, error) {
+	return openTextToSQLReadonlyExecutor(ctx, cfg, dataSourceID)
 }
 
 func openTextToSQLReadonlyExecutor(
@@ -923,19 +1001,19 @@ func observeTextToSQL(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
 	executor repository.ReadonlyQueryExecutor,
-	cfg config.Config,
+	profile config.ChatModelProfileConfig,
 	dataSourceID uuid.UUID,
 	definition mesagent.TextToSQLEvaluationCase,
 ) mesagent.TextToSQLEvaluationObservation {
 	startedAt := time.Now()
-	profile, _ := cfg.Models.Chat.ActiveProfile()
+	// 观测身份显式来自最终选择的 Profile，绝不重新解析 activeProfile。
 	observation := mesagent.TextToSQLEvaluationObservation{
 		DatasetVersion:  definition.DatasetVersion,
 		CaseID:          definition.CaseID,
 		RunID:           definition.CaseID + "-" + uuid.NewString(),
-		ModelProvider:   profile.Provider,
-		ModelID:         profile.Model,
-		ReasoningEffort: profile.ReasoningEffort,
+		ModelProvider:   strings.TrimSpace(profile.Provider),
+		ModelID:         strings.TrimSpace(profile.Model),
+		ReasoningEffort: textToSQLObservationReasoningEffort(profile.ReasoningEffort),
 		PromptVersion:   textToSQLPromptVersion,
 	}
 	message, generateErr := chatModel.Generate(ctx, []*schema.Message{

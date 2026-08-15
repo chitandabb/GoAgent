@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +20,7 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/conversation"
+	texttosqleval "github.com/chitandabb/GoAgent/internal/evaluation/texttosql"
 	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
@@ -52,6 +58,190 @@ func textToSQLConversationCase() mesagent.TextToSQLEvaluationCase {
 		ExpectedColumns: []string{"Status"}, ExpectedRows: [][]any{{"处理中"}},
 		ResultOrder: mesagent.SQLResultOrdered,
 	}
+}
+
+// textToSQLConfigWithNamedProfiles 是 Profile 选择测试的配置：activeProfile 是
+// stepfun-main，额外包含 opencode-deepseek-main（与生产 TOML 合同一致，无
+// reasoningEffort/thinkingMode）。
+func textToSQLConfigWithNamedProfiles(dataSourceID uuid.UUID) config.Config {
+	return config.Config{
+		Models: config.ModelsConfig{Chat: config.ChatModelConfig{
+			Enabled: true, ActiveProfileName: "stepfun-main",
+			Profiles: map[string]config.ChatModelProfileConfig{
+				"stepfun-main": {
+					Provider: "stepfun", BaseURL: "https://api.stepfun.example/v1",
+					APIKeyEnv: "MESGUARD_TEST_API_KEY", Model: "step-3.7-flash",
+					ReasoningEffort: "low", TimeoutMillis: 60000, MaxOutputTokens: 2048,
+				},
+				"opencode-deepseek-main": {
+					Provider: "opencode-go", BaseURL: "https://opencode.ai/zen/go/v1",
+					APIKeyEnv: "MESGUARD_OPENCODE_GO_API_KEY", Model: "deepseek-v4-flash",
+					TimeoutMillis: 120000, MaxOutputTokens: 4096,
+				},
+			},
+		}},
+		SQLServer: config.SQLServerConfig{Enabled: true, ID: dataSourceID.String()},
+	}
+}
+
+// withEffortHighProfile 追加一个带非空 ReasoningEffort 的命名 Profile，用于验证
+// direct 模式的 low 变换只作用于局部副本。
+func withEffortHighProfile(cfg config.Config) config.Config {
+	cfg.Models.Chat.Profiles["effort-high"] = config.ChatModelProfileConfig{
+		Provider: "deepseek", BaseURL: "https://api.deepseek.example/v1",
+		APIKeyEnv: "MESGUARD_TEST_API_KEY_2", Model: "deepseek-chat",
+		ReasoningEffort: "high", TimeoutMillis: 60000, MaxOutputTokens: 2048,
+	}
+	return cfg
+}
+
+func textToSQLSecondCase() mesagent.TextToSQLEvaluationCase {
+	return mesagent.TextToSQLEvaluationCase{
+		DatasetVersion: "text-to-sql-v1", CaseID: "sql-new-count",
+		UserQuery:       "统计新建工单数量",
+		ExpectedColumns: []string{"Status"}, ExpectedRows: [][]any{{"处理中"}},
+		ResultOrder: mesagent.SQLResultOrdered,
+	}
+}
+
+func writeTextToSQLTwoCaseDataset(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "text-to-sql-v1.jsonl")
+	encoded, err := json.Marshal(textToSQLConversationCase())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(textToSQLSecondCase())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append(append(encoded, '\n'), second...), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// withTextToSQLAgentPrompts 为 conversation 模式写入四个 prompt 文件并返回
+// Agent 配置（其余预算字段走 runConversationTextToSQL 的默认值）。
+func withTextToSQLAgentPrompts(t *testing.T, dir string) config.AgentConfig {
+	t.Helper()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	return config.AgentConfig{
+		SystemPromptFile:          write("system.txt", "你是 MESGuard 助手。"),
+		BaselinePromptFile:        write("baseline.txt", "基线指令。"),
+		ReportContractFile:        write("report.txt", "报告合同。"),
+		ConversationPromptFile:    write("conversation.txt", "你是 MESGuard 助手，回答用户的业务数据问题。"),
+		ConversationPromptVersion: "conversation-test-v1",
+	}
+}
+
+func readTextToSQLObservations(t *testing.T, path string) []mesagent.TextToSQLEvaluationObservation {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	var result []mesagent.TextToSQLEvaluationObservation
+	for scanner.Scan() {
+		var observation mesagent.TextToSQLEvaluationObservation
+		if err := json.Unmarshal(scanner.Bytes(), &observation); err != nil {
+			t.Fatalf("decode observation line: %v", err)
+		}
+		result = append(result, observation)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func readTextToSQLConversationObservations(t *testing.T, path string) []texttosqleval.TextToSQLConversationEvaluationObservation {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	var result []texttosqleval.TextToSQLConversationEvaluationObservation
+	for scanner.Scan() {
+		var observation texttosqleval.TextToSQLConversationEvaluationObservation
+		if err := json.Unmarshal(scanner.Bytes(), &observation); err != nil {
+			t.Fatalf("decode conversation observation line: %v", err)
+		}
+		result = append(result, observation)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func init() {
+	sql.Register("mesguard-eval-noop", textToSQLNoopDriver{})
+}
+
+type textToSQLNoopDriver struct{}
+
+func (textToSQLNoopDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("noop driver never opens a connection")
+}
+
+// withTextToSQLOpenerSeam 替换 SQL Server 打开 seam：返回可观察的连接计数与内存
+// executor，证明 case/Profile 失败路径不会触碰真实数据库。
+func withTextToSQLOpenerSeam(t *testing.T, executor repository.ReadonlyQueryExecutor) *int {
+	t.Helper()
+	original := openTextToSQLReadonly
+	opens := 0
+	openTextToSQLReadonly = func(
+		_ context.Context, _ config.SQLServerConfig, _ uuid.UUID,
+	) (*sql.DB, repository.ReadonlyQueryExecutor, error) {
+		opens++
+		db, err := sql.Open("mesguard-eval-noop", "")
+		if err != nil {
+			return nil, nil, err
+		}
+		return db, executor, nil
+	}
+	t.Cleanup(func() { openTextToSQLReadonly = original })
+	return &opens
+}
+
+// withCapturedStdout 捕获 os.Stdout，用于验证 CLI 启动信息包含所选 Profile 且不
+// 泄漏任何密钥材料。
+func withCapturedStdout(t *testing.T) (*strings.Builder, func()) {
+	t.Helper()
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	builder := &strings.Builder{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(builder, reader)
+	}()
+	var finishOnce sync.Once
+	finish := func() {
+		finishOnce.Do(func() {
+			os.Stdout = original
+			_ = writer.Close()
+			<-done
+			_ = reader.Close()
+		})
+	}
+	t.Cleanup(finish)
+	return builder, finish
 }
 
 func conversationEvaluationIdentityForTest(t *testing.T, toolSchemaFingerprint string) conversationEvaluationIdentity {
@@ -689,8 +879,13 @@ func TestDirectModeForcedToolCallingSemanticsUnchanged(t *testing.T) {
 	sqlDataSourceID := uuid.New()
 	executor := newTextToSQLFixtureExecutor(t)
 	modelInstance := &directSingleToolModel{}
+	cfg := textToSQLTestConfig(sqlDataSourceID)
+	profile, err := cfg.Models.Chat.ActiveProfile()
+	if err != nil {
+		t.Fatalf("ActiveProfile: %v", err)
+	}
 	observation := observeTextToSQL(context.Background(), modelInstance, executor,
-		textToSQLTestConfig(sqlDataSourceID), sqlDataSourceID, textToSQLConversationCase())
+		profile, sqlDataSourceID, textToSQLConversationCase())
 	if err := observation.Validate(); err != nil {
 		t.Fatalf("direct observation Validate: %v", err)
 	}
@@ -738,14 +933,24 @@ func TestValidateTextToSQLProviderBudget(t *testing.T) {
 	}
 }
 
+// recordingModelFactory 记录 Factory 收到的 Profile 名称与 Profile 内容，
+// 证明选择结果只来自本次真正选择的 Profile。
 type recordingModelFactory struct {
-	calls int
+	calls       int
+	lastName    string
+	lastProfile config.ChatModelProfileConfig
+	buildModel  model.ToolCallingChatModel
 }
 
 func (f *recordingModelFactory) build(
-	_ context.Context, _ config.ChatModelConfig,
+	_ context.Context, profileName string, profile config.ChatModelProfileConfig,
 ) (model.ToolCallingChatModel, error) {
 	f.calls++
+	f.lastName = profileName
+	f.lastProfile = profile
+	if f.buildModel != nil {
+		return f.buildModel, nil
+	}
 	return &directSingleToolModel{}, nil
 }
 
@@ -786,84 +991,66 @@ func withDirtyGitSeams(t *testing.T) {
 	})
 }
 
+// runGuardScenario 在默认 Profile 与显式 -profile 两条路径上验证护栏先于
+// Provider：失败时 Factory 调用数必须为 0。
+func runGuardScenario(t *testing.T, baseArgs []string, wantError string) {
+	t.Helper()
+	for _, explicit := range []bool{false, true} {
+		args := append([]string(nil), baseArgs...)
+		if explicit {
+			args = append(args, "-profile", "fixture")
+		}
+		dataSourceID := uuid.New()
+		factory := &recordingModelFactory{}
+		err := runEvaluation(args, func() (config.Config, error) {
+			return textToSQLTestConfig(dataSourceID), nil
+		}, factory.build)
+		if err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("explicit-profile=%t: run must refuse with %q, got %v", explicit, wantError, err)
+		}
+		if factory.calls != 0 {
+			t.Fatalf("explicit-profile=%t: Provider was created %d times before the guard, want 0", explicit, factory.calls)
+		}
+	}
+}
+
 func TestRunEvaluationRefusesProviderWithoutAllowFlag(t *testing.T) {
 	withCleanGitSeams(t)
-	dataSourceID := uuid.New()
 	dir := t.TempDir()
-	factory := &recordingModelFactory{}
-	err := runEvaluation([]string{
+	runGuardScenario(t, []string{
 		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
 		"-max-cases", "1", "-max-provider-calls", "10", "-max-provider-tokens", "100000",
-	}, func() (config.Config, error) {
-		return textToSQLTestConfig(dataSourceID), nil
-	}, factory.build)
-	if err == nil || !strings.Contains(err.Error(), "allow-provider-calls") {
-		t.Fatalf("run must refuse without -allow-provider-calls, got %v", err)
-	}
-	if factory.calls != 0 {
-		t.Fatalf("Provider was created %d times before the guard, want 0", factory.calls)
-	}
+	}, "allow-provider-calls")
 }
 
 func TestRunEvaluationRefusesProviderOnTightTokenBudget(t *testing.T) {
 	withCleanGitSeams(t)
-	dataSourceID := uuid.New()
 	dir := t.TempDir()
-	factory := &recordingModelFactory{}
-	err := runEvaluation([]string{
+	runGuardScenario(t, []string{
 		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
 		"-allow-provider-calls", "-max-cases", "1",
 		"-max-provider-calls", "10", "-max-provider-tokens", "100",
-	}, func() (config.Config, error) {
-		return textToSQLTestConfig(dataSourceID), nil
-	}, factory.build)
-	if err == nil || !strings.Contains(err.Error(), "max-provider-tokens") {
-		t.Fatalf("run must refuse an insufficient Token cap, got %v", err)
-	}
-	if factory.calls != 0 {
-		t.Fatalf("Provider was created %d times before the guard, want 0", factory.calls)
-	}
+	}, "max-provider-tokens")
 }
 
 func TestRunEvaluationRefusesProviderOnDirtyRevision(t *testing.T) {
 	withDirtyGitSeams(t)
-	dataSourceID := uuid.New()
 	dir := t.TempDir()
-	factory := &recordingModelFactory{}
-	err := runEvaluation([]string{
+	runGuardScenario(t, []string{
 		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
 		"-allow-provider-calls", "-max-cases", "1",
 		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
-	}, func() (config.Config, error) {
-		return textToSQLTestConfig(dataSourceID), nil
-	}, factory.build)
-	if err == nil || !strings.Contains(err.Error(), "dirty or unknown") {
-		t.Fatalf("formal mode must refuse a dirty revision, got %v", err)
-	}
-	if factory.calls != 0 {
-		t.Fatalf("Provider was created %d times before the identity guard, want 0", factory.calls)
-	}
+	}, "dirty or unknown")
 }
 
 func TestRunEvaluationConversationRefusesProviderOnCallBudget(t *testing.T) {
 	withCleanGitSeams(t)
-	dataSourceID := uuid.New()
 	dir := t.TempDir()
-	factory := &recordingModelFactory{}
-	// conversation 模式每 case 上限 8 次模型调用；授权 4 次必须拒绝。
-	err := runEvaluation([]string{
+	runGuardScenario(t, []string{
 		"-mode", "conversation", "-dataset", writeTextToSQLTestDataset(t, dir),
 		"-allow-provider-calls", "-max-cases", "1",
 		"-max-provider-calls", "4", "-max-provider-tokens", "100000",
-	}, func() (config.Config, error) {
-		return textToSQLTestConfig(dataSourceID), nil
-	}, factory.build)
-	if err == nil || !strings.Contains(err.Error(), "max-provider-calls") {
-		t.Fatalf("conversation run must refuse an insufficient Provider call cap, got %v", err)
-	}
-	if factory.calls != 0 {
-		t.Fatalf("Provider was created %d times before the guard, want 0", factory.calls)
-	}
+	}, "max-provider-calls")
 }
 
 func TestRunEvaluationReachesProviderAfterCleanPreflight(t *testing.T) {
@@ -903,6 +1090,480 @@ func TestRunEvaluationRejectsUnknownMode(t *testing.T) {
 	}
 	if factory.calls != 0 {
 		t.Fatalf("Provider was created %d times for an unknown mode, want 0", factory.calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 红测试：命名 Profile 选择、Profile 指纹与单 Case 选择
+
+func TestRunEvaluationDefaultsToActiveProfile(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := textToSQLConfigWithNamedProfiles(dataSourceID)
+	executor := newTextToSQLFixtureExecutor(t)
+	_ = withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	outputPath := filepath.Join(dir, "obs.jsonl")
+	summaryPath := filepath.Join(dir, "summary.json")
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
+		"-output", outputPath, "-summary", summaryPath,
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if factory.calls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factory.calls)
+	}
+	if factory.lastName != "stepfun-main" {
+		t.Fatalf("factory profile name = %q, want stepfun-main (activeProfile default)", factory.lastName)
+	}
+	if factory.lastProfile.Provider != "stepfun" || factory.lastProfile.Model != "step-3.7-flash" {
+		t.Fatalf("factory profile = %+v, want stepfun/step-3.7-flash", factory.lastProfile)
+	}
+	if factory.lastProfile.ReasoningEffort != "low" {
+		t.Fatalf("factory profile reasoningEffort = %q, want low", factory.lastProfile.ReasoningEffort)
+	}
+}
+
+func TestRunEvaluationExplicitProfileSelection(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := textToSQLConfigWithNamedProfiles(dataSourceID)
+	executor := newTextToSQLFixtureExecutor(t)
+	_ = withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	outputPath := filepath.Join(dir, "obs.jsonl")
+	summaryPath := filepath.Join(dir, "summary.json")
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
+		"-output", outputPath, "-summary", summaryPath,
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if factory.calls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factory.calls)
+	}
+	if factory.lastName != "opencode-deepseek-main" {
+		t.Fatalf("factory profile name = %q, want opencode-deepseek-main", factory.lastName)
+	}
+	if factory.lastProfile.Provider != "opencode-go" || factory.lastProfile.Model != "deepseek-v4-flash" {
+		t.Fatalf("factory profile = %+v, want opencode-go/deepseek-v4-flash", factory.lastProfile)
+	}
+	if strings.TrimSpace(factory.lastProfile.ReasoningEffort) != "" {
+		t.Fatalf("empty-effort profile must not receive an injected effort, got %q", factory.lastProfile.ReasoningEffort)
+	}
+	if cfg.Models.Chat.ActiveProfileName != "stepfun-main" {
+		t.Fatalf("activeProfile was replaced: %q", cfg.Models.Chat.ActiveProfileName)
+	}
+	if active, err := cfg.Models.Chat.ActiveProfile(); err != nil || active.Provider != "stepfun" {
+		t.Fatalf("active profile content changed: %+v err=%v", active, err)
+	}
+}
+
+func TestRunEvaluationUnknownProfileFailsClosed(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	executor := newTextToSQLFixtureExecutor(t)
+	sqlOpens := withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-profile", "no-such-profile",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
+	}, func() (config.Config, error) {
+		return textToSQLConfigWithNamedProfiles(dataSourceID), nil
+	}, factory.build)
+	if err == nil || !strings.Contains(err.Error(), "no-such-profile") {
+		t.Fatalf("unknown profile must fail closed, got %v", err)
+	}
+	if factory.calls != 0 {
+		t.Fatalf("factory calls = %d, want 0", factory.calls)
+	}
+	if *sqlOpens != 0 {
+		t.Fatalf("SQL Server opened %d times, want 0", *sqlOpens)
+	}
+}
+
+func TestRunEvaluationInvalidSelectedProfileFingerprintFailsBeforeProvider(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := textToSQLConfigWithNamedProfiles(dataSourceID)
+	invalid := cfg.Models.Chat.Profiles["opencode-deepseek-main"]
+	invalid.Provider = "unsupported-provider"
+	cfg.Models.Chat.Profiles["invalid-fingerprint"] = invalid
+	executor := newTextToSQLFixtureExecutor(t)
+	sqlOpens := withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-profile", "invalid-fingerprint",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err == nil || !strings.Contains(err.Error(), "compute model profile fingerprint") {
+		t.Fatalf("invalid selected Profile must fail during fingerprint preparation, got %v", err)
+	}
+	if factory.calls != 0 {
+		t.Fatalf("factory calls = %d, want 0", factory.calls)
+	}
+	if *sqlOpens != 0 {
+		t.Fatalf("SQL Server opened %d times, want 0", *sqlOpens)
+	}
+}
+
+func TestPrepareTextToSQLProfileSelectionAndFingerprint(t *testing.T) {
+	cfg := withEffortHighProfile(textToSQLConfigWithNamedProfiles(uuid.New()))
+
+	t.Run("explicit profile", func(t *testing.T) {
+		name, finalProfile, fingerprint, err := prepareTextToSQLProfile(
+			cfg.Models.Chat, "opencode-deepseek-main", textToSQLModeDirect)
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if name != "opencode-deepseek-main" {
+			t.Fatalf("name = %q", name)
+		}
+		if finalProfile.Provider != "opencode-go" || finalProfile.Model != "deepseek-v4-flash" {
+			t.Fatalf("final profile = %+v", finalProfile)
+		}
+		if strings.TrimSpace(finalProfile.ReasoningEffort) != "" {
+			t.Fatalf("empty-effort profile must stay empty, got %q", finalProfile.ReasoningEffort)
+		}
+		expected, err := finalProfile.PromptProfileFingerprint(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint != expected {
+			t.Fatalf("fingerprint = %q, want selected final profile fingerprint %q", fingerprint, expected)
+		}
+		activeProfile, err := cfg.Models.Chat.ActiveProfile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		activeFingerprint, err := activeProfile.PromptProfileFingerprint(cfg.Models.Chat.ActiveProfileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint == activeFingerprint {
+			t.Fatal("selected profile fingerprint must differ from the active profile fingerprint")
+		}
+	})
+
+	t.Run("defaults to active profile", func(t *testing.T) {
+		name, finalProfile, _, err := prepareTextToSQLProfile(cfg.Models.Chat, "", textToSQLModeDirect)
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if name != cfg.Models.Chat.ActiveProfileName || name != "stepfun-main" {
+			t.Fatalf("name = %q, want stepfun-main", name)
+		}
+		if finalProfile.Provider != "stepfun" {
+			t.Fatalf("final profile = %+v", finalProfile)
+		}
+	})
+
+	t.Run("direct low transform on copy", func(t *testing.T) {
+		original, err := cfg.Models.Chat.Profile("effort-high")
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, finalProfile, fingerprint, err := prepareTextToSQLProfile(
+			cfg.Models.Chat, "effort-high", textToSQLModeDirect)
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if finalProfile.ReasoningEffort != "low" {
+			t.Fatalf("direct mode must fix non-empty effort to low, got %q", finalProfile.ReasoningEffort)
+		}
+		expected, err := finalProfile.PromptProfileFingerprint(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint != expected {
+			t.Fatalf("fingerprint must reflect the transformed low effort: %q != %q", fingerprint, expected)
+		}
+		originalFingerprint, err := original.PromptProfileFingerprint(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fingerprint == originalFingerprint {
+			t.Fatal("fingerprint must change when direct mode rewrites the effort to low")
+		}
+		if stored := cfg.Models.Chat.Profiles["effort-high"].ReasoningEffort; stored != "high" {
+			t.Fatalf("profile map was polluted: stored effort = %q, want high", stored)
+		}
+	})
+
+	t.Run("conversation keeps configured effort", func(t *testing.T) {
+		_, finalProfile, _, err := prepareTextToSQLProfile(
+			cfg.Models.Chat, "effort-high", textToSQLModeConversation)
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if finalProfile.ReasoningEffort != "high" {
+			t.Fatalf("conversation mode must keep the configured effort, got %q", finalProfile.ReasoningEffort)
+		}
+	})
+
+	t.Run("unknown profile fails", func(t *testing.T) {
+		_, _, _, err := prepareTextToSQLProfile(cfg.Models.Chat, "no-such-profile", textToSQLModeDirect)
+		if err == nil || !strings.Contains(err.Error(), "no-such-profile") {
+			t.Fatalf("unknown profile must fail, got %v", err)
+		}
+	})
+}
+
+func TestDirectObservationUsesSelectedProfile(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	cfg := textToSQLConfigWithNamedProfiles(sqlDataSourceID)
+	selected, err := cfg.Models.Chat.Profile("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := observeTextToSQL(context.Background(), &directSingleToolModel{}, executor,
+		selected, sqlDataSourceID, textToSQLConversationCase())
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("direct observation Validate: %v", err)
+	}
+	if observation.ModelProvider != "opencode-go" || observation.ModelID != "deepseek-v4-flash" {
+		t.Fatalf("observation identity = %q/%q, want opencode-go/deepseek-v4-flash (selected profile, not active)",
+			observation.ModelProvider, observation.ModelID)
+	}
+	if observation.ReasoningEffort != "none" {
+		t.Fatalf("empty-effort profile must record observation reasoningEffort %q, got %q", "none", observation.ReasoningEffort)
+	}
+	if strings.TrimSpace(selected.ReasoningEffort) != "" {
+		t.Fatalf("profile must not be mutated with the observation-only value: %q", selected.ReasoningEffort)
+	}
+}
+
+func TestTextToSQLObservationReasoningEffortNormalization(t *testing.T) {
+	for input, want := range map[string]string{
+		"": "none", "   ": "none", "low": "low", " high ": "high",
+	} {
+		if got := textToSQLObservationReasoningEffort(input); got != want {
+			t.Fatalf("textToSQLObservationReasoningEffort(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSelectTextToSQLCases(t *testing.T) {
+	cases := []mesagent.TextToSQLEvaluationCase{textToSQLConversationCase(), textToSQLSecondCase()}
+	all, err := selectTextToSQLCases(cases, "")
+	if err != nil || len(all) != 2 {
+		t.Fatalf("empty case-id must keep the whole dataset: len=%d err=%v", len(all), err)
+	}
+	all, err = selectTextToSQLCases(cases, "   ")
+	if err != nil || len(all) != 2 {
+		t.Fatalf("whitespace case-id must keep the whole dataset: len=%d err=%v", len(all), err)
+	}
+	selected, err := selectTextToSQLCases(cases, "sql-new-count")
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(selected) != 1 || selected[0].CaseID != "sql-new-count" {
+		t.Fatalf("selected = %+v, want exactly sql-new-count", selected)
+	}
+	selected, err = selectTextToSQLCases(cases, "  sql-new-count  ")
+	if err != nil || len(selected) != 1 || selected[0].CaseID != "sql-new-count" {
+		t.Fatalf("case-id must be trimmed before matching: %+v err=%v", selected, err)
+	}
+	if _, err := selectTextToSQLCases(cases, "missing-case"); err == nil ||
+		!strings.Contains(err.Error(), "missing-case") {
+		t.Fatalf("unknown case-id must return a stable error, got %v", err)
+	}
+}
+
+func TestRunEvaluationSingleCaseSelection(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := textToSQLConfigWithNamedProfiles(dataSourceID)
+	executor := newTextToSQLFixtureExecutor(t)
+	sqlOpens := withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	outputPath := filepath.Join(dir, "obs.jsonl")
+	summaryPath := filepath.Join(dir, "summary.json")
+	stdout, finishStdout := withCapturedStdout(t)
+	// 数据集有两条，但 -case-id 选中第二条；-max-cases 1 只按选中 Case 授权。
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTwoCaseDataset(t, dir),
+		"-case-id", "sql-new-count", "-max-cases", "1",
+		"-allow-provider-calls", "-max-provider-calls", "10", "-max-provider-tokens", "100000",
+		"-output", outputPath, "-summary", summaryPath,
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if *sqlOpens != 1 {
+		t.Fatalf("SQL Server opened %d times, want 1", *sqlOpens)
+	}
+	if factory.calls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factory.calls)
+	}
+	observations := readTextToSQLObservations(t, outputPath)
+	if len(observations) != 1 || observations[0].CaseID != "sql-new-count" {
+		t.Fatalf("observations = %+v, want exactly the selected case sql-new-count", observations)
+	}
+	if !observations[0].Correct {
+		t.Fatalf("selected case observation = %+v, want correct", observations[0])
+	}
+	if _, err := os.Stat(summaryPath); err != nil {
+		t.Fatalf("summary file: %v", err)
+	}
+	finishStdout()
+	startup := stdout.String()
+	for _, want := range []string{"profile=stepfun-main", "provider=stepfun", "model=step-3.7-flash"} {
+		if !strings.Contains(startup, want) {
+			t.Fatalf("startup output missing %q: %q", want, startup)
+		}
+	}
+	lower := strings.ToLower(startup)
+	for _, secret := range []string{"apikey", "authorization", "sk-"} {
+		if strings.Contains(lower, secret) {
+			t.Fatalf("startup output leaks %q: %q", secret, startup)
+		}
+	}
+}
+
+func TestRunEvaluationUnknownCaseFailsClosed(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	executor := newTextToSQLFixtureExecutor(t)
+	sqlOpens := withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTwoCaseDataset(t, dir),
+		"-case-id", "missing-case",
+		// 冲突护栏：即使预算参数无效，未知 Case 也必须先返回，证明选择发生在预算前。
+		"-allow-provider-calls", "-max-cases", "0",
+		"-max-provider-calls", "0", "-max-provider-tokens", "0",
+	}, func() (config.Config, error) {
+		return textToSQLConfigWithNamedProfiles(dataSourceID), nil
+	}, factory.build)
+	if err == nil || !strings.Contains(err.Error(), "missing-case") {
+		t.Fatalf("unknown case-id must fail closed, got %v", err)
+	}
+	if factory.calls != 0 {
+		t.Fatalf("factory calls = %d, want 0", factory.calls)
+	}
+	if *sqlOpens != 0 {
+		t.Fatalf("SQL Server opened %d times, want 0", *sqlOpens)
+	}
+}
+
+func TestRunEvaluationDoesNotMutateActiveProfile(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := withEffortHighProfile(textToSQLConfigWithNamedProfiles(dataSourceID))
+	activeBefore := cfg.Models.Chat.Profiles["stepfun-main"]
+	selectedBefore := cfg.Models.Chat.Profiles["effort-high"]
+	executor := newTextToSQLFixtureExecutor(t)
+	_ = withTextToSQLOpenerSeam(t, executor)
+	factory := &recordingModelFactory{}
+	outputPath := filepath.Join(dir, "obs.jsonl")
+	summaryPath := filepath.Join(dir, "summary.json")
+	// direct 模式选中带非空 effort 的 Profile：low 变换必须只作用于局部副本。
+	err := runEvaluation([]string{
+		"-mode", "direct", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-profile", "effort-high",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "100000",
+		"-output", outputPath, "-summary", summaryPath,
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if cfg.Models.Chat.ActiveProfileName != "stepfun-main" {
+		t.Fatalf("ActiveProfileName changed to %q", cfg.Models.Chat.ActiveProfileName)
+	}
+	if !reflect.DeepEqual(cfg.Models.Chat.Profiles["stepfun-main"], activeBefore) {
+		t.Fatalf("active profile map entry changed: %+v", cfg.Models.Chat.Profiles["stepfun-main"])
+	}
+	if !reflect.DeepEqual(cfg.Models.Chat.Profiles["effort-high"], selectedBefore) {
+		t.Fatalf("selected profile map entry was polluted: %+v", cfg.Models.Chat.Profiles["effort-high"])
+	}
+	if factory.lastProfile.ReasoningEffort != "low" {
+		t.Fatalf("factory received effort %q, want the transformed low on the copy", factory.lastProfile.ReasoningEffort)
+	}
+	observations := readTextToSQLObservations(t, outputPath)
+	if len(observations) != 1 || observations[0].ReasoningEffort != "low" {
+		t.Fatalf("observations = %+v, want a single observation recording the transformed low effort", observations)
+	}
+}
+
+func TestRunEvaluationConversationObservationIdentityFromSelectedProfile(t *testing.T) {
+	withCleanGitSeams(t)
+	dataSourceID := uuid.New()
+	dir := t.TempDir()
+	cfg := textToSQLConfigWithNamedProfiles(dataSourceID)
+	cfg.Agent = withTextToSQLAgentPrompts(t, dir)
+	selected, err := cfg.Models.Chat.Profile("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFingerprint, err := selected.PromptProfileFingerprint("opencode-deepseek-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := newTextToSQLFixtureExecutor(t)
+	_ = withTextToSQLOpenerSeam(t, executor)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"TKT-999","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	factory := &recordingModelFactory{buildModel: modelInstance}
+	outputPath := filepath.Join(dir, "obs.jsonl")
+	summaryPath := filepath.Join(dir, "summary.json")
+	err = runEvaluation([]string{
+		"-mode", "conversation", "-dataset", writeTextToSQLTestDataset(t, dir),
+		"-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "20000",
+		"-output", outputPath, "-summary", summaryPath,
+	}, func() (config.Config, error) { return cfg, nil }, factory.build)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if factory.lastName != "opencode-deepseek-main" {
+		t.Fatalf("factory profile name = %q", factory.lastName)
+	}
+	observations := readTextToSQLConversationObservations(t, outputPath)
+	if len(observations) != 1 {
+		t.Fatalf("observations = %d, want 1", len(observations))
+	}
+	observation := observations[0]
+	if observation.ModelProvider != "opencode-go" || observation.ModelID != "deepseek-v4-flash" {
+		t.Fatalf("conversation identity = %q/%q, want opencode-go/deepseek-v4-flash",
+			observation.ModelProvider, observation.ModelID)
+	}
+	if observation.ReasoningEffort != "none" {
+		t.Fatalf("conversation reasoningEffort = %q, want none", observation.ReasoningEffort)
+	}
+	if observation.ModelProfileFingerprint != expectedFingerprint {
+		t.Fatalf("conversation fingerprint = %q, want selected profile fingerprint %q",
+			observation.ModelProfileFingerprint, expectedFingerprint)
+	}
+	if observation.ObservationSchemaVersion != texttosqleval.TextToSQLConversationObservationSchemaVersion {
+		t.Fatalf("observationSchemaVersion changed: %q", observation.ObservationSchemaVersion)
+	}
+	if cfg.Models.Chat.ActiveProfileName != "stepfun-main" {
+		t.Fatalf("activeProfile changed to %q", cfg.Models.Chat.ActiveProfileName)
 	}
 }
 
