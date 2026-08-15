@@ -257,7 +257,12 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	var diagnosisTaskService *diagnosis.DiagnosisTaskService
 	if externalCaseService != nil {
 		diagnosisTaskRepository := platformpostgres.NewDiagnosisTaskRepository(deps.db)
-		diagnosisTaskService, err = diagnosis.NewDiagnosisTaskService(diagnosisTaskRepository, externalCaseService)
+		policyBuilder, buildErr := newDiagnosisInvestigationPolicyBuilder(cfg)
+		if buildErr != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build diagnosis investigation policy: %w", buildErr)
+		}
+		diagnosisTaskService, err = diagnosis.NewDiagnosisTaskService(diagnosisTaskRepository, externalCaseService, policyBuilder)
 		if err != nil {
 			closeDependencies()
 			return nil, fmt.Errorf("build diagnosis task service: %w", err)

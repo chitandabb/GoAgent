@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
@@ -47,6 +48,10 @@ type Task struct {
 	CaseSnapshot externalcase.ExternalCase
 	DataSources  []DataSource
 	Attachments  []TaskAttachment
+	// Policy 是任务创建时冻结的 InvestigationPolicy；nil 表示 mode=legacy 的
+	// migration 前旧任务（由执行器仅从冻结 request_scope/任务资源做 legacy
+	// 派生）。新任务（mode=frozen）永远携带非 nil Policy。
+	Policy *agentruntime.InvestigationPolicy
 }
 
 type ExecutionResult struct {

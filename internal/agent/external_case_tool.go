@@ -62,9 +62,10 @@ func NewReadExternalCaseTool(getter ExternalCaseGetter) (tool.InvokableTool, err
 			if err != nil {
 				return externalCaseEvidence{}, errors.New("externalCaseId must be a valid UUID")
 			}
-			// Conversation 运行时：externalCaseId 必须在本轮 RunAccess 的
-			// ExternalCaseIDs Grant 中，否则在 getter.Get 前拒绝（未授权零调用）。
-			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+			// 运行时通用资源边界：externalCaseId 必须在本轮 RunAccess 的
+			// ExternalCaseIDs Grant 中（Conversation 与 Diagnosis 一致），
+			// 否则在 getter.Get 前拒绝（未授权零调用）。
+			if err := requireRuntimeResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
 				return grants.AllowsExternalCase(id)
 			}); err != nil {
 				return externalCaseEvidence{}, err

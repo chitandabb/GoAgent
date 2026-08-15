@@ -98,24 +98,25 @@ func TestReadExternalCaseToolConversationGrantEnforcedBeforeGetter(t *testing.T)
 	}
 }
 
-func TestReadExternalCaseToolDiagnosisCompatPathNotGrantScoped(t *testing.T) {
+func TestReadExternalCaseToolDiagnosisCompatPathFailsClosedWithoutGrant(t *testing.T) {
 	getter := &countingExternalCaseGetter{item: &externalcase.ExternalCase{ID: runnerTestCaseID, ExternalCaseKey: "TKT-1"}}
 	current, err := NewReadExternalCaseTool(getter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Diagnosis 兼容 RunAccess 不携带 ExternalCaseIDs Grant，Tool 必须继续走
-	// 旧 TaskScope/owner 边界，不能因缺少 Conversation Grant 拒绝。
+	// Diagnosis 兼容 RunAccess（TaskScope 适配器）不携带 ExternalCaseIDs
+	// Grant：v2 通用资源 Guard 必须 fail-closed，getter 零调用。旧链路
+	// 由 Worker 从有效 RunAccess 反向生成 TaskScope + 权威 v2 RunAccess。
 	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
 		ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
 	}})
 	if _, err := current.InvokableRun(
 		WithTaskScope(context.Background(), scope), `{"externalCaseId":"`+runnerTestCaseID.String()+`"}`,
-	); err != nil {
-		t.Fatalf("diagnosis compat path failed: %v", err)
+	); !errors.Is(err, ErrResourceNotGranted) {
+		t.Fatalf("diagnosis compat error = %v, want ErrResourceNotGranted", err)
 	}
-	if getter.calls != 1 {
-		t.Fatalf("getter calls = %d, want 1", getter.calls)
+	if getter.calls != 0 {
+		t.Fatalf("getter calls = %d, want 0", getter.calls)
 	}
 }
 

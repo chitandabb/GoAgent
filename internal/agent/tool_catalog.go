@@ -132,6 +132,16 @@ func (c *ToolCatalog) BoundProfileID() agentruntime.ToolProfileID {
 	return c.profile.ID()
 }
 
+// ProfileToolNames 返回绑定 Profile 的 Tool 名单快照（含 Middleware-owned
+// 名称如 skill）。名单是启动 Epoch 的固定装配结果，Diagnosis Worker 用它
+// 派生 AccessCeiling；不按任务或消息变化。
+func (c *ToolCatalog) ProfileToolNames() []string {
+	if c == nil || c.profile == nil {
+		return nil
+	}
+	return c.profile.ToolNames()
+}
+
 // ResolveProfile 返回固定 Profile 的完整模型可见合同。Tools 是 Catalog-owned
 // 且已包装 accessGuardedTool 的执行器集合（不含 Middleware-owned 名称）；
 // ModelVisibleNames 是稳定 Schema 名单（含 Middleware-owned 名称）。

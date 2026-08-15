@@ -60,6 +60,14 @@ func (r *DiagnosisTaskRepository) createTaskInTx(
 ) (diagnosis.TaskCreateResult, error) {
 	db := ResolveDB(ctx, r.db)
 
+	// 先做 Policy fail-closed 校验：新任务必须显式 frozen 且 Policy 完整，
+	// 缺失/损坏/版本不一致时在触碰任何表之前拒绝，绝不自动降级为 legacy。
+	if err := validateTaskInvestigationPolicy(
+		input.InvestigationPolicyMode, input.InvestigationPolicy, input.InvestigationPolicySchemaVersion,
+	); err != nil {
+		return diagnosis.TaskCreateResult{}, err
+	}
+
 	// 先读已有幂等事实，常见重放不创建新的快照。并发首次请求由
 	// INSERT ... ON CONFLICT DO NOTHING 兜底，避免唯一键错误中止事务。
 	var existing diagnosisTaskRecord
@@ -127,13 +135,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 INSERT INTO diagnosis_tasks
     (id, created_by, external_case_id, case_snapshot_id, retry_of, idempotency_key,
      request_fingerprint, request_text, request_scope, request_scope_schema_version,
+     investigation_policy, investigation_policy_schema_version, investigation_policy_mode,
      status, attempt_count, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
 ON CONFLICT (created_by, idempotency_key) DO NOTHING
 RETURNING id`,
 		taskID, input.CreatedBy, input.ExternalCaseID, snapshotID, input.RetryOfTaskID,
 		input.IdempotencyKey, input.RequestFingerprint, input.RequestText, input.RequestScope,
-		input.RequestScopeSchemaVersion, input.CreatedAt, input.CreatedAt,
+		input.RequestScopeSchemaVersion, input.InvestigationPolicy, input.InvestigationPolicySchemaVersion,
+		string(input.InvestigationPolicyMode),
+		input.CreatedAt, input.CreatedAt,
 	).Row()
 	scanErr := row.Scan(&insertedID)
 	if errors.Is(scanErr, sql.ErrNoRows) {

@@ -133,7 +133,7 @@ func TestRunnerUsesOneADKLoopForMultipleSkillsAndTools(t *testing.T) {
 	state := &runnerModelState{github: true}
 	runner := newRunnerTest(t, state)
 	scope := runnerTestScope(t, ToolDependencyExternalCase, ToolDependencyGitHubMCP)
-	result, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), scope), RunRequest{
 		UserQuery: "请诊断工单并在有明确线索时查找代码", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 	state := &runnerModelState{}
 	runner := newRunnerTest(t, state)
 	scope := runnerTestScopeWithCapabilities(t, []ToolCapability{ToolCapabilityCase, ToolCapabilityCode}, ToolDependencyExternalCase)
-	result, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), scope), RunRequest{
 		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
@@ -194,7 +194,7 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 
 func TestRunnerBaselineBindsBroadRoleTaskToolsWithoutSkillMiddleware(t *testing.T) {
 	runner := newRunnerTestWithMode(t, &runnerModelState{baseline: true}, RunnerModeBaseline)
-	result, err := runner.Invoke(WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{
+	result, err := runner.Invoke(withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{
 		UserQuery: "请诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 	})
 	if err != nil {
@@ -447,11 +447,12 @@ func TestToolTraceMiddlewareMarksIncompleteCodeSearchAsDegraded(t *testing.T) {
 func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 	state := &runnerModelState{block: make(chan struct{})}
 	runner := newRunnerTest(t, state)
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx, cancel := context.WithCancel(context.Background())
 	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	runCtx := withRunnerTestRunAccess(baseCtx, scope)
 	done := make(chan error, 1)
 	go func() {
-		_, err := runner.Invoke(WithTaskScope(ctx, scope), RunRequest{UserQuery: "等待取消"})
+		_, err := runner.Invoke(runCtx, RunRequest{UserQuery: "等待取消"})
 		done <- err
 	}()
 	time.Sleep(10 * time.Millisecond)
@@ -462,7 +463,7 @@ func TestRunnerHonorsCancellationAndMaxIterations(t *testing.T) {
 
 	loopRunner := newRunnerTest(t, &runnerModelState{loop: true})
 	loopRunner.maxIterations = 2
-	_, err := loopRunner.Invoke(WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{UserQuery: "循环"})
+	_, err := loopRunner.Invoke(withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)), RunRequest{UserQuery: "循环"})
 	if !errors.Is(err, adk.ErrExceedMaxIterations) {
 		t.Fatalf("max iterations error = %v", err)
 	}
@@ -483,7 +484,7 @@ func TestRunnerBlocksGrowingDiagnosisPromptBeforeSecondProviderCall(t *testing.T
 	}}
 	runner.contextPreflight = diagnosisContextPreflightForTest(planner)
 	result, err := runner.Invoke(
-		WithTaskScope(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)),
+		withRunnerTestRunAccess(context.Background(), runnerTestScope(t, ToolDependencyExternalCase)),
 		RunRequest{
 			UserQuery: "诊断工单", ExternalCaseID: runnerTestCaseID.String(),
 			CaseSnapshot: `{"id":"11111111-1111-1111-1111-111111111111","title":"报工状态未更新"}`,
@@ -532,13 +533,14 @@ func TestRunnerDoesNotApplyDiagnosisPreflightToKnowledgeTask(t *testing.T) {
 func TestRunnerCreatesIsolatedAgentForConcurrentRuns(t *testing.T) {
 	runner := newRunnerTest(t, &runnerModelState{})
 	scope := runnerTestScope(t, ToolDependencyExternalCase)
+	runCtx := withRunnerTestRunAccess(context.Background(), scope)
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := runner.Invoke(WithTaskScope(context.Background(), scope), RunRequest{UserQuery: "并发诊断"})
+			_, err := runner.Invoke(runCtx, RunRequest{UserQuery: "并发诊断"})
 			if err != nil {
 				errs <- err
 			}
@@ -608,4 +610,58 @@ func runnerTestScopeWithCapabilities(t *testing.T, capabilities []ToolCapability
 		t.Fatalf("NewTaskScope: %v", err)
 	}
 	return scope
+}
+
+// withRunnerTestRunAccess 按生产绑定顺序构造测试 Context：WithTaskScope 先
+// 写入兼容上下文，权威 v2 Diagnosis RunAccess（Policy 镜像测试 scope 能力 +
+// runnerTestCaseID case Grant + 只读数据源 Grant）最后覆盖。它模拟 Worker
+// 从有效 RunAccess 反向生成 TaskScope 后的绑定结果。
+func withRunnerTestRunAccess(ctx context.Context, scope TaskScope) context.Context {
+	ctx = WithTaskScope(ctx, scope)
+	permissions := []agentruntime.Permission{agentruntime.PermissionCaseRead}
+	if scope.CapabilityAllowed(ToolCapabilityCode) {
+		permissions = append(permissions, agentruntime.PermissionCodeRead)
+	}
+	if scope.CapabilityAllowed(ToolCapabilitySQL) {
+		permissions = append(permissions, agentruntime.PermissionSQLRead)
+	}
+	if scope.CapabilityAllowed(ToolCapabilityKnowledge) {
+		permissions = append(permissions, agentruntime.PermissionKnowledgeRead)
+	}
+	if scope.CapabilityAllowed(ToolCapabilityWebSearch) {
+		permissions = append(permissions, agentruntime.PermissionWebRead)
+	}
+	if scope.CapabilityAllowed(ToolCapabilityAttachment) {
+		permissions = append(permissions, agentruntime.PermissionAttachmentRead)
+	}
+	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
+	if err != nil {
+		panic(err)
+	}
+	dataSourceIDs := make([]uuid.UUID, 0, len(scope.DataSources()))
+	for _, source := range scope.DataSources() {
+		if source.SafetyMode == DataSourceSafetyReadOnly {
+			dataSourceIDs = append(dataSourceIDs, source.ID)
+		}
+	}
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		ExternalCaseIDs: []uuid.UUID{runnerTestCaseID},
+		DataSourceIDs:   dataSourceIDs,
+	})
+	if err != nil {
+		panic(err)
+	}
+	policy, err := agentruntime.NewInvestigationPolicy(1, permissionSet, grants)
+	if err != nil {
+		panic(err)
+	}
+	access, err := agentruntime.DeriveDiagnosisRunAccess(
+		policy,
+		agentruntime.Actor{UserID: scope.UserID(), Role: scope.Role()},
+		agentruntime.AccessCeiling{Permissions: permissionSet, Grants: grants},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return agentruntime.WithRunAccess(ctx, access)
 }

@@ -65,9 +65,10 @@ func NewReadAttachmentTool(reader attachment.Reader) (tool.InvokableTool, error)
 			if err != nil {
 				return readAttachmentResponse{}, errors.New("attachmentId must be a valid UUID")
 			}
-			// Conversation 运行时：attachmentId 必须在本轮 RunAccess 的
-			// AttachmentIDs Grant 中；现有 CommandContext/owner 校验作为第二层。
-			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+			// 运行时通用资源边界：attachmentId 必须在本轮 RunAccess 的
+			// AttachmentIDs Grant 中（Conversation 与 Diagnosis 一致）；
+			// 现有 CommandContext/任务归属校验作为第二层。
+			if err := requireRuntimeResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
 				return grants.AllowsAttachment(attachmentID)
 			}); err != nil {
 				return readAttachmentResponse{}, err

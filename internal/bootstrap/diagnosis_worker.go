@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/attachment"
 	"github.com/chitandabb/GoAgent/internal/diagnosis"
 	"github.com/chitandabb/GoAgent/internal/diagnosisworker"
@@ -154,30 +155,45 @@ func (e diagnosisAgentExecutor) Execute(
 	if e.runtime == nil || e.runtime.orchestrator == nil {
 		return diagnosisworker.ExecutionResult{}, errors.New("diagnosis Agent runtime is unavailable")
 	}
-	dataSources := make([]agent.ScopedDataSource, 0, len(task.DataSources))
+	ceilingSources := make([]agent.DiagnosisCeilingDataSource, 0, len(task.DataSources))
 	for _, source := range task.DataSources {
-		dataSources = append(dataSources, agent.ScopedDataSource{
+		ceilingSources = append(ceilingSources, agent.DiagnosisCeilingDataSource{
 			ID: source.ID, Role: source.Role, SafetyMode: source.SafetyMode,
 		})
 	}
-	capabilities, err := taskCapabilitiesFromScope(task.RequestScope)
+	attachmentIDs := make([]uuid.UUID, 0, len(task.Attachments))
+	for _, current := range task.Attachments {
+		attachmentIDs = append(attachmentIDs, current.ID)
+	}
+	// legacy 派生输入仍来自冻结 request_scope（request_scope 只为旧任务与
+	// RequestedSkill 兼容保留，不再成为新任务的授权事实）。
+	legacyCapabilities, err := taskCapabilitiesFromScope(task.RequestScope)
 	if err != nil {
 		return diagnosisworker.ExecutionResult{}, err
 	}
-	scope, err := agent.NewTaskScope(agent.TaskScopeConfig{
-		UserID: task.CreatedBy, Role: task.Role, TaskType: agent.TaskTypeDiagnosis,
-		DataSources:           dataSources,
-		AllowedCapabilities:   capabilities,
-		AvailableDependencies: append([]agent.ToolDependency(nil), e.runtime.availableDependencies...),
+	runContext, err := agent.BuildDiagnosisRunContext(agent.DiagnosisRunContextInput{
+		Policy:             task.Policy,
+		Actor:              agentruntime.Actor{UserID: task.CreatedBy, Role: task.Role},
+		ProfileToolNames:   e.runtime.diagnosisToolNames,
+		ExternalCaseID:     task.CaseSnapshot.ID,
+		DataSources:        ceilingSources,
+		AttachmentIDs:      attachmentIDs,
+		LegacyCapabilities: legacyCapabilities,
 	})
 	if err != nil {
-		return diagnosisworker.ExecutionResult{}, fmt.Errorf("%w: build Agent task scope: %v", diagnosis.ErrInvalidTask, err)
+		return diagnosisworker.ExecutionResult{}, fmt.Errorf(
+			"%w: build diagnosis run context: %v", diagnosis.ErrInvalidTask, err,
+		)
 	}
 	requestedSkill, err := requestedSkillFromScope(task.RequestScope)
 	if err != nil {
 		return diagnosisworker.ExecutionResult{}, err
 	}
-	runCtx := agent.WithTaskScope(ctx, scope)
+	// 绑定顺序：WithTaskScope 写入兼容上下文（反向生成的 TaskScope），
+	// agentruntime.WithRunAccess 最后覆盖为权威 v2 RunAccess。
+	runCtx := agent.WithTaskScope(ctx, runContext.Scope())
+	runCtx = agentruntime.WithRunAccess(runCtx, runContext.Access())
+	runCtx = agent.WithDiagnosisTaskContext(runCtx, runContext.TaskContext())
 	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
 		RunID: task.ID.String(), TaskID: task.ID.String(),
 	})

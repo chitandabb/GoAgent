@@ -72,7 +72,7 @@ VALUES (?, ?, ?, 'incident', now())`, externalCaseID, dataSourceID, "WORKER-"+uu
 		SourceFingerprint: "sha256:worker-source", Attributes: map[string]any{"module": "MES"},
 	}
 	taskRepository := NewDiagnosisTaskRepository(tx)
-	taskService, err := diagnosis.NewDiagnosisTaskService(taskRepository, integrationCaseReader{item: caseItem})
+	taskService, err := diagnosis.NewDiagnosisTaskService(taskRepository, integrationCaseReader{item: caseItem}, mustIntegrationPolicyBuilder(t, dataSourceID))
 	if err != nil {
 		t.Fatalf("NewDiagnosisTaskService(): %v", err)
 	}

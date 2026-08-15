@@ -410,7 +410,7 @@ VALUES (?, ?, ?, 'incident', ?)`, fixture.externalCase.ID, fixture.dataSourceID,
 func (f *taskRecoveryIntegrationFixture) createTask(t *testing.T) uuid.UUID {
 	t.Helper()
 	repository := NewDiagnosisTaskRepository(f.db)
-	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: &f.externalCase})
+	service, err := diagnosis.NewDiagnosisTaskService(repository, integrationCaseReader{item: &f.externalCase}, mustIntegrationPolicyBuilder(t))
 	if err != nil {
 		t.Fatalf("NewDiagnosisTaskService(): %v", err)
 	}

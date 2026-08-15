@@ -57,7 +57,7 @@ func NewGetDiagnosisTaskStatusTool(reader DiagnosisTaskStatusReader) (tool.Invok
 			}
 			// Conversation 运行时：taskId 必须在本轮 RunAccess 的 TaskIDs
 			// Grant 中；服务端 owner/admin 校验保留为第二层。
-			if err := requireConversationResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
+			if err := requireRuntimeResourceGrant(ctx, func(grants agentruntime.ResourceGrants) bool {
 				return grants.AllowsTask(taskID)
 			}); err != nil {
 				return getDiagnosisTaskStatusResponse{}, err

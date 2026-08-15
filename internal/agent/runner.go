@@ -229,6 +229,16 @@ func (p evaluationBaselineToolProvider) ResolveProfile(
 	return ResolvedToolProfile{ID: profileID, Tools: tools, ModelVisibleNames: names}, nil
 }
 
+// ProfileToolNames 返回本 Runner 绑定 Catalog 的固定 Profile Tool 名单快照
+// （启动 Epoch 内解析一次，不按任务或消息变化）。Diagnosis Worker 用它派生
+// AccessCeiling，不能按任务动态重算。
+func (r *Runner) ProfileToolNames() []string {
+	if r == nil || r.toolCatalog == nil {
+		return nil
+	}
+	return r.toolCatalog.ProfileToolNames()
+}
+
 func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResult, err error) {
 	if r == nil {
 		return RunResult{}, errors.New("agent runner is nil")
@@ -307,6 +317,10 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction, scope)
 		handlers = append(handlers, r.skillRuntime.Middleware)
 	}
+	// task_context 追加到 system 指令最尾部；同一任务的每轮 Evidence Gate
+	// 重试保持一致（Context 内的值在任务执行开始前绑定一次）。
+	taskContext := DiagnosisTaskContextFromContext(ctx)
+	instruction = appendDiagnosisTaskContext(instruction, taskContext)
 	chatModel := r.chatModel
 	var contextObservation *diagnosisContextObservationRecorder
 	if r.contextPreflight.Enabled && scope.taskType == TaskTypeDiagnosis {
@@ -319,6 +333,7 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 			preflightSystemInstruction = buildAgentInstruction(
 				r.systemInstruction, result.SkillID, "", scope,
 			)
+			preflightSystemInstruction = appendDiagnosisTaskContext(preflightSystemInstruction, taskContext)
 			preloadedSkill = entryInstruction
 		}
 		chatModel, contextObservation = newDiagnosisContextGuardModel(

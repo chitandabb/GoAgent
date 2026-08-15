@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
@@ -185,20 +186,23 @@ type CaseSnapshotRecord struct {
 
 // CreateTaskRecord 是事务 Repository 需要写入的完整事实集合。
 type CreateTaskRecord struct {
-	CreatedBy                 uuid.UUID
-	ExternalCaseID            uuid.UUID
-	RetryOfTaskID             *uuid.UUID
-	IdempotencyKey            string
-	RequestFingerprint        string
-	RequestText               string
-	RequestScope              json.RawMessage
-	RequestScopeSchemaVersion int
-	EvidenceDataSourceIDs     []uuid.UUID
-	Attachments               []TaskAttachment
-	AttachmentSource          *TaskAttachmentSource
-	Snapshot                  CaseSnapshotRecord
-	CorrelationID             uuid.UUID
-	CreatedAt                 time.Time
+	CreatedBy                        uuid.UUID
+	ExternalCaseID                   uuid.UUID
+	RetryOfTaskID                    *uuid.UUID
+	IdempotencyKey                   string
+	RequestFingerprint               string
+	RequestText                      string
+	RequestScope                     json.RawMessage
+	RequestScopeSchemaVersion        int
+	InvestigationPolicy              json.RawMessage
+	InvestigationPolicySchemaVersion int
+	InvestigationPolicyMode          InvestigationPolicyMode
+	EvidenceDataSourceIDs            []uuid.UUID
+	Attachments                      []TaskAttachment
+	AttachmentSource                 *TaskAttachmentSource
+	Snapshot                         CaseSnapshotRecord
+	CorrelationID                    uuid.UUID
+	CreatedAt                        time.Time
 }
 
 // DiagnosisTask 是任务查询返回的安全摘要，不包含模型 Prompt、原始 SQL 或敏感证据。
@@ -242,16 +246,27 @@ type ExternalCaseReader interface {
 }
 
 type DiagnosisTaskService struct {
-	repository TaskRepository
-	cases      ExternalCaseReader
-	clock      func() time.Time
+	repository    TaskRepository
+	cases         ExternalCaseReader
+	policyBuilder InvestigationPolicyBuilder
+	clock         func() time.Time
 }
 
-func NewDiagnosisTaskService(repository TaskRepository, cases ExternalCaseReader) (*DiagnosisTaskService, error) {
-	if repository == nil || cases == nil {
+// NewDiagnosisTaskService 注入纯领域 Policy Builder：新任务必须在创建事务内
+// 冻结 InvestigationPolicy，Builder 缺失时 fail-closed，避免产生没有授权
+// 事实的 v2 任务。
+func NewDiagnosisTaskService(
+	repository TaskRepository,
+	cases ExternalCaseReader,
+	policyBuilder InvestigationPolicyBuilder,
+) (*DiagnosisTaskService, error) {
+	if repository == nil || cases == nil || policyBuilder == nil {
 		return nil, errors.New("diagnosis task dependencies are nil")
 	}
-	return &DiagnosisTaskService{repository: repository, cases: cases, clock: func() time.Time { return time.Now().UTC() }}, nil
+	return &DiagnosisTaskService{
+		repository: repository, cases: cases, policyBuilder: policyBuilder,
+		clock: func() time.Time { return time.Now().UTC() },
+	}, nil
 }
 
 // Create 先在 PostgreSQL 事务外重读 ERP 工单，再把快照、任务、首事件和 Outbox 一起落库。
@@ -275,6 +290,23 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 		return TaskCreateResult{}, ErrSourceChanged
 	}
 
+	// 冻结 InvestigationPolicy：授权事实来自部署上限（Builder 注入）与任务
+	// 绑定的工单/附件/数据源，request_scope 不参与 Policy 构造。Policy 不进入
+	// 幂等 fingerprint，因此同一幂等命令必须回放首次冻结的 Policy，部署配置
+	// 变化不能制造幂等冲突。
+	policy, err := s.policyBuilder.Build(InvestigationPolicyInput{
+		ExternalCaseID: input.ExternalCaseID,
+		DataSourceIDs:  append([]uuid.UUID{item.DataSourceID}, input.EvidenceDataSourceIDs...),
+		AttachmentIDs:  attachmentIDsFromTaskAttachments(input.Attachments),
+	})
+	if err != nil {
+		return TaskCreateResult{}, fmt.Errorf("freeze investigation policy: %w", err)
+	}
+	policyJSON, err := agentruntime.MarshalInvestigationPolicy(policy)
+	if err != nil {
+		return TaskCreateResult{}, fmt.Errorf("encode investigation policy: %w", err)
+	}
+
 	requestScopeJSON, err := json.Marshal(requestScope)
 	if err != nil {
 		return TaskCreateResult{}, fmt.Errorf("marshal task request scope: %w", err)
@@ -293,20 +325,25 @@ func (s *DiagnosisTaskService) Create(ctx context.Context, actor TaskActor, inpu
 		correlationID = uuid.New()
 	}
 	return s.repository.CreateTask(ctx, CreateTaskRecord{
-		CreatedBy:                 actor.UserID,
-		ExternalCaseID:            input.ExternalCaseID,
-		RetryOfTaskID:             input.RetryOfTaskID,
-		IdempotencyKey:            input.IdempotencyKey,
-		RequestFingerprint:        requestFingerprint,
-		RequestText:               input.RequestText,
-		RequestScope:              requestScopeJSON,
-		RequestScopeSchemaVersion: input.RequestScopeSchemaVersion,
-		EvidenceDataSourceIDs:     append([]uuid.UUID(nil), input.EvidenceDataSourceIDs...),
-		Attachments:               append([]TaskAttachment(nil), input.Attachments...),
-		AttachmentSource:          cloneTaskAttachmentSource(input.AttachmentSource),
-		Snapshot:                  snapshot,
-		CorrelationID:             correlationID,
-		CreatedAt:                 now,
+		CreatedBy:                        actor.UserID,
+		ExternalCaseID:                   input.ExternalCaseID,
+		RetryOfTaskID:                    input.RetryOfTaskID,
+		IdempotencyKey:                   input.IdempotencyKey,
+		RequestFingerprint:               requestFingerprint,
+		RequestText:                      input.RequestText,
+		RequestScope:                     requestScopeJSON,
+		RequestScopeSchemaVersion:        input.RequestScopeSchemaVersion,
+		InvestigationPolicy:              policyJSON,
+		InvestigationPolicySchemaVersion: policy.SchemaVersion(),
+		// 新任务必须显式声明 frozen：mode 是区分"旧任务 legacy 派生"与
+		// "新任务漏写 Policy"的唯一事实，缺省默认（legacy）绝不能用于新行。
+		InvestigationPolicyMode: InvestigationPolicyModeFrozen,
+		EvidenceDataSourceIDs:   append([]uuid.UUID(nil), input.EvidenceDataSourceIDs...),
+		Attachments:             append([]TaskAttachment(nil), input.Attachments...),
+		AttachmentSource:        cloneTaskAttachmentSource(input.AttachmentSource),
+		Snapshot:                snapshot,
+		CorrelationID:           correlationID,
+		CreatedAt:               now,
 	})
 }
 

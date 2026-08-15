@@ -88,7 +88,13 @@ func TestReadAttachmentToolInjectsDiagnosisTaskScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := WithDiagnosisAttachmentContext(WithTaskScope(context.Background(), scope), taskID)
+	// 绑定顺序与生产一致：WithTaskScope 先写兼容上下文，权威 v2 RunAccess
+	// 最后覆盖，并携带本任务的附件 Grant。
+	ctx := WithDiagnosisAttachmentContext(context.Background(), taskID)
+	ctx = WithTaskScope(ctx, scope)
+	ctx = agentruntime.WithRunAccess(ctx, mustDiagnosisGrantAccess(t,
+		[]agentruntime.Permission{agentruntime.PermissionCaseRead, agentruntime.PermissionAttachmentRead},
+		agentruntime.ResourceGrantsConfig{AttachmentIDs: []uuid.UUID{attachmentID}}))
 	if _, err := current.InvokableRun(ctx, `{"attachmentId":"`+attachmentID.String()+`"}`); err != nil {
 		t.Fatalf("InvokableRun(): %v", err)
 	}

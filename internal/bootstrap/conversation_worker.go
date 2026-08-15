@@ -82,8 +82,13 @@ func NewConversationWorkerApp(
 	}
 	var diagnosisTaskService *diagnosis.DiagnosisTaskService
 	if externalCaseService != nil {
+		policyBuilder, buildErr := newDiagnosisInvestigationPolicyBuilder(cfg)
+		if buildErr != nil {
+			closeDependencies()
+			return nil, fmt.Errorf("build conversation diagnosis investigation policy: %w", buildErr)
+		}
 		diagnosisTaskService, err = diagnosis.NewDiagnosisTaskService(
-			platformpostgres.NewDiagnosisTaskRepository(deps.db), externalCaseService,
+			platformpostgres.NewDiagnosisTaskRepository(deps.db), externalCaseService, policyBuilder,
 		)
 		if err != nil {
 			closeDependencies()

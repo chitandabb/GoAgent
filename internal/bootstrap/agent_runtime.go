@@ -41,6 +41,7 @@ type agentRuntime struct {
 	conversation              *mesagent.ConversationRunner
 	orchestrator              *mesagent.EvidenceOrchestrator
 	availableDependencies     []mesagent.ToolDependency
+	diagnosisToolNames        []string
 	modelProvider             string
 	modelID                   string
 	promptVersion             string
@@ -399,6 +400,9 @@ func buildAgentRuntimeForRole(
 		_ = runtime.close()
 		return nil, fmt.Errorf("build Agent runner: %w", err)
 	}
+	// Profile 名单在启动 Epoch 内解析并保存一次；Diagnosis Worker 的
+	// AccessCeiling 派生复用该快照，不按任务或消息动态变化。
+	runtime.diagnosisToolNames = runtime.runner.ProfileToolNames()
 	conversationCatalog, err := mesagent.NewConversationDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: externalCases, KnowledgeSearch: knowledgeSearch,
 		WebSearch: webSearch, FetchPublicPage: fetchPublicPage,
