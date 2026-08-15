@@ -50,7 +50,7 @@ Conversation v2 使用独立的 `text-to-sql-conversation-observation-v2` 合同
 
 ## 2026-08-15 OpenCode Go 命名 Profile 单 Case 正式复测
 
-评测器在 clean revision `2c6dcf6` 增加 `-profile` 与 `-case-id`：命名 Profile 选择不会修改生产 `activeProfile`，Profile 指纹、Provider 构造和 Observation 身份都来自实际选择的最终 Profile；单 Case 选择发生在成本预算和 Provider 创建之前。以下是两个相同 revision/Profile/Prompt/Tool Schema 身份下的独立正式单 Case 运行，不作为完整 2 Case 或 20 Case 固定集汇总：
+评测器在 clean revision `2c6dcf6` 增加 `-profile` 与 `-case-id`：命名 Profile 选择不会修改生产 `activeProfile`，Profile 指纹、Provider 构造和 Observation 身份都来自实际选择的最终 Profile；单 Case 选择发生在成本预算和 Provider 创建之前。以下三个相同 revision/Profile/Prompt/Tool Schema 身份下的独立正式单 Case 运行覆盖了 StepFun 小样本的同一组 Case；原始文件保持逐 Case 独立，没有伪装成一次多 Case 汇总：
 
 - Provider/Profile：OpenCode Go `opencode-deepseek-main`；
 - 模型：`deepseek-v4-flash`；
@@ -64,10 +64,13 @@ Conversation v2 使用独立的 `text-to-sql-conversation-observation-v2` 合同
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | `sql-new-count` | 端到端正确 | schema search ×2 → readonly query | 3 | 7,024 | 4,352 | 6.531 秒 |
 | `sql-total-cases` | 端到端正确 | schema search ×3 → readonly query | 4 | 8,619 | 7,680 | 9.771 秒 |
+| `sql-urgent-count` | 失败：未执行 SQL | schema search ×8 | 5 | 11,781 | 10,112 | 10.055 秒 |
 
-两次运行共消耗 7 次模型调用、15,643 Token，其中 12,032 Cached Token；价格仍不在程序侧估算。`sql-total-cases` 从 StepFun 的 7 次 schema search 后未执行 SQL，变为 OpenCode Go 的 3 次 search 后正确执行 `SELECT COUNT(*) AS Total FROM dbo.v_MESGuardExternalCases` 并回答 `4`。这证明生产 SQL Tool、RunAccess、QueryGuard 和数据库执行链路能够完成该 Case，原失败至少部分是模型行为差异，而不是统一运行时能力断裂。
+三次运行的 Tool/SQL/答案/端到端准确率均为 2/3（66.7%），共消耗 12 次模型调用、26,060 Prompt Token、1,364 Completion Token、27,424 Total Token，其中 22,144 Cached Token，平均耗时 8.786 秒。价格仍不在程序侧估算。与 StepFun 同三 Case 的描述性基线相比，OpenCode Go 的模型调用和 Total Token 都减少约 33.3%，但平均耗时高约 30.2%；两组 observation 来自不同实现 revision 和模型身份，不作为严格 paired 因果指标。
 
-当前不设置 `search_schema_catalog=2` 的生产硬上限：正确的 `sql-total-cases` 已实际需要 3 次 search，而且现有 `agentToolRunPolicy` 超限会终止整轮 Conversation，而不是把可恢复结果交还模型。重复 search 仍是 Token/延迟优化项；下一步应先在同一 3 Case 上做 StepFun/OpenCode 可比复测，再以不改变固定 Tool Schema、不牺牲正确率为前提评估 Prompt 收敛或可恢复的执行期反馈。扩大到 20 Case 仍需等待可比小样本稳定。
+失败位置发生了迁移：`sql-total-cases` 从 StepFun 的 7 次 schema search 后未执行 SQL，变为 OpenCode Go 的 3 次 search 后正确执行 `SELECT COUNT(*) AS Total FROM dbo.v_MESGuardExternalCases` 并回答 `4`；但 `sql-urgent-count` 在 OpenCode Go 上连续成功调用 schema search 8 次，仍未执行 SQL。这证明生产 SQL Tool、RunAccess、QueryGuard 和数据库执行链路能够完成这些查询，同时也证明单纯替换 Provider 不能解决 schema 探索不收敛。
+
+当前不设置 `search_schema_catalog=2` 的生产硬上限：正确的 `sql-total-cases` 已实际需要 3 次 search，而且现有 `agentToolRunPolicy` 超限会终止整轮 Conversation，而不是把可恢复结果交还模型。下一步应先补齐 schema search 的受控诊断事实（至少记录归一化 keyword hash、返回条数和是否重复），再以不改变固定 Tool Schema、不牺牲正确率为前提比较“Prompt 明确元数据/业务值边界”和“可恢复重复搜索反馈”。在失败根因可观察之前不新增 Planner、意图分类器或硬限流；扩大到 20 Case 仍需等待三 Case 收敛。
 
 ## 被丢弃的试跑
 

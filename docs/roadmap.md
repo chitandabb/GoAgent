@@ -60,10 +60,12 @@ Ordered next slices are maintained directly in this file.
       基础流式 Tool 协议与 Usage，不代表生产入口质量；JSON Object/Schema 未声明。
 - [x] Text-to-SQL 评测器支持 `-profile` 命名模型与 `-case-id` 精确单 Case 选择，
       不修改生产 `activeProfile`，并在 Provider 创建前完成 Profile 指纹、实现身份和
-      成本护栏校验。clean revision `2c6dcf6` 上的 OpenCode Go 正式单 Case 复测中，
-      `sql-new-count` 与此前 StepFun 失败的 `sql-total-cases` 均端到端正确：合计 7 次
-      模型调用、15,643 Token、12,032 Cached Token；后者在 3 次 schema search 后
-      正确执行只读 SQL。该结果是两个独立单 Case 观测，不冒充完整固定集指标。
+      成本护栏校验。clean revision `2c6dcf6` 上的 OpenCode Go 正式三 Case 单例复测
+      与 StepFun 一样达到 2/3（66.7%）端到端正确：12 次模型调用、27,424 Token、
+      22,144 Cached Token；模型调用和 Total Token 较 StepFun 描述性基线低约 33.3%，
+      但平均耗时高约 30.2%。失败 Case 从 `sql-total-cases` 迁移到
+      `sql-urgent-count`，后者连续 schema search 8 次且未执行 SQL；单纯换 Provider
+      未解决探索不收敛。这是三个同身份的独立单 Case 观测，不冒充一次聚合运行。
 
 ## Active Slice: Unified Agent Runtime v2 and Production-Entry Re-evaluation
 
@@ -84,7 +86,7 @@ This slice resolves the mismatch between the unified conversation product entry 
 - [x] Update `sql-investigation` SOP to include `execute_readonly_query`, evidence citation and stop conditions; keep Skill as SOP rather than authorization.
 - [x] Retire `TaskTypeKnowledge`, `ToolCapability`, `RequestedSkill`, `TaskScope`, the `request_scope` columns and dependency-health-driven Schema deletion: the hard-cut slice deletes them from the runtime, API, database schema and frontend contract. Migration `00035` drops `investigation_policy_mode`/`request_scope`, forces `investigation_policy` + `investigation_policy_schema_version` NOT NULL, fail-fast on any NULL-Policy legacy task, and is irreversible (its Down raises an explicit exception and restores nothing; rollback requires a backup taken before `00033`). The Worker Task Policy is a non-pointer value (missing/corrupt/version-mismatch → `ErrInvalidTask`); OpenAPI removes `DiagnosisTaskRequestScope`/`requestScope`/`requestedSkill`/`allowedCapabilities` and the frontend removes Skill/Capability selection, submitting only `externalCaseId`/`expectedSourceFingerprint`/`evidenceDataSourceIds`/`requestText`/`attachments`/`retryOfTaskId`.
 - [x] Generic Agent Evaluation v2 identity: `EvaluationObservation` records `observationSchemaVersion` (`evaluation-observation-v2`), `toolProfileId`, `toolSchemaFingerprint`, `modelProfileFingerprint`, `implementationRevision` and `implementationDirty`; baseline must record `evaluation-wide-v1` and experiment `diagnosis-default`. Tool Profile ID and Schema fingerprint are arm-specific contracts (never required equal across arms), while the same variant across samples must keep one Profile ID and Schema fingerprint (fail-closed). Paired reduction requires `model`/`modelVersion`/`reasoningEffort`/`promptVersion`/`modelProfileFingerprint`/`implementationRevision` to match and both arms `implementationDirty=false`. The active evaluator keeps no v1 compatibility branch; historical v1 assets may only be marked historical and never enter formal reduction.
-- [ ] Complete v2 production-entry fixed sets. A clean post-commit pilot on revision `3d40582` completed one ticket case in both arms with correct Skill/first Tool, 100% completion and zero forbidden calls (4 model calls, 18,384 total Token), but invalidated the current Token paired variable: the deployment's `evaluation-wide-v1` arm exposed 7 business Tools while `diagnosis-default` exposed 9 Tools after real Skill Middleware, so experiment prompt Token increased from 5,991 to 9,536 (+59.17%) and duration increased from 12.08s to 14.22s. Natural-language Conversation Text-to-SQL 的 StepFun 三 Case 基线仍为 66.7%、18 次模型调用和 41,113 Token；clean revision `2c6dcf6` 上两个独立 OpenCode Go 单 Case 均端到端正确，其中原失败 `sql-total-cases` 在 3 次 schema search 后完成查询。当前不设置会直接终止整轮的两次硬上限；先完成同一三 Case 的 Provider 可比复测，再把重复 search 作为 Token/延迟优化项处理。Tool Selection baseline 装配可比性和完整 Text-to-SQL 固定集仍未完成。详情：[`evaluations/text-to-sql-conversation-v2.md`](evaluations/text-to-sql-conversation-v2.md)。
+- [ ] Complete v2 production-entry fixed sets. A clean post-commit pilot on revision `3d40582` completed one ticket case in both arms with correct Skill/first Tool, 100% completion and zero forbidden calls (4 model calls, 18,384 total Token), but invalidated the current Token paired variable: the deployment's `evaluation-wide-v1` arm exposed 7 business Tools while `diagnosis-default` exposed 9 Tools after real Skill Middleware, so experiment prompt Token increased from 5,991 to 9,536 (+59.17%) and duration increased from 12.08s to 14.22s. Natural-language Conversation Text-to-SQL 的 StepFun 与 OpenCode Go 同三 Case 均为 2/3（66.7%），但失败 Case 不同；OpenCode Go 使用 12 次模型调用和 27,424 Token，较 StepFun 描述性基线低约 33.3%，平均耗时则高约 30.2%。当前不设置会直接终止整轮的两次硬上限；下一切片先记录 schema search 的 keyword hash、返回条数和重复状态，再比较最小 Prompt 收敛与可恢复反馈。Tool Selection baseline 装配可比性和完整 Text-to-SQL 固定集仍未完成。详情：[`evaluations/text-to-sql-conversation-v2.md`](evaluations/text-to-sql-conversation-v2.md)。
 
 ## Completed Slice: M4 Agent Evaluation and Performance Optimization
 
