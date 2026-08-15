@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
@@ -184,8 +185,10 @@ func TestRunnerReportsGitHubDegradationWithoutDroppingTicketEvidence(t *testing.
 	if !strings.Contains(result.Answer, "已根据工单证据") || !strings.Contains(result.Answer, githubUnavailableMessage) {
 		t.Fatalf("degraded answer = %q", result.Answer)
 	}
-	if slices.Contains(result.AllowedTools, "search_code") {
-		t.Fatal("unavailable GitHub Tool was exposed")
+	// 固定 Diagnosis Profile：依赖健康状态不能删除 GitHub Tool Schema，
+	// 但执行由 RunAccess/降级链路 fail-closed。
+	if !slices.Contains(result.AllowedTools, "search_code") {
+		t.Fatalf("GitHub Tool Schema must stay visible with the stable profile: %v", result.AllowedTools)
 	}
 }
 
@@ -214,6 +217,28 @@ func TestNewRunnerRejectsInvalidMode(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid runner mode") {
 		t.Fatalf("invalid mode error = %v", err)
+	}
+}
+
+func TestNewRunnerRejectsConversationBoundCatalog(t *testing.T) {
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{},
+	})
+	if err != nil {
+		t.Fatalf("NewConversationDefaultToolCatalog: %v", err)
+	}
+	skillRuntime, err := NewNativeSkillRuntime(context.Background(), filepath.Join("..", "..", "config", "skills"))
+	if err != nil {
+		t.Fatalf("NewNativeSkillRuntime: %v", err)
+	}
+	// 诊断 Runner 只能使用 diagnosis-default Catalog；传入会话 Catalog 必须构造失败。
+	_, err = NewRunner(RunnerConfig{
+		ChatModel: &runnerTestModel{state: &runnerModelState{}}, ToolCatalog: catalog,
+		SkillRuntime: skillRuntime, SystemInstruction: runnerTestSystemInstruction,
+		BaselineInstruction: runnerTestBaselineInstruction, Logger: zap.NewNop(),
+	})
+	if err == nil || !strings.Contains(err.Error(), string(agentruntime.ToolProfileDiagnosis)) {
+		t.Fatalf("NewRunner accepted a conversation-bound catalog, error = %v", err)
 	}
 }
 

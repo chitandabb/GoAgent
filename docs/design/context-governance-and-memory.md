@@ -21,7 +21,7 @@ Conversation Runner
 ```
 
 `TokenBudgetPlanner` 只计算预算，不读数据库、不授权 Tool、不调用模型。`ConversationMemoryService`
-隐藏压缩、校验、发布和缓存细节。记忆模块永远不能扩权：当前生产由 `TaskScope` 过滤 Tool Schema、`RunAccess Guard` 校验执行 Permission，后续再把 Schema 选择切换为固定 `ToolProfile`；任何阶段都不读取摘要内容决定权限。
+隐藏压缩、校验、发布和缓存细节。记忆模块永远不能扩权：部署配置决定固定 Tool Schema（`ToolProfile`），`RunAccess`/`ResourceGrant` 决定可执行性，当前消息引用和临时依赖健康不再动态删除 Schema；任何阶段都不读取摘要内容决定权限。
 
 ## 为什么只有 Current Summary
 

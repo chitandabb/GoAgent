@@ -19,7 +19,7 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
-	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/bootstrap"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
@@ -338,24 +338,20 @@ func executePilot(
 	if err != nil {
 		return nil, err
 	}
-	catalog, err := mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+	catalog, err := mesagent.NewConversationDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
 		ExternalCases: pilotExternalCaseGetter{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build Pilot Tool catalog: %w", err)
 	}
-	actorID := uuid.New()
-	scope, err := mesagent.NewTaskScope(mesagent.TaskScopeConfig{
-		UserID: actorID, Role: auth.RoleAnalyst, TaskType: mesagent.TaskTypeConversation,
-	})
+	// Pilot 使用固定 conversation-default Profile 解析 Schema，不再调用
+	// ToolsFor(TaskScope)；空 capability 的 TaskScope 只用于 RunAccess 兼容，
+	// 不改变模型可见工具合同。
+	resolved, err := catalog.ResolveProfile(ctx, agentruntime.ToolProfileConversation)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve Pilot conversation Profile: %w", err)
 	}
-	tools, err := catalog.ToolsFor(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
-	toolContract, err := mesagent.CanonicalToolContract(ctx, tools)
+	toolContract, err := mesagent.CanonicalToolContract(ctx, resolved.Tools)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 
 	"github.com/cloudwego/eino/adk"
@@ -19,9 +20,22 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestToolAuthorizationMiddlewareRequiresScopeAndReplacesStaticTools(t *testing.T) {
+// bindDiagnosisProfileForTest 把测试 Catalog 的 test 工具绑定为固定 Diagnosis
+// Profile，供 Middleware/并发测试使用；ToolsFor 的 v1 语义不受影响。
+func bindDiagnosisProfileForTest(t *testing.T, catalog *ToolCatalog) {
+	t.Helper()
+	profile := mustToolProfileForTest(t, agentruntime.ToolProfileDiagnosis, []string{
+		testToolReadCase, testToolGitHub, testToolReadSQL, testToolLabSQL, testToolKnowledge,
+	})
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		t.Fatalf("BindProfile: %v", err)
+	}
+}
+
+func TestToolAuthorizationMiddlewareRequiresRunAccessAndReplacesStaticTools(t *testing.T) {
 	catalog := newToolCatalogForTest(t)
-	middleware, err := NewToolAuthorizationMiddleware(catalog)
+	bindDiagnosisProfileForTest(t, catalog)
+	middleware, err := NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		t.Fatalf("NewToolAuthorizationMiddleware: %v", err)
 	}
@@ -29,8 +43,8 @@ func TestToolAuthorizationMiddlewareRequiresScopeAndReplacesStaticTools(t *testi
 	runCtx := &adk.ChatModelAgentContext{
 		Tools: []tool.BaseTool{bypass}, ReturnDirectly: map[string]bool{"test_bypass": true, testToolReadCase: true},
 	}
-	if _, _, err = middleware.BeforeAgent(context.Background(), runCtx); !errors.Is(err, ErrTaskScopeRequired) {
-		t.Fatalf("missing scope error = %v", err)
+	if _, _, err = middleware.BeforeAgent(context.Background(), runCtx); !errors.Is(err, ErrRunAccessRequired) {
+		t.Fatalf("missing RunAccess error = %v, want ErrRunAccessRequired", err)
 	}
 	scope := mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
 		ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
@@ -39,7 +53,9 @@ func TestToolAuthorizationMiddlewareRequiresScopeAndReplacesStaticTools(t *testi
 	if err != nil {
 		t.Fatalf("BeforeAgent: %v", err)
 	}
-	if names := toolNamesForTest(t, got.Tools); !slices.Equal(names, []string{testToolReadCase}) {
+	if names := toolNamesForTest(t, got.Tools); !slices.Equal(names, []string{
+		testToolGitHub, testToolKnowledge, testToolLabSQL, testToolReadCase, testToolReadSQL,
+	}) {
 		t.Fatalf("authorized tools = %v", names)
 	}
 	if got.ReturnDirectly["test_bypass"] || !got.ReturnDirectly[testToolReadCase] {
@@ -48,18 +64,22 @@ func TestToolAuthorizationMiddlewareRequiresScopeAndReplacesStaticTools(t *testi
 }
 
 type toolProviderStub struct {
-	tools []tool.BaseTool
+	resolved ResolvedToolProfile
 }
 
-func (s toolProviderStub) ToolsFor(context.Context, TaskScope) ([]tool.BaseTool, error) {
-	return s.tools, nil
+func (s toolProviderStub) ResolveProfile(context.Context, agentruntime.ToolProfileID) (ResolvedToolProfile, error) {
+	return s.resolved, nil
 }
 
 func TestToolAuthorizationMiddlewareRejectsInvalidProviderOutput(t *testing.T) {
 	duplicate := newNamedToolForTest(t, "test_provider_duplicate")
 	middleware, err := NewToolAuthorizationMiddleware(toolProviderStub{
-		tools: []tool.BaseTool{duplicate, duplicate},
-	})
+		resolved: ResolvedToolProfile{
+			ID:                agentruntime.ToolProfileDiagnosis,
+			Tools:             []tool.BaseTool{duplicate, duplicate},
+			ModelVisibleNames: []string{"test_provider_duplicate"},
+		},
+	}, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		t.Fatalf("NewToolAuthorizationMiddleware: %v", err)
 	}
@@ -75,12 +95,16 @@ func TestToolAuthorizationMiddlewareRejectsInvalidProviderOutput(t *testing.T) {
 	}
 }
 
-func TestToolAuthorizationMiddlewareHidesBlockedRunTool(t *testing.T) {
+func TestToolAuthorizationMiddlewareKeepsBlockedToolsInSchema(t *testing.T) {
 	readTool := newNamedToolForTest(t, testToolReadCase)
 	knowledgeTool := newNamedToolForTest(t, ToolSearchKnowledge)
 	middleware, err := NewToolAuthorizationMiddleware(toolProviderStub{
-		tools: []tool.BaseTool{readTool, knowledgeTool},
-	})
+		resolved: ResolvedToolProfile{
+			ID: agentruntime.ToolProfileDiagnosis,
+			Tools: []tool.BaseTool{readTool, knowledgeTool},
+			ModelVisibleNames: []string{testToolReadCase, ToolSearchKnowledge},
+		},
+	}, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +117,9 @@ func TestToolAuthorizationMiddlewareHidesBlockedRunTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := toolNamesForTest(t, got.Tools); !slices.Equal(names, []string{testToolReadCase}) {
-		t.Fatalf("run-policy tools = %v", names)
+	// 调用次数限制/blocked 状态不能从下一轮模型上下文中删除 Tool Schema。
+	if names := toolNamesForTest(t, got.Tools); !slices.Equal(names, []string{testToolReadCase, ToolSearchKnowledge}) {
+		t.Fatalf("blocked state changed model schema: %v", names)
 	}
 }
 
@@ -148,7 +173,8 @@ func (m *authorizationCaptureModel) Stream(
 func TestToolAuthorizationMiddlewareIsolatesConcurrentADKRuns(t *testing.T) {
 	ctx := context.Background()
 	catalog := newToolCatalogForTest(t)
-	middleware, err := NewToolAuthorizationMiddleware(catalog)
+	bindDiagnosisProfileForTest(t, catalog)
+	middleware, err := NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
 	if err != nil {
 		t.Fatalf("NewToolAuthorizationMiddleware: %v", err)
 	}
@@ -168,59 +194,50 @@ func TestToolAuthorizationMiddlewareIsolatesConcurrentADKRuns(t *testing.T) {
 		return adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance}), nil
 	}
 
-	type runCase struct {
-		query string
-		scope TaskScope
-		want  []string
-	}
-	runs := make([]runCase, 0, 60)
+	wantTools := []string{testToolGitHub, testToolKnowledge, testToolLabSQL, testToolReadCase, testToolReadSQL}
+	sort.Strings(wantTools)
+	runs := make([]string, 0, 60)
 	for i := 0; i < 20; i++ {
 		runs = append(runs,
-			runCase{
-				query: fmt.Sprintf("case-%02d", i),
-				scope: mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
-					ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
-				}}, ToolDependencyExternalCase),
-				want: []string{testToolReadCase},
-			},
-			runCase{
-				query: fmt.Sprintf("lab-%02d", i),
-				scope: mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-					ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
-				}}, ToolDependencySQLServer),
-				want: []string{testToolLabSQL, testToolReadSQL},
-			},
-			runCase{
-				query: fmt.Sprintf("production-%02d", i),
-				scope: mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
-					ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
-				}}, ToolDependencySQLServer),
-				want: []string{testToolReadSQL},
-			},
+			fmt.Sprintf("case-%02d", i),
+			fmt.Sprintf("lab-%02d", i),
+			fmt.Sprintf("production-%02d", i),
 		)
+	}
+	scopes := []TaskScope{
+		mustTaskScope(t, auth.RoleAnalyst, TaskTypeDiagnosis, []ScopedDataSource{{
+			ID: uuid.New(), Role: DataSourceRoleCaseSource, SafetyMode: DataSourceSafetyReadOnly,
+		}}, ToolDependencyExternalCase),
+		mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
+			ID: uuid.New(), Role: DataSourceRoleProductReplica, SafetyMode: DataSourceSafetyBoundedLab,
+		}}, ToolDependencySQLServer),
+		mustTaskScope(t, auth.RoleAdmin, TaskTypeDiagnosis, []ScopedDataSource{{
+			ID: uuid.New(), Role: DataSourceRoleProduction, SafetyMode: DataSourceSafetyReadOnly,
+		}}, ToolDependencySQLServer),
 	}
 
 	var wg sync.WaitGroup
 	errorsFound := make(chan error, len(runs))
-	for _, current := range runs {
-		current := current
+	for index, query := range runs {
+		query := query
+		scope := scopes[index%len(scopes)]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			runner, buildErr := newRunner()
 			if buildErr != nil {
-				errorsFound <- fmt.Errorf("%s: build runner: %w", current.query, buildErr)
+				errorsFound <- fmt.Errorf("%s: build runner: %w", query, buildErr)
 				return
 			}
-			runCtx := WithTaskScope(context.Background(), current.scope)
-			iterator := runner.Query(runCtx, current.query)
+			runCtx := WithTaskScope(context.Background(), scope)
+			iterator := runner.Query(runCtx, query)
 			for {
 				event, ok := iterator.Next()
 				if !ok {
 					return
 				}
 				if event.Err != nil {
-					errorsFound <- fmt.Errorf("%s: %w", current.query, event.Err)
+					errorsFound <- fmt.Errorf("%s: %w", query, event.Err)
 					return
 				}
 			}
@@ -237,17 +254,18 @@ func TestToolAuthorizationMiddlewareIsolatesConcurrentADKRuns(t *testing.T) {
 
 	modelState.mu.Lock()
 	defer modelState.mu.Unlock()
-	for _, current := range runs {
-		got, ok := modelState.captured[current.query]
+	for _, query := range runs {
+		got, ok := modelState.captured[query]
 		if !ok {
-			t.Errorf("query %q was not captured", current.query)
+			t.Errorf("query %q was not captured", query)
 			continue
 		}
-		if !slices.Equal(got, current.want) {
-			t.Errorf("query %q tools = %v, want %v", current.query, got, current.want)
+		// 固定 Profile 下所有 Run 必须看到完全相同的 Tool Schema。
+		if !slices.Equal(got, wantTools) {
+			t.Errorf("query %q tools = %v, want stable %v", query, got, wantTools)
 		}
 		if slices.Contains(got, "test_static_bypass") {
-			t.Errorf("query %q received static bypass tool", current.query)
+			t.Errorf("query %q received static bypass tool", query)
 		}
 	}
 }

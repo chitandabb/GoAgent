@@ -70,7 +70,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 	if len(dependencies.GitHubTools) > 0 && dependencies.GitHubArgumentRewrite == nil {
 		return nil, errors.New("github argument rewriter is required when github tools are enabled")
 	}
-	catalog, err := NewDefaultToolCatalog(ctx, DefaultToolCatalogDependencies{
+	catalog, err := NewDiagnosisDefaultToolCatalog(ctx, DefaultToolCatalogDependencies{
 		ExternalCases: dependencies.ExternalCases, SkillReference: skillRuntime.ReferenceTool,
 		GitHubTools: dependencies.GitHubTools, SQLObjectDefinitions: dependencies.SQLObjectDefinitions,
 		SchemaCatalog: dependencies.SchemaCatalog, ReadonlyQuery: dependencies.ReadonlyQuery,
@@ -112,9 +112,24 @@ func NewToolDegradationLogObserver(log *zap.Logger, component string) resilience
 	})
 }
 
-// NewDefaultToolCatalog 复用生产 Runner 的 Tool 注册与 TaskScope 筛选规则。
-// SkillReference 可为空，供只评测业务 Tool Schema 的受控实验使用。
-func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+// NewConversationDefaultToolCatalog 构造绑定 Conversation Runtime Profile 的
+// 默认 Catalog，供会话 Runner 与会话测试使用。
+func NewConversationDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileConversation)
+}
+
+// NewDiagnosisDefaultToolCatalog 构造绑定 Diagnosis Runtime Profile 的默认
+// Catalog，供诊断 Runner 使用。它与会话 Catalog 相互独立，不共享可变
+// Observer 状态。
+func NewDiagnosisDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogDependencies) (*ToolCatalog, error) {
+	return newDefaultToolCatalog(ctx, dependencies, agentruntime.ToolProfileDiagnosis)
+}
+
+func newDefaultToolCatalog(
+	ctx context.Context,
+	dependencies DefaultToolCatalogDependencies,
+	profileID agentruntime.ToolProfileID,
+) (*ToolCatalog, error) {
 	if dependencies.ExternalCases == nil {
 		return nil, errors.New("default tool catalog external cases are required")
 	}
@@ -231,6 +246,9 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 			RequiredPermissions:  []agentruntime.Permission{agentruntime.PermissionSQLRead},
 		})
 	}
+	// 注册阶段已经读取并校验过 GitHub Tool 名（allowlist），
+	// Profile 推导直接复用这些已验证名称，不再次调用 Tool.Info。
+	githubNames := make([]string, 0, len(dependencies.GitHubTools))
 	for _, githubTool := range dependencies.GitHubTools {
 		if githubTool == nil {
 			return nil, errors.New("github tool is nil")
@@ -245,6 +263,7 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 		if !slices.Contains(GitHubReadOnlyTools, info.Name) {
 			return nil, fmt.Errorf("github tool %q is outside the read-only allowlist", info.Name)
 		}
+		githubNames = append(githubNames, info.Name)
 		registrations = append(registrations, ToolRegistration{
 			Tool: githubTool, FailurePolicy: resilience.PolicyBestEffort, AllowedRoles: roles,
 			AllowedTaskTypes:     []TaskType{TaskTypeDiagnosis},
@@ -256,5 +275,48 @@ func NewDefaultToolCatalog(ctx context.Context, dependencies DefaultToolCatalogD
 	for index := range registrations {
 		registrations[index].DegradationObserver = dependencies.DegradationObserver
 	}
-	return NewToolCatalog(ctx, registrations...)
+	catalog, err := NewToolCatalog(ctx, registrations...)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := BuildDefaultToolProfiles(toolProfileConfigFromDependencies(dependencies, githubNames))
+	if err != nil {
+		return nil, fmt.Errorf("build deployment Tool profiles: %w", err)
+	}
+	profile, ok := profiles.Profile(profileID)
+	if !ok {
+		return nil, fmt.Errorf("deployment Tool profiles are missing %q", profileID)
+	}
+	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
+		return nil, fmt.Errorf("bind deployment Tool profile %q: %w", profileID, err)
+	}
+	return catalog, nil
+}
+
+// toolProfileConfigFromDependencies 从启动时实际成功构造并注册的 Adapter
+// 推导部署级 ToolProfileConfig；它不读取任何 per-run 引用、权限或依赖健康。
+// githubNames 必须来自注册阶段已验证的 GitHub Tool 名称，不再重复调用
+// Tool.Info。read_conversation_tool_result 是 Conversation Runtime 的固有
+// 续读工具，总是注册，因此恒为 true。SQL 三件套与 Web 两件套按各自成功与否
+// 分别声明。
+func toolProfileConfigFromDependencies(
+	dependencies DefaultToolCatalogDependencies,
+	githubNames []string,
+) ToolProfileConfig {
+	return ToolProfileConfig{
+		ExternalCaseConfigured:           true,
+		SkillReferenceConfigured:         dependencies.SkillReference != nil,
+		KnowledgeConfigured:              dependencies.KnowledgeSearch != nil,
+		WebSearchConfigured:              dependencies.WebSearch != nil,
+		FetchPublicPageConfigured:        dependencies.FetchPublicPage != nil,
+		AttachmentConfigured:             dependencies.AttachmentReader != nil,
+		SQLObjectDefinitionsConfigured:   dependencies.SQLObjectDefinitions != nil,
+		SchemaCatalogConfigured:          dependencies.SchemaCatalog != nil,
+		ReadonlyQueryConfigured:          dependencies.ReadonlyQuery != nil,
+		GitHubToolNames:                  githubNames,
+		DiagnosisCommandConfigured:       dependencies.CreateDiagnosisTask != nil,
+		DiagnosisStatusConfigured:        dependencies.DiagnosisTaskStatus != nil,
+		ConversationMemoryConfigured:     dependencies.ConversationMemorySources != nil,
+		ConversationToolResultConfigured: true,
+	}
 }

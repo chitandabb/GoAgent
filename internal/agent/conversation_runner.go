@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/contextgovernance"
 	"github.com/chitandabb/GoAgent/internal/conversation"
@@ -65,6 +66,7 @@ type ConversationRunner struct {
 	chatModel                    model.ToolCallingChatModel
 	citationRepairer             ConversationCitationRepairer
 	toolCatalog                  *ToolCatalog
+	toolProfileID                agentruntime.ToolProfileID
 	systemInstruction            string
 	modelProvider                string
 	modelID                      string
@@ -149,6 +151,13 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		(cfg.MemorySourceRecoveryMaxCalls < 1 || cfg.MemorySourceRecoveryMaxCalls > 2) {
 		return nil, errors.New("conversation memory source recovery max calls must be between 1 and 2")
 	}
+	// Conversation Runner 只能使用 conversation-default Profile；误配的
+	// Catalog 在构造期失败，而不是在每次请求时失败。
+	if boundProfileID := cfg.ToolCatalog.BoundProfileID(); boundProfileID != agentruntime.ToolProfileConversation {
+		return nil, fmt.Errorf(
+			"conversation runner requires a conversation-default catalog, got profile %q", boundProfileID,
+		)
+	}
 	dependencies := append([]ToolDependency(nil), cfg.AvailableDependencies...)
 	for _, dependency := range dependencies {
 		if !dependency.Valid() {
@@ -163,8 +172,9 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 	}
 	return &ConversationRunner{
 		chatModel: cfg.ChatModel, citationRepairer: cfg.CitationRepairer, toolCatalog: cfg.ToolCatalog,
-		systemInstruction: cfg.SystemInstruction, modelProvider: cfg.ModelProvider,
-		modelID: cfg.ModelID, promptVersion: cfg.PromptVersion, availableDependencies: dependencies,
+		toolProfileID: agentruntime.ToolProfileConversation, systemInstruction: cfg.SystemInstruction,
+		modelProvider: cfg.ModelProvider, modelID: cfg.ModelID, promptVersion: cfg.PromptVersion,
+		availableDependencies: dependencies,
 		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
@@ -265,10 +275,11 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	runCtx = withConversationReportReferenceTrace(runCtx, reportReferenceTrace)
 	usageTrace = &modelUsageTrace{onUsage: budget.recordUsage}
 	observeFailure = true
-	tools, err := r.toolCatalog.ToolsFor(runCtx, scope)
+	resolved, err := r.toolCatalog.ResolveProfile(runCtx, r.toolProfileID)
 	if err != nil {
-		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tools: %w", err)
+		return conversation.AgentResponse{}, fmt.Errorf("resolve conversation tool profile %q: %w", r.toolProfileID, err)
 	}
+	tools := resolved.Tools
 	var projection conversationPromptProjection
 	if r.contextPreflight.SummaryTailEnabled {
 		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request)

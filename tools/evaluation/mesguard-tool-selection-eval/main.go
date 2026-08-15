@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
+	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/externalcase"
 	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
@@ -30,6 +33,7 @@ import (
 	platformlogger "github.com/chitandabb/GoAgent/internal/platform/logger"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -68,8 +72,9 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	outputPath := flags.String("output", "testdata/tool-selection-v1.observations.jsonl", "observation JSONL output")
 	summaryPath := flags.String("summary", "testdata/tool-selection-v1.summary.json", "summary JSON output")
 	concurrency := flags.Int("concurrency", 4, "parallel cases; each case keeps paired variants sequential")
+	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8]")
+		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-allow-dirty]")
 	}
 	if *concurrency < 1 || *concurrency > 8 {
 		return errors.New("concurrency must be between 1 and 8")
@@ -85,15 +90,27 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 	if !cfg.Models.Chat.Enabled || !cfg.GitHubMCP.Enabled {
 		return errors.New("chat model and GitHub MCP must be enabled")
 	}
-	// 工具选择评测固定低推理强度；不修改生产配置文件。
-	profile, err := cfg.Models.Chat.ActiveProfile()
+	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision，
+	// 再决定是否允许继续。
+	identity, identityErr := resolveImplementationIdentity()
+	if identityErr != nil && !*allowDirty {
+		return fmt.Errorf("resolve implementation revision: %w (pass -allow-dirty for local smoke)", identityErr)
+	}
+	identity, decisionErr := evaluateImplementationIdentity(identity, *allowDirty)
+	if decisionErr != nil {
+		return decisionErr
+	}
+	if identityErr != nil || identity.dirty || identity.revision == "unknown" {
+		log.Warn("dirty or unknown implementation revision accepted for local smoke only; observations are NOT formal metrics",
+			zap.String("revision", identity.revision), zap.Bool("dirty", identity.dirty))
+	}
+	// 工具选择评测固定低推理强度：先完成全部 Profile 变换，写回配置，再基于
+	// 最终 Profile 计算 PromptProfileFingerprint，最后创建 Provider。指纹与
+	// 实际模型调用配置必须完全一致。
+	modelProfile, modelProfileFingerprint, err := prepareToolSelectionModelProfile(cfg.Models.Chat)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(profile.ReasoningEffort) != "" {
-		profile.ReasoningEffort = "low"
-	}
-	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 	instance, err := platformchatmodel.NewActive(ctx, cfg.Models.Chat)
 	if err != nil {
 		return fmt.Errorf("build chat model: %w", err)
@@ -104,9 +121,20 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
 	}
 	defer githubConnection.Close()
-	catalog, err := buildSelectionCatalog(ctx, githubConnection.Tools)
+	skillRuntime, err := mesagent.NewNativeSkillRuntime(ctx, cfg.Agent.SkillsDirectory)
+	if err != nil {
+		return fmt.Errorf("build native Skill runtime: %w", err)
+	}
+	catalog, err := buildSelectionCatalog(ctx, githubConnection.Tools, skillRuntime)
 	if err != nil {
 		return err
+	}
+	// 与生产 Diagnosis Runner 相同的装配入口：固定 diagnosis-default Profile
+	// 由 Middleware 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加
+	// 真实 skill Tool。
+	authorization, err := mesagent.NewToolAuthorizationMiddleware(catalog, agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		return fmt.Errorf("build Tool authorization middleware: %w", err)
 	}
 
 	outputTempPath := *outputPath + ".tmp-" + uuid.NewString()
@@ -149,7 +177,9 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 				currentResult := caseResult{observations: make([]mesagent.ToolSelectionObservation, 0, 2)}
 				for _, variant := range variants {
 					observation, observeErr := observeToolSelection(
-						evalCtx, chatModel, catalog, cfg, current.definition, variant, basePromptTokens,
+						evalCtx, chatModel, catalog, authorization, skillRuntime.Middleware,
+						current.definition, variant, basePromptTokens, identity,
+						modelProfileFingerprint, modelProfile,
 					)
 					if observeErr != nil {
 						currentResult.err = fmt.Errorf(
@@ -244,23 +274,59 @@ func observeToolSelection(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
 	catalog *mesagent.ToolCatalog,
-	cfg config.Config,
+	authorization *mesagent.ToolAuthorizationMiddleware,
+	skillMiddleware adk.ChatModelAgentMiddleware,
 	definition mesagent.ToolSelectionCase,
 	variant mesagent.ToolSelectionVariant,
 	basePromptTokens int,
+	identity implementationIdentity,
+	modelProfileFingerprint string,
+	modelProfile config.ChatModelProfileConfig,
 ) (mesagent.ToolSelectionObservation, error) {
 	scope, err := selectionScope(definition.Scope)
 	if err != nil {
 		return mesagent.ToolSelectionObservation{}, err
 	}
 	var available []tool.BaseTool
+	var toolProfileID string
+	var modelVisibleNames []string
 	if variant == mesagent.ToolSelectionWide {
+		// wide baseline 只保留评测用途：宽角色/任务 Schema，不是生产接口。
+		// 它的合同 ID 是 evaluation-wide-v1，不得伪装成 diagnosis-default。
 		available, err = catalog.EvaluationBaselineToolsFor(ctx, scope)
+		if err != nil {
+			return mesagent.ToolSelectionObservation{}, fmt.Errorf("resolve wide baseline tools: %w", err)
+		}
+		names, namesErr := mesagent.ToolNamesFromTools(ctx, available)
+		if namesErr != nil {
+			return mesagent.ToolSelectionObservation{}, namesErr
+		}
+		modelVisibleNames = names
+		toolProfileID = mesagent.ToolSelectionEvaluationWideProfile
 	} else {
-		available, err = catalog.ToolsFor(ctx, scope)
-	}
-	if err != nil {
-		return mesagent.ToolSelectionObservation{}, fmt.Errorf("resolve tools: %w", err)
+		// experiment 基于固定 diagnosis-default Profile，并使用与生产
+		// Diagnosis Runner 相同的最终 Schema 装配：ToolAuthorizationMiddleware
+		// 注入 Catalog-owned Tool，真实 Eino Skill Middleware 追加真实 skill。
+		// ModelVisibleNames、AvailableTools 与 ToolSchemaHash 都描述同一份
+		// 真正传给模型的 Schema。
+		accessCtx := mesagent.WithTaskScope(ctx, scope)
+		_, authorizedCtx, authErr := authorization.BeforeAgent(
+			accessCtx, &adk.ChatModelAgentContext{Tools: nil},
+		)
+		if authErr != nil {
+			return mesagent.ToolSelectionObservation{}, fmt.Errorf("assemble production Tool schema: %w", authErr)
+		}
+		_, finalCtx, skillErr := skillMiddleware.BeforeAgent(accessCtx, authorizedCtx)
+		if skillErr != nil {
+			return mesagent.ToolSelectionObservation{}, fmt.Errorf("append production skill Tool: %w", skillErr)
+		}
+		available = finalCtx.Tools
+		names, namesErr := mesagent.ToolNamesFromTools(ctx, available)
+		if namesErr != nil {
+			return mesagent.ToolSelectionObservation{}, namesErr
+		}
+		modelVisibleNames = names
+		toolProfileID = string(agentruntime.ToolProfileDiagnosis)
 	}
 	infos, names, schemaHash, schemaBytes, err := selectionToolSchemas(ctx, available)
 	if err != nil {
@@ -273,14 +339,17 @@ func observeToolSelection(
 	startedAt := time.Now()
 	message, generateErr := bound.Generate(ctx, selectionMessages(definition),
 		model.WithTemperature(0), model.WithMaxTokens(toolSelectionMaxTokens), model.WithToolChoice(schema.ToolChoiceForced))
-	profile, _ := cfg.Models.Chat.ActiveProfile()
 	observation := mesagent.ToolSelectionObservation{
 		DatasetVersion: definition.DatasetVersion, CaseID: definition.CaseID, Variant: variant,
-		RunID:         fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		ModelProvider: profile.Provider, ModelID: profile.Model,
-		ReasoningEffort: profile.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
+		RunID:                    fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
+		ObservationSchemaVersion: mesagent.ToolSelectionObservationV2,
+		ModelProvider:            modelProfile.Provider, ModelID: modelProfile.Model,
+		ReasoningEffort: modelProfile.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
 		MaxOutputTokens: toolSelectionMaxTokens,
-		AvailableTools:  names, ToolSchemaHash: schemaHash, ToolSchemaBytes: schemaBytes,
+		ToolProfileID:   toolProfileID, ModelVisibleNames: modelVisibleNames,
+		ModelProfileFingerprint: modelProfileFingerprint,
+		ImplementationRevision:  identity.revision, ImplementationDirty: identity.dirty,
+		AvailableTools: names, ToolSchemaHash: schemaHash, ToolSchemaBytes: schemaBytes,
 		DurationMillis: time.Since(startedAt).Milliseconds(),
 	}
 	if generateErr != nil {
@@ -422,7 +491,11 @@ func selectionScope(kind mesagent.ToolSelectionScope) (mesagent.TaskScope, error
 	})
 }
 
-func buildSelectionCatalog(ctx context.Context, githubTools []tool.BaseTool) (*mesagent.ToolCatalog, error) {
+func buildSelectionCatalog(
+	ctx context.Context,
+	githubTools []tool.BaseTool,
+	skillRuntime *mesagent.NativeSkillRuntime,
+) (*mesagent.ToolCatalog, error) {
 	objectDefinition, err := mesagent.NewDatabaseObjectDefinitionTool(selectionSQLStub{})
 	if err != nil {
 		return nil, err
@@ -435,10 +508,133 @@ func buildSelectionCatalog(ctx context.Context, githubTools []tool.BaseTool) (*m
 	if err != nil {
 		return nil, err
 	}
-	return mesagent.NewDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
-		ExternalCases: selectionExternalCases{}, GitHubTools: githubTools,
+	// 注册真实 Skill reference Tool，使 read_skill_reference 与生产 Diagnosis
+	// Profile 一致；skill 本身由 Eino Skill Middleware 拥有，Catalog 不伪造。
+	return mesagent.NewDiagnosisDefaultToolCatalog(ctx, mesagent.DefaultToolCatalogDependencies{
+		ExternalCases: selectionExternalCases{}, SkillReference: skillRuntime.ReferenceTool,
+		GitHubTools:          githubTools,
 		SQLObjectDefinitions: objectDefinition, SchemaCatalog: catalogSearch, ReadonlyQuery: readonlyQuery,
 	})
+}
+
+// implementationIdentity 记录实现提交与其工作树状态。正式评测要求
+// revision 具体且工作树干净；dirty/unknown 结果只能作为本地 smoke，不能
+// 作为正式指标。
+type implementationIdentity struct {
+	revision string
+	dirty    bool
+}
+
+const (
+	gitRevParseTimeout = 2 * time.Second
+	gitStatusTimeout   = 2 * time.Second
+)
+
+// git 命令执行 seam：评测命令默认走真实 git；测试替换为桩函数，避免依赖
+// 真实 git 工作树状态或故障注入。
+var (
+	gitRevParseShortHead = func(ctx context.Context) (string, error) {
+		output, err := exec.CommandContext(ctx, "git", "rev-parse", "--short", "HEAD").Output()
+		return string(output), err
+	}
+	gitStatusPorcelain = func(ctx context.Context) (string, error) {
+		output, err := exec.CommandContext(ctx, "git", "status", "--porcelain").Output()
+		return string(output), err
+	}
+)
+
+// resolveImplementationIdentity fail-closed 地解析实现身份：优先读取 Go
+// build info 的 VCS 元数据，且必须同时确认 revision 与 modified 状态；
+// BuildInfo 缺失或不完整时回退到带独立超时的 git 命令。git status 失败时
+// 不能默认 clean——无法确认工作树状态一律返回 error，且 identity 保留
+// gitFallbackIdentity 已经取得的已知 revision + dirty=true，不得覆盖成
+// unknown。任何无法确认 clean/dirty 的情况都以 error 返回。
+func resolveImplementationIdentity() (implementationIdentity, error) {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		var revision, modified string
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
+		}
+		if revision != "" && modified != "" {
+			return implementationIdentity{revision: revision, dirty: modified == "true"}, nil
+		}
+	}
+	// BuildInfo 缺失或不完整（revision/modified 缺一）时回退 git。
+	// git 返回 error 时原样保留它已取得的 identity（已知 revision 或
+	// unknown），不覆盖为 unknown。
+	identity, err := gitFallbackIdentity()
+	if err != nil {
+		return identity, err
+	}
+	return identity, nil
+}
+
+func gitFallbackIdentity() (implementationIdentity, error) {
+	revCtx, cancelRev := context.WithTimeout(context.Background(), gitRevParseTimeout)
+	defer cancelRev()
+	revisionOutput, err := gitRevParseShortHead(revCtx)
+	if err != nil {
+		return implementationIdentity{revision: "unknown", dirty: true}, fmt.Errorf("git rev-parse failed: %w", err)
+	}
+	revision := strings.TrimSpace(revisionOutput)
+	if revision == "" {
+		return implementationIdentity{revision: "unknown", dirty: true}, errors.New("git rev-parse returned an empty revision")
+	}
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), gitStatusTimeout)
+	defer cancelStatus()
+	statusOutput, err := gitStatusPorcelain(statusCtx)
+	if err != nil {
+		// git status 失败不能默认 dirty=false：无法确认工作树状态。
+		return implementationIdentity{revision: revision, dirty: true}, fmt.Errorf("git status failed: %w", err)
+	}
+	return implementationIdentity{
+		revision: revision, dirty: len(bytes.TrimSpace([]byte(statusOutput))) > 0,
+	}, nil
+}
+
+// evaluateImplementationIdentity 决定身份是否可用于正式评测。formal 模式
+// 下 dirty/unknown 直接拒绝；-allow-dirty 模式接受并强制记录 dirty=true，
+// 结果仅用于本地 smoke。
+func evaluateImplementationIdentity(identity implementationIdentity, allowDirty bool) (implementationIdentity, error) {
+	if identity.revision == "unknown" || identity.dirty {
+		if !allowDirty {
+			return implementationIdentity{}, errors.New("implementation revision is dirty or unknown; refuse formal evaluation (pass -allow-dirty for local smoke)")
+		}
+		return implementationIdentity{revision: identity.revision, dirty: true}, nil
+	}
+	return identity, nil
+}
+
+// prepareToolSelectionModelProfile 完成评测需要的全部实际模型参数变换后，
+// 把最终 Profile 写回配置，并基于最终 Profile 计算 PromptProfileFingerprint。
+// 顺序固定为：读取 ActiveProfile -> 应用所有变换（ReasoningEffort 非空时
+// 置 low、空时保持为空；Temperature 置 0；MaxOutputTokens 置
+// toolSelectionMaxTokens）-> 写回 cfg.Models.Chat.Profiles -> 计算指纹 ->
+// 创建 Provider，保证记录的指纹与实际模型调用配置一致。
+func prepareToolSelectionModelProfile(
+	models config.ChatModelConfig,
+) (config.ChatModelProfileConfig, string, error) {
+	profile, err := models.ActiveProfile()
+	if err != nil {
+		return config.ChatModelProfileConfig{}, "", err
+	}
+	if strings.TrimSpace(profile.ReasoningEffort) != "" {
+		profile.ReasoningEffort = "low"
+	}
+	temperature := float32(0)
+	profile.Temperature = &temperature
+	profile.MaxOutputTokens = toolSelectionMaxTokens
+	models.Profiles[models.ActiveProfileName] = profile
+	fingerprint, err := profile.PromptProfileFingerprint(models.ActiveProfileName)
+	if err != nil {
+		return config.ChatModelProfileConfig{}, "", fmt.Errorf("compute model profile fingerprint: %w", err)
+	}
+	return profile, fingerprint, nil
 }
 
 type selectionExternalCases struct{}

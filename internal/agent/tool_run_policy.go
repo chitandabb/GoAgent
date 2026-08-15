@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-
-	"github.com/cloudwego/eino/components/tool"
 )
 
 var ErrAgentToolRunLimitExhausted = errors.New("agent tool run limit exhausted")
@@ -84,29 +82,4 @@ func (p *agentToolRunPolicy) remaining(name string) (int, bool) {
 		return 0, false
 	}
 	return max(0, limit-p.used[name]), true
-}
-
-func filterAgentToolsForRun(ctx context.Context, tools []tool.BaseTool) ([]tool.BaseTool, error) {
-	policy := agentToolRunPolicyFromContext(ctx)
-	if policy == nil || len(policy.blocked) == 0 {
-		return append([]tool.BaseTool(nil), tools...), nil
-	}
-	filtered := make([]tool.BaseTool, 0, len(tools))
-	for _, current := range tools {
-		if current == nil {
-			return nil, errors.New("agent tool provider returned a nil tool")
-		}
-		info, err := current.Info(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if info == nil {
-			return nil, errors.New("agent tool provider returned nil tool info")
-		}
-		if _, blocked := policy.blocked[info.Name]; blocked {
-			continue
-		}
-		filtered = append(filtered, current)
-	}
-	return filtered, nil
 }
