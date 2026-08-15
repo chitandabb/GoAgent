@@ -32,6 +32,7 @@ import (
 	platformlogger "github.com/chitandabb/GoAgent/internal/platform/logger"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformsqlserver "github.com/chitandabb/GoAgent/internal/platform/sqlserver"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -398,6 +399,7 @@ func buildPairedEvaluationRun(
 	}
 	orchestrator, err := mesagent.NewEvidenceOrchestrator(ctx, mesagent.EvidenceOrchestratorConfig{
 		Runner: runner, Logger: log.Named("evidence_" + string(variant)),
+		ReportPolicy:     resilience.PolicyRepairThenFail,
 		DisableEarlyExit: comparison == "evidence-gate" && variant == mesagent.EvaluationBaseline,
 		MaxAgentRuns:     cfg.Agent.MaxAgentRuns, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxEvidenceItems: cfg.Agent.MaxEvidenceItems, MaxTotalTokens: cfg.Agent.MaxTotalTokens,
