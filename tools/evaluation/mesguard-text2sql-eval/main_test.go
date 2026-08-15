@@ -19,6 +19,7 @@ import (
 
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/auth"
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	texttosqleval "github.com/chitandabb/GoAgent/internal/evaluation/texttosql"
 	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
@@ -27,6 +28,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -1564,6 +1566,330 @@ func TestRunEvaluationConversationObservationIdentityFromSelectedProfile(t *test
 	}
 	if cfg.Models.Chat.ActiveProfileName != "stepfun-main" {
 		t.Fatalf("activeProfile changed to %q", cfg.Models.Chat.ActiveProfileName)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 红测试：Observation v3 Schema Search 诊断（recorder seam）
+
+func schemaSearchConversationCase(caseID string) mesagent.TextToSQLEvaluationCase {
+	definition := textToSQLConversationCase()
+	definition.CaseID = caseID
+	return definition
+}
+
+// schemaSearchTestContext 构造带 sql.read + 单数据源 Grant 的会话 RunAccess，
+// 供直接调用真实 SearchSchemaCatalogTool 的单元测试使用。
+func schemaSearchTestContext(t *testing.T, sqlDataSourceID uuid.UUID) context.Context {
+	t.Helper()
+	permissionSet, err := agentruntime.NewPermissionSet(agentruntime.PermissionSQLRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
+		DataSourceIDs: []uuid.UUID{sqlDataSourceID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	access, err := agentruntime.NewConversationRunAccess(
+		agentruntime.Actor{UserID: uuid.New(), Role: auth.RoleAnalyst},
+		permissionSet,
+		grants,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agentruntime.WithRunAccess(context.Background(), access)
+}
+
+func conversationEvaluationDepsForTestWithSearcher(
+	t *testing.T,
+	modelInstance model.ToolCallingChatModel,
+	executor *textToSQLFixtureExecutor,
+	sqlDataSourceID uuid.UUID,
+	searcher mesagent.SchemaCatalogSearcher,
+) conversationEvaluationDependencies {
+	t.Helper()
+	deps := conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID)
+	deps.schemaSearcher = searcher
+	return deps
+}
+
+func TestSchemaSearchDiagnosticsHashNormalization(t *testing.T) {
+	first := hashSchemaKeyword("  Ticket  ")
+	second := hashSchemaKeyword("ticket")
+	if first != second {
+		t.Fatalf("keyword normalization must trim and lowercase: %q != %q", first, second)
+	}
+	if !strings.HasPrefix(first, "sha256:") || len(first) != len("sha256:")+64 {
+		t.Fatalf("schema keyword hash = %q, want sha256:<64 hex>", first)
+	}
+	if first == hashSchemaKeyword("TicketID") {
+		t.Fatal("distinct keywords must produce distinct hashes")
+	}
+}
+
+func TestConversationV3DefaultOutputsDoNotOverwriteHistoricalV2Artifacts(t *testing.T) {
+	if textToSQLConversationOutputPath != "testdata/text-to-sql-conversation-v3.observations.jsonl" {
+		t.Fatalf("conversation v3 observation default = %q", textToSQLConversationOutputPath)
+	}
+	if textToSQLConversationSummaryPath != "testdata/text-to-sql-conversation-v3.summary.json" {
+		t.Fatalf("conversation v3 summary default = %q", textToSQLConversationSummaryPath)
+	}
+}
+
+type fixedOutputInvokableTool struct {
+	output string
+	err    error
+}
+
+func (t fixedOutputInvokableTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: mesagent.ToolSearchSchemaCatalog}, nil
+}
+
+func (t fixedOutputInvokableTool) InvokableRun(
+	context.Context, string, ...tool.Option,
+) (string, error) {
+	return t.output, t.err
+}
+
+func TestSchemaSearchDiagnosticsRejectsNullAsAResultArray(t *testing.T) {
+	recorder := &conversationToolRecorder{}
+	recording := &recordingConversationTool{
+		name:     mesagent.ToolSearchSchemaCatalog,
+		inner:    fixedOutputInvokableTool{output: "null"},
+		recorder: recorder,
+	}
+
+	output, err := recording.InvokableRun(context.Background(), `{"keyword":"Ticket"}`)
+	if err != nil || output != "null" {
+		t.Fatalf("observation wrapper changed Tool semantics: output=%q err=%v", output, err)
+	}
+	record := recorder.snapshot()[0]
+	if record.schemaResultCount != nil || record.schemaDiagnosticError != "invalid_result" {
+		t.Fatalf("JSON null must not be classified as a zero-result array: %+v", record)
+	}
+}
+
+func TestSchemaSearchDiagnosticsRecordedThroughRunner(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"Ticket","limit":5}`},
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"TICKET","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("v3 observation Validate: %v", err)
+	}
+	if len(observation.ActualToolCalls) != 3 {
+		t.Fatalf("actual tool calls = %d, want 3", len(observation.ActualToolCalls))
+	}
+	first, second := observation.ActualToolCalls[0], observation.ActualToolCalls[1]
+	if first.ToolName != mesagent.ToolSearchSchemaCatalog || second.ToolName != mesagent.ToolSearchSchemaCatalog {
+		t.Fatalf("first two calls must be schema searches: %+v / %+v", first, second)
+	}
+	if first.SchemaKeywordHash == "" || first.SchemaKeywordHash != second.SchemaKeywordHash {
+		t.Fatalf("normalized keywords must share one hash: %q vs %q", first.SchemaKeywordHash, second.SchemaKeywordHash)
+	}
+	if first.SchemaKeywordRepeated || !second.SchemaKeywordRepeated {
+		t.Fatalf("repeated flags = %t/%t, want false/true", first.SchemaKeywordRepeated, second.SchemaKeywordRepeated)
+	}
+	for index, call := range []texttosqleval.TextToSQLConversationToolCall{first, second} {
+		if call.SchemaResultCount == nil || *call.SchemaResultCount != 1 {
+			t.Fatalf("schema call %d result count = %v, want 1", index, call.SchemaResultCount)
+		}
+	}
+	if !observation.Correct || observation.ToolSequenceCorrect == false {
+		t.Fatalf("schema diagnostics must not change correctness: %+v", observation)
+	}
+}
+
+func TestSchemaSearchDiagnosticsZeroResultRecordedThroughRunner(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"ZZZ-NO-MATCH","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTestWithSearcher(t, modelInstance, executor, sqlDataSourceID, fixedSchemaCatalogSearcher{}))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("v3 observation Validate: %v", err)
+	}
+	search := observation.ActualToolCalls[0]
+	if search.SchemaResultCount == nil || *search.SchemaResultCount != 0 {
+		t.Fatalf("zero-result search must record a non-nil count of 0, got %+v", search)
+	}
+}
+
+func TestSchemaSearchDiagnosticsResetAcrossCases(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"Ticket","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+		{},
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"Ticket","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+		{},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	first := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	second := observeConversationCase(context.Background(), assembly,
+		schemaSearchConversationCase("case-2"), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	for name, observation := range map[string]texttosqleval.TextToSQLConversationEvaluationObservation{
+		"first case":  first,
+		"second case": second,
+	} {
+		if err := observation.Validate(); err != nil {
+			t.Fatalf("%s v3 observation Validate: %v", name, err)
+		}
+		if observation.ActualToolCalls[0].SchemaKeywordHash == "" ||
+			observation.ActualToolCalls[0].SchemaKeywordRepeated {
+			t.Fatalf("%s first schema use must not be repeated: %+v", name, observation.ActualToolCalls[0])
+		}
+	}
+}
+
+func TestSchemaSearchDiagnosticsNoKeywordPlaintextInJSON(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"机密字段XYZ","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "机密字段XYZ") {
+		t.Fatalf("observation JSON leaks the raw schema keyword: %s", encoded)
+	}
+	if observation.ActualToolCalls[0].SchemaKeywordHash == "" {
+		t.Fatal("observation must still record the keyword hash")
+	}
+}
+
+func TestSchemaSearchDiagnosticsMalformedArgumentsNoFabricatedCount(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("v3 observation with an undecodable search must still validate: %v", err)
+	}
+	search := observation.ActualToolCalls[0]
+	if search.SchemaResultCount != nil || search.SchemaKeywordHash != "" || search.SchemaKeywordRepeated {
+		t.Fatalf("undecodable search must not fabricate diagnostics: %+v", search)
+	}
+	if search.Succeeded {
+		t.Fatalf("undecodable search arguments must fail closed: %+v", search)
+	}
+}
+
+func TestRecordingConversationToolSchemaDiagnostics(t *testing.T) {
+	schemaTool, err := mesagent.NewSearchSchemaCatalogTool(fixedSchemaCatalogSearcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &conversationToolRecorder{}
+	recording := &recordingConversationTool{name: mesagent.ToolSearchSchemaCatalog, inner: schemaTool, recorder: recorder}
+	ctx := schemaSearchTestContext(t, uuid.New())
+
+	output, err := recording.InvokableRun(ctx, `{"keyword":"Ticket","limit":5}`)
+	if err != nil || !json.Valid([]byte(output)) {
+		t.Fatalf("successful search must keep the real Tool output: err=%v output=%q", err, output)
+	}
+	first := recorder.snapshot()[0]
+	if first.schemaKeywordHash != hashSchemaKeyword("Ticket") || first.schemaResultCount == nil ||
+		*first.schemaResultCount != 1 || first.schemaDiagnosticError != "" {
+		t.Fatalf("diagnostic record = %+v", first)
+	}
+
+	if _, err := recording.InvokableRun(ctx, `{"keyword":"TICKET","limit":20}`); err != nil {
+		t.Fatalf("repeated search: %v", err)
+	}
+	second := recorder.snapshot()[1]
+	if second.schemaKeywordHash != first.schemaKeywordHash {
+		t.Fatalf("normalization must yield one hash: %q vs %q", first.schemaKeywordHash, second.schemaKeywordHash)
+	}
+
+	if _, err := recording.InvokableRun(ctx, `{"keyword":"ZZZ-NO-MATCH"}`); err != nil {
+		t.Fatalf("zero-result search: %v", err)
+	}
+	zero := recorder.snapshot()[2]
+	if zero.schemaResultCount == nil || *zero.schemaResultCount != 0 {
+		t.Fatalf("zero results must be a non-nil count of 0, got %v", zero.schemaResultCount)
+	}
+
+	_, malformedErr := recording.InvokableRun(ctx, `{"keyword":`)
+	malformed := recorder.snapshot()[3]
+	if malformedErr == nil || malformed.schemaResultCount != nil || malformed.schemaKeywordHash != "" ||
+		malformed.schemaDiagnosticError == "" {
+		t.Fatalf("malformed arguments must leave diagnostics empty: record=%+v err=%v", malformed, malformedErr)
+	}
+
+	// 诊断解码必须与真实 Tool 的接受语义一致：InferTool 忽略未知
+	// 字段时，观测层也不得让已成功的调用变成不可验证观测。
+	_, unknownFieldErr := recording.InvokableRun(ctx, `{"keyword":"Ticket","bogus":1}`)
+	unknown := recorder.snapshot()[4]
+	if unknownFieldErr != nil || unknown.schemaKeywordHash != hashSchemaKeyword("Ticket") ||
+		unknown.schemaResultCount == nil || *unknown.schemaResultCount != 1 || unknown.schemaDiagnosticError != "" {
+		t.Fatalf("accepted unknown-field call must keep complete diagnostics: record=%+v err=%v", unknown, unknownFieldErr)
+	}
+}
+
+func TestSchemaSearchDiagnosticsTextToSQLConversationCallsRepeated(t *testing.T) {
+	hash := hashSchemaKeyword("Ticket")
+	count := 1
+	records := []conversationToolRecord{
+		{name: mesagent.ToolSearchSchemaCatalog, succeeded: true, schemaKeywordHash: hash, schemaResultCount: &count},
+		{name: mesagent.ToolSearchSchemaCatalog, succeeded: true, schemaKeywordHash: hash, schemaResultCount: &count},
+		{name: mesagent.ToolSearchSchemaCatalog, succeeded: true, schemaKeywordHash: hashSchemaKeyword("Status"), schemaResultCount: &count},
+		{name: mesagent.ToolExecuteReadonlyQuery, succeeded: true, queryHash: "sha256:" + strings.Repeat("c", 64)},
+	}
+	calls := textToSQLConversationCalls(records)
+	if calls[0].SchemaKeywordRepeated || !calls[1].SchemaKeywordRepeated || calls[2].SchemaKeywordRepeated {
+		t.Fatalf("repeated flags = %t/%t/%t, want false/true/false",
+			calls[0].SchemaKeywordRepeated, calls[1].SchemaKeywordRepeated, calls[2].SchemaKeywordRepeated)
+	}
+	if calls[3].QueryHash != "sha256:"+strings.Repeat("c", 64) || calls[3].SchemaKeywordHash != "" {
+		t.Fatalf("readonly query record must keep only its QueryHash: %+v", calls[3])
 	}
 }
 

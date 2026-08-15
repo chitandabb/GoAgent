@@ -15,8 +15,10 @@
 //     platform/sqlserver ReadonlyQueryExecutor and QueryGuard). The model
 //     autonomously decides search_schema_catalog -> execute_readonly_query ->
 //     final natural-language answer. Observations use the independent
-//     text-to-sql-conversation-observation-v2 contract; historical direct v1
-//     data is never mixed into conversation v2 summaries.
+//     text-to-sql-conversation-observation-v3 contract (Schema Search
+//     diagnostics: schemaKeywordHash/schemaResultCount/schemaKeywordRepeated);
+//     historical direct v1 and conversation v2 data is never mixed into
+//     conversation v3 summaries.
 //
 // Cost guardrails (-allow-provider-calls, -max-cases, -max-provider-calls,
 // -max-provider-tokens) and the clean implementation revision are checked
@@ -69,8 +71,8 @@ var textToSQLCatalogVersionID = uuid.MustParse("55555555-5555-5555-5555-55555555
 const (
 	textToSQLDirectOutputPath        = "testdata/text-to-sql-v1.observations.jsonl"
 	textToSQLDirectSummaryPath       = "testdata/text-to-sql-v1.summary.json"
-	textToSQLConversationOutputPath  = "testdata/text-to-sql-conversation-v2.observations.jsonl"
-	textToSQLConversationSummaryPath = "testdata/text-to-sql-conversation-v2.summary.json"
+	textToSQLConversationOutputPath  = "testdata/text-to-sql-conversation-v3.observations.jsonl"
+	textToSQLConversationSummaryPath = "testdata/text-to-sql-conversation-v3.summary.json"
 )
 
 type textToSQLMode string
@@ -645,7 +647,7 @@ func buildConversationEvaluation(
 	}, nil
 }
 
-// conversationEvaluationIdentity 是写入每条观测的 v2 身份字段。
+// conversationEvaluationIdentity 是写入每条观测的 v3 身份字段。
 type conversationEvaluationIdentity struct {
 	modelProvider           string
 	modelID                 string
@@ -829,6 +831,13 @@ type conversationToolRecord struct {
 	columns   []string
 	rows      [][]any
 	truncated bool
+
+	// Schema Search 诊断（仅评测观测；不对生产 Runtime 暴露）。原始 keyword、
+	// 参数 JSON 与返回正文从不落盘：只保存归一化 keyword 的 SHA-256 hash、
+	// 返回数组长度和诊断错误原因。
+	schemaKeywordHash     string
+	schemaResultCount     *int
+	schemaDiagnosticError string
 }
 
 type conversationToolRecorder struct {
@@ -854,10 +863,56 @@ func (r *conversationToolRecorder) snapshot() []conversationToolRecord {
 	return append([]conversationToolRecord(nil), r.calls...)
 }
 
+// schemaCatalogDiagnosticInput 仅用于解码 search_schema_catalog 参数以生成隐私
+// 安全的诊断字段；绝不修改传给真实 Tool 的 argumentsInJSON。
+type schemaCatalogDiagnosticInput struct {
+	DataSourceID string `json:"dataSourceId"`
+	Keyword      string `json:"keyword"`
+	Limit        int    `json:"limit"`
+}
+
+// decodeSchemaCatalogDiagnostic 按真实 InferTool 的参数接受语义解码
+// search_schema_catalog 参数：未知字段忽略，但拒绝类型错误与多余 JSON 值。
+// 解码失败只影响评测诊断有效性，不篡改真实 Tool 的调用。
+func decodeSchemaCatalogDiagnostic(raw string, out *schemaCatalogDiagnosticInput) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+// hashSchemaKeyword 对 Schema Search keyword 执行 TrimSpace + ToLower 后计算
+// SHA-256，使用项目现有 `sha256:<64 hex>` 格式；原始 keyword 永不持久化。
+func hashSchemaKeyword(keyword string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(keyword))))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func decodeSchemaCatalogResultCount(raw string) (int, error) {
+	trimmed := bytes.TrimSpace([]byte(raw))
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return 0, errors.New("schema catalog result must be a JSON array")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(trimmed, &entries); err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
 // recordingConversationTool 是模型-可见 Tool 边界上的只读观测层：委托给真实
 // Tool（真实 SearchSchemaCatalogTool/ExecuteReadonlyQueryTool，其内是真实
 // Executor 与 QueryGuard），同时按调用顺序记录名称、生成 SQL 的 hash 与
-// 执行结果。评测 harness 自身绝不直接调用 SQL Tool。
+// 执行结果，并为 Schema Search 记录隐私安全的诊断字段。评测 harness 自身
+// 绝不直接调用 SQL Tool。
 type recordingConversationTool struct {
 	name     string
 	inner    tool.InvokableTool
@@ -873,7 +928,8 @@ func (t *recordingConversationTool) InvokableRun(
 ) (string, error) {
 	output, err := t.inner.InvokableRun(ctx, argumentsInJSON, opts...)
 	record := conversationToolRecord{name: t.name, succeeded: err == nil}
-	if t.name == mesagent.ToolExecuteReadonlyQuery {
+	switch t.name {
+	case mesagent.ToolExecuteReadonlyQuery:
 		if arguments, decodeErr := decodeQueryArguments(argumentsInJSON); decodeErr == nil {
 			record.query = arguments.Query
 			record.queryHash = hashQuery(arguments.Query)
@@ -891,6 +947,21 @@ func (t *recordingConversationTool) InvokableRun(
 				record.truncated = result.Truncated
 			}
 		}
+	case mesagent.ToolSearchSchemaCatalog:
+		var input schemaCatalogDiagnosticInput
+		if decodeErr := decodeSchemaCatalogDiagnostic(argumentsInJSON, &input); decodeErr != nil {
+			record.schemaDiagnosticError = "invalid_tool_arguments"
+		} else {
+			record.schemaKeywordHash = hashSchemaKeyword(input.Keyword)
+			if err == nil {
+				count, countErr := decodeSchemaCatalogResultCount(output)
+				if countErr != nil {
+					record.schemaDiagnosticError = "invalid_result"
+				} else {
+					record.schemaResultCount = &count
+				}
+			}
+		}
 	}
 	t.recorder.append(record)
 	return output, err
@@ -898,10 +969,22 @@ func (t *recordingConversationTool) InvokableRun(
 
 func textToSQLConversationCalls(records []conversationToolRecord) []texttosqleval.TextToSQLConversationToolCall {
 	result := make([]texttosqleval.TextToSQLConversationToolCall, 0, len(records))
+	// repeated 是纯转换阶段的同 Case 判定：seen 集合在每次快照内新建，天然
+	// 不跨 Case、不跨进程、不引入任何全局缓存。
+	seenSchemaKeywords := make(map[string]struct{})
 	for _, record := range records {
 		call := texttosqleval.TextToSQLConversationToolCall{ToolName: record.name, Succeeded: record.succeeded}
-		if record.name == mesagent.ToolExecuteReadonlyQuery {
+		switch record.name {
+		case mesagent.ToolExecuteReadonlyQuery:
 			call.QueryHash = record.queryHash
+		case mesagent.ToolSearchSchemaCatalog:
+			call.SchemaKeywordHash = record.schemaKeywordHash
+			call.SchemaResultCount = record.schemaResultCount
+			if record.schemaKeywordHash != "" {
+				_, repeated := seenSchemaKeywords[record.schemaKeywordHash]
+				call.SchemaKeywordRepeated = repeated
+				seenSchemaKeywords[record.schemaKeywordHash] = struct{}{}
+			}
 		}
 		if !record.succeeded {
 			call.ErrorType = record.errorType

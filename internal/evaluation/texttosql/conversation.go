@@ -17,11 +17,11 @@ var (
 )
 
 // TextToSQLConversationObservationSchemaVersion 是 Text-to-SQL conversation
-// 入口评测的独立 v2 数据合同。它和 direct 模式的历史 v1 合同
+// 入口评测的独立 v3 数据合同。它和 direct 模式的历史 v1 合同
 // （TextToSQLEvaluationObservation，无 observationSchemaVersion）是两个
-// 完全独立的数据流：conversation v2 汇总明确拒绝任何非本合同的观测，
-// 历史 direct v1 数据不得混入 conversation v2 汇总。
-const TextToSQLConversationObservationSchemaVersion = "text-to-sql-conversation-observation-v2"
+// 完全独立的数据流：conversation v3 汇总明确拒绝任何非本合同的观测，
+// 历史 direct v1 与 conversation v2 数据都不得混入 conversation v3 汇总。
+const TextToSQLConversationObservationSchemaVersion = "text-to-sql-conversation-observation-v3"
 
 // TextToSQLConversationEntryMode 标识观测来自 conversation 生产入口
 // （真实 Conversation Agent：自然语言输入 -> 模型自主
@@ -30,16 +30,23 @@ const TextToSQLConversationEntryMode = "conversation"
 
 // TextToSQLConversationToolCall 是模型在一次 conversation 评测回合中实际
 // 发起的一次 Tool 调用。execute_readonly_query 调用必须携带生成 SQL 的
-// 稳定 SHA-256 hash；失败调用记录稳定 errorType。
+// 稳定 SHA-256 hash，其失败调用记录稳定 errorType。search_schema_catalog
+// 调用携带隐私安全的 Schema Search 诊断字段（归一化 keyword 的 SHA-256
+// hash、返回数组长度、以及同 Case 内该 keyword 是否重复），绝不记录原始
+// keyword、参数 JSON 或返回正文。
 type TextToSQLConversationToolCall struct {
 	ToolName  string `json:"toolName"`
 	QueryHash string `json:"queryHash,omitempty"`
 	Succeeded bool   `json:"succeeded"`
 	ErrorType string `json:"errorType,omitempty"`
+	// Schema Search 诊断字段（只允许 search_schema_catalog 使用）。
+	SchemaKeywordHash     string `json:"schemaKeywordHash,omitempty"`
+	SchemaResultCount     *int   `json:"schemaResultCount,omitempty"`
+	SchemaKeywordRepeated bool   `json:"schemaKeywordRepeated,omitempty"`
 }
 
 // TextToSQLConversationEvaluationObservation 记录一次自然语言 Text-to-SQL
-// conversation 评测回合。字段覆盖 v2 身份合同（observationSchemaVersion、
+// conversation 评测回合。字段覆盖 v3 身份合同（observationSchemaVersion、
 // entryMode、model/profile fingerprint、implementationRevision/Dirty、
 // toolProfileId、toolSchemaFingerprint）与实际执行事实（actualToolCalls、
 // 生成 SQL hash、执行结果、答案、usage、duration、correct、errorType）。
@@ -79,7 +86,7 @@ type TextToSQLConversationEvaluationObservation struct {
 func (o TextToSQLConversationEvaluationObservation) Validate() error {
 	if o.ObservationSchemaVersion != TextToSQLConversationObservationSchemaVersion {
 		return fmt.Errorf(
-			"unsupported observationSchemaVersion %q: the conversation evaluator only accepts %q; historical direct v1 Text-to-SQL observations must not be mixed into conversation v2 summaries",
+			"unsupported observationSchemaVersion %q: the conversation evaluator only accepts %q; historical direct v1 and conversation v2 Text-to-SQL observations must not be mixed into conversation v3 summaries",
 			o.ObservationSchemaVersion, TextToSQLConversationObservationSchemaVersion,
 		)
 	}
@@ -118,15 +125,54 @@ func (o TextToSQLConversationEvaluationObservation) Validate() error {
 	if o.ToolTraceComplete != traceComplete || o.ToolSequenceCorrect != sequenceCorrect {
 		return errors.New("Tool trace completeness or required sequence is inconsistent")
 	}
+	seenSchemaKeywords := make(map[string]struct{}, len(o.ActualToolCalls))
 	for _, call := range o.ActualToolCalls {
 		if !toolNamePattern.MatchString(call.ToolName) {
 			return fmt.Errorf("invalid Tool name %q", call.ToolName)
 		}
-		if call.ToolName == mesagent.ToolExecuteReadonlyQuery {
+		switch call.ToolName {
+		case mesagent.ToolSearchSchemaCatalog:
+			digest := strings.TrimPrefix(call.SchemaKeywordHash, "sha256:")
+			if call.SchemaKeywordHash != "" &&
+				(call.SchemaKeywordHash == digest || !contextgovernance.IsSHA256Hex(digest)) {
+				return errors.New("search_schema_catalog schemaKeywordHash must be a sha256:<64 hex> value")
+			}
+			if call.Succeeded {
+				if call.SchemaKeywordHash == "" {
+					return errors.New("successful search_schema_catalog call requires a sha256 schemaKeywordHash")
+				}
+				if call.SchemaResultCount == nil {
+					return errors.New("successful search_schema_catalog call requires schemaResultCount")
+				}
+				if *call.SchemaResultCount < 0 || *call.SchemaResultCount > 20 {
+					return errors.New("schemaResultCount must be between 0 and 20")
+				}
+			} else if call.SchemaResultCount != nil {
+				return errors.New("failed search_schema_catalog call cannot carry a fabricated schemaResultCount")
+			}
+			if call.SchemaKeywordHash == "" {
+				if call.SchemaKeywordRepeated {
+					return errors.New("search_schema_catalog call without a keyword hash cannot be marked repeated")
+				}
+				continue
+			}
+			_, alreadySeen := seenSchemaKeywords[call.SchemaKeywordHash]
+			if call.SchemaKeywordRepeated != alreadySeen {
+				return errors.New("schemaKeywordRepeated is inconsistent with prior keyword usage in this case")
+			}
+			seenSchemaKeywords[call.SchemaKeywordHash] = struct{}{}
+		case mesagent.ToolExecuteReadonlyQuery:
+			if call.SchemaKeywordHash != "" || call.SchemaResultCount != nil || call.SchemaKeywordRepeated {
+				return errors.New("schema diagnostic fields are only valid for search_schema_catalog")
+			}
 			digest := strings.TrimPrefix(call.QueryHash, "sha256:")
 			malformedArguments := !call.Succeeded && call.ErrorType == "invalid_tool_arguments" && call.QueryHash == ""
 			if !malformedArguments && (call.QueryHash == digest || !contextgovernance.IsSHA256Hex(digest)) {
 				return errors.New("execute_readonly_query call requires a sha256 queryHash")
+			}
+		default:
+			if call.SchemaKeywordHash != "" || call.SchemaResultCount != nil || call.SchemaKeywordRepeated {
+				return errors.New("schema diagnostic fields are only valid for search_schema_catalog")
 			}
 		}
 		if call.Succeeded && call.ErrorType != "" {
@@ -188,8 +234,8 @@ type TextToSQLConversationEvaluationSummary struct {
 }
 
 // EvaluateTextToSQLConversation 归约 conversation 入口的 Text-to-SQL 评测。
-// 与 direct 的 EvaluateTextToSQL 完全独立：任何非 conversation v2 观测
-// （含历史 direct v1 数据）都会被显式拒绝，绝不混入本汇总。
+// 与 direct 的 EvaluateTextToSQL 完全独立：任何非 conversation v3 观测
+// （含历史 direct v1 与 conversation v2 数据）都会被显式拒绝，绝不混入本汇总。
 func EvaluateTextToSQLConversation(
 	cases []mesagent.TextToSQLEvaluationCase,
 	observations []TextToSQLConversationEvaluationObservation,
@@ -232,11 +278,11 @@ func EvaluateTextToSQLConversation(
 		if err := observation.Validate(); err != nil {
 			return TextToSQLConversationEvaluationSummary{}, fmt.Errorf("observation %d: %w", index, err)
 		}
-		// 显式防混入闸门：conversation 汇总只接受本 v2 合同；历史 direct v1
-		// 数据（无 observationSchemaVersion）在这里被拒绝而不是被折算。
+		// 显式防混入闸门：conversation 汇总只接受本 v3 合同；历史 direct v1
+		// 与 conversation v2 数据（无本合同版本号）在这里被拒绝而不是被折算。
 		if observation.ObservationSchemaVersion != TextToSQLConversationObservationSchemaVersion {
 			return TextToSQLConversationEvaluationSummary{}, fmt.Errorf(
-				"observation %d uses %q: historical direct v1 Text-to-SQL observations must not be mixed into conversation v2 summaries",
+				"observation %d uses %q: historical direct v1 and conversation v2 Text-to-SQL observations must not be mixed into conversation v3 summaries",
 				index, observation.ObservationSchemaVersion,
 			)
 		}
