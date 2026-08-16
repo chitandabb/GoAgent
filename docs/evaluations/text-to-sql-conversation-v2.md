@@ -153,7 +153,39 @@ go run ./tools/evaluation/mesguard-text2sql-eval `
 
 复现时使用上文 20 Case 命令的相同 Profile/身份设置，分别增加 `-case-id sql-equipment` 或 `-case-id sql-customer-distribution`，并把上限收紧为 `-max-cases 1 -max-provider-calls 8 -max-provider-tokens 16000`，输出到上述独立文件。首次缺少 SQL 密码与误用 SA 密码的两次启动都在 Provider 创建前失败，产生 0 次云端调用且未生成正式资产。
 
-结论只限于“此前两个失败 Case 在 v9 上各正式通过一次”。它支持关闭本轮定向治理，但样本仍只有 2 个且没有重复运行；完整 20 Case 的当前正式指标仍是 v8 的 18/20，不能改写为 v9 20/20，也不能据此声称生产流量 100% 准确。
+结论只限于“此前两个失败 Case 在 v9 上各正式通过一次”。在当时，完整 20 Case 指标仍只能引用 v8 的
+18/20，不能改写为 v9 20/20；后续 v9 全量结果见下一节。
+
+## 2026-08-16 conversation-v9 全量 20 Case 正式复测
+
+在生产 Embedding 配额治理提交后的 clean revision `fb92383` 上，使用相同 OpenCode Go
+`opencode-deepseek-main`、`conversation-default`、只读 SQL Server 与全量 20 Case 再执行一次正式运行。
+评测在 Provider 创建前确认 `dirty=false`，授权上限为 20 Case、160 次 Provider 调用和 320,000 Token。
+
+- 原始观测：`output/evaluation/text-to-sql-opencode-conversation-v3-v9-20.observations.jsonl`；
+- 汇总：`output/evaluation/text-to-sql-opencode-conversation-v3-v9-20.summary.json`。
+
+| 指标 | 结果 |
+| --- | ---: |
+| Tool 顺序合规 | 13/20（65%） |
+| SQL 执行正确 | 13/20（65%） |
+| 答案正确 | 13/20（65%） |
+| 端到端正确 | 13/20（65%） |
+| Model / Prompt / Completion / Total Token | 75 / 161,625 / 8,497 / 170,122 |
+| Cached Token / Prompt Token | 126,976 / 78.6% |
+
+7 个失败全部为 `invalid_tool_sequence`，没有 Provider、身份或 SQL Server 基础设施错误：
+
+- `sql-resolved-title`、`sql-equipment` 在首次最终查询之后再次请求查询，第二次调用被运行期门禁在底层
+  executor 前阻断；后者的首次查询还返回了受控 `execution_error`；
+- `sql-customer-a-tickets`、`sql-work-order`、`sql-data-fault-count`、`sql-active-count` 只进行了若干次
+  Schema 搜索，未收敛到最终 SQL；
+- `sql-performance-count` 未先完成有效 Schema 探索，直接查询被 QueryGuard 拒绝。
+
+此前定向通过的 `sql-equipment` 在这次全量运行中再次失败，证明单 Case 成功不能代表全量稳定性。v8 的
+18/20 仍是可审计历史结果，但当前 v9 的正式全量口径是 13/20；简历不得引用 v8 90% 作为现行准确率，
+也不得把两个定向成功 Case 拼接成 20/20。当前生产安全边界继续 fail closed，主要未解决项是模型的
+Schema 探索和 Tool 序列收敛。
 
 ## 被丢弃的试跑
 
