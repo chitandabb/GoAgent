@@ -1044,7 +1044,7 @@ func TestConversationRunnerProducesOneCorrelatedAgentTrace(t *testing.T) {
 		ChatModel: &conversationRunnerTestModel{state: state}, ToolCatalog: catalog,
 		SystemInstruction: "tracing fixture", ModelProvider: "fixture", ModelID: "fixture-v1",
 		PromptVersion: "conversation-test-v1",
-		Logger: zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
+		Logger:        zap.NewNop(), MaxContextRunes: conversation.MaxContentRunes,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1574,7 +1574,7 @@ func TestConversationModelMessagesBoundsHistoryAndDropsInternalRoles(t *testing.
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 3, Role: conversation.MessageRoleAssistant, Content: "上轮回答"},
 		{ID: uuid.New(), ConversationID: conversationID, Seq: 4, Role: conversation.MessageRoleTool, Content: "原始工具结果"},
 		current,
-	}, current, 8, "")
+	}, current, 8, conversationPromptContext{})
 	messages := projection.messages
 
 	if len(messages) != 2 || messages[0].Role != schema.Assistant || messages[0].Content != "上轮回答" ||
@@ -1583,6 +1583,77 @@ func TestConversationModelMessagesBoundsHistoryAndDropsInternalRoles(t *testing.
 	}
 	if projection.tailContinuous {
 		t.Fatal("Rune compatibility projection hid its non-continuous tail")
+	}
+}
+
+func TestConversationRunnerKeepsPriorUserPromptByteStableAcrossTurns(t *testing.T) {
+	state := &conversationRunnerModelState{finalContent: "已处理。"}
+	runner := newConversationRunnerTest(t, state, nil)
+	userID, conversationID := uuid.New(), uuid.New()
+	firstUser := conversation.Message{
+		ID: uuid.New(), ConversationID: conversationID, Seq: 1,
+		Role: conversation.MessageRoleUser, Content: "检查这张工单",
+		CaseReferences: []conversation.CaseReference{{
+			ExternalCaseID: runnerTestCaseID, Kind: conversation.ReferenceKindSelected,
+		}},
+	}
+	conversationItem := conversation.Conversation{
+		ID: conversationID, UserID: userID, Status: conversation.StatusActive,
+	}
+	firstCtx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+		ConversationID: conversationID, UserMessageID: firstUser.ID,
+		Actor: conversation.Actor{UserID: userID},
+	})
+	firstResponse, err := runner.Respond(firstCtx, conversation.AgentRequest{
+		Conversation: conversationItem, UserMessage: firstUser,
+		History: []conversation.Message{firstUser},
+	})
+	if err != nil {
+		t.Fatalf("first Respond(): %v", err)
+	}
+
+	assistant := conversation.Message{
+		ID: uuid.New(), ConversationID: conversationID, Seq: 2,
+		Role: conversation.MessageRoleAssistant, Content: firstResponse.Content,
+	}
+	secondUser := conversation.Message{
+		ID: uuid.New(), ConversationID: conversationID, Seq: 3,
+		Role: conversation.MessageRoleUser, Content: "继续",
+	}
+	secondCtx := conversation.WithCommandContext(context.Background(), conversation.CommandContext{
+		ConversationID: conversationID, UserMessageID: secondUser.ID,
+		Actor: conversation.Actor{UserID: userID},
+	})
+	if _, err = runner.Respond(secondCtx, conversation.AgentRequest{
+		Conversation: conversationItem, UserMessage: secondUser,
+		History: []conversation.Message{firstUser, assistant, secondUser},
+	}); err != nil {
+		t.Fatalf("second Respond(): %v", err)
+	}
+
+	state.mu.Lock()
+	inputs := append([][]string(nil), state.inputs...)
+	state.mu.Unlock()
+	if len(inputs) != 2 {
+		t.Fatalf("captured model calls = %d, want 2", len(inputs))
+	}
+	findUser := func(messages []string, content string) string {
+		prefix := string(schema.User) + "\x00\x00" + content
+		for _, message := range messages {
+			if strings.HasPrefix(message, prefix) {
+				return message
+			}
+		}
+		return ""
+	}
+	firstRendered := findUser(inputs[0], firstUser.Content)
+	historicalRendered := findUser(inputs[1], firstUser.Content)
+	if firstRendered == "" || historicalRendered == "" {
+		t.Fatalf("first user prompt missing: current=%q historical=%q", firstRendered, historicalRendered)
+	}
+	if firstRendered != historicalRendered {
+		t.Fatalf("prior user prompt changed after the next turn:\ncurrent=%q\nhistorical=%q",
+			firstRendered, historicalRendered)
 	}
 }
 
@@ -1609,15 +1680,15 @@ func newConversationRunnerTestWithPreflight(
 		t.Fatalf("NewConversationDefaultToolCatalog(): %v", err)
 	}
 	runner, err := NewConversationRunner(ConversationRunnerConfig{
-		ChatModel:             &conversationRunnerTestModel{state: state},
-		ToolCatalog:           catalog,
-		SystemInstruction:     "conversation test instruction",
-		ModelProvider:         "fixture",
-		ModelID:               "fixture-v1",
-		PromptVersion:         "conversation-test-v1",
-		Logger:                zap.NewNop(),
-		MaxContextRunes:       conversation.MaxContentRunes,
-		ContextPreflight:      preflight,
+		ChatModel:         &conversationRunnerTestModel{state: state},
+		ToolCatalog:       catalog,
+		SystemInstruction: "conversation test instruction",
+		ModelProvider:     "fixture",
+		ModelID:           "fixture-v1",
+		PromptVersion:     "conversation-test-v1",
+		Logger:            zap.NewNop(),
+		MaxContextRunes:   conversation.MaxContentRunes,
+		ContextPreflight:  preflight,
 	})
 	if err != nil {
 		t.Fatalf("NewConversationRunner(): %v", err)

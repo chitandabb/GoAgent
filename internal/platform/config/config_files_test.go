@@ -20,6 +20,10 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate(%q): %v", path, err)
 			}
+			if cfg.Agent.ConversationPromptVersion != "conversation-v8" {
+				t.Fatalf("%q conversation prompt version = %q, want conversation-v8 for stable per-message turn_context rendering",
+					path, cfg.Agent.ConversationPromptVersion)
+			}
 			memoryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
 			if err != nil {
 				t.Fatalf("ConversationMemoryProfile(%q): %v", path, err)
@@ -41,18 +45,36 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if opencode.ReasoningEffort != "" || opencode.ThinkingMode != "" {
 				t.Fatalf("%q opencode-deepseek-main must not configure reasoningEffort/thinkingMode: %+v", path, opencode)
 			}
-			if cfg.Models.Chat.ActiveProfileName != "stepfun-main" ||
+			if cfg.Models.Chat.ActiveProfileName != "opencode-deepseek-main" ||
 				cfg.Models.Chat.ConversationMemoryProfileName != "stepfun-conversation-memory" {
-				t.Fatalf("%q must keep activeProfile=stepfun-main and conversationMemoryProfile=stepfun-conversation-memory", path)
+				t.Fatalf("%q must switch activeProfile=opencode-deepseek-main while keeping conversationMemoryProfile=stepfun-conversation-memory", path)
 			}
-			active := cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName]
-			if opencode.ContextWindowTokens != active.ContextWindowTokens ||
-				opencode.MaxOutputTokens != active.MaxOutputTokens ||
-				opencode.PromptSafetyMarginTokens != active.PromptSafetyMarginTokens ||
-				opencode.PromptSafetyMarginRatio != active.PromptSafetyMarginRatio ||
-				opencode.TokenizerStrategy != active.TokenizerStrategy ||
-				opencode.ToolExposureStrategy != active.ToolExposureStrategy {
-				t.Fatalf("%q opencode-deepseek-main context contract must match stepfun-main for the first comparison: %+v vs %+v", path, opencode, active)
+			// Active Profile 必须解析为 OpenCode Go DeepSeek 生产身份。
+			active, activeErr := cfg.Models.Chat.ActiveProfile()
+			if activeErr != nil {
+				t.Fatalf("ActiveProfile(%q): %v", path, activeErr)
+			}
+			if active.Provider != "opencode-go" || active.Model != "deepseek-v4-flash" ||
+				active.BaseURL != "https://opencode.ai/zen/go/v1" ||
+				active.APIKeyEnv != "MESGUARD_OPENCODE_GO_API_KEY" ||
+				active.ResponseFormat != "text" ||
+				active.ReasoningEffort != "" || active.ThinkingMode != "" {
+				t.Fatalf("%q active profile must be the OpenCode Go DeepSeek identity: %+v", path, active)
+			}
+			// stepfun-main 保留为显式回退 Profile，不删除。
+			stepfunMain, stepfunOK := cfg.Models.Chat.Profiles["stepfun-main"]
+			if !stepfunOK || stepfunMain.Provider != "stepfun" || stepfunMain.Model != "step-3.7-flash" {
+				t.Fatalf("%q must keep the stepfun-main fallback profile: %+v", path, stepfunMain)
+			}
+			// 切换后不能再拿 Active Profile 与 OpenCode 自己比较：对照必须是
+			// 显式读取的 stepfun-main，保证首轮上下文合同不因切换漂移。
+			if opencode.ContextWindowTokens != stepfunMain.ContextWindowTokens ||
+				opencode.MaxOutputTokens != stepfunMain.MaxOutputTokens ||
+				opencode.PromptSafetyMarginTokens != stepfunMain.PromptSafetyMarginTokens ||
+				opencode.PromptSafetyMarginRatio != stepfunMain.PromptSafetyMarginRatio ||
+				opencode.TokenizerStrategy != stepfunMain.TokenizerStrategy ||
+				opencode.ToolExposureStrategy != stepfunMain.ToolExposureStrategy {
+				t.Fatalf("%q opencode-deepseek-main context contract must match the stepfun-main fallback: %+v vs %+v", path, opencode, stepfunMain)
 			}
 			if !cfg.Agent.ContextMemory.ShadowPreflightEnabled ||
 				!cfg.Agent.ContextMemory.DiagnosisPreflightEnabled ||

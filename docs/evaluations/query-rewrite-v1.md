@@ -63,7 +63,8 @@ Precision/Recall 均没有变化；FTS/Vector 查询数从 `1/1` 增加到 `4/3`
 不会限制供应商生成的推理 Token，因此这组配置让一个短 JSON 改写任务产生了 231 Prompt + 921
 Completion Token，并把总延迟放大到基础检索的约 45.43 倍。
 
-当前已改为命名 Profile：主 Agent 使用 `activeProfile=stepfun-main`，Query Rewrite 指向独立
+当前已改为命名 Profile：主 Agent 当时使用 `activeProfile=stepfun-main`（2026-08-16 起已硬切为
+`opencode-deepseek-main`），Query Rewrite 指向独立
 `qwen-rewrite`，候选配置为 `qwen3.6-flash`、Thinking disabled、temperature 0、3 秒、256 输出 Token、
 最多 1 个子查询。Provider Factory 对 StepFun/DeepSeek/DashScope 的推理字段分别映射，并有离线请求
 形状测试；构建失败时只将 `query_rewrite` 标为 provider failed，基础 FTS/Vector 继续运行。
