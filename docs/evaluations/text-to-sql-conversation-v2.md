@@ -135,7 +135,25 @@ go run ./tools/evaluation/mesguard-text2sql-eval `
 - `sql-equipment` 在两次有效 schema 搜索后连续执行两次 `execute_readonly_query`，两次底层执行均成功，但违反当前“一次最终查询”的评测合同，记为 `invalid_tool_sequence`；
 - `sql-customer-distribution` 最终生成 `COUNT(WorkOrderNo)`。`CUST-C` 的 `WorkOrderNo` 为 NULL，因此返回 0；固定集要求统计记录数，正确业务语义应为 `COUNT(*)`，记为 `result_mismatch`。
 
-这次 20 Case 结果推翻了此前“扩大到 20 Case 仍需等待”的待办状态，但没有证明 SQL 治理已经完结。后续本地切片已将 Prompt 升为 `conversation-v9`，明确“统计记录数”使用 `COUNT(*)`，并把每轮第二次 `execute_readonly_query` 转为不触发底层 executor 的结构化 `blocked` 结果；重复请求仍消耗 Tool-call 预算、进入失败执行轨迹，并由评测器记录为无 SQL/hash 的 `tool_run_limit_exhausted` 尝试，因此模型请求两次查询时仍判 `invalid_tool_sequence`，不会被治理层掩盖。只有剩余 Tool-call 预算允许时回合才继续，否则预算错误优先 fail-closed。该实现只有本地桩测试结论，两个失败 Case 的 clean revision 云端复测仍 pending，不得把 v8 的 18/20 结果改写成 v9 指标。
+这次 20 Case 结果推翻了此前“扩大到 20 Case 仍需等待”的待办状态，但没有证明 SQL 治理已经完结。后续本地切片已将 Prompt 升为 `conversation-v9`，明确“统计记录数”使用 `COUNT(*)`，并把每轮第二次 `execute_readonly_query` 转为不触发底层 executor 的结构化 `blocked` 结果；重复请求仍消耗 Tool-call 预算、进入失败执行轨迹，并由评测器记录为无 SQL/hash 的 `tool_run_limit_exhausted` 尝试，因此模型请求两次查询时仍判 `invalid_tool_sequence`，不会被治理层掩盖。只有剩余 Tool-call 预算允许时回合才继续，否则预算错误优先 fail-closed。该实现先通过本地桩测试，再按下一节在 clean revision 上定向复测；无论定向结果如何，都不得把 v8 的 18/20 全量指标改写成 v9 20/20。
+
+## 2026-08-16 conversation-v9 两个失败 Case 正式复测
+
+在 clean revision `2b7a257` 上分别对 v8 的两个失败 Case 做了一次正式单 Case 复测。两次运行都记录 `formal=true`、Prompt `conversation-v9`、Profile `conversation-default`，并沿用 OpenCode Go `opencode-deepseek-main`；每次授权上限为 1 Case、8 次 Provider 调用、16,000 Token。它们是两个独立 Summary，不伪装成一次两 Case 聚合运行。
+
+| Case | Tool 轨迹 | SQL | 结果 | Model / Total / Cached Token | 耗时 |
+| --- | --- | --- | --- | ---: | ---: |
+| `sql-equipment` | schema search ×4 → readonly query ×1 | 按 `TicketID` 查询 `EquipmentCode` | Tool/执行/答案/端到端全部正确 | 5 / 13,148 / 9,856 | 17.342 秒 |
+| `sql-customer-distribution` | schema search ×4 → readonly query ×1 | `SELECT CustomerCode, COUNT(*) ... GROUP BY CustomerCode` | Tool/执行/答案/端到端全部正确 | 4 / 10,101 / 7,296 | 12.688 秒 |
+
+两次复测都只请求并执行了一次 `execute_readonly_query`，因此没有触发第二次查询的 runtime block；`sql-customer-distribution` 明确从 v8 的 `COUNT(WorkOrderNo)` 修正为 `COUNT(*)`。原始资产为：
+
+- `output/evaluation/text-to-sql-conversation-v3-v9-sql-equipment.{observations.jsonl,summary.json}`；
+- `output/evaluation/text-to-sql-conversation-v3-v9-sql-customer-distribution.{observations.jsonl,summary.json}`。
+
+复现时使用上文 20 Case 命令的相同 Profile/身份设置，分别增加 `-case-id sql-equipment` 或 `-case-id sql-customer-distribution`，并把上限收紧为 `-max-cases 1 -max-provider-calls 8 -max-provider-tokens 16000`，输出到上述独立文件。首次缺少 SQL 密码与误用 SA 密码的两次启动都在 Provider 创建前失败，产生 0 次云端调用且未生成正式资产。
+
+结论只限于“此前两个失败 Case 在 v9 上各正式通过一次”。它支持关闭本轮定向治理，但样本仍只有 2 个且没有重复运行；完整 20 Case 的当前正式指标仍是 v8 的 18/20，不能改写为 v9 20/20，也不能据此声称生产流量 100% 准确。
 
 ## 被丢弃的试跑
 
