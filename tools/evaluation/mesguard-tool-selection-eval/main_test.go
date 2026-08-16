@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -785,9 +786,12 @@ func TestSelectionPreflightAcceptsRealArms(t *testing.T) {
 	for name, observation := range map[string]mesagent.ToolSelectionObservation{
 		"wide": wide, "production": production,
 	} {
-		if observation.ObservationSchemaVersion != mesagent.ToolSelectionObservationV3 {
+		if observation.ObservationSchemaVersion != mesagent.ToolSelectionObservationV4 {
 			t.Fatalf("%s observationSchemaVersion = %q, want %q", name,
-				observation.ObservationSchemaVersion, mesagent.ToolSelectionObservationV3)
+				observation.ObservationSchemaVersion, mesagent.ToolSelectionObservationV4)
+		}
+		if observation.ToolChoiceMode != mesagent.ToolSelectionToolChoiceRequired {
+			t.Fatalf("%s toolChoiceMode = %q, want required (CLI default)", name, observation.ToolChoiceMode)
 		}
 		if observation.ComparisonFingerprint == "" ||
 			!strings.HasPrefix(observation.ComparisonFingerprint, "sha256:") {
@@ -859,21 +863,26 @@ func TestObserveToolSelectionRejectsSchemaDriftFromPreflight(t *testing.T) {
 		},
 		mesagent.ToolSelectionProduction, 800,
 		evaluationidentity.Identity{Revision: "git:test", Dirty: false}, fingerprint, profile,
-		zap.NewNop(),
+		zap.NewNop(), mesagent.ToolSelectionToolChoiceRequired,
 	)
 	if err == nil || !strings.Contains(err.Error(), "preflight Tool Schema") {
 		t.Fatalf("observeToolSelection error = %v, want preflight Schema drift rejection", err)
 	}
 }
 
-// TestSelectionDefaultOutputPathsAreV3 证明 v3 输出资产默认名，避免覆盖
-// v1/v2 历史资产。
-func TestSelectionDefaultOutputPathsAreV3(t *testing.T) {
-	if toolSelectionObservationsOutput != "testdata/tool-selection-v3.observations.jsonl" {
+// TestSelectionDefaultOutputPathsAreV4 证明 v4 输出资产默认名，避免覆盖
+// v1/v2/v3 历史资产，且与 compatibility-probe 默认资产互不污染。
+func TestSelectionDefaultOutputPathsAreV4(t *testing.T) {
+	if toolSelectionObservationsOutput != "testdata/tool-selection-v4.observations.jsonl" {
 		t.Fatalf("default observations output = %q", toolSelectionObservationsOutput)
 	}
-	if toolSelectionSummaryOutput != "testdata/tool-selection-v3.summary.json" {
+	if toolSelectionSummaryOutput != "testdata/tool-selection-v4.summary.json" {
 		t.Fatalf("default summary output = %q", toolSelectionSummaryOutput)
+	}
+	if compatibilityProbeObservationsOutput == toolSelectionObservationsOutput ||
+		compatibilityProbeObservationsOutput == toolSelectionSummaryOutput {
+		t.Fatalf("probe output %q must stay disjoint from the formal v4 assets",
+			compatibilityProbeObservationsOutput)
 	}
 }
 
@@ -1182,6 +1191,7 @@ func TestSelectionBudgetPrintCoversProfileAndBounds(t *testing.T) {
 		"cases=1", "authorized_provider_call_upper_bound=3",
 		"authorized_token_hard_upper_bound=786432", "profile=opencode-deepseek-main",
 		"provider=opencode-go", "model=deepseek-v4-flash", "revision=",
+		"tool_choice_mode=required",
 	} {
 		if !strings.Contains(printedText, want) {
 			t.Fatalf("pre-run print missing %q, got:\n%s", want, printedText)
@@ -1554,6 +1564,226 @@ func TestSelectionProviderAccountingDeterministicAcrossConcurrency(t *testing.T)
 			// 两个 Case 各一次校准（800）+ 各两臂（1000×4）。
 			if accounting.PromptTokens != 2*800+4*1000 {
 				t.Fatalf("prompt tokens = %d, want 5600 (each calibration counted once)", accounting.PromptTokens)
+			}
+		})
+	}
+}
+
+// selectionToolChoiceRecord 记录一次 Generate 的解析后 options 与绑定
+// ToolInfo：用于证明 required/absent 除 ToolChoice 外完全一致。
+type selectionToolChoiceRecord struct {
+	messagesJSON string
+	temperature  *float32
+	maxTokens    *int
+	toolChoice   *schema.ToolChoice
+	toolInfos    []*schema.ToolInfo
+}
+
+// selectionToolChoiceRecordingModelStub 记录每次 Generate 的输入，同时保持
+// selectionEvalModelStub 的校准语义：MaxTokens=1 的校准调用返回 800 prompt
+// tokens，带 Tool 调用返回 1000 tokens。
+type selectionToolChoiceRecordingModelStub struct {
+	mu      sync.Mutex
+	records []selectionToolChoiceRecord
+	bound   []*schema.ToolInfo
+}
+
+func (m *selectionToolChoiceRecordingModelStub) Generate(_ context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
+	encoded, _ := json.Marshal(messages)
+	applied := model.GetCommonOptions(&model.Options{}, options...)
+	m.mu.Lock()
+	m.records = append(m.records, selectionToolChoiceRecord{
+		messagesJSON: string(encoded), temperature: applied.Temperature,
+		maxTokens: applied.MaxTokens, toolChoice: applied.ToolChoice,
+		toolInfos: append([]*schema.ToolInfo(nil), m.bound...),
+	})
+	m.mu.Unlock()
+	promptTokens := 1000
+	if applied.MaxTokens != nil && *applied.MaxTokens == 1 {
+		promptTokens = 800
+	}
+	return &schema.Message{
+		Role:    schema.Assistant,
+		Content: "ok",
+		ToolCalls: []schema.ToolCall{{
+			Index: intPtr(0),
+			Function: schema.FunctionCall{
+				Name: mesagent.ToolReadExternalCase, Arguments: "{}",
+			},
+		}},
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage:        &schema.TokenUsage{PromptTokens: promptTokens, CompletionTokens: 50, TotalTokens: promptTokens + 50},
+		},
+	}, nil
+}
+
+func (m *selectionToolChoiceRecordingModelStub) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *selectionToolChoiceRecordingModelStub) WithTools(infos []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bound = append([]*schema.ToolInfo(nil), infos...)
+	return m, nil
+}
+
+func (m *selectionToolChoiceRecordingModelStub) snapshotRecords() []selectionToolChoiceRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]selectionToolChoiceRecord(nil), m.records...)
+}
+
+// runSelectionEvalForModeTest 用记录桩跑单 Case 正式评测（仅本地桩），
+// 返回非校准（带 Tool）调用的记录与全部 observations。
+func runSelectionEvalForModeTest(t *testing.T, modeArgs ...string) ([]selectionToolChoiceRecord, []mesagent.ToolSelectionObservation) {
+	t.Helper()
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+	stub := &selectionToolChoiceRecordingModelStub{}
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+		return stub, nil
+	}
+	args := append([]string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty", "-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "3000000",
+	}, modeArgs...)
+	if err := runWithDependencies(context.Background(), args, zap.NewNop(), deps); err != nil {
+		t.Fatalf("runWithDependencies: %v", err)
+	}
+	records := stub.snapshotRecords()
+	var armRecords []selectionToolChoiceRecord
+	for _, record := range records {
+		if record.maxTokens != nil && *record.maxTokens == 1 {
+			continue
+		}
+		armRecords = append(armRecords, record)
+	}
+	if len(armRecords) != 2 {
+		t.Fatalf("arm generate records = %d, want 2 (wide + production)", len(armRecords))
+	}
+	return armRecords, readSelectionObservationsForTest(t, output)
+}
+
+func selectionToolInfosJSON(t *testing.T, infos []*schema.ToolInfo) string {
+	t.Helper()
+	encoded, err := json.Marshal(infos)
+	if err != nil {
+		t.Fatalf("marshal tool infos: %v", err)
+	}
+	return string(encoded)
+}
+
+// TestSelectionToolChoiceModeDefaultIsRequired 证明默认不传 flag 时语义保持
+// 既有调用：两臂都发送 WithToolChoice(schema.ToolChoiceForced)，observations
+// 记录 required。
+func TestSelectionToolChoiceModeDefaultIsRequired(t *testing.T) {
+	armRecords, observations := runSelectionEvalForModeTest(t)
+	for index, record := range armRecords {
+		if record.toolChoice == nil || *record.toolChoice != schema.ToolChoiceForced {
+			t.Fatalf("arm record %d toolChoice = %v, want ToolChoiceForced", index, record.toolChoice)
+		}
+	}
+	if len(observations) != 2 {
+		t.Fatalf("observations = %d, want 2", len(observations))
+	}
+	for _, observation := range observations {
+		if observation.ToolChoiceMode != mesagent.ToolSelectionToolChoiceRequired {
+			t.Fatalf("toolChoiceMode = %q, want required", observation.ToolChoiceMode)
+		}
+	}
+}
+
+// TestSelectionToolChoiceModeAbsentOmitsOptionEntirely 证明 absent 模式下
+// model.Options.ToolChoice 为 nil（完全省略，不是显式 auto），且除 ToolChoice
+// 外 messages、ToolInfo 与其他 options 与 required 模式完全一致。
+func TestSelectionToolChoiceModeAbsentOmitsOptionEntirely(t *testing.T) {
+	requiredRecords, _ := runSelectionEvalForModeTest(t)
+	absentRecords, absentObservations := runSelectionEvalForModeTest(t, "-tool-choice-mode", "absent")
+	for index, record := range absentRecords {
+		if record.toolChoice != nil {
+			t.Fatalf("absent arm record %d toolChoice = %v, want nil (omitted)", index, *record.toolChoice)
+		}
+	}
+	for _, observation := range absentObservations {
+		if observation.ToolChoiceMode != mesagent.ToolSelectionToolChoiceAbsent {
+			t.Fatalf("absent toolChoiceMode = %q, want absent", observation.ToolChoiceMode)
+		}
+		if err := observation.Validate(); err != nil {
+			t.Fatalf("absent observation must pass v4 Validate: %v", err)
+		}
+	}
+	// 唯一变量校验：按 arm 序对齐（记录顺序为 wide/production）。
+	for index := range absentRecords {
+		required, absent := requiredRecords[index], absentRecords[index]
+		if required.messagesJSON != absent.messagesJSON {
+			t.Fatalf("arm %d messages differ between modes", index)
+		}
+		if selectionToolInfosJSON(t, required.toolInfos) != selectionToolInfosJSON(t, absent.toolInfos) {
+			t.Fatalf("arm %d tool infos differ between modes", index)
+		}
+		if required.maxTokens == nil || absent.maxTokens == nil || *required.maxTokens != *absent.maxTokens {
+			t.Fatalf("arm %d maxTokens differ between modes", index)
+		}
+		if required.temperature == nil || absent.temperature == nil || *required.temperature != *absent.temperature {
+			t.Fatalf("arm %d temperature differ between modes", index)
+		}
+	}
+}
+
+// TestSelectionToolChoiceModeInvalidFailsClosedBeforeProvider 证明非法
+// -tool-choice-mode 在创建任何 Provider 或 GitHub 连接之前 fail-closed。
+func TestSelectionToolChoiceModeInvalidFailsClosedBeforeProvider(t *testing.T) {
+	for _, mode := range []string{"auto", "forced", "REQUIRED"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			dataset := writeSelectionDatasetForTest(t)
+			outputDir := t.TempDir()
+			output := filepath.Join(outputDir, "obs.jsonl")
+			summary := filepath.Join(outputDir, "summary.json")
+			var modelCalls atomic.Int32
+			var githubCalls atomic.Int32
+			deps := defaultSelectionEvalDependencies()
+			deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+			deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+				modelCalls.Add(1)
+				return nil, errors.New("factory must not be reached before tool-choice-mode validation")
+			}
+			deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+				githubCalls.Add(1)
+				return nil, errors.New("GitHub must not be reached before tool-choice-mode validation")
+			}
+			err := runWithDependencies(context.Background(), []string{
+				"-dataset", dataset, "-output", output, "-summary", summary,
+				"-concurrency", "1", "-allow-dirty",
+				"-tool-choice-mode", mode,
+				"-allow-provider-calls", "-max-cases", "1",
+				"-max-provider-calls", "10", "-max-provider-tokens", "3000000",
+			}, zap.NewNop(), deps)
+			if err == nil || !strings.Contains(err.Error(), "tool-choice-mode") {
+				t.Fatalf("runWithDependencies error = %v, want tool-choice-mode rejection", err)
+			}
+			if modelCalls.Load() != 0 {
+				t.Fatalf("newChatModel called %d times, want 0", modelCalls.Load())
+			}
+			if githubCalls.Load() != 0 {
+				t.Fatalf("connectGitHub called %d times, want 0", githubCalls.Load())
+			}
+			if _, statErr := os.Stat(output); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("observations output must not be created: %v", statErr)
 			}
 		})
 	}

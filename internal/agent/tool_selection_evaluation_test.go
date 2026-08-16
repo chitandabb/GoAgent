@@ -19,8 +19,8 @@ func TestEvaluateToolSelectionUsesProviderPromptTokensForPairedReduction(t *test
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
 		t.Fatalf("EvaluateToolSelection(): %v", err)
@@ -40,8 +40,8 @@ func TestEvaluateToolSelectionPairsInvalidSelectionsWithProviderUsage(t *testing
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "")
 	filtered.ToolCallCount = 0
 	filtered.ErrorType = "invalid_tool_call_count"
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
@@ -73,18 +73,19 @@ func validToolSelectionObservation(
 	}
 }
 
-// validV3ToolSelectionObservation 构造通过 v3 Validate 的完整观测。两个
+// validV4ToolSelectionObservation 构造通过 v4 Validate 的完整观测。两个
 // 实验臂使用各自正确的 Profile 合同（wide=评测合同 evaluation-wide-v2，
 // production=生产 diagnosis-default），fingerprint/revision 相同以便默认
 // 可以配对。
-func validV3ToolSelectionObservation(
+func validV4ToolSelectionObservation(
 	variant ToolSelectionVariant,
 	runID string,
 	promptTokens, schemaBytes int,
 	selected string,
 ) ToolSelectionObservation {
 	observation := validToolSelectionObservation(variant, runID, promptTokens, schemaBytes, selected)
-	observation.ObservationSchemaVersion = ToolSelectionObservationV3
+	observation.ObservationSchemaVersion = ToolSelectionObservationV4
+	observation.ToolChoiceMode = ToolSelectionToolChoiceRequired
 	observation.ToolProfileID = ToolSelectionEvaluationWideProfile
 	if variant == ToolSelectionProduction {
 		observation.ToolProfileID = string(agentruntime.ToolProfileDiagnosis)
@@ -103,31 +104,31 @@ func validV3ToolSelectionObservation(
 	return observation
 }
 
-func TestToolSelectionObservationV3FilteredRequiresDiagnosisProfile(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+func TestToolSelectionObservationV4FilteredRequiresDiagnosisProfile(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	observation.ToolProfileID = ""
 	if err := observation.Validate(); err == nil {
-		t.Fatal("v3 production observation without toolProfileId must fail")
+		t.Fatal("v4 production observation without toolProfileId must fail")
 	}
 	observation.ToolProfileID = ToolSelectionEvaluationWideProfile
 	if err := observation.Validate(); err == nil {
-		t.Fatal("v3 production observation with the wide contract id must fail")
+		t.Fatal("v4 production observation with the wide contract id must fail")
 	}
 }
 
-func TestToolSelectionObservationV3WideRejectsDiagnosisProfile(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+func TestToolSelectionObservationV4WideRejectsDiagnosisProfile(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	observation.ToolProfileID = string(agentruntime.ToolProfileDiagnosis)
 	if err := observation.Validate(); err == nil {
-		t.Fatal("v3 wide observation must not masquerade as diagnosis-default")
+		t.Fatal("v4 wide observation must not masquerade as diagnosis-default")
 	}
 	observation.ToolProfileID = ""
 	if err := observation.Validate(); err == nil {
-		t.Fatal("v3 wide observation without toolProfileId must fail")
+		t.Fatal("v4 wide observation without toolProfileId must fail")
 	}
 }
 
-func TestToolSelectionObservationV3RequiresFullIdentity(t *testing.T) {
+func TestToolSelectionObservationV4RequiresFullIdentity(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*ToolSelectionObservation)
@@ -146,47 +147,145 @@ func TestToolSelectionObservationV3RequiresFullIdentity(t *testing.T) {
 	}
 	for _, current := range tests {
 		t.Run(current.name, func(t *testing.T) {
-			observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+			observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 			current.mutate(&observation)
 			if err := observation.Validate(); err == nil {
-				t.Fatalf("v3 observation with %s must fail", current.name)
+				t.Fatalf("v4 observation with %s must fail", current.name)
 			}
 		})
 	}
-	if err := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code").Validate(); err != nil {
-		t.Fatalf("complete v3 observation must pass: %v", err)
+	if err := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code").Validate(); err != nil {
+		t.Fatalf("complete v4 observation must pass: %v", err)
 	}
 }
 
-// TestToolSelectionObservationV3RejectsHistoricalContracts proves the v3 hard
-// cut: historical v1 (no observationSchemaVersion) and v2 observations are
+// TestToolSelectionObservationV4RejectsHistoricalContracts proves the v4 hard
+// cut: historical v1 (no observationSchemaVersion), v2 and v3 observations are
 // rejected; no compatibility branch is kept.
-func TestToolSelectionObservationV3RejectsHistoricalContracts(t *testing.T) {
+func TestToolSelectionObservationV4RejectsHistoricalContracts(t *testing.T) {
 	v1 := validToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	if err := v1.Validate(); err == nil {
 		t.Fatal("historical v1 observation (no schema version) must be rejected")
 	}
-	if !strings.Contains(v1.Validate().Error(), ToolSelectionObservationV3) {
-		t.Fatalf("v1 rejection must name the active v3 contract: %v", v1.Validate())
+	if !strings.Contains(v1.Validate().Error(), ToolSelectionObservationV4) {
+		t.Fatalf("v1 rejection must name the active v4 contract: %v", v1.Validate())
 	}
 
-	v2 := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	v2 := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	v2.ObservationSchemaVersion = "tool-selection-observation-v2"
 	if err := v2.Validate(); err == nil {
 		t.Fatal("historical v2 observation must be rejected")
 	}
+	if !strings.Contains(v2.Validate().Error(), "historical") {
+		t.Fatalf("v2 rejection must mark the contract historical: %v", v2.Validate())
+	}
 
-	unknown := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	v3 := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	v3.ObservationSchemaVersion = "tool-selection-observation-v3"
+	if err := v3.Validate(); err == nil {
+		t.Fatal("historical v3 observation must be rejected by the v4 contract")
+	}
+	if !strings.Contains(v3.Validate().Error(), "historical") {
+		t.Fatalf("v3 rejection must mark the contract historical: %v", v3.Validate())
+	}
+
+	unknown := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	unknown.ObservationSchemaVersion = "tool-selection-observation-v9"
 	if err := unknown.Validate(); err == nil {
 		t.Fatal("unknown observationSchemaVersion must be rejected")
 	}
 }
 
-// TestToolSelectionObservationV3RejectsFilteredVariant proves the filtered
+// TestToolSelectionObservationV4ToolChoiceModeContract proves toolChoiceMode is
+// a mandatory v4 identity field: only required and absent are legal; missing,
+// empty or arbitrary values (including provider-style "auto"/"forced") are
+// rejected.
+func TestToolSelectionObservationV4ToolChoiceModeContract(t *testing.T) {
+	for _, mode := range []ToolSelectionToolChoiceMode{
+		ToolSelectionToolChoiceRequired, ToolSelectionToolChoiceAbsent,
+	} {
+		observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+		observation.ToolChoiceMode = mode
+		if err := observation.Validate(); err != nil {
+			t.Fatalf("v4 observation with toolChoiceMode %q must validate: %v", mode, err)
+		}
+	}
+	for _, mode := range []ToolSelectionToolChoiceMode{"", "auto", "forced", "none", "Required"} {
+		observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+		observation.ToolChoiceMode = mode
+		if err := observation.Validate(); err == nil {
+			t.Fatalf("v4 observation with toolChoiceMode %q must be rejected", mode)
+		}
+	}
+}
+
+// TestParseToolSelectionToolChoiceMode proves the CLI seam: only the exact
+// strings required/absent parse; anything else fails closed with both legal
+// values named.
+func TestParseToolSelectionToolChoiceMode(t *testing.T) {
+	for value, want := range map[string]ToolSelectionToolChoiceMode{
+		"required": ToolSelectionToolChoiceRequired, "absent": ToolSelectionToolChoiceAbsent,
+	} {
+		mode, err := ParseToolSelectionToolChoiceMode(value)
+		if err != nil || mode != want {
+			t.Fatalf("ParseToolSelectionToolChoiceMode(%q) = %q, %v; want %q", value, mode, err, want)
+		}
+	}
+	for _, value := range []string{"", "auto", "forced", "REQUIRED", " absent"} {
+		if _, err := ParseToolSelectionToolChoiceMode(value); err == nil {
+			t.Fatalf("ParseToolSelectionToolChoiceMode(%q) must fail closed", value)
+		}
+	}
+}
+
+// TestEvaluateToolSelectionPairsRejectMismatchedToolChoiceMode proves arms
+// recorded under different tool-choice request modes never pair and never
+// contribute paired reductions.
+func TestEvaluateToolSelectionPairsRejectMismatchedToolChoiceMode(t *testing.T) {
+	cases := []ToolSelectionCase{{
+		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
+		UserQuery: "查找代码", ExpectedTool: "search_code",
+	}}
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	wide.ToolChoiceMode = ToolSelectionToolChoiceAbsent
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
+	if err != nil {
+		t.Fatalf("EvaluateToolSelection(): %v", err)
+	}
+	if summary.PairedCases != 0 || summary.UnpairedRuns != 2 {
+		t.Fatalf("tool choice mode mismatch must not pair: paired=%d unpaired=%d", summary.PairedCases, summary.UnpairedRuns)
+	}
+	if summary.PairedPromptTokenReduction != 0 || summary.PairedToolSchemaTokenReduction != 0 ||
+		summary.PairedSchemaByteReduction != 0 {
+		t.Fatalf("tool choice mode mismatch must not contribute paired reductions: %+v", summary)
+	}
+}
+
+// TestEvaluateToolSelectionPairsIdenticalAbsentMode proves two arms recorded
+// under the same absent mode still pair normally.
+func TestEvaluateToolSelectionPairsIdenticalAbsentMode(t *testing.T) {
+	cases := []ToolSelectionCase{{
+		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
+		UserQuery: "查找代码", ExpectedTool: "search_code",
+	}}
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide.ToolChoiceMode = ToolSelectionToolChoiceAbsent
+	filtered.ToolChoiceMode = ToolSelectionToolChoiceAbsent
+	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
+	if err != nil {
+		t.Fatalf("EvaluateToolSelection(): %v", err)
+	}
+	if summary.PairedCases != 1 || summary.UnpairedRuns != 0 || math.Abs(summary.PairedPromptTokenReduction-0.5) > 1e-9 {
+		t.Fatalf("identical absent-mode arms must pair: %+v", summary)
+	}
+}
+
+// TestToolSelectionObservationV4RejectsFilteredVariant proves the filtered
 // naming is retired: the variant contract only accepts wide/production.
-func TestToolSelectionObservationV3RejectsFilteredVariant(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+func TestToolSelectionObservationV4RejectsFilteredVariant(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	observation.Variant = ToolSelectionVariant("filtered")
 	if err := observation.Validate(); err == nil {
 		t.Fatal("legacy filtered variant must be rejected")
@@ -197,10 +296,10 @@ func TestToolSelectionObservationV3RejectsFilteredVariant(t *testing.T) {
 	}
 }
 
-// TestToolSelectionObservationV3RequiresComparisonIdentity proves the v3
+// TestToolSelectionObservationV4RequiresComparisonIdentity proves the v4
 // comparison identity fields are mandatory: comparisonFingerprint,
 // sharedToolNames and baselineOnlyToolNames.
-func TestToolSelectionObservationV3RequiresComparisonIdentity(t *testing.T) {
+func TestToolSelectionObservationV4RequiresComparisonIdentity(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*ToolSelectionObservation)
@@ -225,46 +324,46 @@ func TestToolSelectionObservationV3RequiresComparisonIdentity(t *testing.T) {
 	}
 	for _, current := range tests {
 		t.Run(current.name, func(t *testing.T) {
-			observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+			observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 			current.mutate(&observation)
 			if err := observation.Validate(); err == nil {
-				t.Fatalf("v3 observation with %s must fail", current.name)
+				t.Fatalf("v4 observation with %s must fail", current.name)
 			}
 		})
 	}
-	if err := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code").Validate(); err != nil {
-		t.Fatalf("complete v3 observation must pass: %v", err)
+	if err := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code").Validate(); err != nil {
+		t.Fatalf("complete v4 observation must pass: %v", err)
 	}
 }
 
-// TestToolSelectionObservationV3AllowsEmptyReasoningEffort：基础校验不再强制
+// TestToolSelectionObservationV4AllowsEmptyReasoningEffort：基础校验不再强制
 // ReasoningEffort 非空，完整 v2 Observation 可以 Validate。
-func TestToolSelectionObservationV3AllowsEmptyReasoningEffort(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+func TestToolSelectionObservationV4AllowsEmptyReasoningEffort(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	observation.ReasoningEffort = ""
 	if err := observation.Validate(); err != nil {
-		t.Fatalf("v3 observation with empty reasoningEffort must validate: %v", err)
+		t.Fatalf("v4 observation with empty reasoningEffort must validate: %v", err)
 	}
 }
 
-// TestToolSelectionObservationV3UnknownDirtyValidatesButNeverPairs：
+// TestToolSelectionObservationV4UnknownDirtyValidatesButNeverPairs：
 // unknown+dirty 允许 Validate（本地 smoke），但禁止进入正式 paired
 // reduction。
-func TestToolSelectionObservationV3UnknownDirtyValidatesButNeverPairs(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+func TestToolSelectionObservationV4UnknownDirtyValidatesButNeverPairs(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	observation.ImplementationRevision = "unknown"
 	observation.ImplementationDirty = true
 	if err := observation.Validate(); err != nil {
-		t.Fatalf("v3 unknown+dirty observation must validate for local smoke: %v", err)
+		t.Fatalf("v4 unknown+dirty observation must validate for local smoke: %v", err)
 	}
 	cases := []ToolSelectionCase{{
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	wide.ImplementationRevision = "unknown"
 	wide.ImplementationDirty = true
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	filtered.ImplementationRevision = "unknown"
 	filtered.ImplementationDirty = true
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
@@ -276,33 +375,33 @@ func TestToolSelectionObservationV3UnknownDirtyValidatesButNeverPairs(t *testing
 	}
 }
 
-// TestToolSelectionObservationV3UnknownCleanRejected：revision=unknown 且
+// TestToolSelectionObservationV4UnknownCleanRejected：revision=unknown 且
 // ImplementationDirty=false 必须拒绝。
-func TestToolSelectionObservationV3UnknownCleanRejected(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+func TestToolSelectionObservationV4UnknownCleanRejected(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	observation.ImplementationRevision = "unknown"
 	observation.ImplementationDirty = false
 	if err := observation.Validate(); err == nil {
-		t.Fatal("v3 unknown+clean observation must be rejected")
+		t.Fatal("v4 unknown+clean observation must be rejected")
 	}
 }
 
-// TestToolSelectionObservationV3EmptyRevisionRejected：空 revision 必须拒绝。
-func TestToolSelectionObservationV3EmptyRevisionRejected(t *testing.T) {
+// TestToolSelectionObservationV4EmptyRevisionRejected：空 revision 必须拒绝。
+func TestToolSelectionObservationV4EmptyRevisionRejected(t *testing.T) {
 	for _, revision := range []string{"", "   "} {
-		observation := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+		observation := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 		observation.ImplementationRevision = revision
 		if err := observation.Validate(); err == nil {
-			t.Fatalf("v3 observation with revision %q must be rejected", revision)
+			t.Fatalf("v4 observation with revision %q must be rejected", revision)
 		}
 	}
 }
 
-// TestToolSelectionObservationV3RejectsProductionComparisonThatDoesNotMatchActualTools
+// TestToolSelectionObservationV4RejectsProductionComparisonThatDoesNotMatchActualTools
 // locks the observation seam: comparison metadata cannot describe a stale or
 // different production schema than the tools actually sent to the model.
-func TestToolSelectionObservationV3RejectsProductionComparisonThatDoesNotMatchActualTools(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionProduction, "production", 500, 400, "search_code")
+func TestToolSelectionObservationV4RejectsProductionComparisonThatDoesNotMatchActualTools(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionProduction, "production", 500, 400, "search_code")
 	observation.AvailableTools = []string{"search_code", "unexpected_tool"}
 	observation.ModelVisibleNames = append([]string(nil), observation.AvailableTools...)
 
@@ -311,11 +410,11 @@ func TestToolSelectionObservationV3RejectsProductionComparisonThatDoesNotMatchAc
 	}
 }
 
-// TestToolSelectionObservationV3RejectsWideComparisonThatDoesNotMatchActualTools
+// TestToolSelectionObservationV4RejectsWideComparisonThatDoesNotMatchActualTools
 // requires the wide arm to contain exactly the shared plus baseline-only Tool
 // names recorded by the comparison contract.
-func TestToolSelectionObservationV3RejectsWideComparisonThatDoesNotMatchActualTools(t *testing.T) {
-	observation := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+func TestToolSelectionObservationV4RejectsWideComparisonThatDoesNotMatchActualTools(t *testing.T) {
+	observation := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	observation.AvailableTools = []string{"search_code", "unexpected_tool"}
 	observation.ModelVisibleNames = append([]string(nil), observation.AvailableTools...)
 
@@ -327,7 +426,7 @@ func TestToolSelectionObservationV3RejectsWideComparisonThatDoesNotMatchActualTo
 func TestToolSelectionObservationV1RemainsReplayableWithoutNewFields(t *testing.T) {
 	observation := validToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	if err := observation.Validate(); err == nil {
-		t.Fatalf("v1 observation without schema version must be rejected by the v3 contract: %v", err)
+		t.Fatalf("v1 observation without schema version must be rejected by the v4 contract: %v", err)
 	}
 	observation.ToolProfileID = string(agentruntime.ToolProfileDiagnosis)
 	if err := observation.Validate(); err == nil {
@@ -340,8 +439,8 @@ func TestEvaluateToolSelectionPairsRejectMismatchedImplementationRevision(t *tes
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	filtered.ImplementationRevision = "other-revision"
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
@@ -361,8 +460,8 @@ func TestEvaluateToolSelectionPairsRejectMismatchedModelProfileFingerprint(t *te
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	filtered.ModelProfileFingerprint = strings.Repeat("cd", 32)
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
@@ -378,8 +477,8 @@ func TestEvaluateToolSelectionDirtyObservationsNeverEnterPairedReduction(t *test
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	wide.ImplementationDirty = true
 	filtered.ImplementationDirty = true
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
@@ -404,8 +503,8 @@ func TestEvaluateToolSelectionPairsMismatchedDirtyStates(t *testing.T) {
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	wide.ImplementationDirty = true
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
@@ -416,24 +515,24 @@ func TestEvaluateToolSelectionPairsMismatchedDirtyStates(t *testing.T) {
 	}
 }
 
-func TestEvaluateToolSelectionPairsIdenticalCleanV3Observations(t *testing.T) {
+func TestEvaluateToolSelectionPairsIdenticalCleanV4Observations(t *testing.T) {
 	cases := []ToolSelectionCase{{
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
 		t.Fatalf("EvaluateToolSelection(): %v", err)
 	}
 	if summary.PairedCases != 1 || summary.UnpairedRuns != 0 {
-		t.Fatalf("identical clean v3 arms must pair: paired=%d unpaired=%d", summary.PairedCases, summary.UnpairedRuns)
+		t.Fatalf("identical clean v4 arms must pair: paired=%d unpaired=%d", summary.PairedCases, summary.UnpairedRuns)
 	}
 	if math.Abs(summary.PairedPromptTokenReduction-0.5) > 1e-9 ||
 		math.Abs(summary.PairedToolSchemaTokenReduction-(500.0/900.0)) > 1e-9 ||
 		math.Abs(summary.PairedSchemaByteReduction-0.6) > 1e-9 {
-		t.Fatalf("clean v3 pair reductions = %v/%v/%v",
+		t.Fatalf("clean v4 pair reductions = %v/%v/%v",
 			summary.PairedPromptTokenReduction, summary.PairedToolSchemaTokenReduction, summary.PairedSchemaByteReduction)
 	}
 }
@@ -445,8 +544,8 @@ func TestEvaluateToolSelectionPairsRejectComparisonFingerprintDrift(t *testing.T
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	filtered.ComparisonFingerprint = "sha256:" + strings.Repeat("ff", 32)
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
@@ -465,8 +564,8 @@ func TestEvaluateToolSelectionPairsRejectBaselineOnlyDrift(t *testing.T) {
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	filtered := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	filtered := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	filtered.BaselineOnlyToolNames = []string{"another_tool"}
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, filtered})
 	if err != nil {
@@ -484,8 +583,8 @@ func TestEvaluateToolSelectionPairsRejectSharedToolNamesDrift(t *testing.T) {
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	production := validV3ToolSelectionObservation(ToolSelectionProduction, "production", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	production := validV4ToolSelectionObservation(ToolSelectionProduction, "production", 500, 400, "search_code")
 	production.SharedToolNames = []string{"search_code", "web_search"}
 	production.AvailableTools = append([]string(nil), production.SharedToolNames...)
 	production.ModelVisibleNames = append([]string(nil), production.AvailableTools...)
@@ -755,11 +854,11 @@ func TestVerifyToolSelectionComparabilityRejectsEmptyArms(t *testing.T) {
 }
 
 // failedToolSelectionObservationForTest 构造失败臂观测：ErrorType 非空时
-// 允许零 Usage（v3 合同），token 校准字段归零。
+// 允许零 Usage（v4 合同），token 校准字段归零。
 func failedToolSelectionObservationForTest(
 	variant ToolSelectionVariant, runID, caseID, errorType string,
 ) ToolSelectionObservation {
-	observation := validV3ToolSelectionObservation(variant, runID, 0, 100, "")
+	observation := validV4ToolSelectionObservation(variant, runID, 0, 100, "")
 	observation.CaseID = caseID
 	observation.ErrorType = errorType
 	observation.Usage = ModelUsage{}
@@ -782,8 +881,8 @@ func TestEvaluateToolSelectionProviderAccounting(t *testing.T) {
 		{DatasetVersion: "tools-v1", CaseID: "case-2", Scope: ToolSelectionGitHub,
 			UserQuery: "再次查找代码", ExpectedTool: "search_code"},
 	}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	production := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	production := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	failed := failedToolSelectionObservationForTest(ToolSelectionProduction, "failed-rate-limited", "case-2", "provider_rate_limited")
 	calibration := []ModelUsage{
 		{ModelCalls: 1, PromptTokens: 800, CompletionTokens: 20, TotalTokens: 820},
@@ -834,7 +933,7 @@ func TestEvaluateToolSelectionProviderAccountingLegacyModelError(t *testing.T) {
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
 	failed := failedToolSelectionObservationForTest(ToolSelectionProduction, "legacy-failure", "case-1", "model_error")
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, failed})
 	if err != nil {
@@ -860,8 +959,8 @@ func TestEvaluateToolSelectionProviderAccountingWithoutCalibration(t *testing.T)
 		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
 		UserQuery: "查找代码", ExpectedTool: "search_code",
 	}}
-	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
-	production := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	wide := validV4ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	production := validV4ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
 	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, production})
 	if err != nil {
 		t.Fatalf("EvaluateToolSelection(): %v", err)

@@ -246,13 +246,42 @@ func (c ToolSelectionCase) Validate() error {
 	return nil
 }
 
+// ToolSelectionToolChoiceMode 是评测请求的显式 tool choice 模式：required
+// 发送 WithToolChoice(schema.ToolChoiceForced)；absent 完全省略 ToolChoice
+// option（不是显式 auto）。模式由调用者显式选择并记录进 v4 Observation
+// 身份，绝不按 Provider 名硬编码。
+type ToolSelectionToolChoiceMode string
+
 const (
-	// ToolSelectionObservationV3 是当前评测数据合同：显式
+	ToolSelectionToolChoiceRequired ToolSelectionToolChoiceMode = "required"
+	ToolSelectionToolChoiceAbsent   ToolSelectionToolChoiceMode = "absent"
+)
+
+func (m ToolSelectionToolChoiceMode) Valid() bool {
+	return m == ToolSelectionToolChoiceRequired || m == ToolSelectionToolChoiceAbsent
+}
+
+// ParseToolSelectionToolChoiceMode 是 CLI 解析 seam：只接受精确的
+// required/absent，任何其他值（含空串与 auto）都 fail-closed 并点名合法值。
+func ParseToolSelectionToolChoiceMode(value string) (ToolSelectionToolChoiceMode, error) {
+	mode := ToolSelectionToolChoiceMode(value)
+	if !mode.Valid() {
+		return "", fmt.Errorf(
+			"invalid -tool-choice-mode %q: legal values are %q and %q",
+			value, ToolSelectionToolChoiceRequired, ToolSelectionToolChoiceAbsent,
+		)
+	}
+	return mode, nil
+}
+
+const (
+	// ToolSelectionObservationV4 是当前评测数据合同：显式
 	// observationSchemaVersion 加上完整身份（Profile 合同、模型可见名单、
-	// 模型 Profile 指纹、实现 revision/dirty）与两臂 comparison 身份
-	// （comparisonFingerprint/sharedToolNames/baselineOnlyToolNames）。历史
-	// v1（无版本字段）与 v2 资产一律拒绝，不保留兼容分支。
-	ToolSelectionObservationV3 = "tool-selection-observation-v3"
+	// 模型 Profile 指纹、实现 revision/dirty、toolChoiceMode）与两臂
+	// comparison 身份（comparisonFingerprint/sharedToolNames/
+	// baselineOnlyToolNames）。历史 v1（无版本字段）、v2 与 v3 资产一律拒绝
+	// 并标记 historical，不保留兼容分支。
+	ToolSelectionObservationV4 = "tool-selection-observation-v4"
 	// ToolSelectionEvaluationWideProfile 是 wide 实验臂的评测合同 ID，与
 	// agentruntime.ToolProfileEvaluationWide（evaluation-wide-v2）一致。
 	// wide baseline 是 conversation-default ∪ diagnosis-default 的并集，
@@ -262,36 +291,37 @@ const (
 )
 
 type ToolSelectionObservation struct {
-	DatasetVersion           string               `json:"datasetVersion"`
-	CaseID                   string               `json:"caseId"`
-	Variant                  ToolSelectionVariant `json:"variant"`
-	RunID                    string               `json:"runId"`
-	ObservationSchemaVersion string               `json:"observationSchemaVersion,omitempty"`
-	ModelProvider            string               `json:"modelProvider"`
-	ModelID                  string               `json:"modelId"`
-	ReasoningEffort          string               `json:"reasoningEffort"`
-	PromptVersion            string               `json:"promptVersion"`
-	MaxOutputTokens          int                  `json:"maxOutputTokens"`
-	ToolProfileID            string               `json:"toolProfileId,omitempty"`
-	ModelVisibleNames        []string             `json:"modelVisibleNames,omitempty"`
-	ModelProfileFingerprint  string               `json:"modelProfileFingerprint,omitempty"`
-	ImplementationRevision   string               `json:"implementationRevision,omitempty"`
-	ImplementationDirty      bool                 `json:"implementationDirty,omitempty"`
-	ComparisonFingerprint    string               `json:"comparisonFingerprint,omitempty"`
-	SharedToolNames          []string             `json:"sharedToolNames,omitempty"`
-	BaselineOnlyToolNames    []string             `json:"baselineOnlyToolNames,omitempty"`
-	AvailableTools           []string             `json:"availableTools"`
-	SelectedTool             string               `json:"selectedTool,omitempty"`
-	ToolCallCount            int                  `json:"toolCallCount"`
-	FinishReason             string               `json:"finishReason,omitempty"`
-	ModelText                string               `json:"modelText,omitempty"`
-	ToolSchemaHash           string               `json:"toolSchemaHash"`
-	ToolSchemaBytes          int                  `json:"toolSchemaBytes"`
-	BasePromptTokens         int                  `json:"basePromptTokens"`
-	ToolSchemaPromptTokens   int                  `json:"toolSchemaPromptTokens"`
-	Usage                    ModelUsage           `json:"usage"`
-	DurationMillis           int64                `json:"durationMillis"`
-	ErrorType                string               `json:"errorType,omitempty"`
+	DatasetVersion           string                      `json:"datasetVersion"`
+	CaseID                   string                      `json:"caseId"`
+	Variant                  ToolSelectionVariant        `json:"variant"`
+	RunID                    string                      `json:"runId"`
+	ObservationSchemaVersion string                      `json:"observationSchemaVersion,omitempty"`
+	ModelProvider            string                      `json:"modelProvider"`
+	ModelID                  string                      `json:"modelId"`
+	ReasoningEffort          string                      `json:"reasoningEffort"`
+	PromptVersion            string                      `json:"promptVersion"`
+	MaxOutputTokens          int                         `json:"maxOutputTokens"`
+	ToolProfileID            string                      `json:"toolProfileId,omitempty"`
+	ModelVisibleNames        []string                    `json:"modelVisibleNames,omitempty"`
+	ModelProfileFingerprint  string                      `json:"modelProfileFingerprint,omitempty"`
+	ImplementationRevision   string                      `json:"implementationRevision,omitempty"`
+	ImplementationDirty      bool                        `json:"implementationDirty,omitempty"`
+	ToolChoiceMode           ToolSelectionToolChoiceMode `json:"toolChoiceMode"`
+	ComparisonFingerprint    string                      `json:"comparisonFingerprint,omitempty"`
+	SharedToolNames          []string                    `json:"sharedToolNames,omitempty"`
+	BaselineOnlyToolNames    []string                    `json:"baselineOnlyToolNames,omitempty"`
+	AvailableTools           []string                    `json:"availableTools"`
+	SelectedTool             string                      `json:"selectedTool,omitempty"`
+	ToolCallCount            int                         `json:"toolCallCount"`
+	FinishReason             string                      `json:"finishReason,omitempty"`
+	ModelText                string                      `json:"modelText,omitempty"`
+	ToolSchemaHash           string                      `json:"toolSchemaHash"`
+	ToolSchemaBytes          int                         `json:"toolSchemaBytes"`
+	BasePromptTokens         int                         `json:"basePromptTokens"`
+	ToolSchemaPromptTokens   int                         `json:"toolSchemaPromptTokens"`
+	Usage                    ModelUsage                  `json:"usage"`
+	DurationMillis           int64                       `json:"durationMillis"`
+	ErrorType                string                      `json:"errorType,omitempty"`
 }
 
 func (o ToolSelectionObservation) Validate() error {
@@ -345,76 +375,82 @@ func (o ToolSelectionObservation) Validate() error {
 	if o.ErrorType == "" && (o.Usage.ModelCalls != 1 || o.Usage.PromptTokens <= 0 || o.Usage.TotalTokens <= 0) {
 		return errors.New("successful observation requires one-call provider usage")
 	}
-	// 数据合同：v3 是唯一支持的合同，不保留 v1/v2 兼容分支。历史资产必须
+	// 数据合同：v4 是唯一支持的合同，不保留 v1/v2/v3 兼容分支。历史资产必须
 	// 标记 historical，不得进入正式归约。
-	if o.ObservationSchemaVersion != ToolSelectionObservationV3 {
+	if o.ObservationSchemaVersion != ToolSelectionObservationV4 {
 		return fmt.Errorf(
-			"unsupported observationSchemaVersion %q: the tool selection evaluator only accepts %q; historical v1/v2 observations must be marked historical and excluded from formal reduction",
-			o.ObservationSchemaVersion, ToolSelectionObservationV3,
+			"unsupported observationSchemaVersion %q: the tool selection evaluator only accepts %q; historical v1/v2/v3 observations must be marked historical and excluded from formal reduction",
+			o.ObservationSchemaVersion, ToolSelectionObservationV4,
 		)
 	}
-	if err := o.validateV3Identity(); err != nil {
+	if !o.ToolChoiceMode.Valid() {
+		return fmt.Errorf(
+			"invalid toolChoiceMode %q: legal values are %q and %q",
+			o.ToolChoiceMode, ToolSelectionToolChoiceRequired, ToolSelectionToolChoiceAbsent,
+		)
+	}
+	if err := o.validateV4Identity(); err != nil {
 		return err
 	}
 	return nil
 }
 
-// validateV3Identity 强制执行 v3 数据合同。两个实验臂的 Profile 合同不同：
+// validateV4Identity 强制执行 v4 数据合同。两个实验臂的 Profile 合同不同：
 // production 必须是生产 diagnosis-default，wide 必须是评测合同
 // evaluation-wide-v2；不能互相伪装。两臂都必须记录模型可见名单（与真正
 // 发送的 AvailableTools 完全一致）和合法的 SHA-256 模型 Profile 指纹。
 // implementationRevision 规则：空值拒绝；unknown 且 clean 拒绝（unknown 且
-// dirty 仅限本地 smoke）。v3 额外要求两臂记录 comparison 身份：
+// dirty 仅限本地 smoke）。v4 额外要求两臂记录 comparison 身份：
 // comparisonFingerprint 必须是合法 SHA-256，sharedToolNames 非空且与
 // baselineOnlyToolNames 不相交。
-func (o ToolSelectionObservation) validateV3Identity() error {
+func (o ToolSelectionObservation) validateV4Identity() error {
 	switch o.Variant {
 	case ToolSelectionWide:
 		if o.ToolProfileID != ToolSelectionEvaluationWideProfile {
-			return fmt.Errorf("v3 wide toolProfileId = %q, want %q",
+			return fmt.Errorf("v4 wide toolProfileId = %q, want %q",
 				o.ToolProfileID, ToolSelectionEvaluationWideProfile)
 		}
 	case ToolSelectionProduction:
 		if o.ToolProfileID != string(agentruntime.ToolProfileDiagnosis) {
-			return fmt.Errorf("v3 production toolProfileId = %q, want %q",
+			return fmt.Errorf("v4 production toolProfileId = %q, want %q",
 				o.ToolProfileID, agentruntime.ToolProfileDiagnosis)
 		}
 	default:
 		return fmt.Errorf("invalid tool selection variant %q", o.Variant)
 	}
 	if len(o.ModelVisibleNames) == 0 {
-		return errors.New("v3 observation requires modelVisibleNames")
+		return errors.New("v4 observation requires modelVisibleNames")
 	}
 	for _, name := range o.ModelVisibleNames {
 		if !toolNamePattern.MatchString(name) {
-			return fmt.Errorf("v3 observation has invalid modelVisibleName %q", name)
+			return fmt.Errorf("v4 observation has invalid modelVisibleName %q", name)
 		}
 	}
 	if !contextgovernance.IsSHA256Hex(o.ModelProfileFingerprint) {
-		return errors.New("v3 observation requires a valid SHA-256 modelProfileFingerprint")
+		return errors.New("v4 observation requires a valid SHA-256 modelProfileFingerprint")
 	}
 	revision := strings.TrimSpace(o.ImplementationRevision)
 	if revision == "" {
-		return errors.New("v3 observation requires an implementationRevision")
+		return errors.New("v4 observation requires an implementationRevision")
 	}
 	if revision == "unknown" && !o.ImplementationDirty {
-		return errors.New("v3 observation with unknown revision must set implementationDirty=true (local smoke only)")
+		return errors.New("v4 observation with unknown revision must set implementationDirty=true (local smoke only)")
 	}
 	if !slices.Equal(o.ModelVisibleNames, o.AvailableTools) {
-		return errors.New("v3 modelVisibleNames must equal the actual availableTools sent to the model")
+		return errors.New("v4 modelVisibleNames must equal the actual availableTools sent to the model")
 	}
 	if err := validateToolComparisonIdentity(
 		o.ComparisonFingerprint, o.SharedToolNames, o.BaselineOnlyToolNames,
 	); err != nil {
-		return fmt.Errorf("v3 observation comparison identity: %w", err)
+		return fmt.Errorf("v4 observation comparison identity: %w", err)
 	}
 	if o.Variant == ToolSelectionProduction && !equalToolNameSets(o.AvailableTools, o.SharedToolNames) {
-		return errors.New("v3 production availableTools must equal sharedToolNames")
+		return errors.New("v4 production availableTools must equal sharedToolNames")
 	}
 	if o.Variant == ToolSelectionWide {
 		expected := append(append([]string(nil), o.SharedToolNames...), o.BaselineOnlyToolNames...)
 		if !equalToolNameSets(o.AvailableTools, expected) {
-			return errors.New("v3 wide availableTools must equal sharedToolNames plus baselineOnlyToolNames")
+			return errors.New("v4 wide availableTools must equal sharedToolNames plus baselineOnlyToolNames")
 		}
 	}
 	return nil
@@ -610,17 +646,19 @@ func accumulateProviderUsage(accounting *ToolSelectionProviderAccounting, usage 
 }
 
 // sameObservationIdentity 要求两个实验臂属于同一观测合同与同一实现身份：
-// observationSchemaVersion、模型 Profile 指纹、实现 revision、dirty 状态
-// 与 comparison 身份（comparisonFingerprint/sharedToolNames/
-// baselineOnlyToolNames）必须一致，且两边都不能是 dirty。dirty 观测只允许
-// 生成单臂统计供本地 smoke，不得计入正式 paired reduction，也不得贡献任何
-// paired 归约指标。ToolProfileID 刻意不参与比较：wide/production 本来就是
-// 不同评测合同，各自的 v3 Validate 已分别校验其合同 ID。
+// observationSchemaVersion、模型 Profile 指纹、实现 revision、dirty 状态、
+// toolChoiceMode（required/absent 请求模式）与 comparison 身份
+// （comparisonFingerprint/sharedToolNames/baselineOnlyToolNames）必须一致，
+// 且两边都不能是 dirty。dirty 观测只允许生成单臂统计供本地 smoke，不得计入
+// 正式 paired reduction，也不得贡献任何 paired 归约指标。ToolProfileID 刻意
+// 不参与比较：wide/production 本来就是不同评测合同，各自的 v4 Validate 已
+// 分别校验其合同 ID。
 func sameObservationIdentity(wide, production ToolSelectionObservation) bool {
 	if wide.ObservationSchemaVersion != production.ObservationSchemaVersion ||
 		wide.ModelProfileFingerprint != production.ModelProfileFingerprint ||
 		wide.ImplementationRevision != production.ImplementationRevision ||
 		wide.ImplementationDirty != production.ImplementationDirty ||
+		wide.ToolChoiceMode != production.ToolChoiceMode ||
 		wide.ComparisonFingerprint != production.ComparisonFingerprint ||
 		!slices.Equal(wide.SharedToolNames, production.SharedToolNames) ||
 		!slices.Equal(wide.BaselineOnlyToolNames, production.BaselineOnlyToolNames) {
