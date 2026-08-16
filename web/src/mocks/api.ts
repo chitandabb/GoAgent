@@ -2,7 +2,7 @@
 // 目录删除，并把 src/shared/api/index.ts 换成 fetch 实现。
 import type {
   AdminDataSource,
-  AdminUser,
+  MockAdminUser,
   CaseCard,
   CatalogEntry,
   CatalogVersion,
@@ -68,7 +68,7 @@ interface Store {
   messages: Record<string, ChatMessage[]>
   knowledgeDocs: KnowledgeDoc[]
   caseCards: CaseCard[]
-  adminUsers: AdminUser[]
+  adminUsers: MockAdminUser[]
   adminDataSources: AdminDataSource[]
   catalogVersions: CatalogVersion[]
   catalogEntries: CatalogEntry[]
@@ -873,7 +873,7 @@ export async function publishCatalogVersion(versionId: string): Promise<void> {
 
 // ---------------------------------------------------------------- 管理
 
-export async function listUsers(): Promise<AdminUser[]> {
+export async function listUsers(): Promise<MockAdminUser[]> {
   await sleep(300)
   return clone(store.adminUsers)
 }
@@ -891,7 +891,7 @@ function hasOtherActiveAdmin(excludeUserId: string): boolean {
   )
 }
 
-export async function createUser(input: CreateUserInput): Promise<AdminUser> {
+export async function createUser(input: CreateUserInput): Promise<MockAdminUser> {
   await sleep(400)
   requireAdmin()
   const username = input.username.trim()
@@ -904,7 +904,7 @@ export async function createUser(input: CreateUserInput): Promise<AdminUser> {
   if (store.adminUsers.some((u) => u.username === username)) {
     throw new ApiError(40901, '用户名已存在')
   }
-  const user: AdminUser = {
+  const user: MockAdminUser = {
     id: `u-${Date.now().toString(36)}`,
     username,
     displayName: input.displayName.trim(),
