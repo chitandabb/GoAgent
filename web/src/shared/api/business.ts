@@ -182,5 +182,18 @@ export function listTurnEvents(
 }
 
 export function listConversationMessages(conversationId: string): Promise<ConversationMessage[]> {
-  return getConversationMessages(conversationId).then((page) => page.items)
+  // 后端消息分页为 seq > afterSeq 升序（无“最新 N 条”查询），
+  // 逐页拉全以保证聊天界面始终包含最新消息；上限 20 页 × 100 条。
+  const load = async (): Promise<ConversationMessage[]> => {
+    const all: ConversationMessage[] = []
+    let afterSeq = 0
+    for (let index = 0; index < 20; index += 1) {
+      const page = await getConversationMessages(conversationId, afterSeq, 100)
+      all.push(...page.items)
+      afterSeq = page.nextAfterSeq
+      if (!page.hasMore) break
+    }
+    return all
+  }
+  return load()
 }

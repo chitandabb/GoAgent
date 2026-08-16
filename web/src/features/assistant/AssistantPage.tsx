@@ -64,12 +64,18 @@ export function AssistantPage() {
     if (!activeId && conversationList.length > 0) setActiveId(conversationList[0].id)
   }, [activeId, conversationList])
 
-  // 切换会话 / 卸载时停止旧 turn 订阅
+  // 切换会话 / 卸载时停止旧 turn 订阅，并清理属于旧会话的附件与 turn 状态
   useEffect(() => {
     return () => {
       unsubscribeRef.current?.()
       unsubscribeRef.current = null
     }
+  }, [activeId])
+
+  useEffect(() => {
+    setUploads([])
+    setTurn(null)
+    lastTurnRef.current = null
   }, [activeId])
 
   const messages = useQuery({
@@ -294,11 +300,25 @@ export function AssistantPage() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
           {orderedMessages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-              <p className="text-[17px] font-semibold text-ink">知识助手</p>
-              <p className="max-w-md text-[13px] leading-[1.7] text-ink-48">
-                解释术语、产品功能与常见问题，也可结合你上传的截图、日志与工单上下文分析。
-                企业知识库优先；回答附引用来源。
-              </p>
+              {messages.isError ? (
+                <>
+                  <p className="text-[15px] font-semibold text-ink">消息读取失败</p>
+                  <p className="max-w-md text-[13px] leading-[1.7] text-ink-48">
+                    {messages.error instanceof Error ? messages.error.message : '请稍后重试'}
+                  </p>
+                  <Button size="sm" variant="neutral" onClick={() => void messages.refetch()}>
+                    重新加载
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <p className="text-[17px] font-semibold text-ink">知识助手</p>
+                  <p className="max-w-md text-[13px] leading-[1.7] text-ink-48">
+                    解释术语、产品功能与常见问题，也可结合你上传的截图、日志与工单上下文分析。
+                    企业知识库优先；回答附引用来源。
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             <div className="flex flex-col gap-5">
