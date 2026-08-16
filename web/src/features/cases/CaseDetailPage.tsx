@@ -32,7 +32,11 @@ export function CaseDetailPage() {
     queries: recentEntries.map((entry) => ({
       queryKey: ['task', entry.taskId],
       queryFn: () => api.getTask(entry.taskId),
-      refetchInterval: 5000,
+      refetchInterval: (query: { state: { data?: { status: string } } }) => {
+        const current = query.state.data
+        return current && ['pending', 'running', 'cancel_requested'].includes(current.status) ? 5000 : false
+      },
+      retry: false,
     })),
   })
 

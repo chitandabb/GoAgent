@@ -5,7 +5,7 @@ import { RotateCcw } from 'lucide-react'
 import { useAuth } from '@/app/auth'
 import * as api from '@/shared/api'
 import { ApiError } from '@/shared/api'
-import type { SseConnectionState, TaskEvent } from '@/shared/api/m1-types'
+import type { DiagnosisReportEvidence, SseConnectionState, TaskEvent } from '@/shared/api/m1-types'
 import { taskStatusMeta } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
@@ -26,6 +26,29 @@ const tabs = [
   { value: 'evidence', label: '证据明细' },
   { value: 'tools', label: '工具执行' },
 ]
+
+const evidenceSourceLabels: Record<DiagnosisReportEvidence['sourceType'], string> = {
+  case_snapshot: '工单快照',
+  schema_catalog: 'Schema Catalog',
+  sql_object_definition: 'SQL 对象定义',
+  sql_query: 'SQL 查询',
+  code_search: '代码检索',
+  attachment: '附件',
+  knowledge_chunk: '知识片段',
+  web: '网页',
+}
+
+const evidenceSupportLabels: Record<DiagnosisReportEvidence['supportType'], string> = {
+  supports: '支持',
+  contradicts: '反驳',
+  context: '背景',
+}
+
+const evidenceValidityLabels: Record<DiagnosisReportEvidence['validityStatus'], string> = {
+  valid: '有效',
+  superseded: '已取代',
+  invalid: '无效',
+}
 
 function mergeEvents(current: TaskEvent[], incoming: TaskEvent): TaskEvent[] {
   if (current.some((event) => event.seq === incoming.seq)) return current
@@ -60,6 +83,12 @@ export function TaskDetailPage() {
     queryKey: ['external-case', task.data?.externalCaseId],
     queryFn: () => api.getExternalCase(task.data!.externalCaseId),
     enabled: !!task.data?.externalCaseId,
+    retry: false,
+  })
+  const report = useQuery({
+    queryKey: ['report', taskId],
+    queryFn: () => api.getReportByTask(taskId),
+    enabled: tab === 'evidence' && task.data?.reportAvailable === true,
     retry: false,
   })
 
@@ -222,13 +251,67 @@ export function TaskDetailPage() {
               )}
               <EventTimeline events={events} live={active && connection !== 'closed' && connection !== 'failed'} />
             </Card>
+          ) : tab === 'evidence' ? (
+            <Card className="p-6">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <CardTitle>证据明细</CardTitle>
+                <span className="text-[11px] text-ink-48">
+                  来自正式报告的声明与溯源元数据，不展示原始证据正文
+                </span>
+              </div>
+              {!value.reportAvailable ? (
+                <EmptyState
+                  title="报告尚未生成"
+                  description="证据明细来自正式诊断报告；报告生成后此处会自动展示。"
+                />
+              ) : report.isPending ? (
+                <PageLoading />
+              ) : report.isError || !report.data ? (
+                <EmptyState
+                  title="证据读取失败"
+                  description={report.error instanceof Error ? report.error.message : '请稍后重试'}
+                  action={<Button size="sm" variant="neutral" onClick={() => void report.refetch()}>重新加载</Button>}
+                />
+              ) : report.data.evidence.length === 0 ? (
+                <p className="py-8 text-center text-[13px] text-ink-48">报告中没有任何证据声明</p>
+              ) : (
+                <ol className="flex flex-col gap-2.5">
+                  {report.data.evidence.map((evidence, index) => (
+                    <li key={`${evidence.evidenceId}-${index}`} className="rounded-utility border border-hairline bg-canvas px-4 py-3">
+                      <div className="flex items-start gap-3">
+                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-info-soft text-[10px] font-semibold text-primary">
+                          {index + 1}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge tone="gray">{evidenceSourceLabels[evidence.sourceType]}</Badge>
+                            <Badge tone={evidence.supportType === 'supports' ? 'green' : evidence.supportType === 'contradicts' ? 'red' : 'gray'}>
+                              {evidenceSupportLabels[evidence.supportType]}
+                            </Badge>
+                            {evidence.validityStatus !== 'valid' && (
+                              <Badge tone="orange">{evidenceValidityLabels[evidence.validityStatus]}</Badge>
+                            )}
+                          </div>
+                          <p className="mt-1.5 text-[13px] font-semibold leading-[1.55] text-ink">{evidence.claim}</p>
+                          <p className="mt-1 break-all text-[11px] leading-[1.55] text-ink-48">
+                            {evidence.sourceTool} · {evidence.sourceRef}
+                            {evidence.location ? ` · ${evidence.location}` : ''}
+                          </p>
+                          {evidence.redactionStatus === 'redacted' && (
+                            <p className="mt-1 text-[11px] text-warn">该证据已脱敏</p>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </Card>
           ) : (
             <Card className="p-6">
               <EmptyState
-                title={tab === 'evidence' ? '证据明细接口尚未开放' : '工具执行接口尚未开放'}
-                description={tab === 'evidence'
-                  ? '当前只能在正式报告中读取有序证据声明元数据，不能读取或伪造原始证据内容。'
-                  : '当前后端未提供独立工具执行列表，页面不会继续显示 Mock 记录。'}
+                title="工具执行接口尚未开放"
+                description="当前后端未提供独立工具执行列表，页面不会继续显示 Mock 记录。"
               />
             </Card>
           )}

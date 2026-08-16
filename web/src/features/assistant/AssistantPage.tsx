@@ -11,7 +11,7 @@ import { useToast } from '@/shared/ui/Toast'
 import { AttachmentPreviewDialog, useAttachmentPreview } from '@/shared/ui/AttachmentPreview'
 import { MessageBubble, fmtBytes } from './MessageBubble'
 
-type TurnPhase = 'queued' | 'running' | 'retry' | 'failed'
+type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'failed'
 
 interface UploadEntry {
   key: string
@@ -21,7 +21,13 @@ interface UploadEntry {
   error?: string
 }
 
+interface LastTurn {
+  content: string
+  attachments: { attachmentId: string }[]
+}
+
 const turnPhaseMeta: Record<TurnPhase, { label: string; tone: 'gray' | 'info' | 'warn' }> = {
+  submitting: { label: '发送中…', tone: 'gray' },
   queued: { label: '排队中', tone: 'gray' },
   running: { label: '助手思考中', tone: 'info' },
   retry: { label: '重试中', tone: 'warn' },
@@ -44,6 +50,7 @@ export function AssistantPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
+  const lastTurnRef = useRef<LastTurn | null>(null)
   const preview = useAttachmentPreview()
 
   const conversations = useQuery({
@@ -118,18 +125,11 @@ export function AssistantPage() {
     })
   }
 
-  const send = async () => {
-    if (!activeId || !input.trim() || turn) return
-    const text = input.trim()
-    const pending = uploads
-    if (pending.some((entry) => entry.status !== 'ready')) return
-    setInput('')
-    setUploads([])
-    const attachments = pending
-      .filter((entry): entry is UploadEntry & { attachmentId: string } => Boolean(entry.attachmentId))
-      .map((entry) => ({ attachmentId: entry.attachmentId }))
+  const submitTurn = async (content: string, attachments: { attachmentId: string }[]) => {
+    if (!activeId || turn) return
+    setTurn({ turnId: '', phase: 'submitting' })
     try {
-      const result = await api.appendTurn(activeId, { content: text, attachments }, api.createIdempotencyKey())
+      const result = await api.appendTurn(activeId, { content, attachments }, api.createIdempotencyKey())
       const turnId = result.turnId
       setTurn({
         turnId,
@@ -195,6 +195,26 @@ export function AssistantPage() {
     }
   }
 
+  const send = async () => {
+    if (!activeId || !input.trim() || turn) return
+    const text = input.trim()
+    const pending = uploads
+    if (pending.some((entry) => entry.status !== 'ready')) return
+    setInput('')
+    setUploads([])
+    const attachments = pending
+      .filter((entry): entry is UploadEntry & { attachmentId: string } => Boolean(entry.attachmentId))
+      .map((entry) => ({ attachmentId: entry.attachmentId }))
+    lastTurnRef.current = { content: text, attachments }
+    void submitTurn(text, attachments)
+  }
+
+  const retryTurn = () => {
+    const last = lastTurnRef.current
+    if (!activeId || !last || turn) return
+    void submitTurn(last.content, last.attachments)
+  }
+
   const openCitation = (citation: ConversationCitation) => {
     if (citation.sourceType === 'web') return
     if (citation.sourceType === 'attachment') {
@@ -212,7 +232,11 @@ export function AssistantPage() {
     if (chunkId) preview.openPreview({ kind: 'knowledge', chunkId })
   }
 
-  const readyToSend = Boolean(activeId && input.trim() && uploads.every((entry) => entry.status !== 'uploading'))
+  const readyToSend = Boolean(
+    activeId &&
+      input.trim() &&
+      uploads.every((entry) => entry.status === 'ready'),
+  )
 
   return (
     <div className="flex h-[calc(100dvh-11.5rem)] min-h-[520px] gap-5">
@@ -293,7 +317,12 @@ export function AssistantPage() {
                       <Badge tone="red">{turnPhaseMeta[turn.phase].label}</Badge>
                     )}
                     {turn.phase === 'failed' && turn.failure && (
-                      <span className="text-[12px] text-danger">{turn.failure}</span>
+                      <span className="max-w-[420px] text-[12px] text-danger">{turn.failure}</span>
+                    )}
+                    {turn.phase === 'failed' && lastTurnRef.current && (
+                      <Button size="sm" variant="ghost" onClick={retryTurn}>
+                        重试
+                      </Button>
                     )}
                   </div>
                 </div>
