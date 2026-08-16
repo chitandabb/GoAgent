@@ -19,6 +19,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/repository"
 
+	"github.com/BurntSushi/toml"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
@@ -408,6 +409,34 @@ func testAgentConfig() config.Config {
 				"test": {Provider: "dashscope", Model: "fixture-v1"},
 			},
 		}},
+	}
+}
+
+// TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity 证明仓库生产
+// 配置的 [models.chat] activeProfile 身份（provider/model）会原样进入
+// Agent Runtime：硬切后必须是 opencode-go / deepseek-v4-flash。模型工厂使用
+// stub，不创建任何真实 Provider。
+func TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity(t *testing.T) {
+	var decoded config.Config
+	path := filepath.Join("..", "..", "config", "mesguard.toml")
+	if _, err := toml.DecodeFile(path, &decoded); err != nil {
+		t.Fatalf("DecodeFile(%q): %v", path, err)
+	}
+	cfg := testAgentConfig()
+	cfg.Models.Chat = decoded.Models.Chat
+	runtime, err := buildAgentRuntime(
+		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{
+			chatModel: func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+				return stubAgentChatModel{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildAgentRuntime(): %v", err)
+	}
+	if runtime.modelProvider != "opencode-go" || runtime.modelID != "deepseek-v4-flash" {
+		t.Fatalf("agent runtime identity = %q/%q, want opencode-go/deepseek-v4-flash",
+			runtime.modelProvider, runtime.modelID)
 	}
 }
 

@@ -64,10 +64,11 @@ Conversation 与 Diagnosis 各有一个默认 Tool Profile。`ToolProfile` 是�
 
 独立工作台会话使用单独的轻量 Conversation Agent Runtime。它加载持久化的 user/assistant
 历史和当前消息引用，并使用部署内固定 Conversation Tool Profile；case/task/attachment 引用决定执行期 `RunAccess` 的 Permission 与对应资源 Grant，Conversation 的 case/task/attachment/create Tool 执行前先校验具体 `ResourceGrant`，`CommandContext`/owner 校验保留为第二层；Diagnosis 已从创建时冻结的 `InvestigationPolicy` 派生 Grant（Policy ∩ 当前 ceiling），同样不改变
-Tool Schema。`turn_context` 已接线：本轮安全投影（case/task/report/attachment ID、引用类型、
-附件展示元数据、授权只读 `dataSourceId`）追加到当前 user 原文尾部（原文 + 换行 + `<turn_context>`
-块），历史消息保留各自已持久化引用且引用同样位于该消息正文尾部，当前运行的数据源授权绝不复制到
-历史消息。`create_diagnosis_task`
+Tool Schema。`turn_context` 已接线：每条 user 消息都把自身已持久化的
+case/task/report/attachment 引用（ID、类型与附件展示元数据）投影为稳定的尾部
+`<turn_context>`；部署级只读 `dataSourceId` 在同一 Prompt Epoch 内保持一致，因此一条消息从当前轮
+进入历史后模型可见字节不再变化。这个投影只提供模型上下文，绝不授权执行；当前轮按最新消息引用
+派生并绑定的 `RunAccess` 仍是唯一执行期权威。`create_diagnosis_task`
 始终属于 Conversation Profile，但只有唯一 selected case 且直接用户消息明确请求诊断时才能通过执行期命令 Guard。该 Runtime 返回最终
 回答并由会话服务持久化助手消息，但不会把长耗时 Diagnosis Worker、原始 Tool 结果或模型推理
 过程写入会话历史。`get_diagnosis_task_status` 始终在 Conversation Profile 中，只有当前消息
@@ -99,7 +100,7 @@ Tool Middleware 再向本轮 Tool JSON 添加后端生成的 `citationSources`�
 `[source:knowledge:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222]`；
 尖括号、引号和反引号不属于语法。Runner 只接受本轮候选集中
 出现的 ref，并按答案首次出现位置去重、最多保留 20 项。来源 Tool 成功但主答案零 marker 时，
-`conversation-v7` 可触发一次同模型、Tool-free、严格 JSON 的受控修复；正常答案零额外调用，修复
+`conversation-v8` 可触发一次同模型、Tool-free、严格 JSON 的受控修复；正常答案零额外调用，修复
 失败仍保持 `insufficient_evidence`，修复 usage 进入原 Token 预算。不能仅凭附件 UUID、Chunk UUID 或任意
 URL 扩权，也不会把“检索到但未被答案引用”的来源冒充引用落库。若原 Tool 结果或加入来源后的
 结果超过字节预算，则不暴露该批来源；未知/篡改 marker 使回合失败。Worker 最终把回答和实际
@@ -174,7 +175,7 @@ Permission、资源不在 Grant 均 fail-closed。Diagnosis 的 RunAccess 由冻
 
 ### Prompt：可配置指令
 
-`diagnosis-system.md` 与 `report-contract.md` 是当前生产 Runner/Evidence 链路使用的 Prompt 资产：前者是生产 Agent 系统指令（Diagnosis 与 Generic paired 两臂共用），后者是结构化报告契约。`evaluation-baseline.md` 仅保留给历史评测资产或历史对照，不参与当前 Generic paired Runner 的 Prompt 装配（`BaselineInstruction` 仍是遗留配置并受构造校验保护，但不再进入模型 Prompt；本切片不处理该死配置的删除）。当前 paired baseline 与 experiment 使用相同的生产 `SystemInstruction`、相同的 ticket-diagnosis 入口 Skill 全文、相同的 `task_context` 与模型参数，唯一对照变量是最终 Tool Profile/Schema。应用启动时读取并校验上述文件。Diagnosis 把同一任务内稳定的 Policy 安全投影（policySchemaVersion、有效权限、当前工单 ID 与授权数据源 id/role/safetyMode）作为 `task_context` 追加到 system 指令最尾部，同一任务每轮 Evidence Gate 重试保持一致；Evidence Orchestrator 把上一轮报告和门禁缺口追加到 user 输入。Conversation 的 `turn_context` 已接线：当前消息安全投影（引用 ID/类型、附件展示元数据、授权只读 `dataSourceId`）追加到当前 user 原文尾部，历史消息保留各自已持久化引用且引用位于该消息正文尾部，本轮数据源授权不复制到历史消息，Token 预算/摘要/连续 Tail/PromptManifest 统计追加后的内容。Diagnosis 的上下文 preflight 统计与真实调用完全相同的 `task_context`（同一 system 指令投影）。临时依赖健康、凭证、连接地址和原始附件内容不进入稳定前缀。
+`diagnosis-system.md` 与 `report-contract.md` 是当前生产 Runner/Evidence 链路使用的 Prompt 资产：前者是生产 Agent 系统指令（Diagnosis 与 Generic paired 两臂共用），后者是结构化报告契约。`evaluation-baseline.md` 仅保留给历史评测资产或历史对照，不参与当前 Generic paired Runner 的 Prompt 装配（`BaselineInstruction` 仍是遗留配置并受构造校验保护，但不再进入模型 Prompt；本切片不处理该死配置的删除）。当前 paired baseline 与 experiment 使用相同的生产 `SystemInstruction`、相同的 ticket-diagnosis 入口 Skill 全文、相同的 `task_context` 与模型参数，唯一对照变量是最终 Tool Profile/Schema。应用启动时读取并校验上述文件。Diagnosis 把同一任务内稳定的 Policy 安全投影（policySchemaVersion、有效权限、当前工单 ID 与授权数据源 id/role/safetyMode）作为 `task_context` 追加到 system 指令最尾部，同一任务每轮 Evidence Gate 重试保持一致；Evidence Orchestrator 把上一轮报告和门禁缺口追加到 user 输入。Conversation 的 `turn_context` 已接线：每条 user 消息始终用自身持久化引用加部署级 SQL 数据源上下文渲染同一种尾部投影，从当前轮进入历史后保持字节稳定；投影不授予权限，执行期只信任当前 `RunAccess`。Token 预算、摘要、连续 Tail 与 PromptManifest 统计同一份渲染结果。Diagnosis 的上下文 preflight 统计与真实调用完全相同的 `task_context`（同一 system 指令投影）。临时依赖健康、凭证、连接地址和原始附件内容不进入稳定前缀。
 
 `promptVersion` 由发布者在修改 Prompt 后显式递增，用于报告和评测追溯；它不是模型版本，也不自动根据文件内容生成。当前工程阶段只保证“文件配置、启动失败保护、重启生效和版本字段预留”，未来若接入 Nacos 或独立 Prompt 平台，应继续向 Runner 注入同一组已解析指令，不改变 Tool 授权和 Evidence Gate 的代码边界。
 

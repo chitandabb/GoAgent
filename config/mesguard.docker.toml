@@ -25,7 +25,7 @@ promptVersion = "diagnosis-v3"
 systemPromptFile = "/app/config/prompts/diagnosis-system.md"
 baselinePromptFile = "/app/config/prompts/evaluation-baseline.md"
 reportContractFile = "/app/config/prompts/report-contract.md"
-conversationPromptVersion = "conversation-v7"
+conversationPromptVersion = "conversation-v8"
 conversationPromptFile = "/app/config/prompts/conversation-system.md"
 conversationCitationRepairEnabled = true
 conversationCitationRepairPromptVersion = "conversation-citation-repair-v1"
@@ -77,7 +77,7 @@ promptMaxEntries = 64
 
 [models.chat]
 enabled = true
-activeProfile = "stepfun-main"
+activeProfile = "opencode-deepseek-main"
 conversationMemoryProfile = "stepfun-conversation-memory"
 
 [models.chat.profiles.stepfun-main]
@@ -161,11 +161,12 @@ tokenizerStrategy = "local_calibrated"
 toolExposureStrategy = "static_frozen"
 providerNativeCompactionEnabled = false
 
-# OpenCode Go 网关（OpenAI Chat Completions 兼容）DeepSeek V4 Flash 主模型
-# 候选 Profile。第一阶段与 stepfun-main 使用相同的 131072/4096 上下文合同，
-# 保证后续对照测试只改变 Provider。不配置 reasoningEffort/thinkingMode：
-# opencode-go Adapter 在创建阶段拒绝这两项。不配置 temperature。
-# activeProfile 暂不切换；切换方式为命名 Profile + 进程重启。
+# OpenCode Go 网关（OpenAI Chat Completions 兼容）DeepSeek V4 Flash 主模型，
+# 生产默认 activeProfile。切换在进程启动时完成，不支持 Run 中途热切换；
+# 回退方式是把 activeProfile 改回 stepfun-main 并重启进程。上下文合同
+# （131072/4096、安全边距、tokenizer/toolExposure 策略）与 stepfun-main 保持
+# 一致。不配置 reasoningEffort/thinkingMode：opencode-go Adapter 在创建阶段
+# 拒绝这两项。不配置 temperature。
 [models.chat.profiles.opencode-deepseek-main]
 provider = "opencode-go"
 baseURL = "https://opencode.ai/zen/go/v1"

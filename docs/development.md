@@ -58,45 +58,49 @@ but never applies migrations itself.
 
 ## Agent providers
 
-The ChatModel uses Step Plan's OpenAI-compatible endpoint with model
-`step-3.7-flash`. Set `MESGUARD_STEPFUN_API_KEY` only in `.env`, GoLand run
-configuration, Docker environment, or a production secret store. Do not put the
-key in TOML or logs. When the key is absent, authentication and ticket APIs
-remain available while the Agent runtime is disabled.
+生产主 Agent 默认使用 OpenCode Go 网关（OpenAI Chat Completions 兼容）的
+`opencode-deepseek-main`（`model = deepseek-v4-flash`）；`stepfun-main`
+保留为显式回退 Profile（把 `activeProfile` 改回 `stepfun-main` 并重启进程即可
+回退）。Set `MESGUARD_OPENCODE_GO_API_KEY`（回退时为 `MESGUARD_STEPFUN_API_KEY`）
+only in `.env`, GoLand run configuration, Docker environment, or a production
+secret store. Do not put the key in TOML or logs. When the key is absent,
+authentication and ticket APIs remain available while the Agent runtime is
+disabled.
 
-### OpenCode Go 主模型候选（第一阶段）
+### OpenCode Go 主模型（生产默认，已切换）
 
-`config/mesguard.toml` 与 `config/mesguard.docker.toml` 已新增命名 Profile
-`opencode-deepseek-main`（`provider = "opencode-go"`，`baseURL =
-https://opencode.ai/zen/go/v1`，`apiKeyEnv = MESGUARD_OPENCODE_GO_API_KEY`，
-`model = deepseek-v4-flash`）。第一阶段要点：
+`config/mesguard.toml` 与 `config/mesguard.docker.toml` 的
+`[models.chat].activeProfile = "opencode-deepseek-main"`（`provider =
+"opencode-go"`，`baseURL = https://opencode.ai/zen/go/v1`，`apiKeyEnv =
+MESGUARD_OPENCODE_GO_API_KEY`，`model = deepseek-v4-flash`）。要点：
 
-- **切换方式**：切换 = 修改 `[models.chat].activeProfile` + 进程重启。不支持
-  Agent Run 中途切换 Provider，也没有运行中热加载。
+- **切换语义**：切换在进程启动时完成（修改 `[models.chat].activeProfile` +
+  进程重启）。不支持 Agent Run 中途切换 Provider，也没有运行中热加载。
+  `stepfun-main` Profile 保留不删除，作为显式回退。
 - **模型职责边界**：主 Agent、Conversation Memory、Query Rewrite、Judge、
   OCR/VLM、Embedding/Rerank 是独立模型职责，各自绑定独立命名 Profile。
   OpenCode Go 只接管主 Agent Profile（`activeProfile`）；`conversationMemoryProfile`
-  仍使用已验证的 StepFun `json_schema` Profile（`stepfun-conversation-memory`）。
+  仍使用已验证的 StepFun `json_schema` Profile（`stepfun-conversation-memory`），
+  不跟随主 Agent 切换。
 - **方言边界**：`opencode-go` 是独立 Provider 方言 Adapter（
   `internal/platform/chatmodel`），它复用共享的 Eino OpenAI Chat Completions
   transport（`openai.NewChatModel`），但不注入 `thinking`、
   `reasoning_effort`、`enable_thinking`，不创建 `ExtraFields`。DeepSeek 官方
   接口方言仍由 `deepSeekAdapter` 表达；OpenCode Go 网关不能假设接受相同的
   专有参数。
-- **能力声明**：`opencode-go` 的 Tool Calling 已于 2026-08-15 通过一次受控真实
-  Smoke：模型完成 Tool Call → Tool Result → 最终回答，两次调用共 1,013 Tokens，
-  总耗时 3.152 秒，第二次调用返回 384 Cached Tokens。该结果只证明基础流式 Tool
-  协议与 Usage 回传，不替代 Conversation/Diagnosis 生产入口质量评测；JSON Object /
-  JSON Schema 输出当前仍未声明。
-- **对照基线**：第一次对照故意与 `stepfun-main` 使用相同的
-  131072/4096 上下文合同，保证对照测试只改变 Provider；后续才单独评估
-  OpenCode Go 的更长窗口（如 256K）。
+- **能力声明**：受控 Tool Calling Smoke 与 Text-to-SQL 小样本只证明基础协议、
+  Usage 回传和局部行为，不是完整生产质量指标；JSON Object / JSON Schema 输出
+  当前仍未声明。实测数据见
+  [`evaluations/text-to-sql-conversation-v2.md`](evaluations/text-to-sql-conversation-v2.md)，
+  正式重测进度与范围只在 [`roadmap.md`](roadmap.md) 维护。
+- **对照基线**：切换与 `stepfun-main` 保持相同的 131072/4096 上下文合同、
+  安全边距与 tokenizer/toolExposure 策略，保证对照测试只改变 Provider；后续才
+  单独评估 OpenCode Go 的更长窗口（如 256K）。
 - **Docker**：`docker-compose.yml` 仅向创建 active chat profile 的服务
   （`diagnosis-worker`、`conversation-worker`）传递
   `MESGUARD_OPENCODE_GO_API_KEY: ${MESGUARD_OPENCODE_GO_API_KEY:-}`；`backend`
   不创建 active chat profile，`memory-worker` 只使用
-  `conversationMemoryProfile`（StepFun），两者均不注入该 Key。未配置该 Key 时，
-  保持 StepFun activeProfile 的现有部署照常启动。
+  `conversationMemoryProfile`（StepFun），两者均不注入该 Key。
 
 生产 Conversation Text-to-SQL 的命名 Profile 单 Case 验证使用独立选择参数，
 不需要修改 `[models.chat].activeProfile`。必须显式提供成本上限和 `output/`

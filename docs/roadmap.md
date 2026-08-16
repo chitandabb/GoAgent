@@ -53,11 +53,22 @@ Ordered next slices are maintained directly in this file.
       命名 Profile `opencode-deepseek-main`（`deepseek-v4-flash`，与 stepfun-main
       相同的 131072/4096 上下文合同作对照基线），按 Profile 选择性读取
       `MESGUARD_OPENCODE_GO_API_KEY`，`mesguard-model-smoke -profile`/
-      `-allow-provider-calls` 成本护栏与 usage 未提供/为 0 区分。`activeProfile`
-      未切换；切换 = 命名 Profile + 进程重启，不支持 Run 中途切换。2026-08-15
+      `-allow-provider-calls` 成本护栏与 usage 未提供/为 0 区分。第一阶段
+      `activeProfile` 尚未切换；切换 = 命名 Profile + 进程重启，不支持 Run 中途
+      切换。2026-08-15
       受控真实 Smoke 已完成 Tool Call → Tool Result → 最终回答：两次模型调用，
       1,013 Tokens、3.152 秒，第二次调用返回 384 Cached Tokens。该结果仅验收
       基础流式 Tool 协议与 Usage，不代表生产入口质量；JSON Object/Schema 未声明。
+- [x] OpenCode Go 主模型硬切生产默认（2026-08-16）：
+      `config/mesguard.toml` 与 `config/mesguard.docker.toml` 的
+      `[models.chat].activeProfile = "opencode-deepseek-main"`，进程启动时生效，
+      不支持 Run 中途热切换；`stepfun-main` 保留为显式回退 Profile（改回 +
+      重启即可回退）；`conversationMemoryProfile` 仍为
+      `stepfun-conversation-memory`（StepFun），不跟随主 Agent 切换。上下文
+      合同（131072/4096、安全边距、tokenizer/toolExposure 策略）与 stepfun-main
+      保持一致，配置合同测试显式以 stepfun-main 为对照。已有 Smoke 与三 Case
+      单例结果不冒充完整质量指标；全量 45 Case（Tool Selection）/20 Case
+      （Text-to-SQL）重测由主 Agent 在 clean revision 提交后正式执行。
 - [x] Text-to-SQL 评测器支持 `-profile` 命名模型与 `-case-id` 精确单 Case 选择，
       不修改生产 `activeProfile`，并在 Provider 创建前完成 Profile 指纹、实现身份和
       成本护栏校验。clean revision `2c6dcf6` 上的 OpenCode Go 正式三 Case 单例复测
@@ -90,6 +101,10 @@ This slice resolves the mismatch between the unified conversation product entry 
 - [x] Freeze the schema contract: Conversation/Diagnosis Schema no longer varies with message references, dependency health, capability declarations, RunAccess narrowing or per-run call limits; blocked/limit enforcement moved to execution-time `agentToolRunPolicy.reserve` and never deletes Schema. The schema-filtering helper `filterAgentToolsForRun` was removed after all callers migrated.
 - [x] Tool Selection v4: the evaluation experiment side resolves the fixed `diagnosis-default` Profile instead of `ToolsFor(TaskScope)`; observations use `tool-selection-observation-v4`, record `toolChoiceMode=required|absent`, and reject historical v1/v2/v3 assets. Variants remain `wide`/`production` with arm-specific `toolProfileId` (`evaluation-wide-v2`/`diagnosis-default`), actual model-visible names/Schema identity, model Profile fingerprint and implementation revision. `VerifyToolSelectionComparability` still fails closed before Provider creation; paired reduction additionally requires equal Tool Choice mode, so different Provider request semantics cannot be mixed.
 - [x] Conversation `turn_context` + production Text-to-SQL landed: each turn's `RunAccess` derives from the fixed Profile's actual Tools plus the current message's references, and the Conversation case/task/attachment/create/SQL Tools validate resource `RunAccess.Grants` at execution time. Implementation contract: [`design/agent-orchestration.md`](design/agent-orchestration.md).
+- [x] Stabilize Conversation user-message prompt bytes across turns: every user message now reuses one
+      deterministic `turn_context` projection built from its persisted references plus deployment-level
+      SQL context, while current `RunAccess` remains the sole execution authority. The production release
+      label is `conversation-v8`; historical `conversation-v7` evaluation records remain unchanged.
 - [x] Persist Diagnosis InvestigationPolicy (Unified Agent Runtime v2; Policy JSON Schema v1), derive Worker RunAccess from it and append stable `task_context` to the Diagnosis system instruction; task-creation Tool exposure has already been removed by the compatibility slice. `00033` adds the strict JSONB pair (`investigation_policy` + `investigation_policy_schema_version`, both-null-or-both-set, object + positive version checks, no backfill) and `00034` added the temporary `investigation_policy_mode` (`legacy`/`frozen`) column; both the mode column and `request_scope` were hard-cut deleted by the irreversible migration `00035`; `investigation_policy_schema_version=1` is the current Policy JSON protocol version, while the Runtime architecture version remains v2. `agentruntime` provides the strict deterministic JSON codec (unknown fields/invalid permissions/duplicates/empty UUIDs rejected, constructor-validated, canonical ordering). The injected pure-domain Policy Builder freezes deployment caps (case/knowledge always; web/code/sql by deployment switch; attachment only when the task froze attachments) and task-bound grants (case + frozen attachments + deployment-allowed data sources only; repositories stay empty), and the Policy is deliberately excluded from the idempotency fingerprint so replay returns the first frozen Policy. The Worker loads the persisted Policy strictly as a non-pointer value (missing/corrupt/version-mismatch Policy is `ErrInvalidTask`; no legacy-mode or `request_scope` fallback exists after `00035`), and the Repository fails closed before INSERT on any new task that does not carry an explicit frozen Policy, computes `RunAccess` as frozen Policy ∩ current ceiling (fixed `diagnosis-default` Profile tools, active/read-only/role-allowed data sources, still-uploaded attachments, valid user), and snapshots the Profile tool names once per startup Epoch. The runtime-generic ResourceGrant Guard now covers Diagnosis `read_external_case`/`read_attachment` and SQL Tools with zero underlying calls when unauthorized, and the deterministic JSON `task_context` (policySchemaVersion, effective permissions, case ID, authorized data sources id/role/safetyMode) is appended at the system instruction tail and counted identically by the Diagnosis preflight. `promptVersion` is bumped to `diagnosis-v3` in both development and Docker configs.
 - [x] Update `sql-investigation` SOP to include `execute_readonly_query`, evidence citation and stop conditions; keep Skill as SOP rather than authorization.
 - [x] Retire `TaskTypeKnowledge`, `ToolCapability`, `RequestedSkill`, `TaskScope`, the `request_scope` columns and dependency-health-driven Schema deletion: the hard-cut slice deletes them from the runtime, API, database schema and frontend contract. Migration `00035` drops `investigation_policy_mode`/`request_scope`, forces `investigation_policy` + `investigation_policy_schema_version` NOT NULL, fail-fast on any NULL-Policy legacy task, and is irreversible (its Down raises an explicit exception and restores nothing; rollback requires a backup taken before `00033`). The Worker Task Policy is a non-pointer value (missing/corrupt/version-mismatch → `ErrInvalidTask`); OpenAPI removes `DiagnosisTaskRequestScope`/`requestScope`/`requestedSkill`/`allowedCapabilities` and the frontend removes Skill/Capability selection, submitting only `externalCaseId`/`expectedSourceFingerprint`/`evidenceDataSourceIds`/`requestText`/`attachments`/`retryOfTaskId`.

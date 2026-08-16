@@ -167,7 +167,7 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		chatModel: cfg.ChatModel, citationRepairer: cfg.CitationRepairer, toolCatalog: cfg.ToolCatalog,
 		toolProfileID: agentruntime.ToolProfileConversation, systemInstruction: cfg.SystemInstruction,
 		modelProvider: cfg.ModelProvider, modelID: cfg.ModelID, promptVersion: cfg.PromptVersion,
-		log:                   cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
+		log: cfg.Logger, maxIterations: cfg.MaxIterations, maxToolCalls: cfg.MaxToolCalls,
 		maxTotalTokens: cfg.MaxTotalTokens, maxContextRunes: cfg.MaxContextRunes,
 		timeout: cfg.Timeout, maxToolResultBytes: cfg.MaxToolResultBytes,
 		memorySourceRecoveryEnabled:  cfg.MemorySourceRecoveryEnabled,
@@ -280,12 +280,12 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	usageTrace = &modelUsageTrace{onUsage: budget.recordUsage}
 	observeFailure = true
 	tools := resolved.Tools
-	turnContext := runContext.TurnContext()
+	promptContext := runContext.PromptContext()
 	var projection conversationPromptProjection
 	if r.contextPreflight.SummaryTailEnabled {
-		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request, turnContext)
+		projection, promptManifest, err = r.prepareSummaryTailPrompt(runCtx, tools, request, promptContext)
 	} else {
-		projection, err = r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage, turnContext)
+		projection, err = r.buildConversationPromptProjection(runCtx, request.History, request.UserMessage, promptContext)
 		if err == nil {
 			promptManifest, err = r.buildConversationPromptManifest(runCtx, tools, projection)
 		}
@@ -540,17 +540,17 @@ func (r *ConversationRunner) buildConversationPromptProjection(
 	ctx context.Context,
 	history []conversation.Message,
 	current conversation.Message,
-	turnContext string,
+	promptContext conversationPromptContext,
 ) (conversationPromptProjection, error) {
 	if r.contextPreflight.FullHistoryEnabled {
-		return buildFullConversationPromptProjection(history, current, turnContext)
+		return buildFullConversationPromptProjection(history, current, promptContext)
 	}
 	if !r.contextPreflight.ContinuousTailEnabled {
-		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes, turnContext), nil
+		return buildRuneConversationPromptProjection(history, current, r.maxContextRunes, promptContext), nil
 	}
 	tailBudget := int(math.Floor(float64(r.contextPreflight.ModelProfile.ContextWindowTokens) *
 		r.contextPreflight.TailMaxRatio))
-	return r.buildConversationPromptProjectionWithTailBudget(ctx, history, current, tailBudget, turnContext)
+	return r.buildConversationPromptProjectionWithTailBudget(ctx, history, current, tailBudget, promptContext)
 }
 
 func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
@@ -558,7 +558,7 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	history []conversation.Message,
 	current conversation.Message,
 	tailBudget int,
-	turnContext string,
+	promptContext conversationPromptContext,
 ) (conversationPromptProjection, error) {
 	if tailBudget < 1 {
 		return conversationPromptProjection{}, ErrConversationContextPreparationFailed
@@ -570,7 +570,7 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	tailMessages := make([]contextgovernance.TailMessage, 0, len(candidates))
 	for _, item := range candidates {
 		tailMessages = append(tailMessages, contextgovernance.TailMessage{
-			Sequence: item.Seq, Content: conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext)),
+			Sequence: item.Seq, Content: conversationMessagePrompt(item, turnContextForMessage(item, promptContext)),
 			Current: item.ID == current.ID,
 		})
 	}
@@ -585,7 +585,7 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	selectedDomain := candidates[len(candidates)-len(selection.Messages):]
 	selected := make([]*schema.Message, 0, len(selectedDomain))
 	for _, item := range selectedDomain {
-		content := conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext))
+		content := conversationMessagePrompt(item, turnContextForMessage(item, promptContext))
 		if item.Role == conversation.MessageRoleUser {
 			selected = append(selected, schema.UserMessage(content))
 		} else {
@@ -594,21 +594,24 @@ func (r *ConversationRunner) buildConversationPromptProjectionWithTailBudget(
 	}
 	return conversationPromptProjection{
 		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
-		currentUserContent: conversationCurrentUserContent(selectedDomain, current, turnContext),
+		currentUserContent: conversationCurrentUserContent(selectedDomain, current, promptContext),
 		tailFromSeq:        selectedDomain[0].Seq, tailThroughSeq: selectedDomain[len(selectedDomain)-1].Seq,
 		tailContinuous: true,
 	}, nil
 }
 
-// turnContextForMessage 只把本轮 turn_context 附加到当前 user message；
-// 历史消息永不携带本轮数据源授权，只保留各自已持久化引用。
+// turnContextForMessage gives every user message one stable representation.
+// Persisted references are rendered from that message, while the SQL data
+// source is a deployment-level fact. This model-visible block never grants
+// authority; the current RunAccess remains the only execution authority.
 func turnContextForMessage(
 	item conversation.Message,
-	current conversation.Message,
-	turnContext string,
+	promptContext conversationPromptContext,
 ) string {
-	if item.ID == current.ID && item.Role == conversation.MessageRoleUser {
-		return turnContext
+	if item.Role == conversation.MessageRoleUser {
+		return renderConversationTurnContext(
+			item, promptContext.sqlDataSourceID, promptContext.sqlAuthorized,
+		)
 	}
 	return ""
 }
@@ -618,11 +621,11 @@ func turnContextForMessage(
 func conversationCurrentUserContent(
 	selected []conversation.Message,
 	current conversation.Message,
-	turnContext string,
+	promptContext conversationPromptContext,
 ) string {
 	for _, item := range selected {
 		if item.ID == current.ID {
-			return strings.TrimSpace(conversationMessagePrompt(item, turnContext))
+			return strings.TrimSpace(conversationMessagePrompt(item, turnContextForMessage(item, promptContext)))
 		}
 	}
 	return ""
@@ -656,7 +659,7 @@ func buildRuneConversationPromptProjection(
 	history []conversation.Message,
 	current conversation.Message,
 	maxRunes int,
-	turnContext string,
+	promptContext conversationPromptContext,
 ) conversationPromptProjection {
 	ordered := conversationHistoryThroughCurrent(history, current)
 	selected := make([]*schema.Message, 0, len(ordered))
@@ -664,7 +667,7 @@ func buildRuneConversationPromptProjection(
 	usedRunes := 0
 	for index := len(ordered) - 1; index >= 0; index-- {
 		item := ordered[index]
-		content := conversationMessagePrompt(item, turnContextForMessage(item, current, turnContext))
+		content := conversationMessagePrompt(item, turnContextForMessage(item, promptContext))
 		if content == "" {
 			continue
 		}
@@ -689,7 +692,7 @@ func buildRuneConversationPromptProjection(
 	slices.Reverse(selectedDomain)
 	projection := conversationPromptProjection{
 		messages: selected, selected: selectedDomain, currentMessageID: current.ID,
-		currentUserContent: conversationCurrentUserContent(selectedDomain, current, turnContext),
+		currentUserContent: conversationCurrentUserContent(selectedDomain, current, promptContext),
 		tailContinuous:     true,
 	}
 	if len(selectedDomain) > 0 {
@@ -729,9 +732,9 @@ func conversationHistoryThroughCurrent(history []conversation.Message, current c
 
 // conversationMessagePrompt 渲染一条消息的模型可见正文。结构化上下文一律
 // 追加在正文尾部（用户原文 + 换行 + 上下文块），绝不放在原文前面：
-//   - 当前 user message 携带本轮 turnContext（含授权只读 dataSourceId）；
-//   - 历史消息只保留各自已持久化引用，引用块同样位于该消息正文尾部，
-//     且永远不携带本轮数据源授权。
+//   - user messages carry a stable turn_context built from their own persisted
+//     references plus deployment-level SQL context;
+//   - non-user historical messages keep their persisted message_references.
 func conversationMessagePrompt(message conversation.Message, turnContext string) string {
 	content := strings.TrimSpace(message.Content)
 	if content == "" {

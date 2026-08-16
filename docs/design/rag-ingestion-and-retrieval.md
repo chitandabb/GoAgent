@@ -249,8 +249,10 @@ assistant message（包括 `reasoning_content` 和 Tool Calls）加入下一轮�
 下一步不再改业务编排，而是用一个无副作用 Tool 完成 DeepSeek non-thinking 与 thinking 的非流式
 多轮 Tool Calling；随后验证严格 JSON、流式最终 usage、取消和 Evidence Gate；最后在固定 Case 上
 与 StepFun 做 paired 质量、Token、P50/P95 和失败率对照。未完成这些探针前，只能说“Provider
-装配可配置且请求合同已验证”，不能说“DeepSeek 已通过生产热插拔验收”。active Profile 仍是
-`stepfun-main`。
+装配可配置且请求合同已验证”，不能说“DeepSeek 官方直连 Adapter 已通过生产热插拔验收”。
+生产 active Profile 的当前身份、回退操作与验收进度不在本设计文档重复维护，分别以运行配置、
+[`../development.md`](../development.md) 和 [`../roadmap.md`](../roadmap.md) 为准；本节的
+DeepSeek 官方直连 Adapter 晋级门槛不变。
 
 官方资料：
 

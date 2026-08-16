@@ -24,8 +24,9 @@ import (
 // 把生成的 RunAccess 用 WithRunAccess 绑定为权威值；旧 TaskScope 兼容
 // 双写已硬切删除。
 type conversationRunContext struct {
-	access      agentruntime.RunAccess
-	turnContext string
+	access        agentruntime.RunAccess
+	promptContext conversationPromptContext
+	turnContext   string
 }
 
 // Access 返回本轮 Conversation RunAccess 快照。
@@ -36,6 +37,12 @@ func (c conversationRunContext) Access() agentruntime.RunAccess {
 // TurnContext 返回追加到当前 user 原文尾部的结构化上下文；为空表示无需追加。
 func (c conversationRunContext) TurnContext() string {
 	return c.turnContext
+}
+
+// PromptContext returns the deployment-stable model projection facts derived
+// alongside the authoritative RunAccess.
+func (c conversationRunContext) PromptContext() conversationPromptContext {
+	return c.promptContext
 }
 
 // buildConversationRunContext 从一次 Conversation 消息推导本轮运行上下文。
@@ -145,9 +152,14 @@ func buildConversationRunContext(
 	if err != nil {
 		return conversationRunContext{}, fmt.Errorf("build conversation run access: %w", err)
 	}
+	promptContext := conversationPromptContext{
+		sqlDataSourceID: sqlDataSourceID,
+		sqlAuthorized:   sqlAuthorized,
+	}
 	return conversationRunContext{
-		access:      access,
-		turnContext: buildConversationTurnContext(message, sqlDataSourceID, sqlAuthorized),
+		access:        access,
+		promptContext: promptContext,
+		turnContext:   buildConversationTurnContext(message, sqlDataSourceID, sqlAuthorized),
 	}, nil
 }
 

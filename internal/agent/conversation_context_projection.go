@@ -23,6 +23,14 @@ type conversationContextProjection struct {
 	DataSourceID string                             `json:"dataSourceId,omitempty"`
 }
 
+// conversationPromptContext contains deployment-stable facts used only to
+// render model context. It is not an authorization source: Tool execution is
+// always guarded by the current RunAccess stored in Context.
+type conversationPromptContext struct {
+	sqlDataSourceID uuid.UUID
+	sqlAuthorized   bool
+}
+
 type conversationCaseProjection struct {
 	ExternalCaseID string `json:"externalCaseId"`
 	Kind           string `json:"kind"`
@@ -46,8 +54,9 @@ type conversationAttachmentProjection struct {
 	Status       string `json:"status"`
 }
 
-// projectionFromMessage 从消息引用构造确定性排序的投影。includeDataSource 仅对
-// 当前轮 turn_context 为 true；历史 message_references 永不携带本轮数据源授权。
+// projectionFromMessage 从消息引用构造确定性排序的投影。includeDataSource
+// 仅用于 user turn_context 中的部署级 SQL 上下文；message_references 永不
+// 携带数据源。该投影只服务模型上下文，不授予执行权限。
 func projectionFromMessage(
 	message conversation.Message,
 	dataSourceID uuid.UUID,
@@ -121,8 +130,8 @@ func (p conversationContextProjection) isEmpty() bool {
 		len(p.Attachments) == 0 && p.DataSourceID == ""
 }
 
-// renderConversationTurnContext 渲染追加到当前 user 原文尾部的本轮 turn_context
-// （原文 + 换行 + 块）。空引用且无授权数据源时返回空字符串。
+// renderConversationTurnContext 渲染追加到 user 原文尾部的 turn_context
+// （原文 + 换行 + 块）。空引用且无部署级 SQL 上下文时返回空字符串。
 func renderConversationTurnContext(
 	message conversation.Message,
 	sqlDataSourceID uuid.UUID,
