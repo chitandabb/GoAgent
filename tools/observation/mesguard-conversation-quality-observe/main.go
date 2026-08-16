@@ -24,6 +24,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	platformconfig "github.com/chitandabb/GoAgent/internal/platform/config"
+	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 
 	"github.com/google/uuid"
@@ -155,8 +156,16 @@ func run(args []string) error {
 	var documentEmbeddingTokens int
 	var actualOnlineCostCNY float64
 	evaluationErr := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 进程级共享的 governed Embedding client：fixture 索引、检索工具与
+		// 语义缓存消费者共享一个 limiter/client，不各自获得完整额度。
+		embeddingClientConfig := cfg.Models.Embedding
+		embeddingClientConfig.MaxAttempts = 1
+		embedder, err := platformembedding.NewClient(embeddingClientConfig, nil)
+		if err != nil {
+			return fmt.Errorf("create embedding client: %w", err)
+		}
 		actorID, sourceByKey, embeddingTokens, err := seedConversationQualityFixture(
-			ctx, tx, cfg, fixture, chunksByDocument,
+			ctx, tx, cfg, embedder, fixture, chunksByDocument,
 		)
 		if err != nil {
 			return err
@@ -168,7 +177,7 @@ func run(args []string) error {
 		}
 		for index, definition := range resolvedCases {
 			runner, preview, modelDiagnostics, err := buildConversationQualityRunner(
-				ctx, tx, cfg, options, selected[index].effectiveRetrievalMaxResults(),
+				ctx, tx, cfg, embedder, options, selected[index].effectiveRetrievalMaxResults(),
 			)
 			if err != nil {
 				return err

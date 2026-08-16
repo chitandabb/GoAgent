@@ -105,6 +105,16 @@ func NewConversationWorkerApp(
 	runtimeBuilders := defaultAgentRuntimeBuilders()
 	runtimeBuilders.conversationCreator = conversationService
 	runtimeBuilders.attachmentReader = attachmentService
+	// 同一进程所有 Embedding 消费者（语义答案缓存与知识检索）共享一个
+	// governed client/limiter，不能各自获得完整额度。
+	if cfg.Models.Embedding.Enabled {
+		sharedEmbedder, embedErr := deps.sharedEmbeddingClient(cfg)
+		if embedErr != nil {
+			log.Warn("knowledge vector search unavailable; using FTS fallback", zap.Error(embedErr))
+		} else {
+			runtimeBuilders.knowledgeSearch = buildKnowledgeSearchToolWithEmbedder(sharedEmbedder)
+		}
+	}
 	runtimeBuilders.conversationMemory = func(
 		buildCtx context.Context,
 		db *gorm.DB,

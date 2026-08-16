@@ -193,7 +193,9 @@ func observeSimilarities(
 	if err != nil {
 		return similarityObservationSet{}, err
 	}
-	client, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+	embeddingClientConfig := cfg.Models.Embedding
+	embeddingClientConfig.MaxAttempts = 1
+	client, err := platformembedding.NewClient(embeddingClientConfig, nil)
 	if err != nil {
 		return similarityObservationSet{}, err
 	}

@@ -144,7 +144,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		embedder, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+		embeddingClientConfig := cfg.Models.Embedding
+		embeddingClientConfig.MaxAttempts = 1
+		embedder, err := platformembedding.NewClient(embeddingClientConfig, nil)
 		if err != nil {
 			return fmt.Errorf("create fixture embedding client: %w", err)
 		}
@@ -169,11 +171,13 @@ func run(args []string) error {
 			}
 			chatModel = instance.Model
 		}
-		baselineService, err := bootstrap.BuildKnowledgeSearchService(ctx, tx, baselineConfig, nil, zap.NewNop())
+		// fixture 索引与两个检索服务共享同一个进程级 governed Embedding
+		// client/limiter，不各自获得完整额度。
+		baselineService, err := bootstrap.BuildKnowledgeSearchService(ctx, tx, baselineConfig, embedder, nil, zap.NewNop())
 		if err != nil {
 			return fmt.Errorf("build baseline search service: %w", err)
 		}
-		experimentService, err := bootstrap.BuildKnowledgeSearchService(ctx, tx, experimentConfig, chatModel, zap.NewNop())
+		experimentService, err := bootstrap.BuildKnowledgeSearchService(ctx, tx, experimentConfig, embedder, chatModel, zap.NewNop())
 		if err != nil {
 			return fmt.Errorf("build experiment search service: %w", err)
 		}

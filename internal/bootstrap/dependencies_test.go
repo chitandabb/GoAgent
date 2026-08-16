@@ -149,6 +149,41 @@ func TestOpenSelectedRuntimeDependenciesSkipsUnselectedOptionalServices(t *testi
 	}
 }
 
+func TestRuntimeDependenciesShareOneGovernedEmbeddingClient(t *testing.T) {
+	t.Setenv("TEST_DASHSCOPE_KEY", "secret")
+	deps := &runtimeDependencies{}
+	cfg := config.Config{Models: config.ModelsConfig{Embedding: embeddingConfigForBootstrapTest()}}
+	first, err := deps.sharedEmbeddingClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := deps.sharedEmbeddingClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("two consumers in the same process received different embedding clients")
+	}
+}
+
+func TestRuntimeDependenciesSharedEmbeddingClientRejectsDisabledModel(t *testing.T) {
+	deps := &runtimeDependencies{}
+	if _, err := deps.sharedEmbeddingClient(config.Config{}); err == nil {
+		t.Fatal("sharedEmbeddingClient accepted a disabled embedding model")
+	}
+}
+
+func embeddingConfigForBootstrapTest() config.EmbeddingModelConfig {
+	return config.EmbeddingModelConfig{
+		Enabled: true, ProfileKey: "knowledge-v1", Provider: "dashscope",
+		Endpoint: "http://127.0.0.1:9/embed", APIKeyEnv: "TEST_DASHSCOPE_KEY",
+		Model: "text-embedding-v4", Dimensions: 1024, DistanceMetric: "cosine",
+		QueryInputType: "query", DocumentInputType: "document", Normalize: true,
+		ConfigVersion: "embedding-v1", BatchSize: 10, MaxConcurrent: 2,
+		TimeoutMillis: 30000, RPM: 900, TPM: 600_000, MaxAttempts: 3, BackoffMaxMillis: 10_000,
+	}
+}
+
 type objectStoreStub struct{}
 
 func (*objectStoreStub) Put(context.Context, objectstore.PutInput) (objectstore.ObjectRef, error) {

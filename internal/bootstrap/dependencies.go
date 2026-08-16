@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/objectstore"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	"github.com/chitandabb/GoAgent/internal/platform/migration"
 	platformminio "github.com/chitandabb/GoAgent/internal/platform/minio"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
@@ -29,6 +31,14 @@ type runtimeDependencies struct {
 	objectStoreError   error
 	sqlServer          *sql.DB
 	sqlServerError     error
+
+	// embeddingOnce 保证同一进程（同一 runtimeDependencies 实例）只构建
+	// 一个 governed Embedding client：语义缓存、知识检索、入库等所有消费者
+	// 共享同一个 limiter 与并发门禁，不能各自获得完整额度。跨进程不共享；
+	// 水平扩容需重新分配 RPM/TPM 预算。
+	embeddingOnce      sync.Once
+	embeddingClient    *platformembedding.Client
+	embeddingClientErr error
 }
 
 type dependencyOpeners struct {
@@ -129,6 +139,17 @@ func openSelectedRuntimeDependencies(
 		}
 	}
 	return deps, nil
+}
+
+// sharedEmbeddingClient 返回进程级共享的 governed Embedding client。
+// 首次调用按 cfg 构建并缓存；同一进程的所有消费者（语义答案缓存、知识
+// 检索、入库流水线）都从这里拿同一个实例。Embedding 未启用时返回错误，
+// 调用方应降级（如检索回退 FTS）。
+func (d *runtimeDependencies) sharedEmbeddingClient(cfg config.Config) (*platformembedding.Client, error) {
+	d.embeddingOnce.Do(func() {
+		d.embeddingClient, d.embeddingClientErr = platformembedding.NewClient(cfg.Models.Embedding, nil)
+	})
+	return d.embeddingClient, d.embeddingClientErr
 }
 
 func (d *runtimeDependencies) close() error {

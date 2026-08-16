@@ -488,6 +488,21 @@ go run ./tools/evaluation/mesguard-ingestion-throughput-eval `
   -target-increase-percent 40
 ```
 
+Production Embedding traffic is governed per process by `[models.embedding]`. The checked-in four-process
+Compose topology uses 200 RPM and 150,000 estimated TPM per process, for an aggregate default of 800 RPM and
+600,000 estimated TPM. The 900 RPM / 600,000 TPM comparison is a conservative repository safety envelope, not an
+account-quota claim. All consumers inside one process share one client, limiter and concurrency gate. Horizontal
+replicas do not share state, so operators must redistribute the per-process values before scaling out. Retriable
+429, selected 5xx, timeout and transport failures use at most three attempts with a 10-second backoff cap; bounded
+evaluation and observation commands force one attempt so their paid-request budgets remain exact.
+
+The production Embedding smoke is disabled by default and makes exactly one short paid Provider request when
+explicitly enabled. It forces one attempt and prints only bounded model/dimension/count/usage fields:
+
+```powershell
+go run ./tools/smoke/mesguard-embedding-smoke -allow-provider-calls
+```
+
 The observer creates fresh MinIO/database facts for each arm and cleans them after measurement, but it does
 not clear provider, operating-system or PostgreSQL caches. It excludes RabbitMQ delivery, OCR/VLM and layout
 routing. The experiment combines the existing Embedding batch/concurrency with batched Chunk/vector INSERTs;

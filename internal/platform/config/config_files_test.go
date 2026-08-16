@@ -117,6 +117,43 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigFourProcessComposeBudgetStaysWithinSafetyEnvelope(t *testing.T) {
+	// docker-compose.yml runs exactly four services that consume embeddings:
+	// backend, conversation-worker, diagnosis-worker, knowledge-worker. Each
+	// process enforces its own process-level budget from the same TOML file.
+	// The sum of the four per-process budgets must stay within the provider
+	// repository safety envelope of 900 RPM / 600000 TPM without Redis or
+	// another distributed limiter. This is not an account-quota assertion;
+	// horizontal scaling requires re-allocating these values.
+	configDirectory := filepath.Join("..", "..", "..", "config")
+	const embeddingConsumingProcesses = 4
+	for _, name := range []string{"mesguard.toml", "mesguard.docker.toml"} {
+		t.Run(name, func(t *testing.T) {
+			var cfg Config
+			path := filepath.Join(configDirectory, name)
+			if _, err := toml.DecodeFile(path, &cfg); err != nil {
+				t.Fatalf("DecodeFile(%q): %v", path, err)
+			}
+			embedding := cfg.Models.Embedding
+			if !embedding.Enabled {
+				t.Fatalf("%q disables the embedding model", path)
+			}
+			if embedding.RPM*embeddingConsumingProcesses > MaxEmbeddingRPM {
+				t.Fatalf("%q per-process rpm=%d exceeds the repository safety envelope across %d processes",
+					path, embedding.RPM, embeddingConsumingProcesses)
+			}
+			if embedding.TPM*embeddingConsumingProcesses > MaxEmbeddingTPM {
+				t.Fatalf("%q per-process tpm=%d exceeds the repository safety envelope across %d processes",
+					path, embedding.TPM, embeddingConsumingProcesses)
+			}
+			if embedding.MaxAttempts < 1 || embedding.BackoffMaxMillis < 1 {
+				t.Fatalf("%q must configure explicit retry bounds: maxAttempts=%d backoffMaxMillis=%d",
+					path, embedding.MaxAttempts, embedding.BackoffMaxMillis)
+			}
+		})
+	}
+}
+
 func TestConversationPromptDefinesRowCountingSemantics(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "config", "prompts", "conversation-system.md")
 	content, err := os.ReadFile(path)

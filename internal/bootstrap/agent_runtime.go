@@ -604,19 +604,44 @@ func buildKnowledgeSearchTool(
 	chatModel model.ToolCallingChatModel,
 	log *zap.Logger,
 ) (tool.BaseTool, error) {
-	service, err := BuildKnowledgeSearchService(ctx, db, cfg, chatModel, log)
+	service, err := BuildKnowledgeSearchService(ctx, db, cfg, nil, chatModel, log)
 	if err != nil {
 		return nil, err
 	}
 	return mesagent.NewSearchKnowledgeTool(service)
 }
 
+// buildKnowledgeSearchToolWithEmbedder 注入进程级共享的 governed Embedding
+// client，保证同一进程内语义缓存、知识检索等消费者共享一个 limiter。
+func buildKnowledgeSearchToolWithEmbedder(embedder knowledge.Embedder) func(
+	context.Context, *gorm.DB, config.Config, model.ToolCallingChatModel, *zap.Logger,
+) (tool.BaseTool, error) {
+	return func(
+		ctx context.Context,
+		db *gorm.DB,
+		cfg config.Config,
+		chatModel model.ToolCallingChatModel,
+		log *zap.Logger,
+	) (tool.BaseTool, error) {
+		service, err := BuildKnowledgeSearchService(ctx, db, cfg, embedder, chatModel, log)
+		if err != nil {
+			return nil, err
+		}
+		return mesagent.NewSearchKnowledgeTool(service)
+	}
+}
+
 // BuildKnowledgeSearchService assembles the production retrieval chain so runtime tools and
 // fixed-set evaluations exercise the same provider, fallback, rerank, and context behavior.
+// embedderOverride 允许传入同一进程共享的 governed Embedding client
+// （runtimeDependencies.sharedEmbeddingClient 提供），保证同一进程多个
+// 消费者共享一个 limiter/client；为 nil 时按 cfg 自建独立 client
+// （工具进程自持进程级预算）。
 func BuildKnowledgeSearchService(
 	ctx context.Context,
 	db *gorm.DB,
 	cfg config.Config,
+	embedderOverride knowledge.Embedder,
 	queryRewriteModelOverride model.ToolCallingChatModel,
 	log *zap.Logger,
 ) (*knowledge.SearchService, error) {
@@ -630,15 +655,25 @@ func BuildKnowledgeSearchService(
 	var embedder knowledge.Embedder
 	var profile knowledge.EmbeddingProfile
 	if cfg.Models.Embedding.Enabled {
-		client, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
-		if err != nil {
-			log.Warn("knowledge vector search unavailable; using FTS fallback", zap.Error(err))
-		} else if profile, err = cfg.Models.Embedding.Profile(); err != nil {
-			log.Warn("knowledge vector profile unavailable; using FTS fallback", zap.Error(err))
-		} else if err := platformpostgres.NewKnowledgeWorkerRepository(db).EnsureEmbeddingProfile(ctx, profile); err != nil {
-			log.Warn("knowledge vector profile is not active; using FTS fallback", zap.Error(err))
+		if embedderOverride != nil {
+			embedder = embedderOverride
 		} else {
-			embedder = client
+			client, clientErr := platformembedding.NewClient(cfg.Models.Embedding, nil)
+			if clientErr != nil {
+				log.Warn("knowledge vector search unavailable; using FTS fallback", zap.Error(clientErr))
+			} else {
+				embedder = client
+			}
+		}
+		if embedder != nil {
+			var profileErr error
+			if profile, profileErr = cfg.Models.Embedding.Profile(); profileErr != nil {
+				log.Warn("knowledge vector profile unavailable; using FTS fallback", zap.Error(profileErr))
+				embedder = nil
+			} else if profileErr = platformpostgres.NewKnowledgeWorkerRepository(db).EnsureEmbeddingProfile(ctx, profile); profileErr != nil {
+				log.Warn("knowledge vector profile is not active; using FTS fallback", zap.Error(profileErr))
+				embedder = nil
+			}
 		}
 	}
 	var reranker knowledge.Reranker

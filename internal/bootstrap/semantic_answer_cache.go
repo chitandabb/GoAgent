@@ -8,7 +8,6 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
-	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformredis "github.com/chitandabb/GoAgent/internal/platform/redis"
 	platformredisstack "github.com/chitandabb/GoAgent/internal/platform/redisstack"
@@ -95,7 +94,7 @@ func wireSemanticAnswerCache(
 		if profile.Fingerprint != cfg.SemanticProfileFingerprint {
 			return fmt.Errorf("semantic answer cache threshold profile does not match active embedding profile")
 		}
-		client, clientErr := platformembedding.NewClient(appConfig.Models.Embedding, nil)
+		client, clientErr := deps.sharedEmbeddingClient(appConfig)
 		if clientErr != nil {
 			return fmt.Errorf("build semantic answer cache embedder: %w", clientErr)
 		}

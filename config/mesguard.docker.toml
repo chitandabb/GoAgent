@@ -209,6 +209,12 @@ configVersion = "embedding-v1"
 batchSize = 10
 maxConcurrent = 2
 timeoutMillis = 30000
+# 进程级配额治理：4 个 Embedding 消费进程共享默认预算；合计保持在
+# 900 RPM / 600000 TPM 的仓库保守运行安全边界内（不是账号额度声明）。
+rpm = 200
+tpm = 150000
+maxAttempts = 3
+backoffMaxMillis = 10000
 
 [models.rerank]
 enabled = false

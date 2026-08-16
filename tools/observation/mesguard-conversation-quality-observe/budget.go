@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 	"math"
-	"unicode"
 
 	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/platform/embeddingquota"
 )
 
 type providerPlan struct {
@@ -31,13 +31,13 @@ func buildProviderPlan(
 	for _, chunks := range chunksByDocument {
 		chunkCount += len(chunks)
 		for _, chunk := range chunks {
-			embeddingTokens += estimateEmbeddingTextTokens(chunk.ContentText)
+			embeddingTokens += embeddingquota.EstimateTextTokens(chunk.ContentText)
 		}
 	}
 	// Query embeddings are part of online retrieval. Reserve one conservative
 	// estimate per case in addition to the document fixture.
 	for _, definition := range cases {
-		embeddingTokens += estimateEmbeddingTextTokens(definition.UserQuery)
+		embeddingTokens += embeddingquota.EstimateTextTokens(definition.UserQuery)
 	}
 	batchSize := 10
 	documentRequests := (chunkCount + batchSize - 1) / batchSize
@@ -72,19 +72,6 @@ func printProviderPlan(plan providerPlan, options commandOptions) {
 	)
 }
 
-func estimateEmbeddingTextTokens(text string) int {
-	asciiRunes, nonASCIIRunes := 0, 0
-	for _, value := range text {
-		if value <= unicode.MaxASCII {
-			asciiRunes++
-		} else {
-			nonASCIIRunes++
-		}
-	}
-	base := (asciiRunes+3)/4 + nonASCIIRunes
-	return max(1, (base*11+7)/8+8)
-}
-
 func onlineRunCost(
 	run conversation.RecordedAgentRun,
 	query string,
@@ -94,7 +81,7 @@ func onlineRunCost(
 	chatCost := float64(usage.PromptTokens)*options.chatInputPriceCNYPerMillion/1_000_000 +
 		float64(usage.CompletionTokens)*options.chatOutputPriceCNYPerMillion/1_000_000
 	queryEmbeddingCost := embeddingCost(
-		estimateEmbeddingTextTokens(query), options.embeddingPriceCNYPerMillion,
+		embeddingquota.EstimateTextTokens(query), options.embeddingPriceCNYPerMillion,
 	)
 	return chatCost + queryEmbeddingCost
 }

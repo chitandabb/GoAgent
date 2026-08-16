@@ -189,7 +189,9 @@ func observe(fixture latencyFixture, cacheProvider string) (performanceReport, e
 	if err := platformpostgres.NewKnowledgeWorkerRepository(tx).EnsureEmbeddingProfile(ctx, profile); err != nil {
 		return performanceReport{}, err
 	}
-	client, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+	embeddingClientConfig := cfg.Models.Embedding
+	embeddingClientConfig.MaxAttempts = 1
+	client, err := platformembedding.NewClient(embeddingClientConfig, nil)
 	if err != nil {
 		return performanceReport{}, err
 	}

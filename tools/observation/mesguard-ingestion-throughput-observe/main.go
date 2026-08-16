@@ -223,7 +223,10 @@ VALUES (?, ?, 'Ingestion Throughput Evaluation', 'evaluation-only-not-a-login-se
 	if err != nil {
 		return err
 	}
-	embedder, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+	providerEmbeddingConfig := providerEvaluationEmbeddingConfig(
+		cfg.Models.Embedding, options.providerRPM, options.providerTPM,
+	)
+	embedder, err := platformembedding.NewClient(providerEmbeddingConfig, nil)
 	if err != nil {
 		return err
 	}
@@ -232,8 +235,6 @@ VALUES (?, ?, 'Ingestion Throughput Evaluation', 'evaluation-only-not-a-login-se
 	guardedProvider, err := newGuardedEmbedder(
 		embedder,
 		providerTokenBudget(options.maxProviderCostCNY, options.embeddingPriceCNYPerMillion),
-		options.providerRPM,
-		options.providerTPM,
 		cancelProvider,
 	)
 	if err != nil {
