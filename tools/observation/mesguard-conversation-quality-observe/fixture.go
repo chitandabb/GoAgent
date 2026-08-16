@@ -16,7 +16,6 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
-	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 
 	"github.com/google/uuid"
@@ -80,6 +79,7 @@ func seedConversationQualityFixture(
 	ctx context.Context,
 	tx *gorm.DB,
 	cfg config.Config,
+	embedder knowledge.Embedder,
 	corpus knowledge.AdvancedRetrievalEvaluationCorpus,
 	chunksByDocument map[string][]knowledge.ChunkDraft,
 ) (uuid.UUID, map[qualityChunkKey]mesagent.ConversationQualitySource, int, error) {
@@ -158,10 +158,6 @@ ORDER BY v.document_id, c.ordinal`, versionIDs).Scan(&rows).Error; err != nil {
 		return uuid.Nil, nil, 0, err
 	}
 	if err := platformpostgres.NewKnowledgeWorkerRepository(tx).EnsureEmbeddingProfile(ctx, profile); err != nil {
-		return uuid.Nil, nil, 0, err
-	}
-	embedder, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
-	if err != nil {
 		return uuid.Nil, nil, 0, err
 	}
 	embeddingTokens, err := indexConversationQualityEmbeddings(ctx, tx, profile, embedder, rows, cfg.Models.Embedding.BatchSize)
@@ -254,10 +250,11 @@ func buildConversationQualityRunner(
 	ctx context.Context,
 	tx *gorm.DB,
 	cfg config.Config,
+	embedder knowledge.Embedder,
 	options commandOptions,
 	retrievalMaxResults int,
 ) (*mesagent.ConversationRunner, *knowledge.CitationService, *qualityModelDiagnostics, error) {
-	searchService, err := buildQualitySearchService(ctx, tx, cfg)
+	searchService, err := buildQualitySearchService(ctx, tx, cfg, embedder)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -308,8 +305,8 @@ func buildConversationQualityRunner(
 		ChatModel: qualityModel, CitationRepairer: citationRepairer, ToolCatalog: catalog,
 		SystemInstruction: prompts.ConversationInstruction,
 		ModelProvider:     modelInstance.Identity.Provider, ModelID: modelInstance.Identity.ModelID,
-		PromptVersion:  cfg.Agent.ConversationPromptVersion,
-		Logger:         zap.NewNop(), MaxIterations: min(cfg.Agent.ConversationMaxIterations, 3),
+		PromptVersion: cfg.Agent.ConversationPromptVersion,
+		Logger:        zap.NewNop(), MaxIterations: min(cfg.Agent.ConversationMaxIterations, 3),
 		MaxToolCalls: 2, MaxTotalTokens: options.maxChatTokensPerCase,
 		MaxContextRunes: cfg.Agent.ConversationMaxContextRunes,
 		Timeout:         time.Duration(cfg.Agent.ConversationTimeoutMillis) * time.Millisecond,
@@ -324,10 +321,17 @@ func buildConversationQualityRunner(
 	return runner, preview, qualityModel.diagnostics, nil
 }
 
-func buildQualitySearchService(ctx context.Context, tx *gorm.DB, cfg config.Config) (*knowledge.SearchService, error) {
+func buildQualitySearchService(
+	ctx context.Context,
+	tx *gorm.DB,
+	cfg config.Config,
+	embedder knowledge.Embedder,
+) (*knowledge.SearchService, error) {
 	// BuildKnowledgeSearchService is intentionally called through a tiny local
-	// wrapper so the observer and production runtime share the same chain.
-	return bootstrap.BuildKnowledgeSearchService(ctx, tx, cfg, nil, zap.NewNop())
+	// wrapper so the observer and production runtime share the same chain; the
+	// process-wide governed embedder is passed in so fixture indexing, semantic
+	// cache consumers, and the search tool share one limiter/client.
+	return bootstrap.BuildKnowledgeSearchService(ctx, tx, cfg, embedder, nil, zap.NewNop())
 }
 
 func observeQualityCase(

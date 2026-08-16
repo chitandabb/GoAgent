@@ -85,6 +85,6 @@ func testConfig(endpoint string) config.EmbeddingModelConfig {
 		APIKeyEnv: "TEST_DASHSCOPE_KEY", Model: "text-embedding-v4", Dimensions: 1024,
 		DistanceMetric: "cosine", QueryInputType: "query", DocumentInputType: "document",
 		Normalize: true, ConfigVersion: "embedding-v1", BatchSize: 10, MaxConcurrent: 2,
-		TimeoutMillis: 30000,
+		TimeoutMillis: 30000, RPM: 900, TPM: 600_000, MaxAttempts: 3, BackoffMaxMillis: 10_000,
 	}
 }

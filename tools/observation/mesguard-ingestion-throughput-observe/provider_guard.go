@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
-	"time"
-	"unicode"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
+	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
+	"github.com/chitandabb/GoAgent/internal/platform/embeddingquota"
 )
 
 const (
@@ -124,24 +123,9 @@ func knowledgeparserInput(document loadedDocument) knowledgeparser.Input {
 func estimateChunkTokens(chunks []knowledge.ChunkDraft) int {
 	total := 0
 	for _, chunk := range chunks {
-		total += estimateEmbeddingTextTokens(chunk.ContentText)
+		total += embeddingquota.EstimateTextTokens(chunk.ContentText)
 	}
 	return total
-}
-
-// The estimate deliberately includes headroom. CJK and other non-ASCII runes
-// are counted individually; ASCII text is approximated at four bytes per token.
-func estimateEmbeddingTextTokens(text string) int {
-	asciiRunes, nonASCIIRunes := 0, 0
-	for _, value := range text {
-		if value <= unicode.MaxASCII {
-			asciiRunes++
-		} else {
-			nonASCIIRunes++
-		}
-	}
-	base := (asciiRunes+3)/4 + nonASCIIRunes
-	return max(1, (base*11+7)/8+8)
 }
 
 func estimatedProviderCostCNY(tokens int, pricePerMillion float64) float64 {
@@ -154,7 +138,6 @@ func providerTokenBudget(maxCostCNY, pricePerMillion float64) int {
 
 type guardedEmbedder struct {
 	inner     knowledge.Embedder
-	limiter   *smoothProviderLimiter
 	cancel    context.CancelFunc
 	maxTokens int
 
@@ -166,17 +149,13 @@ type guardedEmbedder struct {
 
 func newGuardedEmbedder(
 	inner knowledge.Embedder,
-	maxTokens, rpm, tpm int,
+	maxTokens int,
 	cancel context.CancelFunc,
 ) (*guardedEmbedder, error) {
 	if inner == nil || maxTokens < 1 || cancel == nil {
 		return nil, errors.New("provider guard dependencies are invalid")
 	}
-	limiter, err := newSmoothProviderLimiter(rpm, tpm)
-	if err != nil {
-		return nil, err
-	}
-	return &guardedEmbedder{inner: inner, limiter: limiter, cancel: cancel, maxTokens: maxTokens}, nil
+	return &guardedEmbedder{inner: inner, cancel: cancel, maxTokens: maxTokens}, nil
 }
 
 func (e *guardedEmbedder) Embed(
@@ -185,20 +164,14 @@ func (e *guardedEmbedder) Embed(
 ) (knowledge.EmbeddingResult, error) {
 	estimatedTokens := 0
 	for _, text := range input.Texts {
-		estimatedTokens += estimateEmbeddingTextTokens(text)
+		estimatedTokens += embeddingquota.EstimateTextTokens(text)
 	}
 	if err := e.reserveEstimatedTokens(estimatedTokens); err != nil {
 		return knowledge.EmbeddingResult{}, err
 	}
-	if err := e.limiter.Wait(ctx, estimatedTokens); err != nil {
-		if abortErr := e.Err(); abortErr != nil {
-			return knowledge.EmbeddingResult{}, abortErr
-		}
-		return knowledge.EmbeddingResult{}, err
-	}
 	result, err := e.inner.Embed(ctx, input)
 	if err != nil {
-		if isProviderRateLimit(err) {
+		if isProviderRateLimited(err) {
 			return knowledge.EmbeddingResult{}, e.abort(fmt.Errorf("provider rate limit aborted the evaluation: %w", err))
 		}
 		return knowledge.EmbeddingResult{}, err
@@ -207,6 +180,16 @@ func (e *guardedEmbedder) Embed(
 		return knowledge.EmbeddingResult{}, err
 	}
 	return result, nil
+}
+
+func providerEvaluationEmbeddingConfig(
+	base config.EmbeddingModelConfig,
+	rpm, tpm int,
+) config.EmbeddingModelConfig {
+	base.RPM = rpm
+	base.TPM = tpm
+	base.MaxAttempts = 1
+	return base
 }
 
 func (e *guardedEmbedder) reserveEstimatedTokens(tokens int) error {
@@ -263,65 +246,12 @@ func (e *guardedEmbedder) Err() error {
 	return e.abortErr
 }
 
-func isProviderRateLimit(err error) bool {
+// isProviderRateLimited 用结构化分类识别 429：errors.As 穿透 %w 链读取
+// dashscopeembedding.ProviderError.Category，不做任何字符串匹配。
+func isProviderRateLimited(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "status=429") ||
-		strings.Contains(message, "throttling.allocationquota") ||
-		strings.Contains(message, "throttling.ratequota") ||
-		strings.Contains(message, "insufficient_quota")
-}
-
-type smoothProviderLimiter struct {
-	mu          sync.Mutex
-	rpm         int
-	tpm         int
-	nextRequest time.Time
-	nextToken   time.Time
-}
-
-func newSmoothProviderLimiter(rpm, tpm int) (*smoothProviderLimiter, error) {
-	if rpm < 1 || tpm < 1 {
-		return nil, errors.New("provider rate limits must be positive")
-	}
-	return &smoothProviderLimiter{rpm: rpm, tpm: tpm}, nil
-}
-
-func (l *smoothProviderLimiter) Wait(ctx context.Context, tokens int) error {
-	if tokens < 1 {
-		return errors.New("provider token estimate must be positive")
-	}
-	now := time.Now()
-	l.mu.Lock()
-	startAt := maxTime(now, l.nextRequest, l.nextToken)
-	l.nextRequest = startAt.Add(spacingDuration(1, l.rpm))
-	l.nextToken = startAt.Add(spacingDuration(tokens, l.tpm))
-	l.mu.Unlock()
-	if !startAt.After(now) {
-		return nil
-	}
-	timer := time.NewTimer(time.Until(startAt))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func spacingDuration(units, perMinute int) time.Duration {
-	return time.Duration(float64(time.Minute) * float64(units) / float64(perMinute))
-}
-
-func maxTime(values ...time.Time) time.Time {
-	result := values[0]
-	for _, value := range values[1:] {
-		if value.After(result) {
-			result = value
-		}
-	}
-	return result
+	var providerErr *platformembedding.ProviderError
+	return errors.As(err, &providerErr) && providerErr.Category == platformembedding.ProviderErrorRateLimited
 }

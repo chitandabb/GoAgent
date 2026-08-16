@@ -58,6 +58,15 @@ func NewDiagnosisWorkerApp(
 	}
 	runtimeBuilders := defaultAgentRuntimeBuilders()
 	runtimeBuilders.attachmentReader = attachmentService
+	// 知识检索工具使用进程级共享的 governed Embedding client。
+	if cfg.Models.Embedding.Enabled {
+		sharedEmbedder, embedErr := deps.sharedEmbeddingClient(cfg)
+		if embedErr != nil {
+			log.Warn("knowledge vector search unavailable; using FTS fallback", zap.Error(embedErr))
+		} else {
+			runtimeBuilders.knowledgeSearch = buildKnowledgeSearchToolWithEmbedder(sharedEmbedder)
+		}
+	}
 	runtime, err := buildAgentRuntimeForRole(
 		ctx, agentRuntimeRoleDiagnosis, cfg, snapshotExternalCaseGetter{}, deps.sqlServer, deps.db,
 		log.Named("agent"), runtimeBuilders,

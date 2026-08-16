@@ -209,6 +209,19 @@ configVersion = "embedding-v1"
 batchSize = 10
 maxConcurrent = 2
 timeoutMillis = 30000
+# 进程级配额治理：每个进程（backend、conversation-worker、
+# diagnosis-worker、knowledge-worker 共 4 个）各自执行平滑 RPM/TPM 预算，
+# 同一进程所有消费者共享一个 limiter/client。默认值保证
+# 4 × 200 RPM = 800 ≤ 900 RPM、4 × 150000 TPM = 600000 ≤ 600000 TPM，
+# 保持在仓库的保守运行安全边界内；这不是账号额度声明。水平扩容需
+# 重新分配这些值。
+rpm = 200
+tpm = 150000
+# 最大尝试次数包含首次调用；只有 429、明确可重试 5xx 与 timeout/transport
+# 会重试，400/401 与 context canceled/deadline 不重试。
+maxAttempts = 3
+# 无 Retry-After 或该头非法时使用的有界指数退避上限（毫秒）。
+backoffMaxMillis = 10000
 
 [models.rerank]
 enabled = false

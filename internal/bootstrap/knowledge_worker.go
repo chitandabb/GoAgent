@@ -12,7 +12,6 @@ import (
 	"github.com/chitandabb/GoAgent/internal/knowledgeparser"
 	"github.com/chitandabb/GoAgent/internal/knowledgeworker"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
-	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 	platformpostgres "github.com/chitandabb/GoAgent/internal/platform/postgres"
 	platformrabbitmq "github.com/chitandabb/GoAgent/internal/platform/rabbitmq"
 	platformtablemodel "github.com/chitandabb/GoAgent/internal/platform/tablemodel"
@@ -119,7 +118,7 @@ func NewKnowledgeWorkerApp(ctx context.Context, cfg config.Config, log *zap.Logg
 	}
 	var embeddingConfig *knowledgeingestion.EmbeddingConfig
 	if cfg.Models.Embedding.Enabled {
-		embedder, err := platformembedding.NewClient(cfg.Models.Embedding, nil)
+		embedder, err := deps.sharedEmbeddingClient(cfg)
 		if err != nil {
 			closeDependencies()
 			return nil, err

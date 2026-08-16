@@ -4,27 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/chitandabb/GoAgent/internal/knowledge"
+	"github.com/chitandabb/GoAgent/internal/platform/config"
+	platformembedding "github.com/chitandabb/GoAgent/internal/platform/dashscopeembedding"
 )
-
-func TestEstimateEmbeddingTextTokensKeepsSafetyHeadroom(t *testing.T) {
-	tests := []struct {
-		text string
-		want int
-	}{
-		{text: "abcd", want: 10},
-		{text: "中文", want: 11},
-		{text: "", want: 8},
-		{text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", want: 22},
-	}
-	for _, test := range tests {
-		if got := estimateEmbeddingTextTokens(test.text); got != test.want {
-			t.Fatalf("estimateEmbeddingTextTokens(%q) = %d, want %d", test.text, got, test.want)
-		}
-	}
-}
 
 func TestProviderTokenBudgetMatchesDefaultCostCap(t *testing.T) {
 	if got := providerTokenBudget(defaultMaxProviderCostCNY, defaultEmbeddingPriceCNYPerMillion); got != 100_000 {
@@ -32,10 +16,18 @@ func TestProviderTokenBudgetMatchesDefaultCostCap(t *testing.T) {
 	}
 }
 
+func TestProviderEvaluationEmbeddingConfigKeepsActualAttemptsInsideOuterBudget(t *testing.T) {
+	base := config.EmbeddingModelConfig{RPM: 200, TPM: 150_000, MaxAttempts: 3}
+	configured := providerEvaluationEmbeddingConfig(base, 900, 600_000)
+	if configured.RPM != 900 || configured.TPM != 600_000 || configured.MaxAttempts != 1 {
+		t.Fatalf("provider evaluation config = %+v", configured)
+	}
+}
+
 func TestGuardedEmbedderBlocksBeforeExceedingEstimatedBudget(t *testing.T) {
 	inner := &providerGuardStubEmbedder{}
 	ctx, cancel := context.WithCancel(context.Background())
-	guard, err := newGuardedEmbedder(inner, 9, 100_000, 100_000_000, cancel)
+	guard, err := newGuardedEmbedder(inner, 9, cancel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +39,13 @@ func TestGuardedEmbedderBlocksBeforeExceedingEstimatedBudget(t *testing.T) {
 	}
 }
 
-func TestGuardedEmbedderAbortsOnProviderRateLimit(t *testing.T) {
-	inner := &providerGuardStubEmbedder{err: errors.New(
-		"embedding provider rejected request: status=429 code=Throttling.AllocationQuota",
-	)}
+func TestGuardedEmbedderAbortsOnStructuredRateLimit(t *testing.T) {
+	inner := &providerGuardStubEmbedder{err: &platformembedding.ProviderError{
+		Category: platformembedding.ProviderErrorRateLimited, StatusCode: 429,
+		Code: "Throttling.AllocationQuota",
+	}}
 	ctx, cancel := context.WithCancel(context.Background())
-	guard, err := newGuardedEmbedder(inner, 1_000, 100_000, 100_000_000, cancel)
+	guard, err := newGuardedEmbedder(inner, 1_000, cancel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +57,30 @@ func TestGuardedEmbedderAbortsOnProviderRateLimit(t *testing.T) {
 	}
 }
 
+func TestGuardedEmbedderIgnoresRateLimitStringMatching(t *testing.T) {
+	// 字符串匹配已删除：只有结构化 ProviderError 才能触发整组取消。
+	inner := &providerGuardStubEmbedder{err: errors.New(
+		"embedding provider rejected request: status=429 code=Throttling.AllocationQuota",
+	)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard, err := newGuardedEmbedder(inner, 1_000, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = guard.Embed(ctx, knowledge.EmbeddingRequest{
+		Texts: []string{"bounded input"}, InputType: knowledge.EmbeddingInputDocument,
+	})
+	if err == nil || guard.Err() != nil || ctx.Err() != nil {
+		t.Fatalf("err=%v guardErr=%v contextErr=%v", err, guard.Err(), ctx.Err())
+	}
+}
+
 func TestGuardedEmbedderDoesNotAbortOnOrdinaryProviderFailure(t *testing.T) {
 	inner := &providerGuardStubEmbedder{err: errors.New("temporary provider failure")}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	guard, err := newGuardedEmbedder(inner, 1_000, 100_000, 100_000_000, cancel)
+	guard, err := newGuardedEmbedder(inner, 1_000, cancel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +97,7 @@ func TestGuardedEmbedderStopsWhenActualUsageCrossesBudget(t *testing.T) {
 		Usage: knowledge.EmbeddingUsage{TotalTokens: 21},
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
-	guard, err := newGuardedEmbedder(inner, 20, 100_000, 100_000_000, cancel)
+	guard, err := newGuardedEmbedder(inner, 20, cancel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,15 +106,6 @@ func TestGuardedEmbedderStopsWhenActualUsageCrossesBudget(t *testing.T) {
 	})
 	if err == nil || inner.calls != 1 || guard.Err() == nil || ctx.Err() == nil {
 		t.Fatalf("err=%v calls=%d guardErr=%v contextErr=%v", err, inner.calls, guard.Err(), ctx.Err())
-	}
-}
-
-func TestSpacingDurationRepresentsPerMinuteLimits(t *testing.T) {
-	if got := spacingDuration(600_000, 600_000); got != time.Minute {
-		t.Fatalf("token spacing = %s, want %s", got, time.Minute)
-	}
-	if got := spacingDuration(1, 60); got != time.Second {
-		t.Fatalf("request spacing = %s, want %s", got, time.Second)
 	}
 }
 
