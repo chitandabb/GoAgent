@@ -207,6 +207,9 @@ type TaskRepository interface {
 	GetTask(ctx context.Context, taskID uuid.UUID) (DiagnosisTask, error)
 	ListTaskEvents(ctx context.Context, taskID uuid.UUID, afterSeq int64, limit int) (TaskEventPage, error)
 	CancelTask(ctx context.Context, taskID, requestedBy uuid.UUID, requestedAt time.Time) (TaskCancelResult, error)
+	// ListTasks 返回分页任务列表。非管理员 Actor 的查询范围固定为
+	// 自己创建的任务，管理员可查看全部；按创建时间倒序。
+	ListTasks(ctx context.Context, query TaskListQuery) (TaskListPage, error)
 }
 
 // ExternalCaseReader 只暴露任务创建时需要的重新读取能力。

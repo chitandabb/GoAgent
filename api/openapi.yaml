@@ -84,6 +84,36 @@ paths:
                 $ref: "#/components/schemas/LogoutResponse"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v1/auth/change-password:
+    post:
+      operationId: changePassword
+      summary: 修改当前用户密码并撤销其全部会话
+      description: 校验当前密码后写入新密码哈希，随后撤销该用户全部 Session 与 CSRF 令牌；客户端应清除本地身份并引导重新登录。
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          description: 密码已修改
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangePasswordResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
   /api/v1/data-sources:
     get:
       operationId: listDataSources
@@ -607,6 +637,47 @@ paths:
           $ref: "#/components/responses/ValidationFailed"
         "503":
           $ref: "#/components/responses/DependencyUnavailable"
+    get:
+      operationId: listDiagnosisTasks
+      summary: 分页查询当前用户可见的诊断任务
+      description: 分析员只能看到自己创建的任务，管理员可查看全部；按创建时间倒序，支持 status 筛选。工单身份来自创建时冻结的快照。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, running, cancel_requested, succeeded, failed, cancelled]
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 任务列表与分页信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosisTaskListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/diagnosis-tasks/{taskId}:
     get:
       operationId: getDiagnosisTask
@@ -816,6 +887,156 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/admin/users:
+    get:
+      operationId: listAdminUsers
+      summary: 管理员分页查询本地账号
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, disabled]
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [analyst, admin]
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 用户列表与分页信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createAdminUser
+      summary: 管理员创建本地账号并强制首次登录改密
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminUserCreateRequest"
+      responses:
+        "201":
+          description: 账号已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/admin/users/{userId}:
+    patch:
+      operationId: updateAdminUser
+      summary: 管理员更新用户状态或角色（至少一项）
+      description: 角色变更会撤销目标用户全部会话；管理员不能操作自己的账号。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminUserPatchRequest"
+      responses:
+        "200":
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserUpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+  /api/v1/admin/users/{userId}/reset-password:
+    post:
+      operationId: resetAdminUserPassword
+      summary: 管理员重置用户临时密码并撤销其全部会话
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/CSRFToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminUserResetPasswordRequest"
+      responses:
+        "200":
+          description: 已重置；目标用户下次登录须改密
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserResetPasswordResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
   /api/v1/admin/knowledge-documents:
@@ -1830,6 +2051,172 @@ components:
         contentSha256:
           type: string
           pattern: "^[0-9a-f]{64}$"
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          minLength: 1
+          maxLength: 256
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 256
+    ChangePasswordResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [changed]
+              properties:
+                changed:
+                  type: boolean
+                  const: true
+    AdminUserCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [username, displayName, role, temporaryPassword]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 128
+        role:
+          type: string
+          enum: [analyst, admin]
+        temporaryPassword:
+          type: string
+          minLength: 8
+          maxLength: 256
+    AdminUserPatchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [active, disabled]
+        role:
+          type: string
+          enum: [analyst, admin]
+    AdminUser:
+      type: object
+      additionalProperties: false
+      required: [id, username, displayName, role, status, mustChangePassword, createdAt, updatedAt]
+      properties:
+        id: {type: string, format: uuid}
+        username: {type: string}
+        displayName: {type: string}
+        role: {type: string, enum: [analyst, admin]}
+        status: {type: string, enum: [active, disabled]}
+        mustChangePassword: {type: boolean}
+        lastLoginAt: {type: string, format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    AdminUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/AdminUser"
+    AdminUserListData:
+      type: object
+      additionalProperties: false
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUser"
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    AdminUserListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/AdminUserListData"
+    AdminUserUpdateResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [updated]
+              properties:
+                updated:
+                  type: boolean
+                  const: true
+    AdminUserResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [temporaryPassword]
+      properties:
+        temporaryPassword:
+          type: string
+          minLength: 8
+          maxLength: 256
+    AdminUserResetPasswordResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required: [reset]
+              properties:
+                reset:
+                  type: boolean
+                  const: true
+    DiagnosisTaskListItem:
+      allOf:
+        - $ref: "#/components/schemas/DiagnosisTask"
+        - type: object
+          required: [externalCaseKey, externalCaseTitle]
+          properties:
+            externalCaseKey:
+              type: string
+            externalCaseTitle:
+              type: string
+    DiagnosisTaskListData:
+      type: object
+      additionalProperties: false
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosisTaskListItem"
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    DiagnosisTaskListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/DiagnosisTaskListData"
     DiagnosisTaskResponse:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"

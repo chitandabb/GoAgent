@@ -310,6 +310,17 @@ type diagnosisTaskUseCaseStub struct {
 	gotEventLimit   int
 	cancelResult    diagnosis.TaskCancelResult
 	cancelErr       error
+	listPage        diagnosis.TaskListPage
+	listErr         error
+	gotListQuery    diagnosis.TaskListQuery
+}
+
+func (s *diagnosisTaskUseCaseStub) List(_ context.Context, query diagnosis.TaskListQuery) (diagnosis.TaskListPage, error) {
+	s.gotListQuery = query
+	if s.listErr != nil {
+		return diagnosis.TaskListPage{}, s.listErr
+	}
+	return s.listPage, nil
 }
 
 func (s *diagnosisTaskUseCaseStub) Create(_ context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error) {

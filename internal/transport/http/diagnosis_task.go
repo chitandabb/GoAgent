@@ -23,6 +23,7 @@ import (
 type diagnosisTaskUseCase interface {
 	Create(ctx context.Context, actor diagnosis.TaskActor, input diagnosis.CreateTaskInput) (diagnosis.TaskCreateResult, error)
 	Get(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.DiagnosisTask, error)
+	List(ctx context.Context, query diagnosis.TaskListQuery) (diagnosis.TaskListPage, error)
 	ListEvents(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID, afterSeq int64, limit int) (diagnosis.TaskEventPage, error)
 	OpenEventStream(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskEventStream, error)
 	Cancel(ctx context.Context, actor diagnosis.TaskActor, taskID uuid.UUID) (diagnosis.TaskCancelResult, error)
@@ -61,6 +62,7 @@ func NewDiagnosisTaskRoutes(
 func (r *DiagnosisTaskRoutes) Register(api *gin.RouterGroup) {
 	protected := api.Group("/diagnosis-tasks")
 	protected.Use(r.auth)
+	protected.GET("", r.list)
 	protected.GET("/:taskId/events", r.listEvents)
 	protected.GET("/:taskId", r.get)
 
@@ -166,6 +168,65 @@ func (r *DiagnosisTaskRoutes) create(c *gin.Context) {
 	WriteSuccessWithStatus(c, http.StatusAccepted, diagnosisTaskCreateResponse{
 		TaskID: result.Task.ID.String(), Status: result.Task.Status, Replayed: result.Replayed,
 		CreatedAt: result.Task.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+	})
+}
+
+type diagnosisTaskListQuery struct {
+	PageQuery
+	Status string `form:"status"`
+}
+
+type diagnosisTaskListItemResponse struct {
+	diagnosisTaskResponse
+	ExternalCaseKey   string `json:"externalCaseKey"`
+	ExternalCaseTitle string `json:"externalCaseTitle"`
+}
+
+type diagnosisTaskListResponse struct {
+	Items    []diagnosisTaskListItemResponse `json:"items"`
+	Page     int                             `json:"page"`
+	PageSize int                             `json:"pageSize"`
+	Total    int64                           `json:"total"`
+}
+
+// list 返回当前用户可见的任务分页列表。分析员只看自己创建的任务，
+// 管理员可查看全部；可选 status 筛选。
+func (r *DiagnosisTaskRoutes) list(c *gin.Context) {
+	query, ok := BindQuery[diagnosisTaskListQuery](c)
+	if !ok {
+		return
+	}
+	query.Normalize()
+	identity, ok := identityFromContext(c)
+	if !ok {
+		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
+		return
+	}
+	var status *diagnosis.TaskStatus
+	if value := strings.TrimSpace(query.Status); value != "" {
+		parsed := diagnosis.TaskStatus(value)
+		status = &parsed
+	}
+	page, err := r.useCase.List(c.Request.Context(), diagnosis.TaskListQuery{
+		Actor:    diagnosis.TaskActor{UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin()},
+		Status:   status,
+		Page:     query.Page,
+		PageSize: query.PageSize,
+	})
+	if err != nil {
+		AbortWithError(c, translateDiagnosisTaskError("list diagnosis tasks", err))
+		return
+	}
+	items := make([]diagnosisTaskListItemResponse, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, diagnosisTaskListItemResponse{
+			diagnosisTaskResponse: diagnosisTaskResponseFrom(item.Task),
+			ExternalCaseKey:       item.ExternalCaseKey,
+			ExternalCaseTitle:     item.ExternalCaseTitle,
+		})
+	}
+	WriteSuccess(c, diagnosisTaskListResponse{
+		Items: items, Page: page.Page, PageSize: page.PageSize, Total: page.Total,
 	})
 }
 

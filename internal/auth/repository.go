@@ -13,6 +13,18 @@ type UserRepository interface {
 	Create(ctx context.Context, user *User) error
 	FindByID(ctx context.Context, userID uuid.UUID) (*User, error)
 	FindByNormalizedUsername(ctx context.Context, username string) (*User, error)
+	// UpdatePassword 更新密码哈希并清除改密标记。changedAt 同时写入
+	// password_changed_at 与 updated_at。
+	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string, changedAt time.Time) error
+	// ListUsers 返回筛选后的分页用户列表与总数，按创建时间倒序。
+	ListUsers(ctx context.Context, filter UserListFilter, page, pageSize int) ([]User, int64, error)
+	// UpdateStatus 更新用户启用状态；用户不存在时返回 repository.ErrNotFound。
+	UpdateStatus(ctx context.Context, userID uuid.UUID, status UserStatus) error
+	// UpdateRole 更新用户角色；用户不存在时返回 repository.ErrNotFound。
+	UpdateRole(ctx context.Context, userID uuid.UUID, role Role) error
+	// ResetPassword 覆盖密码哈希并强制下次登录改密；用户不存在时返回
+	// repository.ErrNotFound。
+	ResetPassword(ctx context.Context, userID uuid.UUID, passwordHash string, changedAt time.Time) error
 }
 
 // Session 表示服务端保存的登录会话。

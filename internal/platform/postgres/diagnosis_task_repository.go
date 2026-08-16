@@ -682,6 +682,93 @@ func taskEventFromRecord(record taskEventRecord) (diagnosis.TaskEvent, error) {
 	}, nil
 }
 
+// taskListItemRecord 是任务列表查询的行映射，额外携带快照中的工单身份。
+type taskListItemRecord struct {
+	diagnosisTaskRecord
+	ExternalCaseKey   string `gorm:"column:external_case_key"`
+	ExternalCaseTitle string `gorm:"column:external_case_title"`
+}
+
+const taskListSelectColumns = `
+SELECT task.id, task.created_by, task.external_case_id, task.case_snapshot_id,
+       task.retry_of, task.request_text, task.status, task.attempt_count,
+       task.last_error_code, task.last_error_message, task.started_at,
+       task.completed_at, task.created_at, task.updated_at, report.id AS report_id,
+       snapshot.payload->>'externalCaseKey' AS external_case_key,
+       snapshot.payload->>'title' AS external_case_title
+FROM diagnosis_tasks task
+JOIN case_snapshots snapshot ON snapshot.id = task.case_snapshot_id
+LEFT JOIN diagnosis_reports report ON report.task_id = task.id`
+
+const taskListCountQuery = `
+SELECT count(*)
+FROM diagnosis_tasks task
+JOIN case_snapshots snapshot ON snapshot.id = task.case_snapshot_id
+LEFT JOIN diagnosis_reports report ON report.task_id = task.id`
+
+// ListTasks 返回当前 Actor 可见的分页任务列表。
+// 非管理员强制按创建人过滤；管理员可查看全部任务。按创建时间倒序。
+func (r *DiagnosisTaskRepository) ListTasks(
+	ctx context.Context,
+	query diagnosis.TaskListQuery,
+) (diagnosis.TaskListPage, error) {
+	if r == nil || r.db == nil {
+		return diagnosis.TaskListPage{}, errors.New("diagnosis task repository is unavailable")
+	}
+	if query.Actor.UserID == uuid.Nil {
+		return diagnosis.TaskListPage{}, diagnosis.ErrTaskForbidden
+	}
+	page := query.Page
+	if page < 1 {
+		page = 1
+	}
+	pageSize := query.PageSize
+	if pageSize < 1 {
+		pageSize = diagnosis.DefaultTaskListPageSize
+	} else if pageSize > diagnosis.MaxTaskListPageSize {
+		pageSize = diagnosis.MaxTaskListPageSize
+	}
+
+	where := " WHERE 1 = 1"
+	args := make([]any, 0, 2)
+	if !query.Actor.IsAdmin {
+		where += " AND task.created_by = ?"
+		args = append(args, query.Actor.UserID)
+	}
+	if query.Status != nil {
+		where += " AND task.status = ?"
+		args = append(args, *query.Status)
+	}
+
+	db := ResolveDB(ctx, r.db)
+	var total int64
+	if err := db.Raw(taskListCountQuery+where, args...).Scan(&total).Error; err != nil {
+		return diagnosis.TaskListPage{}, TranslateError(err)
+	}
+
+	var records []taskListItemRecord
+	if err := db.Raw(
+		taskListSelectColumns+where+" ORDER BY task.created_at DESC LIMIT ? OFFSET ?",
+		append(args, pageSize, (page-1)*pageSize)...,
+	).Scan(&records).Error; err != nil {
+		return diagnosis.TaskListPage{}, TranslateError(err)
+	}
+
+	items := make([]diagnosis.TaskListItem, 0, len(records))
+	for _, record := range records {
+		task, err := diagnosisTaskFromRecord(record.diagnosisTaskRecord)
+		if err != nil {
+			return diagnosis.TaskListPage{}, err
+		}
+		items = append(items, diagnosis.TaskListItem{
+			Task: task, ExternalCaseKey: record.ExternalCaseKey, ExternalCaseTitle: record.ExternalCaseTitle,
+		})
+	}
+	return diagnosis.TaskListPage{
+		Items: items, Total: total, Page: page, PageSize: pageSize,
+	}, nil
+}
+
 // diagnosisTaskRecord 是 PostgreSQL 行映射，避免领域包依赖 GORM 标签和数据库类型。
 type diagnosisTaskRecord struct {
 	ID                 uuid.UUID            `gorm:"column:id"`
