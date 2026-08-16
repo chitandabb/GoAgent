@@ -48,6 +48,8 @@ const (
 	// v3 输出资产默认名：新合同生成新资产，不覆盖 v1/v2 历史观测与汇总。
 	toolSelectionObservationsOutput = "testdata/tool-selection-v3.observations.jsonl"
 	toolSelectionSummaryOutput      = "testdata/tool-selection-v3.summary.json"
+	// 探针模式独立输出资产：绝不覆盖 v3 正式观测与汇总。
+	compatibilityProbeObservationsOutput = "testdata/tool-compatibility-probe-v1.observations.jsonl"
 )
 
 var (
@@ -81,6 +83,7 @@ type selectionEvalDependencies struct {
 	newChatModel                 func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error)
 	connectGitHub                func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error)
 	verifySelectionComparability func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error)
+	resolveIdentity              func() (evaluationidentity.Identity, error)
 }
 
 // selectionEvalModelFactory 是 Provider 构造 seam：正式运行走真实
@@ -100,6 +103,7 @@ func defaultSelectionEvalDependencies() selectionEvalDependencies {
 		newChatModel:                 selectionEvalModelFactory,
 		connectGitHub:                githubmcp.Connect,
 		verifySelectionComparability: mesagent.VerifyToolSelectionComparability,
+		resolveIdentity:              evaluationidentity.ResolveImplementationIdentity,
 	}
 }
 
@@ -117,11 +121,28 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	maxProviderCalls := flags.Int("max-provider-calls", 0, "authorized Provider call upper bound")
 	maxProviderTokens := flags.Int("max-provider-tokens", 0, "authorized Provider Token upper bound")
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
+	compatibilityProbe := flags.Bool("compatibility-probe", false, "run the fixed 5-scenario tool-calling compatibility probe instead of the formal evaluation")
+	probeOutputPath := flags.String("probe-output", compatibilityProbeObservationsOutput, "compatibility probe observation JSONL output (probe mode only)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty]")
+		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty] [-compatibility-probe [-probe-output path]]")
 	}
 	if *concurrency < 1 || *concurrency > 8 {
 		return errors.New("concurrency must be between 1 and 8")
+	}
+	// 探针模式是独立路径：固定 5 场景单 Case 矩阵，绝不进入正式 v3 评测，
+	// 也绝不写正式 observation/summary 输出。
+	if *compatibilityProbe {
+		return runCompatibilityProbeWithDependencies(ctx, log, deps, compatibilityProbeOptions{
+			datasetPath:        *datasetPath,
+			caseID:             *caseID,
+			profileFlag:        *profileFlag,
+			probeOutputPath:    *probeOutputPath,
+			allowProviderCalls: *allowProviderCalls,
+			maxCases:           *maxCases,
+			maxProviderCalls:   *maxProviderCalls,
+			maxProviderTokens:  *maxProviderTokens,
+			allowDirty:         *allowDirty,
+		})
 	}
 	cases, err := readToolSelectionCases(*datasetPath)
 	if err != nil {
@@ -152,7 +173,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	}
 	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision，
 	// 再决定是否允许继续。
-	identity, identityErr := evaluationidentity.ResolveImplementationIdentity()
+	identity, identityErr := deps.resolveIdentity()
 	if identityErr != nil && !*allowDirty {
 		return fmt.Errorf("resolve implementation revision: %w (pass -allow-dirty for local smoke)", identityErr)
 	}
