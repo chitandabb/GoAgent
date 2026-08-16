@@ -1,31 +1,74 @@
-import type { ChatMessage } from '@/shared/api'
-import { generationMeta } from '@/shared/lib/status'
+import type { ConversationCitation, ConversationMessage } from '@/shared/api/m1-types'
 import { Badge } from '@/shared/ui/Badge'
 
-function Sources({ message }: { message: ChatMessage }) {
-  if (message.sources.length === 0) return null
+export function fmtBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+export function citationLabel(citation: ConversationCitation): string {
+  if (citation.sourceType === 'web') {
+    const url = citation.sourceRef.startsWith('http') ? citation.sourceRef : `https://${citation.sourceRef}`
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, '')
+      return host || citation.sourceRef
+    } catch {
+      return citation.sourceRef
+    }
+  }
+  if (citation.sourceType === 'attachment') {
+    return '附件引用'
+  }
+  if (citation.sourceType === 'knowledge_chunk') {
+    return '知识库引用'
+  }
+  return citation.sourceRef
+}
+
+export function citationKindBadge(citation: ConversationCitation): 'orange' | 'blue' | 'gray' {
+  if (citation.sourceType === 'web') return 'orange'
+  if (citation.sourceType === 'knowledge_chunk') return 'blue'
+  return 'gray'
+}
+
+function CitationList({
+  citations,
+  onCitationClick,
+}: {
+  citations: ConversationCitation[]
+  onCitationClick: (citation: ConversationCitation) => void
+}) {
+  if (citations.length === 0) return null
   return (
     <div className="mt-3 border-t border-divider pt-2.5">
-      <p className="mb-1.5 text-[11px] font-semibold text-ink-48">来源</p>
+      <p className="mb-1.5 text-[11px] font-semibold text-ink-48">引用</p>
       <ul className="flex flex-col gap-1">
-        {message.sources.map((s, i) => (
-          <li key={i} className="flex items-baseline gap-2 text-[12px]">
-            <Badge tone={s.kind === 'web' ? 'orange' : 'blue'}>
-              {s.kind === 'web' ? '网络' : '知识库'}
+        {citations.map((citation, index) => (
+          <li key={`${citation.sourceRef}-${index}`} className="flex items-baseline gap-2 text-[12px]">
+            <Badge tone={citationKindBadge(citation)}>
+              {citation.sourceType === 'web' ? '网络' : citation.sourceType === 'knowledge_chunk' ? '知识库' : '附件'}
             </Badge>
-            {s.url ? (
+            {citation.sourceType === 'web' ? (
               <a
-                href={s.url}
+                href={citation.sourceRef.startsWith('http') ? citation.sourceRef : `https://${citation.sourceRef}`}
                 target="_blank"
                 rel="noreferrer"
                 className="text-primary hover:underline"
               >
-                {s.title}
+                {citationLabel(citation)}
               </a>
             ) : (
-              <span className="text-ink-80">{s.title}</span>
+              <button
+                type="button"
+                onClick={() => onCitationClick(citation)}
+                className="press text-primary hover:underline"
+              >
+                {citationLabel(citation)}
+              </button>
             )}
-            <span className="text-ink-48">{s.location}</span>
           </li>
         ))}
       </ul>
@@ -33,50 +76,41 @@ function Sources({ message }: { message: ChatMessage }) {
   )
 }
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+export function MessageBubble({
+  message,
+  onCitationClick,
+}: {
+  message: ConversationMessage
+  onCitationClick: (citation: ConversationCitation) => void
+}) {
   if (message.role === 'user') {
     return (
       <div className="flex flex-col items-end gap-1.5">
         {message.attachments.length > 0 && (
           <div className="flex flex-wrap justify-end gap-1.5">
-            {message.attachments.map((a, i) => (
+            {message.attachments.map((attachment) => (
               <span
-                key={`${a.name}-${i}`}
-                className="rounded-capsule bg-pearl px-2.5 py-1 text-[11px] text-ink-48"
+                key={attachment.attachmentId}
+                className="inline-flex items-center gap-1.5 rounded-capsule bg-pearl px-2.5 py-1 text-[11px] text-ink-80"
               >
-                {a.name} · {a.scope === 'personal' ? '个人库' : '仅本次'}
+                <span className="max-w-[180px] truncate">{attachment.originalName}</span>
+                <span className="text-ink-48">{fmtBytes(attachment.sizeBytes)}</span>
               </span>
             ))}
           </div>
         )}
-        <div className="max-w-[75%] rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[14px] leading-[1.6] text-white">
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[14px] leading-[1.6] text-white">
           {message.content}
         </div>
       </div>
     )
   }
 
-  const meta = generationMeta[message.status]
   return (
     <div className="flex flex-col items-start">
       <div className="max-w-[85%] rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-4">
-        <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">
-          {message.content}
-          {message.status === 'streaming' && (
-            <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-primary align-middle" />
-          )}
-        </p>
-        {message.status === 'interrupted' && (
-          <div className="mt-2.5">
-            <Badge tone={meta.tone}>{meta.label} · 已保留部分内容</Badge>
-          </div>
-        )}
-        {message.status === 'failed' && (
-          <div className="mt-2.5">
-            <Badge tone="red">生成失败</Badge>
-          </div>
-        )}
-        <Sources message={message} />
+        <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">{message.content}</p>
+        <CitationList citations={message.citations} onCitationClick={onCitationClick} />
       </div>
     </div>
   )

@@ -1,17 +1,27 @@
 import { request } from './client'
 import type {
   CaseQuery,
+  ConversationListData,
+  ConversationMessage,
+  ConversationMessagesData,
+  ConversationSummary,
+  ConversationTurnResponse,
   CreateDiagnosisTaskInput,
   DataSource,
   DiagnosisReport,
   DiagnosisTask,
   DiagnosisTaskCreateData,
+  DiagnosisTaskListData,
+  DiagnosisTaskListQuery,
   DiagnosisTaskRecovery,
   ExternalCase,
   ExternalCaseListData,
   ReportReviewsData,
   ReviewVerdict,
+  SendMessageInput,
   TaskEventsData,
+  TurnDetail,
+  TurnEventsData,
 } from './m1-types'
 
 function queryString(values: Record<string, string | number | undefined>): string {
@@ -106,4 +116,71 @@ export function recoverTask(
       body: JSON.stringify({ reason: reason.trim() }),
     },
   )
+}
+
+// ---------------------------------------------------------------- 任务列表
+
+export function listDiagnosisTasks(query: DiagnosisTaskListQuery = {}): Promise<DiagnosisTaskListData> {
+  return request<DiagnosisTaskListData>(
+    `/api/v1/diagnosis-tasks${queryString({ status: query.status, page: query.page, pageSize: query.pageSize })}`,
+  )
+}
+
+// ---------------------------------------------------------------- AI 会话
+
+export function listConversations(page = 1, pageSize = 50): Promise<ConversationListData> {
+  return request<ConversationListData>(
+    `/api/v1/conversations${queryString({ page, pageSize })}`,
+  )
+}
+
+export function createConversation(title = ''): Promise<ConversationSummary> {
+  return request<ConversationSummary>('/api/v1/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ title: title.trim() }),
+  })
+}
+
+export function getConversationMessages(
+  conversationId: string,
+  afterSeq = 0,
+  limit = 100,
+): Promise<ConversationMessagesData> {
+  return request<ConversationMessagesData>(
+    `/api/v1/conversations/${conversationId}/messages${queryString({ afterSeq, limit })}`,
+  )
+}
+
+export function appendTurn(
+  conversationId: string,
+  input: SendMessageInput,
+  idempotencyKey: string,
+): Promise<ConversationTurnResponse> {
+  return request<ConversationTurnResponse>(`/api/v1/conversations/${conversationId}/turns`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify(input),
+  })
+}
+
+export function getTurn(
+  conversationId: string,
+  turnId: string,
+): Promise<TurnDetail> {
+  return request<TurnDetail>(`/api/v1/conversations/${conversationId}/turns/${turnId}`)
+}
+
+export function listTurnEvents(
+  conversationId: string,
+  turnId: string,
+  afterSeq: number,
+  limit = 100,
+): Promise<TurnEventsData> {
+  return request<TurnEventsData>(
+    `/api/v1/conversations/${conversationId}/turns/${turnId}/events${queryString({ afterSeq, limit })}`,
+  )
+}
+
+export function listConversationMessages(conversationId: string): Promise<ConversationMessage[]> {
+  return getConversationMessages(conversationId).then((page) => page.items)
 }

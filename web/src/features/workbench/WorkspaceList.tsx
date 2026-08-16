@@ -85,17 +85,22 @@ export function WorkspaceList({
         <div className="mt-3 border-t border-divider px-2 pt-3">
           <button
             type="button"
-            disabled
-            className="flex w-full items-center justify-between py-2 text-left text-[12px] text-ink-48 opacity-60"
+            onClick={() => {
+              navigate('/assistant')
+              onNavigate?.()
+            }}
+            className="press flex w-full items-center justify-between py-2 text-left text-[12px] text-ink hover:bg-pearl"
           >
             <span>知识会话</span>
-            <span>未接入</span>
+            <span className="rounded-capsule bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+              可用
+            </span>
           </button>
         </div>
       </div>
 
       <div className="border-t border-divider px-4 py-3 text-[10px] leading-[1.55] text-ink-48">
-        会话列表仅保存在当前浏览器；任务状态和报告始终从服务端读取。
+        诊断会话列表仅保存在当前浏览器；任务状态、报告与知识会话始终从服务端读取。
       </div>
     </div>
   )

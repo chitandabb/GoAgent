@@ -244,3 +244,296 @@ export interface CaseQuery {
   sortBy?: 'reportedAt' | 'sourceUpdatedAt' | 'externalCaseKey'
   sortOrder?: 'asc' | 'desc'
 }
+
+// ---------------------------------------------------------------- 任务列表
+
+export interface DiagnosisTaskListItem {
+  taskId: string
+  externalCaseId: string
+  caseSnapshotId: string
+  retryOfTaskId?: string
+  requestText: string
+  status: TaskStatus
+  attemptCount: number
+  lastErrorCode?: string
+  lastErrorMessage?: string
+  startedAt: string | null
+  completedAt: string | null
+  createdAt: string
+  updatedAt: string
+  reportAvailable: boolean
+  reportId?: string
+  externalCaseKey: string
+  externalCaseTitle: string
+}
+
+export interface DiagnosisTaskListData {
+  items: DiagnosisTaskListItem[]
+  page: number
+  pageSize: number
+  total: number
+}
+
+export interface DiagnosisTaskListQuery {
+  status?: TaskStatus
+  page?: number
+  pageSize?: number
+}
+
+// ---------------------------------------------------------------- 会话
+
+export type ConversationStatus = 'active' | 'archived'
+
+export interface ConversationSummary {
+  id: string
+  title: string
+  status: ConversationStatus
+  createdAt: string
+  updatedAt: string
+  lastMessageAt?: string
+}
+
+export interface ConversationListData {
+  items: ConversationSummary[]
+  page: number
+  pageSize: number
+  total: number
+}
+
+export type MessageRole = 'user' | 'assistant'
+
+export interface ConversationCaseReference {
+  externalCaseId: string
+  kind: 'selected' | 'mentioned'
+}
+
+export interface ConversationTaskReference {
+  taskId: string
+  kind: 'created' | 'referenced'
+}
+
+export interface ConversationMessageAttachment {
+  attachmentId: string
+  position: number
+  purpose?: string
+  originalName: string
+  mediaType: string
+  sizeBytes: number
+  contentSha256: string
+  status: string
+}
+
+export interface ConversationCitation {
+  position: number
+  sourceType: 'attachment' | 'knowledge_chunk' | 'web'
+  sourceRef: string
+  contentSha256: string
+}
+
+export interface ConversationMessage {
+  id: string
+  conversationId: string
+  seq: number
+  role: MessageRole
+  content: string
+  contentSchemaVersion: number
+  caseReferences: ConversationCaseReference[]
+  taskReferences: ConversationTaskReference[]
+  attachments: ConversationMessageAttachment[]
+  citations: ConversationCitation[]
+  createdAt: string
+}
+
+export interface ConversationMessagesData {
+  items: ConversationMessage[]
+  afterSeq: number
+  nextAfterSeq: number
+  hasMore: boolean
+}
+
+export type TurnStatus =
+  | 'queued'
+  | 'running'
+  | 'retry_scheduled'
+  | 'completed'
+  | 'failed'
+
+export interface ConversationTurnResponse {
+  turnId: string
+  status: TurnStatus
+  userMessage: ConversationMessage
+  assistantMessage?: ConversationMessage
+  replayed: boolean
+}
+
+export interface TurnDetail {
+  turnId: string
+  conversationId: string
+  status: TurnStatus
+  userMessageId: string
+  assistantMessageId?: string
+  attemptCount: number
+  failureSummary?: string
+  retryAt?: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+}
+
+export type TurnEventType =
+  | 'turn_queued'
+  | 'turn_running'
+  | 'turn_retry_scheduled'
+  | 'turn_completed'
+  | 'turn_failed'
+
+export interface TurnEvent {
+  seq: number
+  eventType: TurnEventType | string
+  payload: Record<string, unknown>
+  payloadSchemaVersion: number
+  createdAt: string
+}
+
+export interface TurnEventsData {
+  items: TurnEvent[]
+  afterSeq: number
+  nextAfterSeq: number
+  hasMore: boolean
+}
+
+export interface ConversationAttachment {
+  attachmentId: string
+  conversationId: string
+  scope: 'session'
+  status: 'ready' | 'processing' | 'failed'
+  originalName: string
+  mediaType: string
+  sizeBytes: number
+  contentSha256: string
+  replayed: boolean
+  uploadedAt: string
+}
+
+export interface AttachmentPreviewElement {
+  index: number
+  pageNumber?: number
+  elementType: string
+  sectionPath?: string[]
+  contentText: string
+}
+
+export interface AttachmentPreviewData {
+  sourceType: 'attachment'
+  sourceRef: string
+  attachmentId: string
+  originalName: string
+  mediaType: string
+  sizeBytes: number
+  contentSha256: string
+  parserVersion: string
+  elements: AttachmentPreviewElement[]
+  visualAssetCount: number
+  truncated: boolean
+}
+
+export interface SendMessageInput {
+  content: string
+  caseReferences?: { externalCaseId: string; kind?: 'selected' | 'mentioned' }[]
+  taskReferences?: { taskId: string; kind?: 'created' | 'referenced' }[]
+  attachments?: { attachmentId: string; purpose?: string }[]
+}
+
+// ---------------------------------------------------------------- 知识库
+
+export type KnowledgeScope = 'personal' | 'global'
+export type IngestionTaskStatus = 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type IngestionStage = 'staged' | 'parsing' | 'chunking' | 'embedding' | 'publishing' | 'done'
+
+export interface KnowledgeIngestionResponse {
+  documentId: string
+  documentVersionId: string
+  version: number
+  taskId: string
+  status: IngestionTaskStatus
+  stage: IngestionStage
+  replayed: boolean
+  createdAt: string
+}
+
+export interface KnowledgeIngestionTask {
+  taskId: string
+  documentVersionId: string
+  documentId: string
+  status: IngestionTaskStatus
+  stage: IngestionStage
+  attemptCount: number
+  maxAttempts: number
+  progressPercent: number
+  cancelRequestedAt?: string
+  lastError?: { code: string; message: string }
+  startedAt?: string
+  completedAt?: string
+  createdAt: string
+  updatedAt: string
+  cancellationChanged?: boolean
+}
+
+export interface KnowledgeCitationData {
+  sourceType: string
+  sourceRef: string
+  documentId: string
+  documentVersionId: string
+  chunkId: string
+  title: string
+  scope: KnowledgeScope
+  version: number
+  ordinal: number
+  pageNumber?: number
+  elementType: string
+  sectionPath: string[]
+  contentText: string
+  contentSha256: string
+}
+
+// ---------------------------------------------------------------- 管理域
+
+export type AdminUserStatus = 'active' | 'disabled'
+
+export interface AdminUser {
+  id: string
+  username: string
+  displayName: string
+  role: 'analyst' | 'admin'
+  status: AdminUserStatus
+  mustChangePassword: boolean
+  lastLoginAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminUserListData {
+  items: AdminUser[]
+  page: number
+  pageSize: number
+  total: number
+}
+
+export interface AdminUserListQuery {
+  status?: AdminUserStatus
+  role?: 'analyst' | 'admin'
+  page?: number
+  pageSize?: number
+}
+
+export interface CreateAdminUserInput {
+  username: string
+  displayName: string
+  role: 'analyst' | 'admin'
+  temporaryPassword: string
+}
+
+export interface UpdateAdminUserInput {
+  status?: AdminUserStatus
+  role?: 'analyst' | 'admin'
+}
