@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ import (
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
+	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -857,6 +859,7 @@ func TestObserveToolSelectionRejectsSchemaDriftFromPreflight(t *testing.T) {
 		},
 		mesagent.ToolSelectionProduction, 800,
 		evaluationidentity.Identity{Revision: "git:test", Dirty: false}, fingerprint, profile,
+		zap.NewNop(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "preflight Tool Schema") {
 		t.Fatalf("observeToolSelection error = %v, want preflight Schema drift rejection", err)
@@ -1183,5 +1186,375 @@ func TestSelectionBudgetPrintCoversProfileAndBounds(t *testing.T) {
 		if !strings.Contains(printedText, want) {
 			t.Fatalf("pre-run print missing %q, got:\n%s", want, printedText)
 		}
+	}
+}
+
+// selectionEvalErrorModelStub 是可脚本化的模型桩：Generate 按调用序号返回
+// errors 中对应错误（越界或 nil 时返回成功响应）。校准调用
+// （WithMaxTokens(1)）返回 800 tokens，带 Tool 调用返回 1000 tokens——
+// 判别基于 option，不依赖调用顺序，因此并发交错下也保持每 Case 的
+// base < arm 校准一致性。
+type selectionEvalErrorModelStub struct {
+	errors []error
+	calls  atomic.Int32
+}
+
+func (m *selectionEvalErrorModelStub) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	options ...model.Option,
+) (*schema.Message, error) {
+	index := int(m.calls.Add(1)) - 1
+	if index < len(m.errors) && m.errors[index] != nil {
+		return nil, m.errors[index]
+	}
+	promptTokens := 1000
+	applied := model.GetCommonOptions(nil, options...)
+	if applied.MaxTokens != nil && *applied.MaxTokens == 1 {
+		promptTokens = 800
+	}
+	return &schema.Message{
+		Role:    schema.Assistant,
+		Content: "ok",
+		ToolCalls: []schema.ToolCall{{
+			Index: intPtr(0),
+			Function: schema.FunctionCall{
+				Name: mesagent.ToolReadExternalCase, Arguments: "{}",
+			},
+		}},
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+			Usage: &schema.TokenUsage{
+				PromptTokens: promptTokens, CompletionTokens: 50, TotalTokens: promptTokens + 50,
+			},
+		},
+	}, nil
+}
+
+func (m *selectionEvalErrorModelStub) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *selectionEvalErrorModelStub) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *selectionEvalErrorModelStub) resetForTest() {
+	m.calls.Store(0)
+}
+
+// runSelectionEvalWithStubForTest 用给定模型桩跑完整单 Case 评测（仅本地
+// 桩，无任何真实 Provider）。
+func runSelectionEvalWithStubForTest(t *testing.T, modelStub model.ToolCallingChatModel) (string, string) {
+	t.Helper()
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+		return modelStub, nil
+	}
+	err := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+		"-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "3000000",
+	}, zap.NewNop(), deps)
+	if err != nil {
+		t.Fatalf("runWithDependencies: %v", err)
+	}
+	return output, summary
+}
+
+// selectionSummaryForTest 是 summary.json 的局部投影，只解码本测试关心的
+// 字段。
+type selectionSummaryForTest struct {
+	Wide struct {
+		PromptTokens int `json:"promptTokens"`
+	} `json:"wide"`
+	Production struct {
+		PromptTokens int `json:"promptTokens"`
+	} `json:"production"`
+	FailureTypes       map[string]int `json:"failureTypes"`
+	ProviderAccounting struct {
+		ModelGenerateAttempts int `json:"modelGenerateAttempts"`
+		UsageReportedAttempts int `json:"usageReportedAttempts"`
+		UsageMissingAttempts  int `json:"usageMissingAttempts"`
+		PromptTokens          int `json:"promptTokens"`
+		CompletionTokens      int `json:"completionTokens"`
+		TotalTokens           int `json:"totalTokens"`
+		CachedTokens          int `json:"cachedTokens"`
+		ReasoningTokens       int `json:"reasoningTokens"`
+	} `json:"providerAccounting"`
+}
+
+func readSelectionSummaryForTest(t *testing.T, path string) selectionSummaryForTest {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	var summary selectionSummaryForTest
+	if err := json.Unmarshal(contents, &summary); err != nil {
+		t.Fatalf("decode summary %s: %v", contents, err)
+	}
+	return summary
+}
+
+func readSelectionObservationsForTest(t *testing.T, path string) []mesagent.ToolSelectionObservation {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read observations: %v", err)
+	}
+	var observations []mesagent.ToolSelectionObservation
+	for _, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var observation mesagent.ToolSelectionObservation
+		if err := json.Unmarshal([]byte(line), &observation); err != nil {
+			t.Fatalf("decode observation: %v", err)
+		}
+		observations = append(observations, observation)
+	}
+	return observations
+}
+
+// TestSelectionProviderErrorClassificationHTTPModes 证明 400/429 被稳定分类
+// 到 observation.ErrorType，错误消息绝不泄漏，且 Summary 记账：校准成功 1
+// 次 + 两臂失败 2 次 = 3 次 Generate 调用、1 次上报 Usage、2 次缺失 Usage。
+func TestSelectionProviderErrorClassificationHTTPModes(t *testing.T) {
+	secret := "sensitive provider message with prompt and credential details"
+	stub := &selectionEvalErrorModelStub{errors: []error{
+		nil,
+		&openai.APIError{Message: secret, Type: "invalid_request_error", Code: "bad_param",
+			HTTPStatus: "400 Bad Request", HTTPStatusCode: 400},
+		&openai.APIError{Message: secret, Type: "rate_limit_error", Code: "insufficient_quota",
+			HTTPStatus: "429 Too Many Requests", HTTPStatusCode: 429},
+	}}
+	output, summaryPath := runSelectionEvalWithStubForTest(t, stub)
+	observations := readSelectionObservationsForTest(t, output)
+	if len(observations) != 2 {
+		t.Fatalf("observations = %d, want 2", len(observations))
+	}
+	byVariant := map[string]mesagent.ToolSelectionObservation{}
+	for _, observation := range observations {
+		byVariant[string(observation.Variant)] = observation
+	}
+	if got := byVariant["wide"].ErrorType; got != "provider_bad_request" {
+		t.Fatalf("wide ErrorType = %q, want provider_bad_request", got)
+	}
+	if got := byVariant["production"].ErrorType; got != "provider_rate_limited" {
+		t.Fatalf("production ErrorType = %q, want provider_rate_limited", got)
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read observations: %v", err)
+	}
+	if strings.Contains(string(contents), "credential") || strings.Contains(string(contents), secret) {
+		t.Fatal("observations must not leak the provider error message")
+	}
+	summary := readSelectionSummaryForTest(t, summaryPath)
+	accounting := summary.ProviderAccounting
+	if accounting.ModelGenerateAttempts != 3 || accounting.UsageReportedAttempts != 1 || accounting.UsageMissingAttempts != 2 {
+		t.Fatalf("accounting = %+v, want attempts=3 reported=1 missing=2", accounting)
+	}
+	if accounting.PromptTokens != 800 || accounting.TotalTokens != 850 {
+		t.Fatalf("accumulated usage = %+v, want only the calibration attempt (800/850)", accounting)
+	}
+	if summary.FailureTypes["provider_bad_request"] != 1 || summary.FailureTypes["provider_rate_limited"] != 1 {
+		t.Fatalf("failureTypes = %+v", summary.FailureTypes)
+	}
+}
+
+func TestSelectionCalibrationProviderErrorIsSanitized(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+	secret := "sensitive calibration response body with credential details"
+	stub := &selectionEvalErrorModelStub{errors: []error{
+		&openai.APIError{
+			Message:        secret,
+			Type:           "invalid_request_error",
+			Code:           "unsupported_tool_choice",
+			HTTPStatus:     "400 Bad Request",
+			HTTPStatusCode: 400,
+		},
+	}}
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+		return stub, nil
+	}
+
+	err := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+		"-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "3", "-max-provider-tokens", "3000000",
+	}, zap.NewNop(), deps)
+	if err == nil {
+		t.Fatal("calibration Provider failure must stop the evaluation")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "credential") {
+		t.Fatalf("calibration error leaked Provider message: %v", err)
+	}
+	if !strings.Contains(err.Error(), platformchatmodel.ProviderErrorCategoryBadRequest) {
+		t.Fatalf("calibration error = %v, want stable Provider category", err)
+	}
+}
+
+// TestSelectionProviderErrorClassificationAuthAndServerModes 证明 401/503 被
+// 稳定分类且不泄漏。
+func TestSelectionProviderErrorClassificationAuthAndServerModes(t *testing.T) {
+	stub := &selectionEvalErrorModelStub{errors: []error{
+		nil,
+		&openai.APIError{Message: "secret auth body", Type: "authentication_error", Code: "invalid_api_key",
+			HTTPStatus: "401 Unauthorized", HTTPStatusCode: 401},
+		&openai.APIError{Message: "secret server body", Type: "server_error", Code: "overloaded",
+			HTTPStatus: "503 Service Unavailable", HTTPStatusCode: 503},
+	}}
+	output, summaryPath := runSelectionEvalWithStubForTest(t, stub)
+	observations := readSelectionObservationsForTest(t, output)
+	byVariant := map[string]mesagent.ToolSelectionObservation{}
+	for _, observation := range observations {
+		byVariant[string(observation.Variant)] = observation
+	}
+	if got := byVariant["wide"].ErrorType; got != "provider_auth_error" {
+		t.Fatalf("wide ErrorType = %q, want provider_auth_error", got)
+	}
+	if got := byVariant["production"].ErrorType; got != "provider_server_error" {
+		t.Fatalf("production ErrorType = %q, want provider_server_error", got)
+	}
+	summary := readSelectionSummaryForTest(t, summaryPath)
+	accounting := summary.ProviderAccounting
+	if accounting.ModelGenerateAttempts != 3 || accounting.UsageReportedAttempts != 1 || accounting.UsageMissingAttempts != 2 {
+		t.Fatalf("accounting = %+v, want attempts=3 reported=1 missing=2", accounting)
+	}
+}
+
+// TestSelectionProviderErrorClassificationTimeoutTransportAndUnknown 证明
+// deadline/传输错误/未知错误分别分类为 timeout/transport/model_error。
+func TestSelectionProviderErrorClassificationTimeoutTransportAndUnknown(t *testing.T) {
+	t.Run("deadline and transport", func(t *testing.T) {
+		stub := &selectionEvalErrorModelStub{errors: []error{
+			nil,
+			context.DeadlineExceeded,
+			&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+		}}
+		output, _ := runSelectionEvalWithStubForTest(t, stub)
+		observations := readSelectionObservationsForTest(t, output)
+		byVariant := map[string]mesagent.ToolSelectionObservation{}
+		for _, observation := range observations {
+			byVariant[string(observation.Variant)] = observation
+		}
+		if got := byVariant["wide"].ErrorType; got != "provider_timeout" {
+			t.Fatalf("wide ErrorType = %q, want provider_timeout", got)
+		}
+		if got := byVariant["production"].ErrorType; got != "provider_transport_error" {
+			t.Fatalf("production ErrorType = %q, want provider_transport_error", got)
+		}
+	})
+	t.Run("unknown falls back to model_error", func(t *testing.T) {
+		stub := &selectionEvalErrorModelStub{errors: []error{
+			nil,
+			errors.New("plain non-provider error"),
+			errors.New("plain non-provider error"),
+		}}
+		output, summaryPath := runSelectionEvalWithStubForTest(t, stub)
+		observations := readSelectionObservationsForTest(t, output)
+		for _, observation := range observations {
+			if observation.ErrorType != "model_error" {
+				t.Fatalf("ErrorType = %q, want model_error", observation.ErrorType)
+			}
+		}
+		summary := readSelectionSummaryForTest(t, summaryPath)
+		if summary.FailureTypes["model_error"] != 2 {
+			t.Fatalf("failureTypes = %+v, want model_error=2", summary.FailureTypes)
+		}
+	})
+}
+
+// TestSelectionProviderAccountingCalibrationCountedOnceAndArmsClean 证明全
+// 成功运行时校准 Usage 恰好计一次（800 + 两臂 1000 + 1000），且校准不混入
+// 两臂指标。
+func TestSelectionProviderAccountingCalibrationCountedOnceAndArmsClean(t *testing.T) {
+	output, summaryPath := runSelectionEvalWithStubForTest(t, &selectionEvalErrorModelStub{})
+	observations := readSelectionObservationsForTest(t, output)
+	if len(observations) != 2 {
+		t.Fatalf("observations = %d, want 2", len(observations))
+	}
+	summary := readSelectionSummaryForTest(t, summaryPath)
+	accounting := summary.ProviderAccounting
+	if accounting.ModelGenerateAttempts != 3 || accounting.UsageReportedAttempts != 3 || accounting.UsageMissingAttempts != 0 {
+		t.Fatalf("accounting = %+v, want attempts=3 reported=3 missing=0", accounting)
+	}
+	if accounting.PromptTokens != 800+1000+1000 {
+		t.Fatalf("accumulated prompt tokens = %d, want 2800 (calibration counted exactly once)", accounting.PromptTokens)
+	}
+	if accounting.CompletionTokens != 50*3 || accounting.TotalTokens != 850+1050+1050 {
+		t.Fatalf("accumulated completion/total = %d/%d", accounting.CompletionTokens, accounting.TotalTokens)
+	}
+	// 校准绝不混入两臂指标。
+	if summary.Wide.PromptTokens != 1000 || summary.Production.PromptTokens != 1000 {
+		t.Fatalf("arm metrics polluted by calibration: wide=%d production=%d",
+			summary.Wide.PromptTokens, summary.Production.PromptTokens)
+	}
+}
+
+// TestSelectionProviderAccountingDeterministicAcrossConcurrency 证明并发
+// 1..8 下 Generate 记账确定且一致：2 个 Case × 3 次尝试 = 6，校准每个 Case 恰好
+// 一次。并发安全由 -race 验证（本测试无共享可变状态，归并只在主协程）。
+func TestSelectionProviderAccountingDeterministicAcrossConcurrency(t *testing.T) {
+	for _, concurrency := range []string{"1", "2", "4", "8"} {
+		t.Run("concurrency="+concurrency, func(t *testing.T) {
+			dataset := writeSelectionTwoCaseDatasetForTest(t)
+			outputDir := t.TempDir()
+			output := filepath.Join(outputDir, "obs.jsonl")
+			summary := filepath.Join(outputDir, "summary.json")
+			stub := &selectionEvalErrorModelStub{}
+			deps := defaultSelectionEvalDependencies()
+			deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+			deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+				return &githubmcp.Connection{}, nil
+			}
+			deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+				return stub, nil
+			}
+			err := runWithDependencies(context.Background(), []string{
+				"-dataset", dataset, "-output", output, "-summary", summary,
+				"-concurrency", concurrency, "-allow-dirty",
+				"-profile", "opencode-deepseek-main",
+				"-allow-provider-calls", "-max-cases", "2",
+				"-max-provider-calls", "20", "-max-provider-tokens", "6000000",
+			}, zap.NewNop(), deps)
+			if err != nil {
+				t.Fatalf("runWithDependencies(concurrency=%s): %v", concurrency, err)
+			}
+			accounting := readSelectionSummaryForTest(t, summary).ProviderAccounting
+			if accounting.ModelGenerateAttempts != 6 || accounting.UsageReportedAttempts != 6 || accounting.UsageMissingAttempts != 0 {
+				t.Fatalf("accounting = %+v, want attempts=6 reported=6 missing=0", accounting)
+			}
+			// 两个 Case 各一次校准（800）+ 各两臂（1000×4）。
+			if accounting.PromptTokens != 2*800+4*1000 {
+				t.Fatalf("prompt tokens = %d, want 5600 (each calibration counted once)", accounting.PromptTokens)
+			}
+		})
 	}
 }
