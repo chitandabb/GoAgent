@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +19,14 @@ import (
 	mesagent "github.com/chitandabb/GoAgent/internal/agent"
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/evaluationidentity"
+	platformchatmodel "github.com/chitandabb/GoAgent/internal/platform/chatmodel"
 	"github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/platform/githubmcp"
 	"github.com/chitandabb/GoAgent/internal/resilience"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
@@ -243,6 +247,182 @@ func selectionRunAccessForTest(t *testing.T, _ mesagent.ToolSelectionScope) cont
 		t.Fatalf("withSelectionRunAccess: %v", err)
 	}
 	return ctx
+}
+
+// toolInfoFingerprintForTest 与 selectionToolInfoMetadata 同口径：json.Marshal
+// 走 schema.ToolInfo 自带 MarshalJSON（保留 params/jsonschema 两种表示）。
+func toolInfoFingerprintForTest(t *testing.T, info *schema.ToolInfo) string {
+	t.Helper()
+	encoded, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal ToolInfo: %v", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+// realSelectionChatModelForTest 用真实 platformchatmodel.New 构造模型（与
+// selectionEvalModelFactory 同 seam）。本测试只 WithTools、绝不 Generate；
+// 选中 Profile 的 BaseURL 被覆盖为不可达地址，确保测试无法意外访问真实
+// Provider。
+func realSelectionChatModelForTest(t *testing.T) model.ToolCallingChatModel {
+	t.Helper()
+	models := selectionChatModelsForTest()
+	profileName, profile, _, err := prepareToolSelectionProfile(models, "")
+	if err != nil {
+		t.Fatalf("prepareToolSelectionProfile: %v", err)
+	}
+	profile.BaseURL = "http://127.0.0.1:9/v1"
+	t.Setenv("MESGUARD_STEPFUN_API_KEY", "test-key")
+	instance, err := platformchatmodel.New(context.Background(), profileName, profile)
+	if err != nil {
+		t.Fatalf("chatmodel.New: %v", err)
+	}
+	if instance.Model == nil {
+		t.Fatal("chatmodel.New returned nil Model")
+	}
+	return instance.Model
+}
+
+// TestToolSchemaHashStableAcrossRealBindingOrders 复现 f5831a4 单 Case 探针的
+// 顺序依赖：真实装配得到两臂 preflight hash 后，用真实 Factory 模型按
+// wide→production 顺序绑定，重新装配两臂必须与 preflight hash 一致；再按
+// production→wide 逆序验证；重复绑定也必须稳定。全程不 Generate、不创建
+// 真实 Provider 请求。
+func TestToolSchemaHashStableAcrossRealBindingOrders(t *testing.T) {
+	skillRuntime := skillRuntimeForSelectionTest(t)
+	ctx := context.Background()
+	assembly, err := assembleSelectionEval(ctx, nil, skillRuntime, mesagent.VerifyToolSelectionComparability)
+	if err != nil {
+		t.Fatalf("assembleSelectionEval: %v", err)
+	}
+	chatModel := realSelectionChatModelForTest(t)
+
+	armInfos := func(authorization *mesagent.ToolAuthorizationMiddleware) ([]*schema.ToolInfo, string) {
+		t.Helper()
+		infos, hash, err := selectionArmTools(ctx, authorization, skillRuntime.Middleware)
+		if err != nil {
+			t.Fatalf("selectionArmTools: %v", err)
+		}
+		return infos, hash
+	}
+	productionInfos, productionHash := armInfos(assembly.productionAuthorization)
+	wideInfos, wideHash := armInfos(assembly.wideAuthorization)
+	if productionHash != assembly.productionSchemaHash || wideHash != assembly.wideSchemaHash {
+		t.Fatalf("fresh arm hash must equal preflight: production %s/%s wide %s/%s",
+			productionHash, assembly.productionSchemaHash, wideHash, assembly.wideSchemaHash)
+	}
+
+	// wide -> production：wide 绑定后重新装配两臂必须与 preflight 一致。
+	bound, err := chatModel.WithTools(wideInfos)
+	if err != nil {
+		t.Fatalf("bind wide: %v", err)
+	}
+	if _, got := armInfos(assembly.productionAuthorization); got != assembly.productionSchemaHash {
+		t.Fatalf("production arm hash drifted after wide binding: %s != preflight %s", got, assembly.productionSchemaHash)
+	}
+	if _, got := armInfos(assembly.wideAuthorization); got != assembly.wideSchemaHash {
+		t.Fatalf("wide arm hash drifted after wide binding: %s != preflight %s", got, assembly.wideSchemaHash)
+	}
+	// 重复绑定也稳定。
+	if _, err := bound.WithTools(wideInfos); err != nil {
+		t.Fatalf("re-bind wide: %v", err)
+	}
+	if _, got := armInfos(assembly.productionAuthorization); got != assembly.productionSchemaHash {
+		t.Fatalf("production arm hash drifted after repeated wide binding: %s != preflight %s", got, assembly.productionSchemaHash)
+	}
+
+	// production -> wide 逆序。
+	if _, err := chatModel.WithTools(productionInfos); err != nil {
+		t.Fatalf("bind production: %v", err)
+	}
+	if _, got := armInfos(assembly.wideAuthorization); got != assembly.wideSchemaHash {
+		t.Fatalf("wide arm hash drifted after production binding: %s != preflight %s", got, assembly.wideSchemaHash)
+	}
+	if _, got := armInfos(assembly.productionAuthorization); got != assembly.productionSchemaHash {
+		t.Fatalf("production arm hash drifted after production binding: %s != preflight %s", got, assembly.productionSchemaHash)
+	}
+}
+
+// TestCatalogAndSkillToolSchemasStableAcrossBinding 覆盖两类 Tool 的不同风险：
+// Catalog-owned Tool（InferTool 重复返回同一 ToolInfo/JSONSchema 指针）绑定
+// 前后 Info/Schema/fingerprint 不变；middleware-owned skill Tool（每次 Info
+// 重建 ToolInfo）多次 Info 稳定，且其他 Tool 绑定不影响它；skill 最终仍恰好
+// 出现一次，不修改现有装配合同。
+func TestCatalogAndSkillToolSchemasStableAcrossBinding(t *testing.T) {
+	skillRuntime := skillRuntimeForSelectionTest(t)
+	ctx := context.Background()
+	assembly, err := assembleSelectionEval(ctx, nil, skillRuntime, mesagent.VerifyToolSelectionComparability)
+	if err != nil {
+		t.Fatalf("assembleSelectionEval: %v", err)
+	}
+	chatModel := realSelectionChatModelForTest(t)
+
+	accessCtx, err := withSelectionRunAccess(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, authorizedCtx, err := assembly.productionAuthorization.BeforeAgent(accessCtx, &adk.ChatModelAgentContext{Tools: nil})
+	if err != nil {
+		t.Fatalf("BeforeAgent(authorization): %v", err)
+	}
+	_, finalCtx, err := assembly.skillMiddleware.BeforeAgent(accessCtx, authorizedCtx)
+	if err != nil {
+		t.Fatalf("BeforeAgent(skill): %v", err)
+	}
+
+	var skillTool tool.BaseTool
+	var catalogTools []tool.BaseTool
+	skillCount := 0
+	for _, current := range finalCtx.Tools {
+		info, infoErr := current.Info(ctx)
+		if infoErr != nil {
+			t.Fatalf("Info: %v", infoErr)
+		}
+		if info.Name == mesagent.ToolSkill {
+			skillCount++
+			skillTool = current
+		} else {
+			catalogTools = append(catalogTools, current)
+		}
+	}
+	if skillCount != 1 || skillTool == nil {
+		t.Fatalf("skill Tool must appear exactly once, got %d", skillCount)
+	}
+	skillHash := func() string {
+		t.Helper()
+		info, infoErr := skillTool.Info(ctx)
+		if infoErr != nil {
+			t.Fatalf("skill Info: %v", infoErr)
+		}
+		return toolInfoFingerprintForTest(t, info)
+	}
+	baselineSkillHash := skillHash()
+	// middleware-owned skill Tool：多次 Info 必须稳定。
+	if second := skillHash(); second != baselineSkillHash {
+		t.Fatalf("skill Tool Info unstable across calls: %s != %s", second, baselineSkillHash)
+	}
+
+	for _, current := range catalogTools {
+		info, infoErr := current.Info(ctx)
+		if infoErr != nil {
+			t.Fatalf("Info: %v", infoErr)
+		}
+		before := toolInfoFingerprintForTest(t, info)
+		if _, bindErr := chatModel.WithTools([]*schema.ToolInfo{info}); bindErr != nil {
+			t.Fatalf("bind %s: %v", info.Name, bindErr)
+		}
+		afterInfo, infoErr := current.Info(ctx)
+		if infoErr != nil {
+			t.Fatalf("Info after binding: %v", infoErr)
+		}
+		if after := toolInfoFingerprintForTest(t, afterInfo); after != before {
+			t.Fatalf("catalog tool %s schema mutated by binding: %s -> %s", info.Name, before, after)
+		}
+		if after := skillHash(); after != baselineSkillHash {
+			t.Fatalf("skill Tool schema drifted after binding %s: %s -> %s", info.Name, baselineSkillHash, after)
+		}
+	}
 }
 
 func selectionChatModelsForTest() config.ChatModelConfig {
