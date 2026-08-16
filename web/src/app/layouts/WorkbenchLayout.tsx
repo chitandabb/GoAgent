@@ -50,6 +50,12 @@ export function WorkbenchLayout() {
             <NavLink to="/cases" className={navLinkCls}>
               外部工单
             </NavLink>
+            <NavLink to="/tasks" className={navLinkCls}>
+              诊断任务
+            </NavLink>
+            <NavLink to="/assistant" className={navLinkCls}>
+              知识助手
+            </NavLink>
             <NavLink to="/knowledge" className={navLinkCls}>
               知识库
             </NavLink>
