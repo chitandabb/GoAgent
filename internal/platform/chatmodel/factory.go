@@ -152,8 +152,13 @@ func newInstance(
 	if err != nil {
 		return nil, fmt.Errorf("create %s chat model: %w", provider, err)
 	}
+	// 所有返回的模型都由 toolSchemaIsolatingModel 保护：openai ACL 的 toTools
+	// 会原地 sort ToolInfo 的 JSONSchema.Required，而 InferTool.Info() 重复
+	// 返回同一 ToolInfo/JSONSchema 指针，未经隔离会漂移 ToolProfile 启动期
+	// 指纹、评测 preflight 指纹与后续 runtime 指纹。隔离发生在模型 Adapter
+	// seam，Catalog/Skill/Runner 接口不变。
 	return &Instance{
-		Model: chatModel,
+		Model: &toolSchemaIsolatingModel{inner: chatModel},
 		Identity: Identity{
 			Profile: strings.TrimSpace(profileName), Provider: provider, ModelID: strings.TrimSpace(profile.Model),
 			ReasoningEffort: strings.ToLower(strings.TrimSpace(profile.ReasoningEffort)),
