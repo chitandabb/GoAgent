@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"sort"
@@ -77,21 +78,26 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 // Provider 创建之前（factory.calls == 0）。
 type selectionEvalDependencies struct {
 	loadConfig                   func() (config.Config, error)
-	newChatModel                 func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+	newChatModel                 func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error)
 	connectGitHub                func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error)
 	verifySelectionComparability func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error)
 }
 
+// selectionEvalModelFactory 是 Provider 构造 seam：正式运行走真实
+// platformchatmodel.New（只接收本次选择的 Profile 名称与最终 Profile，绝不
+// 从 activeProfile 重新解析，也绝不为 NewActive 临时切换 activeProfile）。
+func selectionEvalModelFactory(ctx context.Context, profileName string, profile config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+	instance, err := platformchatmodel.New(ctx, profileName, profile)
+	if err != nil {
+		return nil, err
+	}
+	return instance.Model, nil
+}
+
 func defaultSelectionEvalDependencies() selectionEvalDependencies {
 	return selectionEvalDependencies{
-		loadConfig: config.Load,
-		newChatModel: func(ctx context.Context, models config.ChatModelConfig) (model.ToolCallingChatModel, error) {
-			instance, err := platformchatmodel.NewActive(ctx, models)
-			if err != nil {
-				return nil, err
-			}
-			return instance.Model, nil
-		},
+		loadConfig:                   config.Load,
+		newChatModel:                 selectionEvalModelFactory,
 		connectGitHub:                githubmcp.Connect,
 		verifySelectionComparability: mesagent.VerifyToolSelectionComparability,
 	}
@@ -104,9 +110,15 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	outputPath := flags.String("output", toolSelectionObservationsOutput, "observation JSONL output")
 	summaryPath := flags.String("summary", toolSelectionSummaryOutput, "summary JSON output")
 	concurrency := flags.Int("concurrency", 4, "parallel cases; each case keeps paired variants sequential")
+	profileFlag := flags.String("profile", "", "named [models.chat.profiles.<name>] to evaluate with (empty = activeProfile)")
+	caseID := flags.String("case-id", "", "exact dataset CaseID to evaluate (empty = whole dataset)")
+	allowProviderCalls := flags.Bool("allow-provider-calls", false, "explicitly authorize Provider calls for this evaluation run")
+	maxCases := flags.Int("max-cases", 0, "authorized case count cap for Provider runs")
+	maxProviderCalls := flags.Int("max-provider-calls", 0, "authorized Provider call upper bound")
+	maxProviderTokens := flags.Int("max-provider-tokens", 0, "authorized Provider Token upper bound")
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-allow-dirty]")
+		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty]")
 	}
 	if *concurrency < 1 || *concurrency > 8 {
 		return errors.New("concurrency must be between 1 and 8")
@@ -115,12 +127,28 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	if err != nil {
 		return fmt.Errorf("read tool selection dataset: %w", err)
 	}
+	// 数据集整体仍先经过现有版本、重复 ID 与字段合同校验；-case-id 的精确
+	// 选择必须发生在成本预算与 Provider 创建之前，-max-cases 仍是授权上限，
+	// 严禁把 max-cases 实现成"前 N 条"截断。
+	cases, err = selectToolSelectionCases(cases, *caseID)
+	if err != nil {
+		return err
+	}
 	cfg, err := deps.loadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 	if !cfg.Models.Chat.Enabled || !cfg.GitHubMCP.Enabled {
 		return errors.New("chat model and GitHub MCP must be enabled")
+	}
+	// 解析 -profile：空值使用 activeProfile，非空值使用精确命名 Profile；
+	// 评测变换（low reasoning、temperature=0、maxOutputTokens=1024）只作用于
+	// 局部副本；模型 Profile 指纹基于最终副本与实际 Profile 名；绝不写回配置
+	// Map，绝不替换 activeProfile，绝不为 NewActive 临时切换。
+	profileName, modelProfile, modelProfileFingerprint, err :=
+		prepareToolSelectionProfile(cfg.Models.Chat, *profileFlag)
+	if err != nil {
+		return err
 	}
 	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision，
 	// 再决定是否允许继续。
@@ -132,17 +160,26 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	if decisionErr != nil {
 		return decisionErr
 	}
+	// 成本闸门：缺授权、预算非正、Case 超限、调用或 Token 硬上界超限都在创建
+	// 任何 Chat Provider 与任何远端连接（GitHub MCP）之前 fail-closed。默认
+	// 每 Case 允许 3 次 Provider 调用（base 校准 1 + wide 1 + production 1）。
+	// Token 硬上界由最终命名 Profile 的 contextWindowTokens 派生，不使用固定
+	// 16K 输入假设。
+	budget, err := validateToolSelectionProviderBudget(
+		len(cases), toolSelectionPerCaseEndpointCalls, modelProfile.ContextWindowTokens,
+		*allowProviderCalls, *maxCases, *maxProviderCalls, *maxProviderTokens,
+	)
+	if err != nil {
+		return err
+	}
 	if identityErr != nil || identity.Dirty || identity.Revision == "unknown" {
 		log.Warn("dirty or unknown implementation revision accepted for local smoke only; observations are NOT formal metrics",
 			zap.String("revision", identity.Revision), zap.Bool("dirty", identity.Dirty))
 	}
-	// 工具选择评测固定低推理强度：先完成全部 Profile 变换，写回配置，再基于
-	// 最终 Profile 计算 PromptProfileFingerprint。指纹与实际模型调用配置必须
-	// 完全一致。
-	modelProfile, modelProfileFingerprint, err := prepareToolSelectionModelProfile(cfg.Models.Chat)
-	if err != nil {
-		return err
-	}
+	fmt.Fprintf(os.Stdout,
+		"mesguard-tool-selection-eval profile=%s provider=%s model=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_hard_upper_bound=%d revision=%s dirty=%t\n",
+		profileName, strings.TrimSpace(modelProfile.Provider), strings.TrimSpace(modelProfile.Model),
+		budget.Cases, budget.ProviderCalls, budget.TotalTokens, identity.Revision, identity.Dirty)
 	githubConnection, err := deps.connectGitHub(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
 		return fmt.Errorf("connect GitHub MCP: %w", err)
@@ -160,7 +197,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	if err != nil {
 		return err
 	}
-	chatModel, err := deps.newChatModel(ctx, cfg.Models.Chat)
+	chatModel, err := deps.newChatModel(ctx, profileName, modelProfile)
 	if err != nil {
 		return fmt.Errorf("build chat model: %w", err)
 	}
@@ -652,31 +689,132 @@ func assembleSelectionEval(
 	}, nil
 }
 
-// prepareToolSelectionModelProfile 完成评测需要的全部实际模型参数变换后，
-// 把最终 Profile 写回配置，并基于最终 Profile 计算 PromptProfileFingerprint。
-// 顺序固定为：读取 ActiveProfile -> 应用所有变换（ReasoningEffort 非空时
-// 置 low、空时保持为空；Temperature 置 0；MaxOutputTokens 置
-// toolSelectionMaxTokens）-> 写回 cfg.Models.Chat.Profiles -> 计算指纹 ->
-// 创建 Provider，保证记录的指纹与实际模型调用配置一致。
-func prepareToolSelectionModelProfile(
-	models config.ChatModelConfig,
-) (config.ChatModelProfileConfig, string, error) {
-	profile, err := models.ActiveProfile()
-	if err != nil {
-		return config.ChatModelProfileConfig{}, "", err
+// 工具选择评测固定：每 Case 恰好 3 次 Provider 调用上界（base 校准 1 次 +
+// wide 1 次 + production 1 次）。Token 硬上界不由本地估算或固定 16K 输入假设
+// 派生，而是由最终命名 Profile 的 contextWindowTokens 派生（见
+// validateToolSelectionProviderBudget）：每次调用硬上界 <= contextWindowTokens、
+// 每 Case 硬上界 = 3 x contextWindowTokens。
+const toolSelectionPerCaseEndpointCalls = 3
+
+// checkedMultiply 对预算乘法做溢出检查：溢出 fail-closed，绝不回绕。
+func checkedMultiply(factorA, factorB int) (int, error) {
+	if factorA <= 0 || factorB <= 0 {
+		return 0, errors.New("budget factors must be positive")
 	}
-	if strings.TrimSpace(profile.ReasoningEffort) != "" {
-		profile.ReasoningEffort = "low"
+	if factorA > math.MaxInt/factorB {
+		return 0, fmt.Errorf("budget multiplication overflow (%d * %d)", factorA, factorB)
+	}
+	return factorA * factorB, nil
+}
+
+// validateToolSelectionProviderBudget 是统一成本闸门：缺授权、预算非正、Case
+// 超限、调用或 Token 硬上界超限都必须 fail-closed。除非显式给出的命名 Profile
+// contextWindowTokens 外不做任何本地 Token 估算：每 Case Token 硬上界 =
+// 3 x contextWindowTokens（对应 1 次 base 校准 + 1 次 wide + 1 次 production，
+// 每次调用上限为 Profile 的 contextWindowTokens），总硬上界 =
+// Cases x 3 x contextWindowTokens；溢出 fail-closed。默认 45 Case 调用上界 =
+// 45*3 = 135 次 Provider 调用。只做校验，绝不静默截取数据集。
+func validateToolSelectionProviderBudget(
+	cases int,
+	perCaseEndpointCalls int,
+	contextWindowTokens int,
+	allowed bool,
+	caseLimit int,
+	providerCallLimit int,
+	totalTokenLimit int,
+) (toolSelectionProviderBudget, error) {
+	if !allowed {
+		return toolSelectionProviderBudget{}, errors.New("Provider run requires -allow-provider-calls")
+	}
+	if cases < 1 || caseLimit < 1 || providerCallLimit < 1 || totalTokenLimit < 1 {
+		return toolSelectionProviderBudget{}, errors.New("Provider run requires positive -max-cases, -max-provider-calls, and -max-provider-tokens")
+	}
+	if cases > caseLimit {
+		return toolSelectionProviderBudget{}, fmt.Errorf("dataset has %d cases, exceeds authorized max-cases %d", cases, caseLimit)
+	}
+	if perCaseEndpointCalls < 1 || contextWindowTokens < 1 {
+		return toolSelectionProviderBudget{}, errors.New("effective per-case Provider call and context window budgets must be positive")
+	}
+	providerCalls, err := checkedMultiply(cases, perCaseEndpointCalls)
+	if err != nil {
+		return toolSelectionProviderBudget{}, err
+	}
+	perCaseTokens, err := checkedMultiply(perCaseEndpointCalls, contextWindowTokens)
+	if err != nil {
+		return toolSelectionProviderBudget{}, err
+	}
+	totalTokens, err := checkedMultiply(cases, perCaseTokens)
+	if err != nil {
+		return toolSelectionProviderBudget{}, err
+	}
+	budget := toolSelectionProviderBudget{
+		Cases:         cases,
+		ProviderCalls: providerCalls,
+		TotalTokens:   totalTokens,
+	}
+	if budget.ProviderCalls > providerCallLimit {
+		return toolSelectionProviderBudget{}, fmt.Errorf("estimated Provider call upper bound %d exceeds authorized max-provider-calls %d", budget.ProviderCalls, providerCallLimit)
+	}
+	if budget.TotalTokens > totalTokenLimit {
+		return toolSelectionProviderBudget{}, fmt.Errorf("hard Token upper bound %d exceeds authorized max-provider-tokens %d", budget.TotalTokens, totalTokenLimit)
+	}
+	return budget, nil
+}
+
+type toolSelectionProviderBudget struct {
+	Cases         int
+	ProviderCalls int
+	TotalTokens   int
+}
+
+// selectToolSelectionCases 在完整数据集校验之后、成本预算与 Provider 创建之前，
+// 按精确 CaseID 选择单个 Case；空 caseID 返回全部 Case，保持历史行为。
+// -max-cases 仍是授权上限：这里只做选择，绝不做"前 N 条"截断。
+func selectToolSelectionCases(cases []mesagent.ToolSelectionCase, caseID string) ([]mesagent.ToolSelectionCase, error) {
+	caseID = strings.TrimSpace(caseID)
+	if caseID == "" {
+		return cases, nil
+	}
+	for _, definition := range cases {
+		if definition.CaseID == caseID {
+			return []mesagent.ToolSelectionCase{definition}, nil
+		}
+	}
+	return nil, fmt.Errorf("case-id %q does not match any case in the dataset", caseID)
+}
+
+// prepareToolSelectionProfile 解析 -profile：空值使用 activeProfile，非空值
+// 使用精确命名 Profile（如 opencode-deepseek-main），支持不修改生产
+// activeProfile 直接评测命名 Profile。评测变换（非空 ReasoningEffort 固定
+// low、Temperature=0、MaxOutputTokens=toolSelectionMaxTokens）只作用于局部
+// 副本；指纹基于最终副本与实际 Profile 名；绝不写回配置 Map，绝不替换
+// activeProfile，绝不为 NewActive 临时切换。
+func prepareToolSelectionProfile(
+	chat config.ChatModelConfig,
+	profileFlag string,
+) (profileName string, finalProfile config.ChatModelProfileConfig, fingerprint string, err error) {
+	profileName = strings.TrimSpace(profileFlag)
+	if profileName == "" {
+		profileName = strings.TrimSpace(chat.ActiveProfileName)
+	}
+	if profileName == "" {
+		return "", config.ChatModelProfileConfig{}, "", errors.New("chat model profile name is empty")
+	}
+	finalProfile, err = chat.Profile(profileName)
+	if err != nil {
+		return "", config.ChatModelProfileConfig{}, "", err
+	}
+	if strings.TrimSpace(finalProfile.ReasoningEffort) != "" {
+		finalProfile.ReasoningEffort = "low"
 	}
 	temperature := float32(0)
-	profile.Temperature = &temperature
-	profile.MaxOutputTokens = toolSelectionMaxTokens
-	models.Profiles[models.ActiveProfileName] = profile
-	fingerprint, err := profile.PromptProfileFingerprint(models.ActiveProfileName)
+	finalProfile.Temperature = &temperature
+	finalProfile.MaxOutputTokens = toolSelectionMaxTokens
+	fingerprint, err = finalProfile.PromptProfileFingerprint(profileName)
 	if err != nil {
-		return config.ChatModelProfileConfig{}, "", fmt.Errorf("compute model profile fingerprint: %w", err)
+		return "", config.ChatModelProfileConfig{}, "", fmt.Errorf("compute model profile fingerprint: %w", err)
 	}
-	return profile, fingerprint, nil
+	return profileName, finalProfile, fingerprint, nil
 }
 
 type selectionExternalCases struct{}

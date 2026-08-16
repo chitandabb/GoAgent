@@ -145,6 +145,9 @@ func (o EvaluationObservation) Validate() error {
 	if err := o.validateV3Identity(); err != nil {
 		return err
 	}
+	if err := o.validateAllowedToolsArmSets(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(o.Model) == "" || strings.TrimSpace(o.ModelVersion) == "" ||
 		strings.TrimSpace(o.ReasoningEffort) == "" || strings.TrimSpace(o.PromptVersion) == "" {
 		return errors.New("model, modelVersion, reasoningEffort, and promptVersion are required")
@@ -172,6 +175,70 @@ func (o EvaluationObservation) Validate() error {
 		return errors.New("usage and duration values cannot be negative")
 	}
 	return nil
+}
+
+// validateAllowedToolsArmSets 收紧 v3 AllowedTools 集合合同：AllowedTools 是
+// 最终模型可见 Tool 名单的集合快照，必须与 comparison 合同严格一致——
+// experiment == SharedToolNames；baseline == SharedToolNames ∪
+// BaselineOnlyToolNames。拒绝重复、缺失或额外 Tool；顺序不影响集合比较。
+// 错配观测在 Validate 阶段 fail-closed，绝不能进入 paired reduction。
+func (o EvaluationObservation) validateAllowedToolsArmSets() error {
+	if hasDuplicate(o.AllowedTools) {
+		return errors.New("v3 allowedTools must not contain duplicates")
+	}
+	if hasDuplicate(o.SharedToolNames) || hasDuplicate(o.BaselineOnlyToolNames) {
+		return errors.New("v3 sharedToolNames/baselineOnlyToolNames must not contain duplicates")
+	}
+	shared := normalizeToolSet(o.SharedToolNames)
+	var expected []string
+	switch o.Variant {
+	case EvaluationExperiment:
+		expected = append([]string(nil), shared...)
+	case EvaluationBaseline:
+		expected = normalizeToolSet(append(append([]string(nil), shared...), o.BaselineOnlyToolNames...))
+	default:
+		return fmt.Errorf("invalid evaluation variant %q", o.Variant)
+	}
+	actual := normalizeToolSet(o.AllowedTools)
+	return compareObservationToolSets("allowedTools", "comparison Tool contract", actual, expected)
+}
+
+// normalizeToolSet 返回去重后的稳定集合（排序，供集合比较）。
+func normalizeToolSet(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if _, exists := seen[name]; exists || name == "" {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func compareObservationToolSets(label, contract string, actual, expected []string) error {
+	if !slices.Equal(actual, expected) {
+		missing := differenceToolSets(expected, actual)
+		extra := differenceToolSets(actual, expected)
+		return fmt.Errorf(
+			"v3 %s does not match the %s contract: missing=%v extra=%v (order does not matter)",
+			label, contract, missing, extra,
+		)
+	}
+	return nil
+}
+
+func differenceToolSets(from, against []string) []string {
+	result := make([]string, 0, len(from))
+	for _, name := range from {
+		if !slices.Contains(against, name) {
+			result = append(result, name)
+		}
+	}
+	return result
 }
 
 // validateV3Identity 强制执行 v3 身份合同。ToolProfileID 是实验臂特有合同：

@@ -396,7 +396,7 @@ func newEvaluationWideToolCatalogForTest(t *testing.T) *ToolCatalog {
 		t.Fatal(err)
 	}
 	if err := catalog.BindProfile(profile, []string{ToolSkill}); err != nil {
-		t.Fatalf("BindProfile(evaluation-wide-v1): %v", err)
+		t.Fatalf("BindProfile(evaluation-wide-v2): %v", err)
 	}
 	return catalog
 }

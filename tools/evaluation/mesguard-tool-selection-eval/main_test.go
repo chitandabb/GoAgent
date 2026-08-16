@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -251,36 +254,55 @@ func selectionChatModelsForTest() config.ChatModelConfig {
 		PromptSafetyMarginTokens: 2048, PromptSafetyMarginRatio: 0.05,
 		TokenizerStrategy: config.TokenizerStrategyLocalCalibrated,
 	}
+	named := config.ChatModelProfileConfig{
+		Provider: "opencode-go", BaseURL: "https://opencode.deepseek.com/api/v1",
+		APIKeyEnv: "MESGUARD_OPENCODE_DEEPSEEK_API_KEY", Model: "deepseek-v4-flash",
+		ReasoningEffort: "low", TimeoutMillis: 120_000,
+		ContextWindowTokens: 262_144, MaxOutputTokens: 8192,
+		PromptSafetyMarginTokens: 4096, PromptSafetyMarginRatio: 0.05,
+		TokenizerStrategy: config.TokenizerStrategyLocalCalibrated,
+	}
 	return config.ChatModelConfig{
+		Enabled:           true,
 		ActiveProfileName: "stepfun-main",
-		Profiles:          map[string]config.ChatModelProfileConfig{"stepfun-main": active},
+		Profiles: map[string]config.ChatModelProfileConfig{
+			"stepfun-main":           active,
+			"opencode-deepseek-main": named,
+		},
 	}
 }
 
-// TestPrepareToolSelectionModelProfileOverridesEffort 验证变换顺序：high ->
-// low，且最终 Profile 写回配置。
-func TestPrepareToolSelectionModelProfileOverridesEffort(t *testing.T) {
+// TestPrepareToolSelectionProfileOverridesEffort 验证变换顺序：high -> low。
+// 变换只作用于局部副本：prepareToolSelectionProfile 绝不写回 config Map。
+func TestPrepareToolSelectionProfileOverridesEffort(t *testing.T) {
 	models := selectionChatModelsForTest()
-	profile, fingerprint, err := prepareToolSelectionModelProfile(models)
+	profileName, profile, fingerprint, err := prepareToolSelectionProfile(models, "")
 	if err != nil {
-		t.Fatalf("prepareToolSelectionModelProfile(): %v", err)
+		t.Fatalf("prepareToolSelectionProfile(): %v", err)
+	}
+	if profileName != models.ActiveProfileName {
+		t.Fatalf("profileName = %q, want active %q", profileName, models.ActiveProfileName)
 	}
 	if profile.ReasoningEffort != "low" {
 		t.Fatalf("final reasoningEffort = %q, want low", profile.ReasoningEffort)
 	}
-	if written := models.Profiles[models.ActiveProfileName].ReasoningEffort; written != "low" {
-		t.Fatalf("profile written back to config has reasoningEffort = %q, want low", written)
+	active, err := models.ActiveProfile()
+	if err != nil {
+		t.Fatalf("ActiveProfile(): %v", err)
+	}
+	if active.ReasoningEffort != "high" {
+		t.Fatalf("activeProfile must stay untouched, got reasoningEffort %q", active.ReasoningEffort)
 	}
 	if fingerprint == "" {
 		t.Fatal("fingerprint must be non-empty")
 	}
 }
 
-// TestPrepareToolSelectionModelProfileFingerprintMatchesFinalProfile 验证指纹
-// 等于最终 Profile 的指纹、与修改前 Profile 的指纹不同，且最终 Profile 携带
-// 评测实际使用的全部参数（ReasoningEffort、Temperature=0、
+// TestPrepareToolSelectionProfileFingerprintMatchesFinalProfile 验证指纹等于
+// 最终 Profile（副本）的指纹、与修改前 Profile 的指纹不同，且最终 Profile
+// 携带评测实际使用的全部参数（ReasoningEffort、Temperature=0、
 // MaxOutputTokens=toolSelectionMaxTokens）。
-func TestPrepareToolSelectionModelProfileFingerprintMatchesFinalProfile(t *testing.T) {
+func TestPrepareToolSelectionProfileFingerprintMatchesFinalProfile(t *testing.T) {
 	models := selectionChatModelsForTest()
 	original, err := models.ActiveProfile()
 	if err != nil {
@@ -290,11 +312,11 @@ func TestPrepareToolSelectionModelProfileFingerprintMatchesFinalProfile(t *testi
 	if err != nil {
 		t.Fatalf("original PromptProfileFingerprint(): %v", err)
 	}
-	profile, fingerprint, err := prepareToolSelectionModelProfile(models)
+	profileName, profile, fingerprint, err := prepareToolSelectionProfile(models, "")
 	if err != nil {
-		t.Fatalf("prepareToolSelectionModelProfile(): %v", err)
+		t.Fatalf("prepareToolSelectionProfile(): %v", err)
 	}
-	finalFingerprint, err := profile.PromptProfileFingerprint(models.ActiveProfileName)
+	finalFingerprint, err := profile.PromptProfileFingerprint(profileName)
 	if err != nil {
 		t.Fatalf("final PromptProfileFingerprint(): %v", err)
 	}
@@ -313,19 +335,26 @@ func TestPrepareToolSelectionModelProfileFingerprintMatchesFinalProfile(t *testi
 	if profile.MaxOutputTokens != toolSelectionMaxTokens {
 		t.Fatalf("final profile maxOutputTokens = %d, want %d", profile.MaxOutputTokens, toolSelectionMaxTokens)
 	}
+	active, err := models.ActiveProfile()
+	if err != nil {
+		t.Fatalf("ActiveProfile(): %v", err)
+	}
+	if active.ReasoningEffort != "high" || active.MaxOutputTokens != 4096 {
+		t.Fatalf("activeProfile must stay untouched: %+v", active)
+	}
 }
 
-// TestPrepareToolSelectionModelProfileKeepsEmptyEffort 验证未声明
+// TestPrepareToolSelectionProfileKeepsEmptyEffort 验证未声明
 // ReasoningEffort 时保持为空，不无条件改写为 low；Temperature 与
 // MaxOutputTokens 仍按评测参数设置。
-func TestPrepareToolSelectionModelProfileKeepsEmptyEffort(t *testing.T) {
+func TestPrepareToolSelectionProfileKeepsEmptyEffort(t *testing.T) {
 	models := selectionChatModelsForTest()
 	profile := models.Profiles[models.ActiveProfileName]
 	profile.ReasoningEffort = ""
 	models.Profiles[models.ActiveProfileName] = profile
-	finalProfile, _, err := prepareToolSelectionModelProfile(models)
+	_, finalProfile, _, err := prepareToolSelectionProfile(models, "")
 	if err != nil {
-		t.Fatalf("prepareToolSelectionModelProfile(): %v", err)
+		t.Fatalf("prepareToolSelectionProfile(): %v", err)
 	}
 	if finalProfile.ReasoningEffort != "" {
 		t.Fatalf("empty reasoningEffort must stay empty, got %q", finalProfile.ReasoningEffort)
@@ -335,6 +364,49 @@ func TestPrepareToolSelectionModelProfileKeepsEmptyEffort(t *testing.T) {
 	}
 	if finalProfile.MaxOutputTokens != toolSelectionMaxTokens {
 		t.Fatalf("final profile maxOutputTokens = %d, want %d", finalProfile.MaxOutputTokens, toolSelectionMaxTokens)
+	}
+}
+
+// TestPrepareToolSelectionProfileSelectsNamedProfile 证明 -profile 非空时精确
+// 选择命名 Profile（如 opencode-deepseek-main），activeProfile 完全不改；
+// 指纹基于最终副本与实际 Profile 名。
+func TestPrepareToolSelectionProfileSelectsNamedProfile(t *testing.T) {
+	models := selectionChatModelsForTest()
+	profileName, profile, fingerprint, err := prepareToolSelectionProfile(models, "opencode-deepseek-main")
+	if err != nil {
+		t.Fatalf("prepareToolSelectionProfile(named): %v", err)
+	}
+	if profileName != "opencode-deepseek-main" {
+		t.Fatalf("profileName = %q, want opencode-deepseek-main", profileName)
+	}
+	if profile.Provider != "opencode-go" || profile.Model != "deepseek-v4-flash" {
+		t.Fatalf("named profile = %+v", profile)
+	}
+	if profile.ReasoningEffort != "low" {
+		t.Fatalf("named final reasoningEffort = %q, want low", profile.ReasoningEffort)
+	}
+	active, err := models.ActiveProfile()
+	if err != nil {
+		t.Fatalf("ActiveProfile(): %v", err)
+	}
+	if active.Provider != "stepfun" || active.ReasoningEffort != "high" {
+		t.Fatalf("activeProfile must stay untouched: %+v", active)
+	}
+	finalFingerprint, err := profile.PromptProfileFingerprint(profileName)
+	if err != nil {
+		t.Fatalf("final PromptProfileFingerprint(): %v", err)
+	}
+	if fingerprint != finalFingerprint {
+		t.Fatalf("recorded fingerprint %q != final named profile fingerprint %q", fingerprint, finalFingerprint)
+	}
+}
+
+// TestPrepareToolSelectionProfileRejectsUnknownNamedProfile 证明未知命名
+// Profile 被拒绝，不退回 activeProfile。
+func TestPrepareToolSelectionProfileRejectsUnknownNamedProfile(t *testing.T) {
+	models := selectionChatModelsForTest()
+	if _, _, _, err := prepareToolSelectionProfile(models, "missing-profile"); err == nil {
+		t.Fatal("unknown named profile must be rejected")
 	}
 }
 
@@ -392,21 +464,7 @@ func intPtr(value int) *int {
 
 func selectionTestConfig() config.Config {
 	return config.Config{
-		Models: config.ModelsConfig{Chat: config.ChatModelConfig{
-			Enabled:           true,
-			ActiveProfileName: "stepfun-main",
-			Profiles: map[string]config.ChatModelProfileConfig{
-				"stepfun-main": {
-					Provider: "stepfun", BaseURL: "https://api.stepfun.com/step_plan/v1",
-					APIKeyEnv: "MESGUARD_STEPFUN_API_KEY",
-					Model:     "step-3.7-flash", ReasoningEffort: "low",
-					TimeoutMillis:       120_000,
-					ContextWindowTokens: 131_072, MaxOutputTokens: 4096,
-					PromptSafetyMarginTokens: 2048, PromptSafetyMarginRatio: 0.05,
-					TokenizerStrategy: config.TokenizerStrategyLocalCalibrated,
-				},
-			},
-		}},
+		Models:    config.ModelsConfig{Chat: selectionChatModelsForTest()},
 		GitHubMCP: config.GitHubMCPConfig{Enabled: true},
 		Agent: config.AgentConfig{
 			SkillsDirectory: filepath.Join("..", "..", "..", "config", "skills"),
@@ -419,6 +477,17 @@ func writeSelectionDatasetForTest(t *testing.T) string {
 	dataset := filepath.Join(t.TempDir(), "dataset.jsonl")
 	line := `{"datasetVersion":"tools-v1","caseId":"case-1","scope":"github","userQuery":"查找代码","expectedTool":"read_external_case"}` + "\n"
 	if err := os.WriteFile(dataset, []byte(line), 0o600); err != nil {
+		t.Fatalf("write dataset: %v", err)
+	}
+	return dataset
+}
+
+func writeSelectionTwoCaseDatasetForTest(t *testing.T) string {
+	t.Helper()
+	dataset := filepath.Join(t.TempDir(), "dataset-two.jsonl")
+	lines := `{"datasetVersion":"tools-v1","caseId":"case-1","scope":"github","userQuery":"查找代码","expectedTool":"read_external_case"}` + "\n" +
+		`{"datasetVersion":"tools-v1","caseId":"case-2","scope":"github","userQuery":"再次查找代码","expectedTool":"read_external_case"}` + "\n"
+	if err := os.WriteFile(dataset, []byte(lines), 0o600); err != nil {
 		t.Fatalf("write dataset: %v", err)
 	}
 	return dataset
@@ -439,7 +508,7 @@ func TestSelectionPreflightFailClosedBeforeProvider(t *testing.T) {
 	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
 		return &githubmcp.Connection{}, nil
 	}
-	deps.newChatModel = func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+	deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
 		factoryCalls.Add(1)
 		return nil, errors.New("factory must not be reached before comparability preflight")
 	}
@@ -450,6 +519,8 @@ func TestSelectionPreflightFailClosedBeforeProvider(t *testing.T) {
 	err := runWithDependencies(context.Background(), []string{
 		"-dataset", dataset, "-output", output, "-summary", summary,
 		"-concurrency", "1", "-allow-dirty",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "1000000",
 	}, zap.NewNop(), deps)
 	if err == nil || !strings.Contains(err.Error(), "comparability preflight") {
 		t.Fatalf("runWithDependencies error = %v, want comparability preflight rejection", err)
@@ -478,8 +549,15 @@ func TestSelectionPreflightAcceptsRealArms(t *testing.T) {
 	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
 		return &githubmcp.Connection{}, nil
 	}
-	deps.newChatModel = func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error) {
+	deps.newChatModel = func(_ context.Context, profileName string, profile config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
 		factoryCalls.Add(1)
+		if profileName != "stepfun-main" {
+			return nil, fmt.Errorf("factory received profile %q, want stepfun-main", profileName)
+		}
+		if profile.ReasoningEffort != "low" || profile.Temperature == nil || *profile.Temperature != 0 ||
+			profile.MaxOutputTokens != toolSelectionMaxTokens {
+			return nil, fmt.Errorf("factory received untransformed profile: %+v", profile)
+		}
 		return modelStub, nil
 	}
 	// 真实 VerifyToolSelectionComparability（默认依赖）。
@@ -487,6 +565,8 @@ func TestSelectionPreflightAcceptsRealArms(t *testing.T) {
 	if err := runWithDependencies(context.Background(), []string{
 		"-dataset", dataset, "-output", output, "-summary", summary,
 		"-concurrency", "1", "-allow-dirty",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "1000000",
 	}, zap.NewNop(), deps); err != nil {
 		t.Fatalf("runWithDependencies: %v", err)
 	}
@@ -583,9 +663,9 @@ func TestObserveToolSelectionRejectsSchemaDriftFromPreflight(t *testing.T) {
 		t.Fatalf("assembleSelectionEval: %v", err)
 	}
 	assembly.productionSchemaHash = "sha256:" + strings.Repeat("f", 64)
-	profile, fingerprint, err := prepareToolSelectionModelProfile(cfg.Models.Chat)
+	_, profile, fingerprint, err := prepareToolSelectionProfile(cfg.Models.Chat, "")
 	if err != nil {
-		t.Fatalf("prepareToolSelectionModelProfile: %v", err)
+		t.Fatalf("prepareToolSelectionProfile: %v", err)
 	}
 
 	_, err = observeToolSelection(
@@ -611,5 +691,317 @@ func TestSelectionDefaultOutputPathsAreV3(t *testing.T) {
 	}
 	if toolSelectionSummaryOutput != "testdata/tool-selection-v3.summary.json" {
 		t.Fatalf("default summary output = %q", toolSelectionSummaryOutput)
+	}
+}
+
+// TestValidateToolSelectionProviderBudget 是成本闸门的契约测试：缺授权、
+// 非正预算、Case 超限、调用或 Token 硬上界超限都必须 fail-closed，且默认
+// 每 Case 允许 3 次 Provider 调用（base 校准 1 次 + wide 1 次 +
+// production 1 次）。Token 硬上界 = Cases x 3 x contextWindowTokens。
+func TestValidateToolSelectionProviderBudget(t *testing.T) {
+	if _, err := validateToolSelectionProviderBudget(1, 3, 1000, false, 1, 10, 10000); err == nil ||
+		!strings.Contains(err.Error(), "allow-provider-calls") {
+		t.Fatalf("missing -allow-provider-calls must be refused, got %v", err)
+	}
+	if _, err := validateToolSelectionProviderBudget(1, 3, 1000, true, 0, 10, 10000); err == nil {
+		t.Fatal("non-positive max-cases must be refused")
+	}
+	if _, err := validateToolSelectionProviderBudget(1, 3, 1000, true, -1, 10, 10000); err == nil {
+		t.Fatal("negative max-cases must be refused")
+	}
+	if _, err := validateToolSelectionProviderBudget(2, 3, 1000, true, 1, 10, 10000); err == nil ||
+		!strings.Contains(err.Error(), "max-cases") {
+		t.Fatalf("cases above max-cases must be refused, got %v", err)
+	}
+	// 3 cases x 3 calls/case = 9 上界超过 8。
+	if _, err := validateToolSelectionProviderBudget(3, 3, 1000, true, 3, 8, 100000); err == nil ||
+		!strings.Contains(err.Error(), "max-provider-calls") {
+		t.Fatalf("call upper bound above max-provider-calls must be refused, got %v", err)
+	}
+	// 1 case 硬上界 = 3 x 4000 = 12000 超过 1500。
+	if _, err := validateToolSelectionProviderBudget(1, 3, 4000, true, 1, 100, 1500); err == nil ||
+		!strings.Contains(err.Error(), "max-provider-tokens") {
+		t.Fatalf("hard Token upper bound above max-provider-tokens must be refused, got %v", err)
+	}
+	budget, err := validateToolSelectionProviderBudget(3, 3, 2000, true, 3, 9, 18000)
+	if err != nil {
+		t.Fatalf("valid budget refused: %v", err)
+	}
+	if budget.Cases != 3 || budget.ProviderCalls != 9 || budget.TotalTokens != 3*3*2000 {
+		t.Fatalf("budget = %+v, want cases=3 calls=9 tokens=%d", budget, 3*3*2000)
+	}
+}
+
+// TestSelectionDefaultCallUpperBoundIs135For45Cases 证明默认预算公式：
+// 45 Case x 3 次调用/Case = 135 次 Provider 调用上界（base 校准 1 次 +
+// wide 1 次 + production 1 次），且 Token 硬上界按
+// Case 数 x 3 x contextWindowTokens 扩展。
+func TestSelectionDefaultCallUpperBoundIs135For45Cases(t *testing.T) {
+	budget, err := validateToolSelectionProviderBudget(
+		45, 3, 8192, true,
+		45, 135, 45*3*8192,
+	)
+	if err != nil {
+		t.Fatalf("default 45-case budget refused: %v", err)
+	}
+	if budget.ProviderCalls != 135 {
+		t.Fatalf("default call upper bound = %d, want 45*3=135", budget.ProviderCalls)
+	}
+	if budget.Cases != 45 || budget.TotalTokens != 45*3*8192 {
+		t.Fatalf("budget = %+v, want cases=45 tokens=%d", budget, 45*3*8192)
+	}
+}
+
+// TestToolSelectionTokenHardUpperBoundFollowsProfileContextWindow 证明 Token 硬
+// 上界由最终命名 Profile 的 contextWindowTokens 派生（每次调用 <= 窗口、
+// 每 Case = 3 x 窗口、总数 = Case 数 x 3 x 窗口），不再依赖固定 16K 输入假设：
+// 8K 与 128K 窗口的 Profile 必须得出不同的硬上界，而调用上界保持 3 次/Case。
+func TestToolSelectionTokenHardUpperBoundFollowsProfileContextWindow(t *testing.T) {
+	budget8K, err := validateToolSelectionProviderBudget(45, 3, 8192, true, 45, 135, 45*3*8192)
+	if err != nil {
+		t.Fatalf("8K-window budget refused: %v", err)
+	}
+	budget128K, err := validateToolSelectionProviderBudget(45, 3, 131072, true, 45, 135, 45*3*131072)
+	if err != nil {
+		t.Fatalf("128K-window budget refused: %v", err)
+	}
+	if budget8K.ProviderCalls != 135 || budget128K.ProviderCalls != 135 {
+		t.Fatalf("call upper bound must stay 45*3=135 for every context window: 8K=%d 128K=%d",
+			budget8K.ProviderCalls, budget128K.ProviderCalls)
+	}
+	if budget8K.TotalTokens == budget128K.TotalTokens {
+		t.Fatal("hard Token upper bound must depend on the profile context window")
+	}
+	if budget8K.TotalTokens != 45*3*8192 || budget128K.TotalTokens != 45*3*131072 {
+		t.Fatalf("hard Token upper bound must be cases*3*contextWindow: 8K=%d (want %d) 128K=%d (want %d)",
+			budget8K.TotalTokens, 45*3*8192, budget128K.TotalTokens, 45*3*131072)
+	}
+	// 8K 窗口下的硬上界必须显著低于旧的固定 16K 假设（45 x 3 x (16K+1K)）：
+	// 这证明上界不再按无法证明的 "base prompt ~16K" 魔数计算。
+	if budget8K.TotalTokens >= 45*3*(16*1024+1024) {
+		t.Fatalf("Token upper bound must not be derived from the fixed 16K base assumption: %d", budget8K.TotalTokens)
+	}
+}
+
+// TestToolSelectionTokenHardUpperBoundOverflowFailsClosed 证明调用数与 Token
+// 硬上界的乘法在溢出时 fail-closed，绝不回绕成负数或小值后放行。
+func TestToolSelectionTokenHardUpperBoundOverflowFailsClosed(t *testing.T) {
+	_, err := validateToolSelectionProviderBudget(math.MaxInt, 3, 262144, true, math.MaxInt, math.MaxInt, math.MaxInt)
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("call-bound multiplication overflow must fail closed, got %v", err)
+	}
+	_, err = validateToolSelectionProviderBudget(2, 3, math.MaxInt, true, 2, math.MaxInt, math.MaxInt)
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("Token-bound multiplication overflow must fail closed, got %v", err)
+	}
+	_, err = validateToolSelectionProviderBudget(1, 3, 262144, true, 1, math.MaxInt, math.MaxInt)
+	if err != nil {
+		t.Fatalf("valid single-case budget refused: %v", err)
+	}
+}
+
+// TestSelectToolSelectionCasesIsExactAndNeverTruncates 证明 -case-id 在完整
+// 数据集校验后进行精确选择：空值与空白等价于整个数据集；已知 CaseID 精确
+// 返回单 Case；未知 CaseID fail-closed；不允许实现成"前 N 条"截断。
+func TestSelectToolSelectionCasesIsExactAndNeverTruncates(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	all, err := readToolSelectionCases(dataset)
+	if err != nil {
+		t.Fatalf("readToolSelectionCases: %v", err)
+	}
+	if len(all) == 0 {
+		t.Fatal("test dataset must contain cases")
+	}
+	selected, err := selectToolSelectionCases(all, "")
+	if err != nil || len(selected) != len(all) {
+		t.Fatalf("empty case-id must keep the whole dataset: len=%d err=%v", len(selected), err)
+	}
+	selected, err = selectToolSelectionCases(all, "   ")
+	if err != nil || len(selected) != len(all) {
+		t.Fatalf("whitespace case-id must keep the whole dataset: len=%d err=%v", len(selected), err)
+	}
+	selected, err = selectToolSelectionCases(all, " "+all[len(all)-1].CaseID+" ")
+	if err != nil || len(selected) != 1 || selected[0].CaseID != all[len(all)-1].CaseID {
+		t.Fatalf("case-id must be trimmed and select exactly one case: %+v err=%v", selected, err)
+	}
+	if _, err := selectToolSelectionCases(all, "missing-case"); err == nil ||
+		!strings.Contains(err.Error(), "missing-case") {
+		t.Fatalf("unknown case-id must fail closed with the id in the message, got %v", err)
+	}
+}
+
+// TestSelectionBudgetFailClosedBeforeFactories 证明成本闸门整条 fail-closed
+// 链在创建任何 Provider / 远端连接之前执行：缺授权、max-cases 超限、调用
+// 上界超限、Token 上界超限四种场景 newChatModel 与 connectGitHub 调用数均
+// 为 0，且不创建输出文件。
+func TestSelectionBudgetFailClosedBeforeFactories(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	twoCaseDataset := writeSelectionTwoCaseDatasetForTest(t)
+	scenarios := []struct {
+		name     string
+		twoCases bool
+		args     []string
+		wantErr  string
+	}{
+		{name: "missing authorization", wantErr: "allow-provider-calls"},
+		{name: "cases exceed max", twoCases: true, args: []string{
+			"-allow-provider-calls", "-max-cases", "1",
+			"-max-provider-calls", "100", "-max-provider-tokens", "100000000",
+		}, wantErr: "max-cases"},
+		{name: "call bound exceeded", args: []string{
+			"-allow-provider-calls", "-max-cases", "3",
+			"-max-provider-calls", "2", "-max-provider-tokens", "1000000",
+		}, wantErr: "max-provider-calls"},
+		{name: "token bound exceeded", args: []string{
+			"-allow-provider-calls", "-max-cases", "1",
+			"-max-provider-calls", "10", "-max-provider-tokens", "1",
+		}, wantErr: "max-provider-tokens"},
+		{name: "unknown case-id fails closed", args: []string{
+			"-allow-provider-calls", "-max-cases", "1",
+			"-max-provider-calls", "10", "-max-provider-tokens", "1000000",
+			"-case-id", "missing-case",
+		}, wantErr: "missing-case"},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			output := filepath.Join(outputDir, "obs.jsonl")
+			summary := filepath.Join(outputDir, "summary.json")
+			ds := dataset
+			if scenario.twoCases {
+				ds = twoCaseDataset
+			}
+			var modelCalls atomic.Int32
+			var githubCalls atomic.Int32
+			deps := defaultSelectionEvalDependencies()
+			deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+			deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+				modelCalls.Add(1)
+				return nil, errors.New("factory must not be reached before budget gate")
+			}
+			deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+				githubCalls.Add(1)
+				return nil, errors.New("GitHub must not be reached before budget gate")
+			}
+			args := append([]string{"-dataset", ds, "-output", output, "-summary", summary,
+				"-concurrency", "1", "-allow-dirty"}, scenario.args...)
+			err := runWithDependencies(context.Background(), args, zap.NewNop(), deps)
+			if err == nil || !strings.Contains(err.Error(), scenario.wantErr) {
+				t.Fatalf("runWithDependencies error = %v, want %q", err, scenario.wantErr)
+			}
+			if modelCalls.Load() != 0 {
+				t.Fatalf("newChatModel called %d times, want 0", modelCalls.Load())
+			}
+			if githubCalls.Load() != 0 {
+				t.Fatalf("connectGitHub called %d times, want 0", githubCalls.Load())
+			}
+			if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("observations output must not be created on budget rejection: %v", err)
+			}
+		})
+	}
+}
+
+// TestSelectionCaseIDSelectsSingleCaseForProviderRun 证明 -case-id 精确选择后
+// 预算按选中 Case 数计算并通过，Provider 只创建一次，且一路上没有触碰
+// activeProfile。
+func TestSelectionCaseIDSelectsSingleCaseForProviderRun(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+
+	factoryCalls := atomic.Int32{}
+	modelStub := &selectionEvalModelStub{}
+	deps := defaultSelectionEvalDependencies()
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(_ context.Context, profileName string, profile config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+		factoryCalls.Add(1)
+		if profileName != "opencode-deepseek-main" {
+			return nil, fmt.Errorf("factory received profile %q, want the explicitly named profile", profileName)
+		}
+		if profile.Provider != "opencode-go" || profile.Model != "deepseek-v4-flash" {
+			return nil, fmt.Errorf("factory received wrong named profile: %+v", profile)
+		}
+		return modelStub, nil
+	}
+
+	err := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+		"-profile", "opencode-deepseek-main",
+		"-case-id", "case-1",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "1000000",
+	}, zap.NewNop(), deps)
+	if err != nil {
+		t.Fatalf("runWithDependencies: %v", err)
+	}
+	if factoryCalls.Load() != 1 {
+		t.Fatalf("newChatModel called %d times, want 1", factoryCalls.Load())
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read observations: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("single selected case must produce 2 observations (wide + production), got %d", len(lines))
+	}
+}
+
+// TestSelectionBudgetPrintCoversProfileAndBounds 证明运行前打印包含 Case 数、
+// 调用上界、Token 上界、Profile 名、Provider、模型与实现 revision/dirty。
+func TestSelectionBudgetPrintCoversProfileAndBounds(t *testing.T) {
+	dataset := writeSelectionDatasetForTest(t)
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "obs.jsonl")
+	summary := filepath.Join(outputDir, "summary.json")
+
+	oldStdout := os.Stdout
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = writeEnd
+	defer func() { os.Stdout = oldStdout }()
+
+	deps := defaultSelectionEvalDependencies()
+	modelStub := &selectionEvalModelStub{}
+	deps.loadConfig = func() (config.Config, error) { return selectionTestConfig(), nil }
+	deps.connectGitHub = func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error) {
+		return &githubmcp.Connection{}, nil
+	}
+	deps.newChatModel = func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+		return modelStub, nil
+	}
+
+	runErr := runWithDependencies(context.Background(), []string{
+		"-dataset", dataset, "-output", output, "-summary", summary,
+		"-concurrency", "1", "-allow-dirty",
+		"-profile", "opencode-deepseek-main",
+		"-allow-provider-calls", "-max-cases", "1",
+		"-max-provider-calls", "10", "-max-provider-tokens", "3000000",
+	}, zap.NewNop(), deps)
+	_ = writeEnd.Close()
+	printed, _ := io.ReadAll(readEnd)
+	os.Stdout = oldStdout
+	if runErr != nil {
+		t.Fatalf("runWithDependencies: %v", runErr)
+	}
+	printedText := string(printed)
+	// opencode-deepseek-main 的 ContextWindowTokens=262144：单 Case 硬 Token
+	// 上界 = 3 x 262144 = 786432。
+	for _, want := range []string{
+		"cases=1", "authorized_provider_call_upper_bound=3",
+		"authorized_token_hard_upper_bound=786432", "profile=opencode-deepseek-main",
+		"provider=opencode-go", "model=deepseek-v4-flash", "revision=",
+	} {
+		if !strings.Contains(printedText, want) {
+			t.Fatalf("pre-run print missing %q, got:\n%s", want, printedText)
+		}
 	}
 }

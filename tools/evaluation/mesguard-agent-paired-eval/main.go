@@ -84,7 +84,7 @@ func run(ctx context.Context, args []string, log *zap.Logger) error {
 // Provider 创建之前（factory.calls == 0）。
 type pairedEvalDependencies struct {
 	loadConfig                func() (config.Config, error)
-	newChatModel              func(context.Context, config.ChatModelConfig) (model.ToolCallingChatModel, error)
+	newChatModel              func(context.Context, string, config.ChatModelProfileConfig) (model.ToolCallingChatModel, error)
 	connectGitHub             func(context.Context, config.GitHubMCPConfig, *zap.Logger) (*githubmcp.Connection, error)
 	verifyPairedComparability func([]*schema.ToolInfo, []*schema.ToolInfo) (mesagent.ToolSelectionComparability, error)
 }
@@ -102,16 +102,21 @@ type pairedEvaluationAssembly struct {
 	comparability               mesagent.ToolSelectionComparability
 }
 
+// pairedEvalModelFactory 是 Provider 构造 seam：正式运行走真实
+// platformchatmodel.New（只接收本次选择的 Profile 名称与最终 Profile，绝不
+// 从 activeProfile 重新解析，也绝不为 NewActive 临时切换 activeProfile）。
+func pairedEvalModelFactory(ctx context.Context, profileName string, profile config.ChatModelProfileConfig) (model.ToolCallingChatModel, error) {
+	instance, err := platformchatmodel.New(ctx, profileName, profile)
+	if err != nil {
+		return nil, err
+	}
+	return instance.Model, nil
+}
+
 func defaultPairedEvalDependencies() pairedEvalDependencies {
 	return pairedEvalDependencies{
-		loadConfig: config.Load,
-		newChatModel: func(ctx context.Context, models config.ChatModelConfig) (model.ToolCallingChatModel, error) {
-			instance, err := platformchatmodel.NewActive(ctx, models)
-			if err != nil {
-				return nil, err
-			}
-			return instance.Model, nil
-		},
+		loadConfig:                config.Load,
+		newChatModel:              pairedEvalModelFactory,
 		connectGitHub:             githubmcp.Connect,
 		verifyPairedComparability: mesagent.VerifyToolSelectionComparability,
 	}
@@ -122,16 +127,17 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	flags.SetOutput(io.Discard)
 	datasetPath := flags.String("dataset", "testdata/agent-evaluation.real-v1.jsonl", "versioned JSONL evaluation cases")
 	outputPath := flags.String("output", "testdata/agent-evaluation.real-v3.observations.jsonl", "output JSONL observations")
+	profileFlag := flags.String("profile", "", "named [models.chat.profiles.<name>] to evaluate with (empty = activeProfile)")
 	reasoningEffort := flags.String("reasoning-effort", "", "provider-supported effort; defaults to config")
 	maxTotalTokens := flags.Int("max-total-tokens", 0, "override the Evidence Gate total token budget; defaults to config")
 	comparison := flags.String("comparison", "tool-selection", "paired variable: tool-selection or evidence-gate")
-	allowProviderCalls := flags.Bool("allow-provider-calls", false, "explicitly authorize Provider calls for evidence-gate comparison")
-	maxCases := flags.Int("max-cases", 0, "maximum evidence-gate cases authorized for this Provider run")
-	maxProviderCalls := flags.Int("max-provider-calls", 0, "maximum estimated Provider calls authorized for this evidence-gate run")
-	maxProviderTokens := flags.Int("max-provider-tokens", 0, "maximum total Token budget authorized across both evidence-gate arms")
+	allowProviderCalls := flags.Bool("allow-provider-calls", false, "explicitly authorize Provider calls for this paired run")
+	maxCases := flags.Int("max-cases", 0, "maximum cases authorized for this Provider run")
+	maxProviderCalls := flags.Int("max-provider-calls", 0, "maximum estimated Provider calls authorized for this run")
+	maxProviderTokens := flags.Int("max-provider-tokens", 0, "maximum total Token budget authorized across both paired arms")
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-reasoning-effort provider-value]: %w", err)
+		return fmt.Errorf("usage: mesguard-agent-paired-eval [-dataset path] [-output path] [-profile <named-chat-profile>] [-reasoning-effort provider-value] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N]: %w", err)
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
@@ -154,17 +160,14 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	if !cfg.GitHubMCP.Enabled {
 		return errors.New("github MCP must be enabled for paired evaluation")
 	}
-	profile, err := cfg.Models.Chat.ActiveProfile()
+	// 解析 -profile：空值使用 activeProfile，非空值使用精确命名 Profile；
+	// -reasoning-effort 变换只作用于局部副本；既不写回配置 Map，也不替换
+	// activeProfile，绝不为 NewActive 临时切换。
+	profileName, profile, modelProfileFingerprint, err :=
+		preparePairedProfile(cfg.Models.Chat, *profileFlag, *reasoningEffort)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(*reasoningEffort) != "" {
-		profile.ReasoningEffort = strings.ToLower(strings.TrimSpace(*reasoningEffort))
-	}
-	if _, err := parseReasoningEffort(profile.ReasoningEffort); err != nil {
-		return err
-	}
-	cfg.Models.Chat.Profiles[cfg.Models.Chat.ActiveProfileName] = profile
 	// 身份校验必须在调用任何收费 Provider 之前完成：先解析实现 revision 与
 	// 最终模型 Profile 指纹，再决定是否允许继续。
 	identity, identityErr := evaluationidentity.ResolveImplementationIdentity()
@@ -179,33 +182,28 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 		log.Warn("dirty or unknown implementation revision accepted for local smoke only; observations are NOT formal metrics",
 			zap.String("revision", identity.Revision), zap.Bool("dirty", identity.Dirty))
 	}
-	// 指纹基于写回后的最终 Profile 计算，保证记录的指纹与实际模型调用配置一致。
-	modelProfileFingerprint, fingerprintErr := profile.PromptProfileFingerprint(cfg.Models.Chat.ActiveProfileName)
-	if fingerprintErr != nil {
-		return fmt.Errorf("compute model profile fingerprint: %w", fingerprintErr)
-	}
 	if *maxTotalTokens != 0 {
 		if *maxTotalTokens < 1000 || *maxTotalTokens > 1_000_000 {
 			return errors.New("max-total-tokens must be between 1000 and 1000000")
 		}
 		cfg.Agent.MaxTotalTokens = *maxTotalTokens
 	}
-	if *comparison == "evidence-gate" {
-		budget, budgetErr := validateEvidenceGateProviderBudget(
-			len(cases), cfg.Agent.MaxAgentRuns, cfg.Agent.MaxToolCalls, cfg.Agent.MaxTotalTokens,
-			*allowProviderCalls, *maxCases, *maxProviderCalls, *maxProviderTokens,
-		)
-		if budgetErr != nil {
-			return budgetErr
-		}
-		log.Info("Evidence Gate Provider paired run authorized",
-			zap.Int("cases", budget.Cases),
-			zap.Int("estimated_provider_call_upper_bound", budget.ProviderCalls),
-			zap.Int("embedding_request_upper_bound", 0),
-			zap.Int("rerank_request_upper_bound", 0),
-			zap.Int("total_token_budget_upper_bound", budget.TotalTokens),
-		)
+	// 统一成本闸门：tool-selection 与 evidence-gate 两种 comparison 共用同一
+	// 组成本旗标，但固定 reviewed Case target 只约束 evidence-gate；
+	// tool-selection 只受数据集大小、显式 max-cases 与调用/Token 上界限制。
+	// 缺授权、预算非正、Case 超限、调用或 Token 上界超限都在创建任何 Chat
+	// Provider 与任何远端连接（GitHub MCP）之前 fail-closed。
+	budget, budgetErr := validatePairedProviderBudget(
+		*comparison, len(cases), cfg.Agent.MaxAgentRuns, cfg.Agent.MaxToolCalls, cfg.Agent.MaxTotalTokens,
+		*allowProviderCalls, *maxCases, *maxProviderCalls, *maxProviderTokens,
+	)
+	if budgetErr != nil {
+		return budgetErr
 	}
+	fmt.Fprintf(os.Stdout,
+		"mesguard-agent-paired-eval comparison=%s profile=%s provider=%s model=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_upper_bound=%d revision=%s dirty=%t\n",
+		*comparison, profileName, strings.TrimSpace(profile.Provider), strings.TrimSpace(profile.Model),
+		budget.Cases, budget.ProviderCalls, budget.TotalTokens, identity.Revision, identity.Dirty)
 	prompts, err := cfg.Agent.LoadPrompts()
 	if err != nil {
 		return fmt.Errorf("load Agent prompts: %w", err)
@@ -290,7 +288,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 		return fmt.Errorf("paired arms comparability preflight: %w", err)
 	}
 
-	chatModel, err := deps.newChatModel(ctx, cfg.Models.Chat)
+	chatModel, err := deps.newChatModel(ctx, profileName, profile)
 	if err != nil {
 		return fmt.Errorf("build chat model: %w", err)
 	}
@@ -307,15 +305,30 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	defer output.Close()
 	encoder := json.NewEncoder(output)
 
+	// 运行上下文的 ceiling 必须来自真实生产 diagnosis-default Profile（绝
+	// 不是 evaluation-wide-v2）；每 Case 由生产深模块 BuildDiagnosisRunContext
+	// 一次性派生 RunAccess + task_context，baseline 与 experiment 两臂注入
+	// 完全相同的实例。
+	productionProfileNames, nameErr := pairedProductionProfileToolNames(ctx, assembly.productionCatalog)
+	if nameErr != nil {
+		return fmt.Errorf("resolve production diagnosis-default Profile tool names: %w", nameErr)
+	}
+
 	for _, definition := range cases {
 		if definition.TaskType != "diagnosis" {
 			return fmt.Errorf("case %q uses unsupported paired evaluation task type %q", definition.CaseID, definition.TaskType)
 		}
-		access, accessErr := newPairedEvaluationRunAccess(definition, cfg)
-		if accessErr != nil {
-			return fmt.Errorf("build run access for case %q: %w", definition.CaseID, accessErr)
+		runContext, runContextErr := buildPairedCaseRunContext(definition, cfg, productionProfileNames)
+		if runContextErr != nil {
+			return fmt.Errorf("build run context for case %q: %w", definition.CaseID, runContextErr)
 		}
-		pairingFingerprint, fingerprintErr := evidenceGatePairingFingerprint(definition, cfg)
+		// 同一 Case 只在 variants 循环之前绑定一次：两臂共用同一 RunAccess 与
+		// 同一 task_context（字节级一致的 system message 尾部）。
+		caseCtx := mesagent.WithDiagnosisTaskContext(
+			agentruntime.WithRunAccess(ctx, runContext.Access()),
+			runContext.TaskContext(),
+		)
+		pairingFingerprint, fingerprintErr := evidenceGatePairingFingerprint(definition, cfg, profileName, profile)
 		if fingerprintErr != nil {
 			return fmt.Errorf("fingerprint case %q: %w", definition.CaseID, fingerprintErr)
 		}
@@ -331,7 +344,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 			}
 			startedAt := time.Now()
 			result, invokeErr := orchestrator.Invoke(
-				agentruntime.WithRunAccess(ctx, access),
+				caseCtx,
 				mesagent.RunRequest{
 					UserQuery: definition.UserQuery, ExternalCaseID: pairedEvalCaseID.String(),
 				},
@@ -347,7 +360,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 			duration := time.Since(startedAt)
 			if *comparison == "evidence-gate" {
 				observation := evidenceGateObservationFromResult(
-					definition, variant, cfg, pairingFingerprint, result, duration, invokeErr,
+					definition, variant, cfg, profileName, profile, pairingFingerprint, result, duration, invokeErr,
 				)
 				if err := observation.Validate(); err != nil {
 					return fmt.Errorf("validate %s Evidence Gate observation for case %q: %w", variant, definition.CaseID, err)
@@ -365,7 +378,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 				}
 			} else {
 				observation := observationFromResult(
-					definition, variant, cfg, result, duration, toolSchemaFingerprint,
+					definition, variant, cfg, profileName, profile, result, duration, toolSchemaFingerprint,
 					assembly.comparability, identity, modelProfileFingerprint,
 				)
 				if err := observation.Validate(); err != nil {
@@ -406,6 +419,11 @@ func buildPairedEvaluationRun(
 	if catalog == nil || assembly.skillRuntime == nil || expectedSchemaFingerprint == "" {
 		return nil, "", errors.New("paired evaluation preflight assembly is incomplete")
 	}
+	// Generic paired 单变量契约：两臂同一 Runner 装配（相同生产
+	// SystemInstruction、相同 ticket-diagnosis 入口 Skill 全文、相同
+	// Skill Middleware、相同模型参数与运行预算），唯一差异是最终 Tool
+	// Profile/Schema（baseline=evaluation-wide-v2、experiment=
+	// diagnosis-default）。系统指令统一由 Runner 用 SystemInstruction 构造。
 	runner, err := mesagent.NewRunner(mesagent.RunnerConfig{
 		ChatModel: chatModel, ToolCatalog: catalog, SkillRuntime: assembly.skillRuntime,
 		SystemInstruction:     prompts.SystemInstruction,
@@ -483,28 +501,33 @@ func pairedArmToolInfos(
 	return infos, fingerprint, nil
 }
 
-// pairedPreflightRunAccess 构造 preflight 装配用的最小合法诊断 RunAccess：
-// 装配层只校验 RunAccess 存在与 Profile 匹配，preflight 不执行任何 Tool。
-func pairedPreflightRunAccess() (agentruntime.RunAccess, error) {
+// pairedPreflightRunContext 用生产深模块 BuildDiagnosisRunContext 构造 preflight
+// 装配用的最小合法诊断运行上下文（case.read 冻结 Policy、Analyst actor、真实
+// 生产 diagnosis-default 名单 ceiling）：装配层只校验 RunAccess 存在与 Profile
+// 匹配，preflight 不执行任何 Tool，也不需要任务级授权。运行期授权由
+// buildPairedCaseRunContext 按 Case 派生；两者共用同一个深模块，不保留两套
+// 并行派生逻辑。
+func pairedPreflightRunContext(profileToolNames []string) (mesagent.DiagnosisRunContext, error) {
 	permissions, err := agentruntime.NewPermissionSet(agentruntime.PermissionCaseRead)
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
 	grants, err := agentruntime.NewResourceGrants(agentruntime.ResourceGrantsConfig{
 		ExternalCaseIDs: []uuid.UUID{pairedEvalCaseID},
 	})
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
 	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissions, grants)
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
-	return agentruntime.DeriveDiagnosisRunAccess(
-		policy,
-		agentruntime.Actor{UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst},
-		agentruntime.AccessCeiling{Permissions: permissions, Grants: grants},
-	)
+	return mesagent.BuildDiagnosisRunContext(mesagent.DiagnosisRunContextInput{
+		Policy:           policy,
+		Actor:            pairedEvaluationActor,
+		ProfileToolNames: profileToolNames,
+		ExternalCaseID:   pairedEvalCaseID,
+	})
 }
 
 // verifyPairedArmsComparability 在创建任何收费 Provider 之前装配两臂并执行
@@ -547,18 +570,24 @@ func verifyPairedArmsComparability(
 	if err != nil {
 		return pairedEvaluationAssembly{}, fmt.Errorf("build wide Tool authorization middleware: %w", err)
 	}
-	access, err := pairedPreflightRunAccess()
+	// preflight ceiling 必须来自真实生产 diagnosis-default Profile（同运行期
+	// 派生：BuildDiagnosisRunContext + production ModelVisibleNames）。
+	productionProfile, resolveErr := productionCatalog.ResolveProfile(ctx, agentruntime.ToolProfileDiagnosis)
+	if resolveErr != nil {
+		return pairedEvaluationAssembly{}, fmt.Errorf("resolve production Profile tool names: %w", resolveErr)
+	}
+	preflightRunContext, err := pairedPreflightRunContext(productionProfile.ModelVisibleNames)
 	if err != nil {
 		return pairedEvaluationAssembly{}, err
 	}
 	productionInfos, productionFingerprint, err := pairedArmToolInfos(
-		ctx, productionAuthorization, skillRuntime.Middleware, access,
+		ctx, productionAuthorization, skillRuntime.Middleware, preflightRunContext.Access(),
 	)
 	if err != nil {
 		return pairedEvaluationAssembly{}, fmt.Errorf("assemble production arm: %w", err)
 	}
 	wideInfos, wideFingerprint, err := pairedArmToolInfos(
-		ctx, wideAuthorization, skillRuntime.Middleware, access,
+		ctx, wideAuthorization, skillRuntime.Middleware, preflightRunContext.Access(),
 	)
 	if err != nil {
 		return pairedEvaluationAssembly{}, fmt.Errorf("assemble wide arm: %w", err)
@@ -577,13 +606,20 @@ func verifyPairedArmsComparability(
 	}, nil
 }
 
-type evidenceGateProviderBudget struct {
+type pairedProviderBudget struct {
 	Cases         int
 	ProviderCalls int
 	TotalTokens   int
 }
 
-func validateEvidenceGateProviderBudget(
+// validatePairedProviderBudget 是两种 comparison 共用的统一成本闸门，但 Case
+// 上限按 comparison 分离：固定 reviewed Case target 只约束 evidence-gate；
+// tool-selection 的 Case 数只受数据集大小、显式 max-cases、
+// max-provider-calls 与 max-provider-tokens 限制。缺授权、预算非正、Case
+// 超限、调用或 Token 硬上界超限都在创建任何 Provider / 远端连接之前
+// fail-closed。
+func validatePairedProviderBudget(
+	comparison string,
 	cases int,
 	maxAgentRuns int,
 	maxToolCalls int,
@@ -592,43 +628,79 @@ func validateEvidenceGateProviderBudget(
 	caseLimit int,
 	providerCallLimit int,
 	totalTokenLimit int,
-) (evidenceGateProviderBudget, error) {
+) (pairedProviderBudget, error) {
+	if comparison != "tool-selection" && comparison != "evidence-gate" {
+		return pairedProviderBudget{}, fmt.Errorf("comparison must be tool-selection or evidence-gate, got %q", comparison)
+	}
 	if !allowed {
-		return evidenceGateProviderBudget{}, errors.New("evidence-gate Provider run requires -allow-provider-calls")
+		return pairedProviderBudget{}, errors.New("Provider paired run requires -allow-provider-calls")
 	}
 	if cases < 1 || caseLimit < 1 || providerCallLimit < 1 || totalTokenLimit < 1 {
-		return evidenceGateProviderBudget{}, errors.New("evidence-gate Provider run requires positive -max-cases, -max-provider-calls, and -max-provider-tokens")
+		return pairedProviderBudget{}, errors.New("Provider paired run requires positive -max-cases, -max-provider-calls, and -max-provider-tokens")
 	}
-	if cases > evidenceGateReviewedCaseTargetForProviderRun || caseLimit > evidenceGateReviewedCaseTargetForProviderRun {
-		return evidenceGateProviderBudget{}, fmt.Errorf("evidence-gate Provider run is capped at %d reviewed cases", evidenceGateReviewedCaseTargetForProviderRun)
+	// Evidence Gate 的固定审核 Case 上限只适用于 evidence-gate 自身；它不约束
+	// tool-selection（后者只受数据集大小与显式预算限制）。
+	if comparison == "evidence-gate" &&
+		(cases > evidenceGateReviewedCaseTargetForProviderRun || caseLimit > evidenceGateReviewedCaseTargetForProviderRun) {
+		return pairedProviderBudget{}, fmt.Errorf("Provider evidence-gate run is capped at %d reviewed cases", evidenceGateReviewedCaseTargetForProviderRun)
 	}
 	if cases > caseLimit {
-		return evidenceGateProviderBudget{}, fmt.Errorf("dataset has %d cases, exceeds authorized max-cases %d", cases, caseLimit)
+		return pairedProviderBudget{}, fmt.Errorf("dataset has %d cases, exceeds authorized max-cases %d", cases, caseLimit)
 	}
 	if maxAgentRuns < 1 || maxToolCalls < 1 || maxTotalTokens < 1 {
-		return evidenceGateProviderBudget{}, errors.New("effective Agent run, Tool call, and Token budgets must be positive")
+		return pairedProviderBudget{}, errors.New("effective Agent run, Tool call, and Token budgets must be positive")
 	}
-	budget := evidenceGateProviderBudget{
+	budget := pairedProviderBudget{
 		Cases: cases,
 		// One model turn produces either a final answer or one Tool call. This is a
-		// conservative upper bound across both paired arms.
+		// conservative upper bound across both paired arms and applies to the
+		// tool-selection and evidence-gate comparisons alike.
 		ProviderCalls: cases * 2 * (maxAgentRuns + maxToolCalls),
 		TotalTokens:   cases * 2 * maxTotalTokens,
 	}
 	if budget.ProviderCalls > providerCallLimit {
-		return evidenceGateProviderBudget{}, fmt.Errorf("estimated Provider call upper bound %d exceeds authorized max-provider-calls %d", budget.ProviderCalls, providerCallLimit)
+		return pairedProviderBudget{}, fmt.Errorf("estimated Provider call upper bound %d exceeds authorized max-provider-calls %d", budget.ProviderCalls, providerCallLimit)
 	}
 	if budget.TotalTokens > totalTokenLimit {
-		return evidenceGateProviderBudget{}, fmt.Errorf("total Token budget upper bound %d exceeds authorized max-provider-tokens %d", budget.TotalTokens, totalTokenLimit)
+		return pairedProviderBudget{}, fmt.Errorf("total Token budget upper bound %d exceeds authorized max-provider-tokens %d", budget.TotalTokens, totalTokenLimit)
 	}
 	return budget, nil
 }
 
-func evidenceGatePairingFingerprint(definition mesagent.EvaluationCase, cfg config.Config) (string, error) {
-	profile, err := cfg.Models.Chat.ActiveProfile()
-	if err != nil {
-		return "", err
+// preparePairedProfile 解析 -profile：空值使用 activeProfile，非空值使用
+// 精确命名 Profile；-reasoning-effort 变换只作用于局部副本。返回最终 Profile
+// 名称、最终 Profile（Provider 实际收到的内容）与基于该名称和内容的指纹。
+// 绝不写回配置 Map，绝不修改或替换 activeProfile，绝不为 NewActive 临时切换。
+func preparePairedProfile(
+	chat config.ChatModelConfig,
+	profileFlag string,
+	reasoningEffort string,
+) (profileName string, finalProfile config.ChatModelProfileConfig, fingerprint string, err error) {
+	profileName = strings.TrimSpace(profileFlag)
+	if profileName == "" {
+		profileName = strings.TrimSpace(chat.ActiveProfileName)
 	}
+	if profileName == "" {
+		return "", config.ChatModelProfileConfig{}, "", errors.New("chat model profile name is empty")
+	}
+	finalProfile, err = chat.Profile(profileName)
+	if err != nil {
+		return "", config.ChatModelProfileConfig{}, "", err
+	}
+	if strings.TrimSpace(reasoningEffort) != "" {
+		finalProfile.ReasoningEffort = strings.ToLower(strings.TrimSpace(reasoningEffort))
+	}
+	if _, err := parseReasoningEffort(finalProfile.ReasoningEffort); err != nil {
+		return "", config.ChatModelProfileConfig{}, "", err
+	}
+	fingerprint, err = finalProfile.PromptProfileFingerprint(profileName)
+	if err != nil {
+		return "", config.ChatModelProfileConfig{}, "", fmt.Errorf("compute model profile fingerprint: %w", err)
+	}
+	return profileName, finalProfile, fingerprint, nil
+}
+
+func evidenceGatePairingFingerprint(definition mesagent.EvaluationCase, cfg config.Config, profileName string, profile config.ChatModelProfileConfig) (string, error) {
 	payload := struct {
 		Case             mesagent.EvaluationCase `json:"case"`
 		ModelProvider    string                  `json:"modelProvider"`
@@ -643,7 +715,7 @@ func evidenceGatePairingFingerprint(definition mesagent.EvaluationCase, cfg conf
 		TimeoutMillis    int                     `json:"timeoutMillis"`
 	}{
 		Case: definition, ModelProvider: profile.Provider, ModelID: profile.Model,
-		ModelProfile: cfg.Models.Chat.ActiveProfileName, ReasoningEffort: profile.ReasoningEffort,
+		ModelProfile: profileName, ReasoningEffort: profile.ReasoningEffort,
 		PromptVersion: cfg.Agent.PromptVersion, MaxAgentRuns: cfg.Agent.MaxAgentRuns,
 		MaxToolCalls: cfg.Agent.MaxToolCalls, MaxEvidenceItems: cfg.Agent.MaxEvidenceItems,
 		MaxTotalTokens: cfg.Agent.MaxTotalTokens, TimeoutMillis: cfg.Agent.TimeoutMillis,
@@ -660,12 +732,13 @@ func evidenceGateObservationFromResult(
 	definition mesagent.EvaluationCase,
 	variant mesagent.EvaluationVariant,
 	cfg config.Config,
+	profileName string,
+	profile config.ChatModelProfileConfig,
 	pairingFingerprint string,
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
 	invokeErr error,
 ) mesagent.EvidenceGateEvaluationObservation {
-	profile, _ := cfg.Models.Chat.ActiveProfile()
 	reasoningEffort := strings.TrimSpace(profile.ReasoningEffort)
 	if reasoningEffort == "" {
 		reasoningEffort = "none"
@@ -687,7 +760,7 @@ func evidenceGateObservationFromResult(
 		Variant: variant, RunID: fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
 		EarlyExitEnabled:   variant == mesagent.EvaluationExperiment,
 		PairingFingerprint: pairingFingerprint, ModelProvider: profile.Provider, ModelID: profile.Model,
-		ModelProfile: cfg.Models.Chat.ActiveProfileName, PromptVersion: cfg.Agent.PromptVersion,
+		ModelProfile: profileName, PromptVersion: cfg.Agent.PromptVersion,
 		ReasoningEffort: reasoningEffort, AgentRuns: result.AgentRuns,
 		Completed:       invokeErr == nil && !result.Partial,
 		QualityReviewed: false, Usage: result.Usage, ToolCalls: len(result.ToolExecutions),
@@ -707,45 +780,76 @@ func evidenceGateInvocationErrorType(err error) string {
 	}
 }
 
-// newPairedEvaluationRunAccess 构造评测用的诊断 RunAccess：授权事实直接来自
-// 冻结 Policy 与 ceiling（case.read + 按 tag 附加 code/sql），不再经过旧
-// TaskScope。Diagnosis 入口 Skill 由 Runner 固定为 ticket-diagnosis。
-func newPairedEvaluationRunAccess(definition mesagent.EvaluationCase, cfg config.Config) (agentruntime.RunAccess, error) {
+// pairedEvaluationActor 是评测固定 Analyst 执行者（与既有评测约定一致：
+// 授权事实始终来自冻结 Policy 而非角色特权）。
+var pairedEvaluationActor = agentruntime.Actor{
+	UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+	Role:   auth.RoleAnalyst,
+}
+
+// pairedProductionProfileToolNames 返回真实生产 diagnosis-default Profile 的
+// 模型可见 Tool 名单（含 Middleware-owned 名称）。它是运行上下文 ceiling 的
+// 唯一 ProfileToolNames 来源，绝不使用 evaluation-wide-v2 名单。
+func pairedProductionProfileToolNames(ctx context.Context, productionCatalog *mesagent.ToolCatalog) ([]string, error) {
+	resolved, err := productionCatalog.ResolveProfile(ctx, agentruntime.ToolProfileDiagnosis)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), resolved.ModelVisibleNames...), nil
+}
+
+// buildPairedCaseRunContext 复用生产深模块 BuildDiagnosisRunContext 一次构造
+// 单 Case 的诊断运行上下文（RunAccess + task_context）。冻结 Policy 按固定
+// Case 与 Case tags 派生（case.read 恒有；github-enabled -> code.read；
+// sql-enabled/sql-query-enabled -> sql.read 并绑定合法数据源）；ceiling 的
+// ProfileToolNames 必须是真实生产 diagnosis-default Profile（由调用方从
+// productionCatalog 解析）；SQL Case 的 DataSources 使用合法
+// dataSourceId + DataSourceRole + read_only SafetyMode；非 SQL Case 不附加
+// 任何数据源 Grant（旧"无 SQL Permission 却无条件附加虚拟数据源 Grant"逻辑
+// 已删除）。每 Case 只构造一次，baseline 与 experiment 两臂注入完全相同实例。
+func buildPairedCaseRunContext(
+	definition mesagent.EvaluationCase,
+	cfg config.Config,
+	profileToolNames []string,
+) (mesagent.DiagnosisRunContext, error) {
 	permissions := []agentruntime.Permission{agentruntime.PermissionCaseRead}
 	grantsConfig := agentruntime.ResourceGrantsConfig{
 		ExternalCaseIDs: []uuid.UUID{pairedEvalCaseID},
-		DataSourceIDs: []uuid.UUID{
-			uuid.MustParse("33333333-3333-3333-3333-333333333333"),
-		},
 	}
 	if containsString(definition.Tags, "github-enabled") {
 		permissions = append(permissions, agentruntime.PermissionCodeRead)
 	}
+	var dataSources []mesagent.DiagnosisCeilingDataSource
 	if containsString(definition.Tags, "sql-enabled") || containsString(definition.Tags, "sql-query-enabled") {
-		dataSourceID, err := uuid.Parse(cfg.SQLServer.ID)
-		if err != nil {
-			return agentruntime.RunAccess{}, fmt.Errorf("parse SQL data source id: %w", err)
+		sqlID, parseErr := uuid.Parse(cfg.SQLServer.ID)
+		if parseErr != nil {
+			return mesagent.DiagnosisRunContext{}, fmt.Errorf("parse SQL data source id: %w", parseErr)
 		}
 		permissions = append(permissions, agentruntime.PermissionSQLRead)
-		grantsConfig.DataSourceIDs = append(grantsConfig.DataSourceIDs, dataSourceID)
+		grantsConfig.DataSourceIDs = append(grantsConfig.DataSourceIDs, sqlID)
+		dataSources = append(dataSources, mesagent.DiagnosisCeilingDataSource{
+			ID: sqlID, Role: mesagent.DataSourceRoleCaseSource, SafetyMode: mesagent.DataSourceSafetyReadOnly,
+		})
 	}
 	permissionSet, err := agentruntime.NewPermissionSet(permissions...)
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
 	grants, err := agentruntime.NewResourceGrants(grantsConfig)
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
 	policy, err := agentruntime.NewInvestigationPolicy(diagnosis.InvestigationPolicySchemaVersion, permissionSet, grants)
 	if err != nil {
-		return agentruntime.RunAccess{}, err
+		return mesagent.DiagnosisRunContext{}, err
 	}
-	return agentruntime.DeriveDiagnosisRunAccess(
-		policy,
-		agentruntime.Actor{UserID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Role: auth.RoleAnalyst},
-		agentruntime.AccessCeiling{Permissions: permissionSet, Grants: grants},
-	)
+	return mesagent.BuildDiagnosisRunContext(mesagent.DiagnosisRunContextInput{
+		Policy:           policy,
+		Actor:            pairedEvaluationActor,
+		ProfileToolNames: profileToolNames,
+		ExternalCaseID:   pairedEvalCaseID,
+		DataSources:      dataSources,
+	})
 }
 
 func evaluationDatasetHasTag(cases []mesagent.EvaluationCase, tag string) bool {
@@ -761,6 +865,8 @@ func observationFromResult(
 	definition mesagent.EvaluationCase,
 	variant mesagent.EvaluationVariant,
 	cfg config.Config,
+	profileName string,
+	profile config.ChatModelProfileConfig,
 	result mesagent.OrchestrationResult,
 	duration time.Duration,
 	toolSchemaFingerprint string,
@@ -768,7 +874,6 @@ func observationFromResult(
 	identity evaluationidentity.Identity,
 	modelProfileFingerprint string,
 ) mesagent.EvaluationObservation {
-	profile, _ := cfg.Models.Chat.ActiveProfile()
 	actualTools := make([]string, 0, len(result.ToolExecutions))
 	for _, execution := range result.ToolExecutions {
 		actualTools = append(actualTools, execution.Name)
