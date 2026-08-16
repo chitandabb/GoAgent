@@ -1,6 +1,6 @@
 // 演示静态数据。全部为虚构内容，接入真实后端后随 mocks 目录一并删除。
 import type {
-  AdminUser,
+  MockAdminUser,
   CurrentUser,
   DataSource,
   DependencyStatus,
@@ -157,7 +157,7 @@ export const mockCases: ExternalCase[] = [
   },
 ]
 
-export const mockAdminUsers: AdminUser[] = [
+export const mockAdminUsers: MockAdminUser[] = [
   {
     id: 'u-admin-01',
     username: 'admin01',

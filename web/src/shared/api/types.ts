@@ -281,7 +281,9 @@ export interface CatalogEntry {
 
 // ---------------------------------------------------------------- 管理
 
-export interface AdminUser {
+// Mock 专用类型。真实管理员用户类型见 m1-types.ts 的 AdminUser，
+// 两者字段不同，避免 barrel 同名冲突故以 Mock 前缀命名。
+export interface MockAdminUser {
   id: string
   username: string
   displayName: string
