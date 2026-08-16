@@ -45,11 +45,13 @@ import (
 const (
 	toolSelectionPromptVersion = "tool-selection-v4"
 	toolSelectionMaxTokens     = 1024
-	// v3 输出资产默认名：新合同生成新资产，不覆盖 v1/v2 历史观测与汇总。
-	toolSelectionObservationsOutput = "testdata/tool-selection-v3.observations.jsonl"
-	toolSelectionSummaryOutput      = "testdata/tool-selection-v3.summary.json"
-	// 探针模式独立输出资产：绝不覆盖 v3 正式观测与汇总。
+	// v4 输出资产默认名：新合同生成新资产，不覆盖 v1/v2/v3 历史观测与汇总。
+	toolSelectionObservationsOutput = "testdata/tool-selection-v4.observations.jsonl"
+	toolSelectionSummaryOutput      = "testdata/tool-selection-v4.summary.json"
+	// 探针模式独立输出资产：绝不覆盖 v4 正式观测与汇总。
 	compatibilityProbeObservationsOutput = "testdata/tool-compatibility-probe-v1.observations.jsonl"
+	// toolChoiceMode 默认保持既有调用语义：发送 WithToolChoice(ToolChoiceForced)。
+	toolSelectionDefaultToolChoiceMode = string(mesagent.ToolSelectionToolChoiceRequired)
 )
 
 var (
@@ -123,13 +125,21 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	allowDirty := flags.Bool("allow-dirty", false, "accept a dirty/unknown implementation revision for local smoke; results are NOT formal metrics")
 	compatibilityProbe := flags.Bool("compatibility-probe", false, "run the fixed 5-scenario tool-calling compatibility probe instead of the formal evaluation")
 	probeOutputPath := flags.String("probe-output", compatibilityProbeObservationsOutput, "compatibility probe observation JSONL output (probe mode only)")
+	toolChoiceModeFlag := flags.String("tool-choice-mode", toolSelectionDefaultToolChoiceMode, "explicit tool choice request mode: required|absent")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty] [-compatibility-probe [-probe-output path]]")
+		return errors.New("usage: mesguard-tool-selection-eval [-dataset path] [-output path] [-summary path] [-concurrency 1..8] [-profile <named-chat-profile>] [-case-id <exact-case-id>] [-tool-choice-mode required|absent] [-allow-provider-calls] [-max-cases N] [-max-provider-calls N] [-max-provider-tokens N] [-allow-dirty] [-compatibility-probe [-probe-output path]]")
 	}
 	if *concurrency < 1 || *concurrency > 8 {
 		return errors.New("concurrency must be between 1 and 8")
 	}
-	// 探针模式是独立路径：固定 5 场景单 Case 矩阵，绝不进入正式 v3 评测，
+	// -tool-choice-mode 必须在任何 Provider 创建与任何远端连接（GitHub MCP）
+	// 之前 fail-closed 解析：合法值只有 required/absent，默认 required 保持
+	// 既有调用语义。绝不按 Provider 名选择模式。
+	toolChoiceMode, err := mesagent.ParseToolSelectionToolChoiceMode(*toolChoiceModeFlag)
+	if err != nil {
+		return err
+	}
+	// 探针模式是独立路径：固定 5 场景单 Case 矩阵，绝不进入正式 v4 评测，
 	// 也绝不写正式 observation/summary 输出。
 	if *compatibilityProbe {
 		return runCompatibilityProbeWithDependencies(ctx, log, deps, compatibilityProbeOptions{
@@ -198,8 +208,8 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 			zap.String("revision", identity.Revision), zap.Bool("dirty", identity.Dirty))
 	}
 	fmt.Fprintf(os.Stdout,
-		"mesguard-tool-selection-eval profile=%s provider=%s model=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_hard_upper_bound=%d revision=%s dirty=%t\n",
-		profileName, strings.TrimSpace(modelProfile.Provider), strings.TrimSpace(modelProfile.Model),
+		"mesguard-tool-selection-eval profile=%s provider=%s model=%s tool_choice_mode=%s cases=%d authorized_provider_call_upper_bound=%d authorized_token_hard_upper_bound=%d revision=%s dirty=%t\n",
+		profileName, strings.TrimSpace(modelProfile.Provider), strings.TrimSpace(modelProfile.Model), toolChoiceMode,
 		budget.Cases, budget.ProviderCalls, budget.TotalTokens, identity.Revision, identity.Dirty)
 	githubConnection, err := deps.connectGitHub(ctx, cfg.GitHubMCP, log.Named("github_mcp"))
 	if err != nil {
@@ -277,7 +287,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 					observation, observeErr := observeToolSelection(
 						evalCtx, chatModel, assembly,
 						current.definition, variant, basePromptTokens, identity,
-						modelProfileFingerprint, modelProfile, log,
+						modelProfileFingerprint, modelProfile, log, toolChoiceMode,
 					)
 					if observeErr != nil {
 						currentResult.err = fmt.Errorf(
@@ -382,6 +392,7 @@ func observeToolSelection(
 	modelProfileFingerprint string,
 	modelProfile config.ChatModelProfileConfig,
 	log *zap.Logger,
+	toolChoiceMode mesagent.ToolSelectionToolChoiceMode,
 ) (mesagent.ToolSelectionObservation, error) {
 	accessCtx, err := withSelectionRunAccess(ctx)
 	if err != nil {
@@ -426,13 +437,23 @@ func observeToolSelection(
 	if err != nil {
 		return mesagent.ToolSelectionObservation{}, fmt.Errorf("bind tools: %w", err)
 	}
+	// 显式 tool choice 模式是两臂唯一的请求差异来源之一：required 追加
+	// WithToolChoice(schema.ToolChoiceForced)；absent 完全省略 ToolChoice
+	// option（不是显式 auto）。Prompt、ToolInfo、temperature 与 maxTokens
+	// 在两种模式下完全一致。
+	generateOptions := []model.Option{
+		model.WithTemperature(0), model.WithMaxTokens(toolSelectionMaxTokens),
+	}
+	if toolChoiceMode == mesagent.ToolSelectionToolChoiceRequired {
+		generateOptions = append(generateOptions, model.WithToolChoice(schema.ToolChoiceForced))
+	}
 	startedAt := time.Now()
-	message, generateErr := bound.Generate(ctx, selectionMessages(definition),
-		model.WithTemperature(0), model.WithMaxTokens(toolSelectionMaxTokens), model.WithToolChoice(schema.ToolChoiceForced))
+	message, generateErr := bound.Generate(ctx, selectionMessages(definition), generateOptions...)
 	observation := mesagent.ToolSelectionObservation{
 		DatasetVersion: definition.DatasetVersion, CaseID: definition.CaseID, Variant: variant,
 		RunID:                    fmt.Sprintf("%s-%s-%s", definition.CaseID, variant, uuid.NewString()),
-		ObservationSchemaVersion: mesagent.ToolSelectionObservationV3,
+		ObservationSchemaVersion: mesagent.ToolSelectionObservationV4,
+		ToolChoiceMode:           toolChoiceMode,
 		ModelProvider:            modelProfile.Provider, ModelID: modelProfile.Model,
 		ReasoningEffort: modelProfile.ReasoningEffort, PromptVersion: toolSelectionPromptVersion,
 		MaxOutputTokens: toolSelectionMaxTokens,
