@@ -50,6 +50,7 @@ type runnerModelState struct {
 	block    chan struct{}
 	calls    int
 	schemas  [][]string
+	prompts  [][]string
 }
 
 type runnerTestModel struct {
@@ -82,6 +83,15 @@ func (m *runnerTestModel) Generate(ctx context.Context, input []*schema.Message,
 	m.state.mu.Lock()
 	m.state.calls++
 	m.state.schemas = append(m.state.schemas, names)
+	var systemMessages []string
+	for _, message := range input {
+		if message.Role == schema.System {
+			systemMessages = append(systemMessages, message.Content)
+		}
+	}
+	if len(systemMessages) > 0 {
+		m.state.prompts = append(m.state.prompts, systemMessages)
+	}
 	m.state.mu.Unlock()
 	if m.state.loop {
 		return runnerTestToolCall(ToolReadExternalCase, `{"externalCaseId":"11111111-1111-1111-1111-111111111111"}`), nil

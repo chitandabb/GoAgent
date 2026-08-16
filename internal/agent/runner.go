@@ -297,14 +297,15 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	if !r.skillRuntime.HasSkill(result.SkillID) {
 		return RunResult{}, fmt.Errorf("%w: %s", ErrSkillUnavailable, result.SkillID)
 	}
-	entryInstruction := ""
-	if r.mode == RunnerModeExperiment {
-		entryInstruction, err = r.skillRuntime.Instruction(ctx, result.SkillID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		result.ExecutedSkills = []SkillID{result.SkillID}
+	// 两臂（experiment 与 baseline wide）都加载 Diagnosis 入口 Skill 全文：
+	// Generic paired 评测要求两臂最终 system message 字节级一致（相同生产
+	// SystemInstruction + 相同入口 Skill 全文 + 相同 task_context），唯一允许
+	// 差异是最终 Tool Profile/Schema。
+	entryInstruction, err := r.skillRuntime.Instruction(ctx, result.SkillID)
+	if err != nil {
+		return RunResult{}, err
 	}
+	result.ExecutedSkills = []SkillID{result.SkillID}
 
 	userPrompt, buildErr := BuildUserPrompt(request)
 	if buildErr != nil {
@@ -320,10 +321,11 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	usageTrace := &modelUsageTrace{onUsage: budget.recordUsage}
 
 	handlers := []adk.ChatModelAgentMiddleware{r.toolAuthorization}
-	instruction := buildBaselineAgentInstruction(r.baselineInstruction, result.SkillID)
-	if r.mode == RunnerModeExperiment {
-		instruction = buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction)
-	}
+	// 两臂使用同一个生产 SystemInstruction 与同一个入口 Skill 全文：
+	// baseline 不再使用独立的评测 baseline 指令（BaselineInstruction 字段受
+	// 构造校验保护，但不再进入最终 model 指令），因此两臂 system message
+	// 字节级一致；区别只保留在 Tool Profile/Schema。
+	instruction := buildAgentInstruction(r.systemInstruction, result.SkillID, entryInstruction)
 	// 两臂（experiment 与 baseline wide）使用同一个 Eino Skill Middleware：
 	// wide 臂的 evaluation-wide-v2 Profile 并集声明了 skill 名单，最终模型
 	// Schema 与 experiment 共享完全一致的 skill Tool。
@@ -460,17 +462,13 @@ func (r *Runner) Invoke(ctx context.Context, request RunRequest) (result RunResu
 	return result, nil
 }
 
-// buildAgentInstruction 装配 experiment 模式 system 指令：基础指令 + 固定
-// 入口 Skill 全文。授权事实由 RunAccess 承载并追加在 task_context 中，
-// 指令本身不再按任务/消息变化。
+// buildAgentInstruction 装配 system 指令：生产 SystemInstruction + 固定
+// 入口 Skill 全文。experiment 与 baseline（Generic paired 评测）共用同一
+// 装配，保证两臂最终 system message 字节级一致；授权事实由 RunAccess
+// 承载并追加在 task_context 中，指令本身不再按任务/消息变化。
 func buildAgentInstruction(baseInstruction string, entry SkillID, skillContent string) string {
 	return strings.TrimSpace(baseInstruction) +
 		"\n\n<entry_skill name=\"" + string(entry) + "\">\n" + strings.TrimSpace(skillContent) + "\n</entry_skill>"
-}
-
-func buildBaselineAgentInstruction(baseInstruction string, entry SkillID) string {
-	return strings.TrimSpace(baseInstruction) +
-		"\n\n<entry_task>" + string(entry) + "</entry_task>"
 }
 
 func (r *Runner) rewriteToolArguments(ctx context.Context, name, arguments string) (string, error) {

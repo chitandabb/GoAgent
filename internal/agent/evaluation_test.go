@@ -268,6 +268,12 @@ func evaluationObservationForTest(
 		actualTools = append(actualTools, "search_code")
 		evidence = append(evidence, "code")
 	}
+	// v3 AllowedTools 集合合同：experiment == sharedToolNames；
+	// baseline == sharedToolNames ∪ baselineOnlyToolNames（顺序无关）。
+	allowedTools := []string{ToolReadExternalCase, ToolSkill}
+	if variant == EvaluationBaseline {
+		allowedTools = append(allowedTools, "search_code")
+	}
 	return EvaluationObservation{
 		DatasetVersion: "dev-v1", CaseID: caseID, Variant: variant,
 		RunID: caseID + "-" + string(variant), Model: "stepfun", ModelVersion: "step-3.7-flash",
@@ -282,7 +288,7 @@ func evaluationObservationForTest(
 		BaselineOnlyToolNames:    []string{"search_code"},
 		SelectedSkill:            SkillTicketDiagnosis,
 		ActualToolCalls:          actualTools,
-		AllowedTools:             []string{ToolReadExternalCase, "search_code", ToolSkill},
+		AllowedTools:             allowedTools,
 		Evidence:                 evidence,
 		ConclusionStatus:         ConclusionProbable,
 		RootCauseMatched:         true,
@@ -307,4 +313,86 @@ func evaluationSchemaFingerprintForTest(variant EvaluationVariant) string {
 		return strings.Repeat("1", 64)
 	}
 	return strings.Repeat("2", 64)
+}
+
+// TestEvaluationObservationV3RejectsExperimentAllowedToolsDrift 证明
+// experiment 臂的 AllowedTools 集合必须 == sharedToolNames：缺失共享 Tool、
+// 多出非共享 Tool、重复条目都要拒绝。
+func TestEvaluationObservationV3RejectsExperimentAllowedToolsDrift(t *testing.T) {
+	base := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
+	if err := base.Validate(); err != nil {
+		t.Fatalf("baseline-valid experiment rejected: %v", err)
+	}
+	missing := base
+	missing.AllowedTools = []string{ToolReadExternalCase}
+	if err := missing.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("experiment missing a shared Tool must fail, got %v", err)
+	}
+	extra := base
+	extra.AllowedTools = []string{ToolReadExternalCase, "search_code", ToolSkill}
+	if err := extra.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("experiment with an extra non-shared Tool must fail, got %v", err)
+	}
+	duplicate := base
+	duplicate.AllowedTools = []string{ToolReadExternalCase, ToolSkill, ToolSkill}
+	if err := duplicate.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("experiment with duplicate AllowedTools must fail, got %v", err)
+	}
+}
+
+// TestEvaluationObservationV3RejectsBaselineAllowedToolsDrift 证明 baseline 臂
+// 的 AllowedTools 集合必须 == sharedToolNames ∪ baselineOnlyToolNames：
+// 缺共享 Tool、缺 baseline-only Tool、多出额外 Tool 都要拒绝。
+func TestEvaluationObservationV3RejectsBaselineAllowedToolsDrift(t *testing.T) {
+	base := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid baseline rejected: %v", err)
+	}
+	missingShared := base
+	missingShared.AllowedTools = []string{ToolReadExternalCase, "search_code"}
+	if err := missingShared.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("baseline missing a shared Tool must fail, got %v", err)
+	}
+	missingOnly := base
+	missingOnly.AllowedTools = []string{ToolReadExternalCase, ToolSkill}
+	if err := missingOnly.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("baseline missing a baseline-only Tool must fail, got %v", err)
+	}
+	extra := base
+	extra.AllowedTools = []string{ToolReadExternalCase, "search_code", ToolSkill, "read_attachment"}
+	if err := extra.Validate(); err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("baseline with an extra Tool must fail, got %v", err)
+	}
+}
+
+// TestEvaluationObservationV3AllowedToolsSetIgnoresOrder 证明集合语义：
+// AllowedTools 乱序仍然通过；顺序不影响集合比较。
+func TestEvaluationObservationV3AllowedToolsSetIgnoresOrder(t *testing.T) {
+	baseline := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
+	baseline.AllowedTools = []string{"search_code", ToolSkill, ToolReadExternalCase}
+	if err := baseline.Validate(); err != nil {
+		t.Fatalf("shuffled baseline AllowedTools rejected: %v", err)
+	}
+	experiment := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
+	experiment.AllowedTools = []string{ToolSkill, ToolReadExternalCase}
+	if err := experiment.Validate(); err != nil {
+		t.Fatalf("shuffled experiment AllowedTools rejected: %v", err)
+	}
+}
+
+// TestEvaluateDatasetRejectsMisalignedAllowedToolsBeforePairing 证明错配观测
+// （AllowedTools 集合与 comparison 合同不一致）在 Validate 阶段 fail-closed，
+// 不能进入 paired reduction。
+func TestEvaluateDatasetRejectsMisalignedAllowedToolsBeforePairing(t *testing.T) {
+	baseline := evaluationObservationForTest("ticket", EvaluationBaseline, 1000, 1000)
+	experiment := evaluationObservationForTest("ticket", EvaluationExperiment, 600, 700)
+	experiment.AllowedTools = append([]string(nil), experiment.AllowedTools...)
+	experiment.AllowedTools = append(experiment.AllowedTools, "search_code")
+	_, err := EvaluateDataset(evaluationCasesForTest()[:1], []EvaluationObservation{baseline, experiment})
+	if err == nil || !strings.Contains(err.Error(), "allowedTools") {
+		t.Fatalf("EvaluateDataset must reject a misaligned experiment before pairing, got %v", err)
+	}
+	if err := experiment.Validate(); err == nil {
+		t.Fatal("misaligned experiment observation must fail Validate")
+	}
 }
