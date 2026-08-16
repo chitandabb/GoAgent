@@ -76,9 +76,17 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 		closeDependencies()
 		return nil, fmt.Errorf("build session service: %w", err)
 	}
+	changePasswordService, err := auth.NewChangePasswordService(
+		userRepository, sessionRepository, passwordHasher,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build change password service: %w", err)
+	}
 	authRoutes, err := httptransport.NewAuthRoutes(
 		loginService,
 		sessionService,
+		changePasswordService,
 		httptransport.CookieSettings{
 			Domain: cfg.Auth.CookieDomain,
 			Secure: cfg.Auth.CookieSecure,
@@ -91,6 +99,21 @@ func New(ctx context.Context, cfg config.Config, log *zap.Logger) (*App, error) 
 	}
 
 	registrars := []httptransport.RouteRegistrar{authRoutes}
+	adminUsersService, err := auth.NewAdminUsersService(
+		userRepository, sessionRepository, passwordHasher,
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build admin users service: %w", err)
+	}
+	adminUsersRoutes, err := httptransport.NewAdminUsersRoutes(
+		adminUsersService, authRoutes.RequireAuthentication(), authRoutes.RequireCSRF(),
+	)
+	if err != nil {
+		closeDependencies()
+		return nil, fmt.Errorf("build admin users routes: %w", err)
+	}
+	registrars = append(registrars, adminUsersRoutes)
 	conversationRepository := platformpostgres.NewConversationRepository(deps.db)
 	conversationService, err := conversation.NewService(conversationRepository)
 	if err != nil {

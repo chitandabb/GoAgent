@@ -33,10 +33,22 @@ func TestOpenAPIYAMLParsesAndContainsTaskControlPaths(t *testing.T) {
 		"/api/v1/admin/knowledge-ingestion-tasks/{taskId}/cancel",
 		"/api/v1/conversations/{conversationId}/turns/{turnId}",
 		"/api/v1/conversations/{conversationId}/turns/{turnId}/events",
+		"/api/v1/auth/change-password",
+		"/api/v1/admin/users",
+		"/api/v1/admin/users/{userId}",
+		"/api/v1/admin/users/{userId}/reset-password",
 	} {
 		if _, ok := document.Paths[path]; !ok {
 			t.Fatalf("OpenAPI path %q is missing", path)
 		}
+	}
+	taskList := document.Paths["/api/v1/diagnosis-tasks"]["get"]
+	taskListOperation, ok := taskList.(map[string]any)
+	if !ok {
+		t.Fatal("diagnosis task list GET operation is invalid")
+	}
+	if _, ok := taskListOperation["parameters"].([]any); !ok {
+		t.Fatal("diagnosis task list must document query parameters")
 	}
 	upload := document.Paths["/api/v1/admin/knowledge-documents"]["post"]
 	uploadOperation, ok := upload.(map[string]any)

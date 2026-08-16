@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/auth"
+	"github.com/chitandabb/GoAgent/internal/repository"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -50,6 +51,111 @@ func (r *UserRepository) FindByNormalizedUsername(ctx context.Context, username 
 		return nil, TranslateError(err)
 	}
 	return record.toDomain(), nil
+}
+
+// UpdatePassword 更新密码哈希并清除首次登录改密标记。
+func (r *UserRepository) UpdatePassword(
+	ctx context.Context,
+	userID uuid.UUID,
+	passwordHash string,
+	changedAt time.Time,
+) error {
+	err := ResolveDB(ctx, r.db).
+		Model(&userRecord{}).
+		Where("id = ?", userID).
+		Updates(map[string]any{
+			"password_hash":        passwordHash,
+			"must_change_password": false,
+			"password_changed_at":  changedAt,
+			"updated_at":           changedAt,
+		}).Error
+	return TranslateError(err)
+}
+
+// ListUsers 返回筛选后的分页用户列表与总数，按创建时间倒序。
+func (r *UserRepository) ListUsers(
+	ctx context.Context,
+	filter auth.UserListFilter,
+	page, pageSize int,
+) ([]auth.User, int64, error) {
+	db := ResolveDB(ctx, r.db).Model(&userRecord{})
+	if filter.Status != nil {
+		db = db.Where("status = ?", *filter.Status)
+	}
+	if filter.Role != nil {
+		db = db.Where("role = ?", *filter.Role)
+	}
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, TranslateError(err)
+	}
+	var records []userRecord
+	if err := db.
+		Order("created_at DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&records).Error; err != nil {
+		return nil, 0, TranslateError(err)
+	}
+	users := make([]auth.User, 0, len(records))
+	for _, record := range records {
+		users = append(users, *record.toDomain())
+	}
+	return users, total, nil
+}
+
+// UpdateStatus 更新用户启用状态；用户不存在时返回 repository.ErrNotFound。
+func (r *UserRepository) UpdateStatus(ctx context.Context, userID uuid.UUID, status auth.UserStatus) error {
+	result := ResolveDB(ctx, r.db).
+		Model(&userRecord{}).
+		Where("id = ?", userID).
+		Update("status", status)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateRole 更新用户角色；用户不存在时返回 repository.ErrNotFound。
+func (r *UserRepository) UpdateRole(ctx context.Context, userID uuid.UUID, role auth.Role) error {
+	result := ResolveDB(ctx, r.db).
+		Model(&userRecord{}).
+		Where("id = ?", userID).
+		Update("role", role)
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
+// ResetPassword 覆盖密码哈希并强制下次登录改密。
+func (r *UserRepository) ResetPassword(
+	ctx context.Context,
+	userID uuid.UUID,
+	passwordHash string,
+	changedAt time.Time,
+) error {
+	result := ResolveDB(ctx, r.db).
+		Model(&userRecord{}).
+		Where("id = ?", userID).
+		Updates(map[string]any{
+			"password_hash":        passwordHash,
+			"must_change_password": true,
+			"updated_at":           changedAt,
+		})
+	if result.Error != nil {
+		return TranslateError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
 }
 
 type userRecord struct {

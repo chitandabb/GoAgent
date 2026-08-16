@@ -179,7 +179,7 @@ func newAuthTestRouter(
 	origins []string,
 ) http.Handler {
 	t.Helper()
-	routes, err := NewAuthRoutes(login, sessions, cookies, origins)
+	routes, err := NewAuthRoutes(login, sessions, nil, cookies, origins)
 	if err != nil {
 		t.Fatalf("NewAuthRoutes(): %v", err)
 	}

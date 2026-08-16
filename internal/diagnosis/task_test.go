@@ -255,6 +255,10 @@ type taskRepositoryStub struct {
 	gotCancelTaskID uuid.UUID
 	gotRequestedBy  uuid.UUID
 	gotRequestedAt  time.Time
+	listPage        TaskListPage
+	listErr         error
+	listCalls       int
+	listGotQuery    TaskListQuery
 }
 
 // alias keeps the test readable while retaining the production interface type.
@@ -284,6 +288,12 @@ func (s *taskRepositoryStub) ListTaskEvents(_ context.Context, _ uuid.UUID, afte
 func (s *taskRepositoryStub) CancelTask(_ context.Context, taskID, requestedBy uuid.UUID, requestedAt time.Time) (TaskCancelResult, error) {
 	s.gotCancelTaskID, s.gotRequestedBy, s.gotRequestedAt = taskID, requestedBy, requestedAt
 	return s.cancelResult, s.cancelErr
+}
+
+func (s *taskRepositoryStub) ListTasks(_ context.Context, query TaskListQuery) (TaskListPage, error) {
+	s.listCalls++
+	s.listGotQuery = query
+	return s.listPage, s.listErr
 }
 
 type taskCaseReaderStub struct {

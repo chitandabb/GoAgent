@@ -41,14 +41,17 @@ type CookieSettings struct {
 type AuthRoutes struct {
 	login          loginUseCase
 	sessions       sessionUseCase
+	changePassword changePasswordUseCase
 	cookies        CookieSettings
 	allowedOrigins map[string]struct{}
 }
 
-// NewAuthRoutes 创建认证 HTTP 边界。
+// NewAuthRoutes 创建认证 HTTP 边界。changePassword 为 nil 时改密接口
+// 返回依赖不可用，避免路由在未装配时静默 404。
 func NewAuthRoutes(
 	login loginUseCase,
 	sessions sessionUseCase,
+	changePassword changePasswordUseCase,
 	cookies CookieSettings,
 	allowedOrigins []string,
 ) (*AuthRoutes, error) {
@@ -69,7 +72,7 @@ func NewAuthRoutes(
 		}
 		origins[origin] = struct{}{}
 	}
-	return &AuthRoutes{login: login, sessions: sessions, cookies: cookies, allowedOrigins: origins}, nil
+	return &AuthRoutes{login: login, sessions: sessions, changePassword: changePassword, cookies: cookies, allowedOrigins: origins}, nil
 }
 
 // Register 在 /api/v1/auth 下注册认证接口。
@@ -80,6 +83,11 @@ func (r *AuthRoutes) Register(api *gin.RouterGroup) {
 	protected := routes.Group("")
 	protected.Use(r.requireAuthentication())
 	protected.GET("/me", r.meHandler)
+
+	commands := protected.Group("")
+	commands.Use(r.requireCSRF())
+	commands.POST("/change-password", r.changePasswordHandler)
+
 	routes.POST("/logout", r.requireTrustedOrigin(), r.logoutHandler)
 }
 

@@ -164,11 +164,33 @@ type stubUserRepository struct {
 	findErr     error
 	gotUsername string
 	createdUser *User
+	createErr   error
+
+	updatedPasswordHash string
+	updatedPasswordAt   time.Time
+
+	listUsers        []User
+	listTotal        int64
+	listErr          error
+	listGotStatus    *UserStatus
+	listGotRole      *Role
+	listGotPage      int
+	listGotPageSize  int
+	updatedStatusUserID uuid.UUID
+	updatedStatus    UserStatus
+	updateStatusErr  error
+	updatedRoleUserID uuid.UUID
+	updatedRole      Role
+	updateRoleErr    error
+	resetPasswordHash       string
+	resetPasswordAt         time.Time
+	resetPasswordMustChange *bool
+	resetPasswordErr        error
 }
 
 func (r *stubUserRepository) Create(_ context.Context, user *User) error {
 	r.createdUser = user
-	return nil
+	return r.createErr
 }
 
 func (r *stubUserRepository) FindByID(context.Context, uuid.UUID) (*User, error) {
@@ -180,6 +202,41 @@ func (r *stubUserRepository) FindByNormalizedUsername(_ context.Context, usernam
 	return r.user, r.findErr
 }
 
+func (r *stubUserRepository) UpdatePassword(_ context.Context, _ uuid.UUID, passwordHash string, changedAt time.Time) error {
+	r.updatedPasswordHash = passwordHash
+	r.updatedPasswordAt = changedAt
+	return nil
+}
+
+func (r *stubUserRepository) ListUsers(_ context.Context, filter UserListFilter, page, pageSize int) ([]User, int64, error) {
+	r.listGotStatus = cloneUserStatus(filter.Status)
+	r.listGotRole = cloneRole(filter.Role)
+	r.listGotPage = page
+	r.listGotPageSize = pageSize
+	return r.listUsers, r.listTotal, r.listErr
+}
+
+func (r *stubUserRepository) UpdateStatus(_ context.Context, userID uuid.UUID, status UserStatus) error {
+	r.updatedStatusUserID = userID
+	r.updatedStatus = status
+	return r.updateStatusErr
+}
+
+func (r *stubUserRepository) UpdateRole(_ context.Context, userID uuid.UUID, role Role) error {
+	r.updatedRoleUserID = userID
+	r.updatedRole = role
+	return r.updateRoleErr
+}
+
+func (r *stubUserRepository) ResetPassword(_ context.Context, userID uuid.UUID, passwordHash string, changedAt time.Time) error {
+	r.updatedStatusUserID = userID
+	r.resetPasswordHash = passwordHash
+	r.resetPasswordAt = changedAt
+	mustChange := true
+	r.resetPasswordMustChange = &mustChange
+	return r.resetPasswordErr
+}
+
 type stubSessionRepository struct {
 	created          *Session
 	createErr        error
@@ -189,6 +246,8 @@ type stubSessionRepository struct {
 	refreshed        bool
 	refreshIdleUntil time.Time
 	revokedID        uuid.UUID
+	revokedAllFor    uuid.UUID
+	revokedAllAt     time.Time
 }
 
 func (r *stubSessionRepository) Create(_ context.Context, session *Session) error {
@@ -215,7 +274,9 @@ func (r *stubSessionRepository) Revoke(_ context.Context, sessionID uuid.UUID, _
 	return nil
 }
 
-func (*stubSessionRepository) RevokeAllByUserID(context.Context, uuid.UUID, time.Time) error {
+func (r *stubSessionRepository) RevokeAllByUserID(_ context.Context, userID uuid.UUID, revokedAt time.Time) error {
+	r.revokedAllFor = userID
+	r.revokedAllAt = revokedAt
 	return nil
 }
 
