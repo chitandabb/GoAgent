@@ -404,6 +404,74 @@ type scriptedSQLState struct {
 	queryCalled   bool
 }
 
+type duplicateReadonlyQueryModel struct {
+	tools []*schema.ToolInfo
+	state *duplicateReadonlyQueryState
+}
+
+type duplicateReadonlyQueryState struct {
+	mu     sync.Mutex
+	inputs [][]*schema.Message
+}
+
+func (m *duplicateReadonlyQueryModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return &duplicateReadonlyQueryModel{
+		tools: append([]*schema.ToolInfo(nil), tools...),
+		state: m.state,
+	}, nil
+}
+
+func (m *duplicateReadonlyQueryModel) Generate(
+	_ context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.Message, error) {
+	common := model.GetCommonOptions(nil, opts...)
+	toolInfos := common.Tools
+	if len(toolInfos) == 0 {
+		toolInfos = m.tools
+	}
+	m.state.mu.Lock()
+	m.state.inputs = append(m.state.inputs, append([]*schema.Message(nil), input...))
+	m.state.mu.Unlock()
+
+	queryResults := 0
+	for _, message := range input {
+		if message.Role == schema.Tool && message.ToolName == ToolExecuteReadonlyQuery {
+			queryResults++
+		}
+	}
+	if queryResults == 0 && toolNameInList(toolInfoNames(toolInfos), ToolExecuteReadonlyQuery) {
+		return withRunnerTestUsage(runnerTestToolCall(
+			ToolExecuteReadonlyQuery,
+			`{"query":"SELECT Status FROM dbo.v_Tickets WHERE TicketID='TKT-999'"}`,
+		)), nil
+	}
+	if queryResults == 1 {
+		return withRunnerTestUsage(runnerTestToolCall(
+			ToolExecuteReadonlyQuery,
+			`{"query":"SELECT COUNT(*) AS Total FROM dbo.v_Tickets"}`,
+		)), nil
+	}
+	return withRunnerTestUsage(schema.AssistantMessage("已根据首次查询结果作答。", nil)), nil
+}
+
+func (m *duplicateReadonlyQueryModel) Stream(
+	ctx context.Context, input []*schema.Message, opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func toolInfoNames(infos []*schema.ToolInfo) []string {
+	names := make([]string, 0, len(infos))
+	for _, info := range infos {
+		names = append(names, info.Name)
+	}
+	return names
+}
+
 func (m *scriptedSQLConversationModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return &scriptedSQLConversationModel{
 		state: m.state, tools: append([]*schema.ToolInfo(nil), tools...),
@@ -418,10 +486,7 @@ func (m *scriptedSQLConversationModel) Generate(
 	if len(toolInfos) == 0 {
 		toolInfos = m.tools
 	}
-	names := make([]string, 0, len(toolInfos))
-	for _, info := range toolInfos {
-		names = append(names, info.Name)
-	}
+	names := toolInfoNames(toolInfos)
 	inputSnapshot := make([]string, 0, len(input))
 	catalogResult := false
 	queryResult := false
@@ -565,6 +630,88 @@ func TestConversationRunnerSelectsAndExecutesReadonlySQLTool(t *testing.T) {
 		!strings.HasSuffix(userMessage, "</turn_context>") {
 		t.Fatalf("turn_context must be appended after the original user text: %q", userMessage)
 	}
+}
+
+func TestConversationRunnerBlocksSecondReadonlyQueryRecoverably(t *testing.T) {
+	runner, executor, modelState := newDuplicateReadonlyQueryRunnerForTest(t, 8)
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond() must recover from a duplicate readonly query request: %v", err)
+	}
+	if !strings.Contains(response.Content, "首次查询") {
+		t.Fatalf("response = %q", response.Content)
+	}
+	if response.RunObservation == nil || response.RunObservation.ToolCalls != 2 {
+		t.Fatalf("run observation = %+v, want two requested Tool calls", response.RunObservation)
+	}
+	if calls, _, _, _, _ := executor.snapshot(); calls != 1 {
+		t.Fatalf("readonly executor calls = %d, want exactly 1", calls)
+	}
+
+	modelState.mu.Lock()
+	defer modelState.mu.Unlock()
+	blockedResultSeen := false
+	for _, input := range modelState.inputs {
+		for _, message := range input {
+			if message.Role == schema.Tool && message.ToolName == ToolExecuteReadonlyQuery &&
+				strings.Contains(message.Content, `"status":"blocked"`) &&
+				strings.Contains(message.Content, `"errorType":"tool_run_limit_exhausted"`) {
+				blockedResultSeen = true
+			}
+		}
+	}
+	if !blockedResultSeen {
+		t.Fatal("model did not receive a structured recoverable result for the second readonly query")
+	}
+}
+
+func TestConversationRunnerDuplicateReadonlyQueryFailsClosedWhenToolBudgetIsExhausted(t *testing.T) {
+	runner, executor, _ := newDuplicateReadonlyQueryRunnerForTest(t, 1)
+	request, ctx := conversationRunnerRequest(nil)
+	_, err := runner.Respond(ctx, request)
+	if !errors.Is(err, ErrToolCallBudgetExhausted) {
+		t.Fatalf("Respond() error = %v, want ErrToolCallBudgetExhausted", err)
+	}
+	if calls, _, _, _, _ := executor.snapshot(); calls != 1 {
+		t.Fatalf("readonly executor calls = %d, want exactly 1", calls)
+	}
+}
+
+func newDuplicateReadonlyQueryRunnerForTest(
+	t *testing.T,
+	maxToolCalls int,
+) (*ConversationRunner, *countingReadonlyQueryExecutor, *duplicateReadonlyQueryState) {
+	t.Helper()
+	sqlDataSourceID := uuid.New()
+	executor := &countingReadonlyQueryExecutor{}
+	readonlyQuery, err := NewExecuteReadonlyQueryTool(executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, ReadonlyQuery: readonlyQuery,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelState := &duplicateReadonlyQueryState{}
+	modelInstance := &duplicateReadonlyQueryModel{state: modelState}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel: modelInstance, ToolCatalog: catalog,
+		SystemInstruction: "conversation SQL single-query policy fixture",
+		ModelProvider:     "fixture",
+		ModelID:           "fixture-v1",
+		PromptVersion:     "conversation-test-v1",
+		Logger:            zap.NewNop(),
+		MaxToolCalls:      maxToolCalls,
+		MaxContextRunes:   conversation.MaxContentRunes,
+		SQLDataSourceID:   sqlDataSourceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runner, executor, modelState
 }
 
 func TestConversationRunnerKeepsPriorSQLPromptContextByteStableAcrossTurns(t *testing.T) {

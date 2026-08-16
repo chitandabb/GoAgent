@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,8 +21,8 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if err := cfg.Validate(); err != nil {
 				t.Fatalf("Validate(%q): %v", path, err)
 			}
-			if cfg.Agent.ConversationPromptVersion != "conversation-v8" {
-				t.Fatalf("%q conversation prompt version = %q, want conversation-v8 for stable per-message turn_context rendering",
+			if cfg.Agent.ConversationPromptVersion != "conversation-v9" {
+				t.Fatalf("%q conversation prompt version = %q, want conversation-v9 for readonly SQL counting semantics",
 					path, cfg.Agent.ConversationPromptVersion)
 			}
 			memoryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
@@ -113,6 +114,24 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				t.Fatalf("configured models.judge in %q is invalid: %v", path, err)
 			}
 		})
+	}
+}
+
+func TestConversationPromptDefinesRowCountingSemantics(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "prompts", "conversation-system.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	prompt := string(content)
+	for _, required := range []string{
+		"use `COUNT(*)`",
+		"`COUNT(column)` excludes NULL values",
+		"count non-NULL values of a specific column",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("conversation prompt is missing %q", required)
+		}
 	}
 }
 

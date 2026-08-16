@@ -92,6 +92,51 @@ Observation v3 在 clean revision `37b361c` 上对之前失败的 `sql-urgent-co
 
 本次观测只证明“两个不同 keyword 都命中正结果后，模型能够收敛到 SQL”；之前 8 次 search 的失败未在 v3 复测中复现，而历史 v2 观测又没有 keyword/result-count 诊断，因此不能宣称 Prompt 或生产策略已修复。当前决策是保持生产 Prompt、Tool Schema 和调用上限不变，不新增 Planner/意图分类器；以后只在 v3 失败样本出现时按事实选择治理：全部零结果则改进“元数据词 vs 业务值”引导；已有正结果仍持续扩散搜索则补停止条件；同 hash 重复则设计可恢复的重复搜索反馈，而不直接终止整轮。
 
+## 2026-08-16 OpenCode Go 20 Case 正式全量复测
+
+Prompt 前缀稳定修正和生产主模型硬切后，在 clean revision `7c4f5d6` 上完成固定集全部 20 Case 的一次正式运行：
+
+- Provider/Profile：OpenCode Go `opencode-deepseek-main`；
+- 模型：`deepseek-v4-flash`；
+- Prompt / Tool Profile：`conversation-v8` / `conversation-default`；
+- Observation：`text-to-sql-conversation-observation-v3`；
+- 实现身份：clean revision `7c4f5d6`，`formal=true`；
+- 原始观测：`output/evaluation/text-to-sql-opencode-conversation-v3-20.observations.jsonl`；
+- 汇总：`output/evaluation/text-to-sql-opencode-conversation-v3-20.summary.json`。
+
+在 revision `7c4f5d6` 的 clean checkout 中，配置好 OpenCode Go 与只读 SQL Server 所需环境变量后，可用以下脱敏命令复现；命令不包含或打印凭据：
+
+```powershell
+go run ./tools/evaluation/mesguard-text2sql-eval `
+  -mode conversation -profile opencode-deepseek-main -timeout 10m `
+  -allow-provider-calls -max-cases 20 -max-provider-calls 160 -max-provider-tokens 320000 `
+  -output output/evaluation/text-to-sql-opencode-conversation-v3-20.observations.jsonl `
+  -summary output/evaluation/text-to-sql-opencode-conversation-v3-20.summary.json
+```
+
+| 指标 | 结果 |
+| --- | ---: |
+| Tool 顺序合规 | 19 / 20（95%） |
+| SQL 执行正确 | 18 / 20（90%） |
+| 答案正确 | 18 / 20（90%） |
+| 端到端正确 | 18 / 20（90%） |
+| 模型调用 | 77 |
+| Prompt Token | 175,187 |
+| Completion Token | 12,698 |
+| Total Token | 187,885 |
+| Cached Token | 160,896 |
+| Cached / Prompt Token | 91.8% |
+| 平均耗时 | 11.327 秒 |
+
+18 个成功 Case 都从自然语言输入经生产 Conversation 入口自主完成 schema 搜索、只读 SQL 与 grounded-value 答案。Provider 上报的 Cached Token 占 Prompt Token 约 91.8%；这是该网关在本次固定集上的 Usage 观测值，不等同于应用语义缓存命中率，也不外推到其他 Provider 或生产流量。
+
+两个失败 Case 暴露的是不同问题：
+
+- `sql-equipment` 在两次有效 schema 搜索后连续执行两次 `execute_readonly_query`，两次底层执行均成功，但违反当前“一次最终查询”的评测合同，记为 `invalid_tool_sequence`；
+- `sql-customer-distribution` 最终生成 `COUNT(WorkOrderNo)`。`CUST-C` 的 `WorkOrderNo` 为 NULL，因此返回 0；固定集要求统计记录数，正确业务语义应为 `COUNT(*)`，记为 `result_mismatch`。
+
+这次 20 Case 结果推翻了此前“扩大到 20 Case 仍需等待”的待办状态，但没有证明 SQL 治理已经完结。后续本地切片已将 Prompt 升为 `conversation-v9`，明确“统计记录数”使用 `COUNT(*)`，并把每轮第二次 `execute_readonly_query` 转为不触发底层 executor 的结构化 `blocked` 结果；重复请求仍消耗 Tool-call 预算、进入失败执行轨迹，并由评测器记录为无 SQL/hash 的 `tool_run_limit_exhausted` 尝试，因此模型请求两次查询时仍判 `invalid_tool_sequence`，不会被治理层掩盖。只有剩余 Tool-call 预算允许时回合才继续，否则预算错误优先 fail-closed。该实现只有本地桩测试结论，两个失败 Case 的 clean revision 云端复测仍 pending，不得把 v8 的 18/20 结果改写成 v9 指标。
+
 ## 被丢弃的试跑
 
 本轮另有两次 Provider 试跑不得计入正式指标：
