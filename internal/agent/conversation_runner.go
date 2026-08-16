@@ -269,6 +269,7 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	runCtx = withAgentToolRunPolicy(runCtx, newAgentToolRunPolicy(nil, map[string]int{
 		ToolCreateDiagnosisTask:           1,
 		ToolReadConversationMemorySources: r.memorySourceRecoveryMaxCalls,
+		ToolExecuteReadonlyQuery:          1,
 	}))
 	trace := &executionTrace{}
 	toolTrace = trace
@@ -764,6 +765,9 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 				return nil, err
 			}
 			if err := agentToolRunPolicyFromContext(ctx).reserve(input.Name); err != nil {
+				if output, recovered, recoveryErr := recoverConversationToolRunLimit(ctx, input.Name, err); recovered {
+					return output, recoveryErr
+				}
 				return nil, err
 			}
 			if err := executionBudgetFromContext(ctx).reserveToolCall(); err != nil {
@@ -812,6 +816,28 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 			return output, err
 		}
 	}}
+}
+
+const readonlyQueryRunLimitResult = `{"status":"blocked","errorType":"tool_run_limit_exhausted","retryable":false,"message":"A readonly query was already attempted during this turn. Do not call this tool again; answer from the first result or report the evidence gap."}`
+
+func recoverConversationToolRunLimit(
+	ctx context.Context,
+	toolName string,
+	limitErr error,
+) (*compose.ToolOutput, bool, error) {
+	if toolName != ToolExecuteReadonlyQuery || !errors.Is(limitErr, ErrAgentToolRunLimitExhausted) {
+		return nil, false, nil
+	}
+	if err := executionBudgetFromContext(ctx).reserveToolCall(); err != nil {
+		return nil, true, err
+	}
+	traceFromContext(ctx).append(ToolExecution{
+		Name: toolName, Succeeded: false, Error: "tool run limit exhausted",
+	}, "", nil)
+	observeConversationToolPolicy(ctx, ConversationToolPolicyObservation{
+		ToolName: toolName, ErrorType: ConversationToolPolicyErrorRunLimit,
+	})
+	return &compose.ToolOutput{Result: readonlyQueryRunLimitResult}, true, nil
 }
 
 func boundedConversationToolResult(

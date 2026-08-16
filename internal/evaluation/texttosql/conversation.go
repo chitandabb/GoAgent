@@ -29,8 +29,9 @@ const TextToSQLConversationObservationSchemaVersion = "text-to-sql-conversation-
 const TextToSQLConversationEntryMode = "conversation"
 
 // TextToSQLConversationToolCall 是模型在一次 conversation 评测回合中实际
-// 发起的一次 Tool 调用。execute_readonly_query 调用必须携带生成 SQL 的
-// 稳定 SHA-256 hash，其失败调用记录稳定 errorType。search_schema_catalog
+// 发起的一次 Tool 调用。已进入 SQL Tool 边界的 execute_readonly_query 调用
+// 必须携带生成 SQL 的稳定 SHA-256 hash；运行策略在 Tool 边界前阻断的调用只
+// 记录稳定 errorType，不记录 SQL 或 hash。search_schema_catalog
 // 调用携带隐私安全的 Schema Search 诊断字段（归一化 keyword 的 SHA-256
 // hash、返回数组长度、以及同 Case 内该 keyword 是否重复），绝不记录原始
 // keyword、参数 JSON 或返回正文。
@@ -166,8 +167,10 @@ func (o TextToSQLConversationEvaluationObservation) Validate() error {
 				return errors.New("schema diagnostic fields are only valid for search_schema_catalog")
 			}
 			digest := strings.TrimPrefix(call.QueryHash, "sha256:")
-			malformedArguments := !call.Succeeded && call.ErrorType == "invalid_tool_arguments" && call.QueryHash == ""
-			if !malformedArguments && (call.QueryHash == digest || !contextgovernance.IsSHA256Hex(digest)) {
+			queryHashOmitted := !call.Succeeded && call.QueryHash == "" &&
+				(call.ErrorType == "invalid_tool_arguments" ||
+					call.ErrorType == mesagent.ConversationToolPolicyErrorRunLimit)
+			if !queryHashOmitted && (call.QueryHash == digest || !contextgovernance.IsSHA256Hex(digest)) {
 				return errors.New("execute_readonly_query call requires a sha256 queryHash")
 			}
 		default:

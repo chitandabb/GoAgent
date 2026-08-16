@@ -493,6 +493,51 @@ func TestConversationEvaluationRunsNaturalLanguageThroughRealAssembly(t *testing
 	}
 }
 
+func TestConversationEvaluationRecordsRecoverablyBlockedSecondReadonlyQuery(t *testing.T) {
+	sqlDataSourceID := uuid.New()
+	executor := newTextToSQLFixtureExecutor(t)
+	modelInstance := newEvalScriptedSQLModel([]evalScriptedSQLStep{
+		{toolName: mesagent.ToolSearchSchemaCatalog, arguments: `{"keyword":"TKT-999","limit":5}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT Status FROM dbo.v_MESGuardExternalCases WHERE TicketID='TKT-999'"}`},
+		{toolName: mesagent.ToolExecuteReadonlyQuery, arguments: `{"query":"SELECT COUNT(*) AS Total FROM dbo.v_MESGuardExternalCases"}`},
+	}, "工单 TKT-999 当前状态为 处理中。")
+	assembly, err := buildConversationEvaluation(context.Background(),
+		conversationEvaluationDepsForTest(t, modelInstance, executor, sqlDataSourceID))
+	if err != nil {
+		t.Fatalf("buildConversationEvaluation: %v", err)
+	}
+	observation := observeConversationCase(context.Background(), assembly,
+		textToSQLConversationCase(), conversationEvaluationIdentityForTest(t, assembly.toolSchemaFingerprint))
+
+	if observation.ErrorType != "invalid_tool_sequence" || observation.ToolSequenceCorrect ||
+		!observation.ToolTraceComplete || observation.ActualToolCallCount != 3 {
+		t.Fatalf("blocked-query observation = error:%q sequence:%t complete:%t count:%d",
+			observation.ErrorType, observation.ToolSequenceCorrect,
+			observation.ToolTraceComplete, observation.ActualToolCallCount)
+	}
+	if len(observation.ActualToolCalls) != 3 {
+		t.Fatalf("actual Tool calls = %+v, want search + query + blocked query", observation.ActualToolCalls)
+	}
+	blocked := observation.ActualToolCalls[2]
+	if blocked.ToolName != mesagent.ToolExecuteReadonlyQuery || blocked.Succeeded ||
+		blocked.ErrorType != "tool_run_limit_exhausted" || blocked.QueryHash != "" {
+		t.Fatalf("blocked Tool call = %+v", blocked)
+	}
+	if calls, _, _, _ := executor.snapshot(); calls != 1 {
+		t.Fatalf("executor calls = %d, want exactly 1", calls)
+	}
+	encoded, err := json.Marshal(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "SELECT COUNT(*)") {
+		t.Fatalf("blocked query plaintext leaked into observation: %s", encoded)
+	}
+	if err := observation.Validate(); err != nil {
+		t.Fatalf("blocked-query observation must remain reducible: %v", err)
+	}
+}
+
 func TestConversationEvaluationRejectsWrongNaturalLanguageAnswer(t *testing.T) {
 	sqlDataSourceID := uuid.New()
 	executor := newTextToSQLFixtureExecutor(t)

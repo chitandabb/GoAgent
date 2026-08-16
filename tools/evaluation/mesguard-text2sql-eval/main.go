@@ -689,6 +689,7 @@ func observeConversationCase(
 		ConversationID: conversationID, UserMessageID: messageID,
 		Actor: conversation.Actor{UserID: userID},
 	})
+	runCtx = mesagent.WithConversationToolPolicyObserver(runCtx, assembly.recorder)
 	response, respondErr := assembly.runner.Respond(runCtx, request)
 	observation := texttosqleval.TextToSQLConversationEvaluationObservation{
 		ObservationSchemaVersion: texttosqleval.TextToSQLConversationObservationSchemaVersion,
@@ -713,10 +714,10 @@ func observeConversationCase(
 		observation.Usage = conversationRunUsageToModelUsage(response.RunObservation.Usage)
 		observation.ActualToolCallCount = response.RunObservation.ToolCalls
 	}
-	// Runner 的 ToolCalls 由执行中间件统计；在 RunAccess Guard 中提前
-	// fail-closed 的 SQL 尝试不会进入该中间件，但 SQL 边界 recorder 已明确观测到。
-	// 取两者较大值保留这类被拒绝的调用尝试；非 SQL Tool 仍会使 Runner
-	// 总数大于 recorder 长度，并被标记为不完整轨迹。
+	// Runner 的 ToolCalls 由执行中间件统计；RunAccess Guard 拒绝的 SQL
+	// 尝试由 SQL 边界 recorder 记录，运行策略提前阻断的 SQL 尝试由有界
+	// policy observer 记录。取两者较大值；其他未被 recorder 识别的 Tool
+	// 仍会使 Runner 总数大于记录长度，并被标记为不完整轨迹。
 	if len(observation.ActualToolCalls) > observation.ActualToolCallCount {
 		observation.ActualToolCallCount = len(observation.ActualToolCalls)
 	}
@@ -855,6 +856,14 @@ func (r *conversationToolRecorder) append(record conversationToolRecord) {
 	r.mu.Lock()
 	r.calls = append(r.calls, record)
 	r.mu.Unlock()
+}
+
+func (r *conversationToolRecorder) ObserveConversationToolPolicy(
+	observation mesagent.ConversationToolPolicyObservation,
+) {
+	r.append(conversationToolRecord{
+		name: observation.ToolName, succeeded: false, errorType: observation.ErrorType,
+	})
 }
 
 func (r *conversationToolRecorder) snapshot() []conversationToolRecord {
