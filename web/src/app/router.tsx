@@ -16,6 +16,7 @@ import { SystemPage } from '@/features/admin/SystemPage'
 import { UsersPage } from '@/features/admin/UsersPage'
 import { CaseWorkbenchRedirect } from '@/features/workbench/CaseWorkbenchRedirect'
 import { WorkbenchPage } from '@/features/workbench/WorkbenchPage'
+import { AssistantPage } from '@/features/assistant/AssistantPage'
 
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
@@ -35,7 +36,7 @@ export const router = createBrowserRouter([
           { path: '/tasks', element: <TasksPage /> },
           { path: '/tasks/:taskId', element: <TaskDetailPage /> },
           { path: '/tasks/:taskId/report', element: <ReportPage /> },
-          { path: '/assistant', element: <Navigate to="/workbench" replace /> },
+          { path: '/assistant', element: <AssistantPage /> },
           { path: '/knowledge', element: <KnowledgePage /> },
           {
             element: <RequireAdmin />,

@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router'
-import { useQueries } from '@tanstack/react-query'
-import type { DiagnosisTask } from '@/shared/api/m1-types'
+import { useQuery } from '@tanstack/react-query'
+import type { DiagnosisTaskListItem, TaskStatus } from '@/shared/api/m1-types'
 import * as api from '@/shared/api'
 import { taskStatusMeta } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
@@ -21,47 +21,63 @@ const statusOptions = [
   { value: 'cancelled', label: '已取消' },
 ]
 
+const runningStatuses: TaskStatus[] = ['pending', 'running', 'cancel_requested']
+
 export function TasksPage() {
   const navigate = useNavigate()
   const [status, setStatus] = useState('all')
+  const [page, setPage] = useState(1)
   const [taskId, setTaskId] = useState('')
-  const entries = useMemo(() => api.getRecentTasks(), [])
-  const queries = useQueries({
-    queries: entries.map((entry) => ({
-      queryKey: ['task', entry.taskId],
-      queryFn: () => api.getTask(entry.taskId),
-      refetchInterval: (query: { state: { data?: DiagnosisTask } }) => {
-        const current = query.state.data
-        return current && ['pending', 'running', 'cancel_requested'].includes(current.status)
-          ? 5000
-          : false
-      },
-      retry: false,
-    })),
+
+  const query = useQuery({
+    queryKey: ['diagnosis-tasks', status, page],
+    queryFn: () =>
+      api.listDiagnosisTasks({
+        status: status === 'all' ? undefined : (status as TaskStatus),
+        page,
+        pageSize: 20,
+      }),
+    // 列表里还有活跃任务时轮询刷新状态
+    refetchInterval: (q) =>
+      (q.state.data?.items ?? []).some((item) => runningStatuses.includes(item.status)) ? 5000 : false,
   })
 
-  const tasks = queries
-    .flatMap((query) => (query.data ? [query.data] : []))
-    .filter((task) => {
-      if (status === 'all') return true
-      if (status === 'running') {
-        return ['pending', 'running', 'cancel_requested'].includes(task.status)
-      }
-      return task.status === status
-    })
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const tasks = query.data?.items ?? []
+  const total = query.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / 20))
 
-  const columns: Column<DiagnosisTask>[] = [
+  const columns: Column<DiagnosisTaskListItem>[] = [
     {
-      key: 'id',
+      key: 'case',
+      title: '工单',
+      className: 'max-w-[300px]',
+      render: (task) => (
+        <div>
+          <p className="font-semibold text-ink">{task.externalCaseKey || shortId(task.externalCaseId)}</p>
+          {task.externalCaseTitle && (
+            <p className="line-clamp-1 text-[12px] text-ink-48">{task.externalCaseTitle}</p>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'taskId',
       title: '任务',
       render: (task) => <code className="text-[12px] text-ink-48">{shortId(task.taskId)}</code>,
+    },
+    {
+      key: 'request',
+      title: '诊断请求',
+      className: 'max-w-[260px]',
+      render: (task) => (
+        <p className="line-clamp-1 text-[12px] text-ink-80">{task.requestText}</p>
+      ),
     },
     {
       key: 'status',
       title: '状态',
       render: (task) => (
-        <Badge tone={taskStatusMeta[task.status].tone} dot={['pending', 'running', 'cancel_requested'].includes(task.status)}>
+        <Badge tone={taskStatusMeta[task.status].tone} dot={runningStatuses.includes(task.status)}>
           {taskStatusMeta[task.status].label}
         </Badge>
       ),
@@ -80,7 +96,8 @@ export function TasksPage() {
     {
       key: 'report',
       title: '报告',
-      render: (task) => task.reportAvailable ? <span className="text-primary">可查看</span> : <span className="text-ink-48">—</span>,
+      render: (task) =>
+        task.reportAvailable ? <span className="text-primary">可查看</span> : <span className="text-ink-48">—</span>,
     },
   ]
 
@@ -93,8 +110,8 @@ export function TasksPage() {
     <div>
       <PageHeader
         title="诊断任务"
-        subtitle="当前后端没有任务列表接口；这里仅保留本浏览器会话创建过的任务入口，状态始终从服务端读取"
-        actions={<FilterChips options={statusOptions} value={status} onChange={setStatus} />}
+        subtitle="从服务端读取你创建过的全部诊断任务；管理员可查看所有任务"
+        actions={<FilterChips options={statusOptions} value={status} onChange={(value) => { setStatus(value); setPage(1) }} />}
       />
 
       <div className="mb-5 flex flex-wrap items-center gap-2 rounded-utility border border-hairline bg-pearl px-4 py-3">
@@ -102,7 +119,7 @@ export function TasksPage() {
           value={taskId}
           onChange={(event) => setTaskId(event.target.value)}
           onKeyDown={(event) => event.key === 'Enter' && openTask()}
-          placeholder="输入已知 taskId"
+          placeholder="输入已知 taskId 直接打开"
           className="max-w-md bg-canvas"
           aria-label="任务 ID"
         />
@@ -111,10 +128,12 @@ export function TasksPage() {
         </Button>
       </div>
 
-      {entries.length === 0 ? (
+      {query.isPending && tasks.length === 0 ? (
+        <DataTable columns={columns} rows={[]} rowKey={(task) => task.taskId} loading />
+      ) : tasks.length === 0 ? (
         <EmptyState
-          title="本会话还没有最近任务"
-          description="请从真实 ERP 工单详情发起诊断，或在上方输入已知 taskId。这里不是服务端任务列表。"
+          title={status === 'all' ? '还没有诊断任务' : '当前筛选下没有任务'}
+          description="从工单详情页发起诊断后，任务会出现在这里。"
           action={<Button onClick={() => navigate('/cases')}>前往外部工单</Button>}
         />
       ) : (
@@ -124,13 +143,21 @@ export function TasksPage() {
             rows={tasks}
             rowKey={(task) => task.taskId}
             onRowClick={(task) => navigate(`/tasks/${task.taskId}`)}
-            loading={queries.some((query) => query.isPending)}
-            emptyText="当前筛选下没有可读取的最近任务"
+            loading={query.isFetching}
+            emptyText="当前筛选下没有任务"
           />
-          {queries.some((query) => query.isError) && (
-            <p className="mt-3 text-[12px] text-warn">
-              部分导航记录已失效或当前账号无权读取；页面没有用本地状态替代后端结果。
-            </p>
+          {total > 20 && (
+            <div className="mt-4 flex items-center justify-between text-[12px] text-ink-48">
+              <span>共 {total} 条 · 第 {page} / {totalPages} 页</span>
+              <div className="flex items-center gap-2">
+                <Button variant="neutral" size="sm" disabled={page <= 1 || query.isFetching} onClick={() => setPage((value) => value - 1)}>
+                  上一页
+                </Button>
+                <Button variant="neutral" size="sm" disabled={page >= totalPages || query.isFetching} onClick={() => setPage((value) => value + 1)}>
+                  下一页
+                </Button>
+              </div>
+            </div>
           )}
         </>
       )}
