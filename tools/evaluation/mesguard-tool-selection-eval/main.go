@@ -217,8 +217,9 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 		definition mesagent.ToolSelectionCase
 	}
 	type caseResult struct {
-		observations []mesagent.ToolSelectionObservation
-		err          error
+		observations     []mesagent.ToolSelectionObservation
+		calibrationUsage []mesagent.ModelUsage
+		err              error
 	}
 	evalCtx, cancelEval := context.WithCancel(ctx)
 	defer cancelEval()
@@ -230,21 +231,32 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 		go func() {
 			defer workers.Done()
 			for current := range jobs {
-				basePromptTokens, baseErr := measureBasePromptTokens(evalCtx, chatModel, current.definition)
+				basePromptTokens, baseUsage, baseErr := measureBasePromptTokens(evalCtx, chatModel, current.definition)
 				if baseErr != nil {
-					results <- caseResult{err: fmt.Errorf("measure case %q base prompt: %w", current.definition.CaseID, baseErr)}
+					category := platformchatmodel.ClassifyProviderError(baseErr)
+					logToolSelectionProviderFailure(
+						log, current.definition.CaseID, "base_calibration", "", modelProfile, category,
+					)
+					results <- caseResult{
+						err: fmt.Errorf(
+							"measure case %q base prompt: %s", current.definition.CaseID, category.Category,
+						),
+					}
 					continue
 				}
 				variants := []mesagent.ToolSelectionVariant{mesagent.ToolSelectionWide, mesagent.ToolSelectionProduction}
 				if current.index%2 == 1 {
 					variants[0], variants[1] = variants[1], variants[0]
 				}
-				currentResult := caseResult{observations: make([]mesagent.ToolSelectionObservation, 0, 2)}
+				currentResult := caseResult{
+					observations:     make([]mesagent.ToolSelectionObservation, 0, 2),
+					calibrationUsage: []mesagent.ModelUsage{baseUsage},
+				}
 				for _, variant := range variants {
 					observation, observeErr := observeToolSelection(
 						evalCtx, chatModel, assembly,
 						current.definition, variant, basePromptTokens, identity,
-						modelProfileFingerprint, modelProfile,
+						modelProfileFingerprint, modelProfile, log,
 					)
 					if observeErr != nil {
 						currentResult.err = fmt.Errorf(
@@ -279,11 +291,14 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 		close(results)
 	}()
 	var firstErr error
+	var calibrationUsage []mesagent.ModelUsage
 	for current := range results {
 		if current.err != nil && firstErr == nil {
 			firstErr = current.err
 			cancelEval()
 		}
+		// 主协程统一归并各 Case 的校准 Usage（无共享可变状态）。
+		calibrationUsage = append(calibrationUsage, current.calibrationUsage...)
 		for _, observation := range current.observations {
 			if firstErr == nil {
 				if err := encoder.Encode(observation); err != nil {
@@ -307,7 +322,7 @@ func runWithDependencies(ctx context.Context, args []string, log *zap.Logger, de
 	if err := output.Close(); err != nil {
 		return fmt.Errorf("close observations output: %w", err)
 	}
-	summary, err := mesagent.EvaluateToolSelection(cases, observations)
+	summary, err := mesagent.EvaluateToolSelection(cases, observations, calibrationUsage)
 	if err != nil {
 		return fmt.Errorf("evaluate tool selection: %w", err)
 	}
@@ -345,6 +360,7 @@ func observeToolSelection(
 	identity evaluationidentity.Identity,
 	modelProfileFingerprint string,
 	modelProfile config.ChatModelProfileConfig,
+	log *zap.Logger,
 ) (mesagent.ToolSelectionObservation, error) {
 	accessCtx, err := withSelectionRunAccess(ctx)
 	if err != nil {
@@ -409,7 +425,14 @@ func observeToolSelection(
 		DurationMillis: time.Since(startedAt).Milliseconds(),
 	}
 	if generateErr != nil {
-		observation.ErrorType = "model_error"
+		// 稳定错误分类：只记录 category、HTTP status 与受限的 provider
+		// type/code/param（全部长度受限），绝不记录原始错误消息、响应正文、
+		// Prompt、Tool 参数或凭据。
+		category := platformchatmodel.ClassifyProviderError(generateErr)
+		observation.ErrorType = category.Category
+		logToolSelectionProviderFailure(
+			log, definition.CaseID, "tool_selection", string(variant), modelProfile, category,
+		)
 		return observation, nil
 	}
 	if message == nil {
@@ -447,21 +470,53 @@ func observeToolSelection(
 	return observation, nil
 }
 
+func logToolSelectionProviderFailure(
+	log *zap.Logger,
+	caseID string,
+	phase string,
+	variant string,
+	profile config.ChatModelProfileConfig,
+	category platformchatmodel.ProviderErrorCategory,
+) {
+	if log == nil {
+		return
+	}
+	log.Warn("tool selection provider request failed",
+		zap.String("case_id", caseID),
+		zap.String("phase", phase),
+		zap.String("variant", variant),
+		zap.String("provider", profile.Provider),
+		zap.String("model", profile.Model),
+		zap.String("category", category.Category),
+		zap.String("http_status", category.HTTPStatus),
+		zap.Int("http_status_code", category.HTTPStatusCode),
+		zap.String("provider_type", category.Type),
+		zap.String("provider_code", category.Code),
+		zap.String("provider_param", category.Param),
+	)
+}
+
 func measureBasePromptTokens(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
 	definition mesagent.ToolSelectionCase,
-) (int, error) {
+) (int, mesagent.ModelUsage, error) {
 	message, err := chatModel.Generate(ctx, selectionMessages(definition),
 		model.WithTemperature(0), model.WithMaxTokens(1))
 	if err != nil {
-		return 0, err
+		return 0, mesagent.ModelUsage{}, err
 	}
 	if message == nil || message.ResponseMeta == nil || message.ResponseMeta.Usage == nil ||
 		message.ResponseMeta.Usage.PromptTokens <= 0 {
-		return 0, errors.New("base prompt response is missing Provider usage")
+		return 0, mesagent.ModelUsage{}, errors.New("base prompt response is missing Provider usage")
 	}
-	return message.ResponseMeta.Usage.PromptTokens, nil
+	usage := message.ResponseMeta.Usage
+	return usage.PromptTokens, mesagent.ModelUsage{
+		ModelCalls: 1, PromptTokens: usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens,
+		CachedTokens:    usage.PromptTokenDetails.CachedTokens,
+		ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens,
+	}, nil
 }
 
 func selectionMessages(definition mesagent.ToolSelectionCase) []*schema.Message {

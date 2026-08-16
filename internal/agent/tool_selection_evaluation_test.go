@@ -753,3 +753,124 @@ func TestVerifyToolSelectionComparabilityRejectsEmptyArms(t *testing.T) {
 		t.Fatal("empty wide arm must be rejected")
 	}
 }
+
+// failedToolSelectionObservationForTest 构造失败臂观测：ErrorType 非空时
+// 允许零 Usage（v3 合同），token 校准字段归零。
+func failedToolSelectionObservationForTest(
+	variant ToolSelectionVariant, runID, caseID, errorType string,
+) ToolSelectionObservation {
+	observation := validV3ToolSelectionObservation(variant, runID, 0, 100, "")
+	observation.CaseID = caseID
+	observation.ErrorType = errorType
+	observation.Usage = ModelUsage{}
+	observation.SelectedTool = ""
+	observation.ToolCallCount = 0
+	observation.BasePromptTokens = 0
+	observation.ToolSchemaPromptTokens = 0
+	return observation
+}
+
+// TestEvaluateToolSelectionProviderAccounting proves the independent
+// ProviderAccounting block: endpoint attempts cover calibration + both arms,
+// reported Usage accumulates exactly once per attempt, failed attempts count
+// as usage-missing without any token estimation, and calibration never leaks
+// into arm metrics or paired reduction.
+func TestEvaluateToolSelectionProviderAccounting(t *testing.T) {
+	cases := []ToolSelectionCase{
+		{DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
+			UserQuery: "查找代码", ExpectedTool: "search_code"},
+		{DatasetVersion: "tools-v1", CaseID: "case-2", Scope: ToolSelectionGitHub,
+			UserQuery: "再次查找代码", ExpectedTool: "search_code"},
+	}
+	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	production := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	failed := failedToolSelectionObservationForTest(ToolSelectionProduction, "failed-rate-limited", "case-2", "provider_rate_limited")
+	calibration := []ModelUsage{
+		{ModelCalls: 1, PromptTokens: 800, CompletionTokens: 20, TotalTokens: 820},
+		{ModelCalls: 1, PromptTokens: 790, CompletionTokens: 10, TotalTokens: 800},
+	}
+	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, production, failed}, calibration)
+	if err != nil {
+		t.Fatalf("EvaluateToolSelection(): %v", err)
+	}
+	acc := summary.ProviderAccounting
+	if acc.ModelGenerateAttempts != 5 {
+		t.Fatalf("modelGenerateAttempts = %d, want 5 (2 calibration + 3 arm attempts)", acc.ModelGenerateAttempts)
+	}
+	if acc.UsageReportedAttempts != 4 {
+		t.Fatalf("usageReportedAttempts = %d, want 4", acc.UsageReportedAttempts)
+	}
+	if acc.UsageMissingAttempts != 1 {
+		t.Fatalf("usageMissingAttempts = %d, want 1 (failed rate-limited attempt)", acc.UsageMissingAttempts)
+	}
+	if acc.PromptTokens != 800+790+1000+500 || acc.CompletionTokens != 20+10+10+10 ||
+		acc.TotalTokens != 820+800+1010+510 {
+		t.Fatalf("accumulated usage = %+v, want 3090/50/3140", acc)
+	}
+	// 校准绝不混入两臂指标与 paired reduction。
+	if summary.Wide.PromptTokens != 1000 || summary.Production.PromptTokens != 500 {
+		t.Fatalf("arm prompt tokens polluted by calibration: wide=%d production=%d",
+			summary.Wide.PromptTokens, summary.Production.PromptTokens)
+	}
+	if summary.PairedCases != 1 || math.Abs(summary.PairedPromptTokenReduction-0.5) > 1e-9 {
+		t.Fatalf("paired reduction polluted by calibration: %+v", summary)
+	}
+	if summary.UnpairedRuns != 1 {
+		t.Fatalf("unpairedRuns = %d, want 1 (case-2 has production only)", summary.UnpairedRuns)
+	}
+	if summary.Production.FailedRuns != 1 {
+		t.Fatalf("production failedRuns = %d, want 1", summary.Production.FailedRuns)
+	}
+	if summary.FailureTypes["provider_rate_limited"] != 1 {
+		t.Fatalf("failureTypes = %+v, want provider_rate_limited=1", summary.FailureTypes)
+	}
+}
+
+// TestEvaluateToolSelectionProviderAccountingLegacyModelError proves the
+// historical model_error category stays readable and counts as a
+// usage-missing attempt without any schema/identity change.
+func TestEvaluateToolSelectionProviderAccountingLegacyModelError(t *testing.T) {
+	cases := []ToolSelectionCase{{
+		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
+		UserQuery: "查找代码", ExpectedTool: "search_code",
+	}}
+	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	failed := failedToolSelectionObservationForTest(ToolSelectionProduction, "legacy-failure", "case-1", "model_error")
+	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, failed})
+	if err != nil {
+		t.Fatalf("EvaluateToolSelection(): %v", err)
+	}
+	if summary.FailureTypes["model_error"] != 1 {
+		t.Fatalf("historical model_error must stay readable: %+v", summary.FailureTypes)
+	}
+	acc := summary.ProviderAccounting
+	if acc.ModelGenerateAttempts != 2 || acc.UsageReportedAttempts != 1 || acc.UsageMissingAttempts != 1 {
+		t.Fatalf("accounting = %+v, want attempts=2 reported=1 missing=1", acc)
+	}
+	if acc.PromptTokens != 1000 {
+		t.Fatalf("failed attempt must not estimate tokens: %+v", acc)
+	}
+}
+
+// TestEvaluateToolSelectionProviderAccountingWithoutCalibration proves the
+// two-argument call shape still works: accounting derives from observations
+// only and stays zero-valued for reported/missing breakdown.
+func TestEvaluateToolSelectionProviderAccountingWithoutCalibration(t *testing.T) {
+	cases := []ToolSelectionCase{{
+		DatasetVersion: "tools-v1", CaseID: "case-1", Scope: ToolSelectionGitHub,
+		UserQuery: "查找代码", ExpectedTool: "search_code",
+	}}
+	wide := validV3ToolSelectionObservation(ToolSelectionWide, "wide", 1000, 1000, "search_code")
+	production := validV3ToolSelectionObservation(ToolSelectionProduction, "filtered", 500, 400, "search_code")
+	summary, err := EvaluateToolSelection(cases, []ToolSelectionObservation{wide, production})
+	if err != nil {
+		t.Fatalf("EvaluateToolSelection(): %v", err)
+	}
+	acc := summary.ProviderAccounting
+	if acc.ModelGenerateAttempts != 2 || acc.UsageReportedAttempts != 2 || acc.UsageMissingAttempts != 0 {
+		t.Fatalf("accounting = %+v, want attempts=2 reported=2 missing=0", acc)
+	}
+	if acc.PromptTokens != 1500 {
+		t.Fatalf("accumulated prompt tokens = %d, want 1500", acc.PromptTokens)
+	}
+}

@@ -444,23 +444,55 @@ type ToolSelectionVariantSummary struct {
 	FailedRuns             int     `json:"failedRuns"`
 }
 
-type ToolSelectionSummary struct {
-	DatasetVersion                 string                      `json:"datasetVersion"`
-	Cases                          int                         `json:"cases"`
-	Runs                           int                         `json:"runs"`
-	PairedCases                    int                         `json:"pairedCases"`
-	UnpairedRuns                   int                         `json:"unpairedRuns"`
-	Wide                           ToolSelectionVariantSummary `json:"wide"`
-	Production                     ToolSelectionVariantSummary `json:"production"`
-	PairedPromptTokenReduction     float64                     `json:"pairedPromptTokenReduction"`
-	PairedToolSchemaTokenReduction float64                     `json:"pairedToolSchemaTokenReduction"`
-	PairedSchemaByteReduction      float64                     `json:"pairedSchemaByteReduction"`
-	FailureTypes                   map[string]int              `json:"failureTypes,omitempty"`
+// ToolSelectionProviderAccounting 是独立于两臂指标的真实成本记账：
+//   - ModelGenerateAttempts：每次调用 ChatModel.Generate（校准请求 + 两臂
+//     请求，无论成功失败）恰好 +1；它不声称 HTTP 已到达 Provider；
+//   - UsageReportedAttempts：实际返回 Usage 的尝试 +1，并把该次 Usage 的
+//     累计值累加进 PromptTokens/CompletionTokens/TotalTokens/CachedTokens/
+//     ReasoningTokens；
+//   - UsageMissingAttempts：没有返回 Usage 的尝试 +1（失败请求或缺失
+//     Usage），不估算 Token、不估算价格。
+//
+// 校准请求计入本块，但绝不混入 wide/production 的准确率、Token 对比与
+// paired reduction。记账只随成功生成的 Summary 落盘，由
+// EvaluateToolSelection 从观测与调用方显式传入的校准 Usage 列表推导，
+// 无全局状态，天然并发安全；fatal 运行不会生成 Summary，由预运行预算上界
+// 约束最坏成本。
+type ToolSelectionProviderAccounting struct {
+	ModelGenerateAttempts int `json:"modelGenerateAttempts"`
+	UsageReportedAttempts int `json:"usageReportedAttempts"`
+	UsageMissingAttempts  int `json:"usageMissingAttempts"`
+	PromptTokens          int `json:"promptTokens"`
+	CompletionTokens      int `json:"completionTokens"`
+	TotalTokens           int `json:"totalTokens"`
+	CachedTokens          int `json:"cachedTokens"`
+	ReasoningTokens       int `json:"reasoningTokens"`
 }
 
+type ToolSelectionSummary struct {
+	DatasetVersion                 string                          `json:"datasetVersion"`
+	Cases                          int                             `json:"cases"`
+	Runs                           int                             `json:"runs"`
+	PairedCases                    int                             `json:"pairedCases"`
+	UnpairedRuns                   int                             `json:"unpairedRuns"`
+	Wide                           ToolSelectionVariantSummary     `json:"wide"`
+	Production                     ToolSelectionVariantSummary     `json:"production"`
+	PairedPromptTokenReduction     float64                         `json:"pairedPromptTokenReduction"`
+	PairedToolSchemaTokenReduction float64                         `json:"pairedToolSchemaTokenReduction"`
+	PairedSchemaByteReduction      float64                         `json:"pairedSchemaByteReduction"`
+	FailureTypes                   map[string]int                  `json:"failureTypes,omitempty"`
+	ProviderAccounting             ToolSelectionProviderAccounting `json:"providerAccounting"`
+}
+
+// EvaluateToolSelection 汇总两臂指标与配对归约。可选的第三个参数是每次
+// 基础无 Tool 校准请求实际返回的 Usage（每个 Case 恰好一个元素，零值表示
+// 该校准尝试未返回 Usage）；它只进入 ProviderAccounting，绝不进入两臂
+// 指标、Token 对比或 paired reduction。不传该参数时记账只覆盖两臂观测
+// （历史 model_error 等失败观测仍按 usageMissing 计入）。
 func EvaluateToolSelection(
 	cases []ToolSelectionCase,
 	observations []ToolSelectionObservation,
+	calibrationUsage ...[]ModelUsage,
 ) (ToolSelectionSummary, error) {
 	caseByID, version, err := indexToolSelectionCases(cases)
 	if err != nil {
@@ -535,10 +567,46 @@ func EvaluateToolSelection(
 	if wideBytes > 0 {
 		summary.PairedSchemaByteReduction = reductionRate(wideBytes, productionBytes)
 	}
+	summary.ProviderAccounting = providerAccounting(observations, calibrationUsage)
 	if len(summary.FailureTypes) == 0 {
 		summary.FailureTypes = nil
 	}
 	return summary, nil
+}
+
+// providerAccounting 从两臂观测与调用方显式传入的校准 Usage 推导成本记账。
+// 每条观测/每个校准元素恰好对应一次 Generate 调用：返回了有效 Usage 的调用计入
+// usageReportedAttempts 并累加累计值，其余计入 usageMissingAttempts（不
+// 估算 Token）。纯函数，无全局状态。
+func providerAccounting(
+	observations []ToolSelectionObservation,
+	calibrationUsage [][]ModelUsage,
+) ToolSelectionProviderAccounting {
+	var accounting ToolSelectionProviderAccounting
+	for _, usage := range calibrationUsage {
+		accounting.ModelGenerateAttempts += len(usage)
+		for _, attempt := range usage {
+			accumulateProviderUsage(&accounting, attempt)
+		}
+	}
+	for _, observation := range observations {
+		accounting.ModelGenerateAttempts++
+		accumulateProviderUsage(&accounting, observation.Usage)
+	}
+	return accounting
+}
+
+func accumulateProviderUsage(accounting *ToolSelectionProviderAccounting, usage ModelUsage) {
+	if usage.ModelCalls == 1 && usage.PromptTokens > 0 && usage.TotalTokens > 0 {
+		accounting.UsageReportedAttempts++
+		accounting.PromptTokens += usage.PromptTokens
+		accounting.CompletionTokens += usage.CompletionTokens
+		accounting.TotalTokens += usage.TotalTokens
+		accounting.CachedTokens += usage.CachedTokens
+		accounting.ReasoningTokens += usage.ReasoningTokens
+		return
+	}
+	accounting.UsageMissingAttempts++
 }
 
 // sameObservationIdentity 要求两个实验臂属于同一观测合同与同一实现身份：
