@@ -2,6 +2,7 @@
 /.env
 /.firecrawl/
 /.playwright-cli/
+/.scratch/
 /.claude/settings.local.json
 /docs/evidence/
 /docs/demos/
