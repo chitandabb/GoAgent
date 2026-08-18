@@ -173,7 +173,8 @@ func (r *DiagnosisTaskRoutes) create(c *gin.Context) {
 
 type diagnosisTaskListQuery struct {
 	PageQuery
-	Status string `form:"status"`
+	Status         string `form:"status"`
+	ExternalCaseID string `form:"caseId"`
 }
 
 type diagnosisTaskListItemResponse struct {
@@ -207,11 +208,23 @@ func (r *DiagnosisTaskRoutes) list(c *gin.Context) {
 		parsed := diagnosis.TaskStatus(value)
 		status = &parsed
 	}
+	var caseID *uuid.UUID
+	if value := strings.TrimSpace(query.ExternalCaseID); value != "" {
+		parsed, err := uuid.Parse(value)
+		if err != nil {
+			AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+				Field: "caseId", Reason: "必须是合法的 UUID",
+			}}))
+			return
+		}
+		caseID = &parsed
+	}
 	page, err := r.useCase.List(c.Request.Context(), diagnosis.TaskListQuery{
-		Actor:    diagnosis.TaskActor{UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin()},
-		Status:   status,
-		Page:     query.Page,
-		PageSize: query.PageSize,
+		Actor:          diagnosis.TaskActor{UserID: identity.User.ID, IsAdmin: identity.User.IsAdmin()},
+		Status:         status,
+		ExternalCaseID: caseID,
+		Page:           query.Page,
+		PageSize:       query.PageSize,
 	})
 	if err != nil {
 		AbortWithError(c, translateDiagnosisTaskError("list diagnosis tasks", err))
@@ -550,22 +563,22 @@ func (r *DiagnosisTaskRoutes) cancel(c *gin.Context) {
 }
 
 type diagnosisTaskResponse struct {
-	TaskID          string                            `json:"taskId"`
-	ExternalCaseID  string                            `json:"externalCaseId"`
-	CaseSnapshotID  string                            `json:"caseSnapshotId"`
-	RetryOfTaskID   string                            `json:"retryOfTaskId,omitempty"`
-	RequestText     string                            `json:"requestText"`
-	Status          diagnosis.TaskStatus              `json:"status"`
-	AttemptCount    int                               `json:"attemptCount"`
-	LastErrorCode   string                            `json:"lastErrorCode,omitempty"`
-	LastErrorMessage string                           `json:"lastErrorMessage,omitempty"`
-	StartedAt       *string                           `json:"startedAt,omitempty"`
-	CompletedAt     *string                           `json:"completedAt,omitempty"`
-	CreatedAt       string                            `json:"createdAt"`
-	UpdatedAt       string                            `json:"updatedAt"`
-	ReportAvailable bool                              `json:"reportAvailable"`
-	ReportID        string                            `json:"reportId,omitempty"`
-	Attachments     []diagnosisTaskAttachmentResponse `json:"attachments"`
+	TaskID           string                            `json:"taskId"`
+	ExternalCaseID   string                            `json:"externalCaseId"`
+	CaseSnapshotID   string                            `json:"caseSnapshotId"`
+	RetryOfTaskID    string                            `json:"retryOfTaskId,omitempty"`
+	RequestText      string                            `json:"requestText"`
+	Status           diagnosis.TaskStatus              `json:"status"`
+	AttemptCount     int                               `json:"attemptCount"`
+	LastErrorCode    string                            `json:"lastErrorCode,omitempty"`
+	LastErrorMessage string                            `json:"lastErrorMessage,omitempty"`
+	StartedAt        *string                           `json:"startedAt,omitempty"`
+	CompletedAt      *string                           `json:"completedAt,omitempty"`
+	CreatedAt        string                            `json:"createdAt"`
+	UpdatedAt        string                            `json:"updatedAt"`
+	ReportAvailable  bool                              `json:"reportAvailable"`
+	ReportID         string                            `json:"reportId,omitempty"`
+	Attachments      []diagnosisTaskAttachmentResponse `json:"attachments"`
 }
 
 type diagnosisTaskAttachmentResponse struct {

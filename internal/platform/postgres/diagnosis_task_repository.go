@@ -683,10 +683,40 @@ func taskEventFromRecord(record taskEventRecord) (diagnosis.TaskEvent, error) {
 }
 
 // taskListItemRecord 是任务列表查询的行映射，额外携带快照中的工单身份。
+// 注意：不能以内嵌 diagnosisTaskRecord 的方式扫描——GORM 对带 TableName()
+// 方法的匿名内嵌结构会按关联关系处理而不是平铺字段，导致 Raw().Scan()
+// 后任务侧字段全部为空；因此这里显式平铺所有列。
 type taskListItemRecord struct {
-	diagnosisTaskRecord
-	ExternalCaseKey   string `gorm:"column:external_case_key"`
-	ExternalCaseTitle string `gorm:"column:external_case_title"`
+	ID                uuid.UUID            `gorm:"column:id"`
+	CreatedBy         uuid.UUID            `gorm:"column:created_by"`
+	ExternalCaseID    uuid.UUID            `gorm:"column:external_case_id"`
+	CaseSnapshotID    uuid.UUID            `gorm:"column:case_snapshot_id"`
+	RetryOfTaskID     *uuid.UUID           `gorm:"column:retry_of"`
+	RequestText       string               `gorm:"column:request_text"`
+	Status            diagnosis.TaskStatus `gorm:"column:status"`
+	AttemptCount      int                  `gorm:"column:attempt_count"`
+	LastErrorCode     string               `gorm:"column:last_error_code"`
+	LastErrorMessage  string               `gorm:"column:last_error_message"`
+	StartedAt         *time.Time           `gorm:"column:started_at"`
+	CompletedAt       *time.Time           `gorm:"column:completed_at"`
+	CreatedAt         time.Time            `gorm:"column:created_at"`
+	UpdatedAt         time.Time            `gorm:"column:updated_at"`
+	ReportID          string               `gorm:"column:report_id"`
+	ExternalCaseKey   string               `gorm:"column:external_case_key"`
+	ExternalCaseTitle string               `gorm:"column:external_case_title"`
+}
+
+// toDiagnosisTask 将平铺的任务列表行转换为领域摘要。
+func (r taskListItemRecord) toDiagnosisTask() (diagnosis.DiagnosisTask, error) {
+	return diagnosisTaskFromRecord(diagnosisTaskRecord{
+		ID: r.ID, CreatedBy: r.CreatedBy, ExternalCaseID: r.ExternalCaseID,
+		CaseSnapshotID: r.CaseSnapshotID, RetryOfTaskID: r.RetryOfTaskID,
+		RequestText: r.RequestText, Status: r.Status,
+		AttemptCount: r.AttemptCount, LastErrorCode: r.LastErrorCode,
+		LastErrorMessage: r.LastErrorMessage, StartedAt: r.StartedAt,
+		CompletedAt: r.CompletedAt, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		ReportID: r.ReportID,
+	})
 }
 
 const taskListSelectColumns = `
@@ -730,7 +760,7 @@ func (r *DiagnosisTaskRepository) ListTasks(
 	}
 
 	where := " WHERE 1 = 1"
-	args := make([]any, 0, 2)
+	args := make([]any, 0, 3)
 	if !query.Actor.IsAdmin {
 		where += " AND task.created_by = ?"
 		args = append(args, query.Actor.UserID)
@@ -738,6 +768,10 @@ func (r *DiagnosisTaskRepository) ListTasks(
 	if query.Status != nil {
 		where += " AND task.status = ?"
 		args = append(args, *query.Status)
+	}
+	if query.ExternalCaseID != nil && *query.ExternalCaseID != uuid.Nil {
+		where += " AND task.external_case_id = ?"
+		args = append(args, *query.ExternalCaseID)
 	}
 
 	db := ResolveDB(ctx, r.db)
@@ -756,7 +790,7 @@ func (r *DiagnosisTaskRepository) ListTasks(
 
 	items := make([]diagnosis.TaskListItem, 0, len(records))
 	for _, record := range records {
-		task, err := diagnosisTaskFromRecord(record.diagnosisTaskRecord)
+		task, err := record.toDiagnosisTask()
 		if err != nil {
 			return diagnosis.TaskListPage{}, err
 		}

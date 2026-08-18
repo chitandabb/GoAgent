@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from 'react-router'
-import { useQueries, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import * as api from '@/shared/api'
 import { caseStatusMeta, priorityMeta, taskStatusMeta } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
@@ -9,6 +9,8 @@ import { Card, CardTitle } from '@/shared/ui/Card'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { PageLoading } from '@/shared/ui/Spinner'
 import { openCaseWorkspace } from '@/features/workbench/workspace-store'
+
+const activeTaskStatuses = ['pending', 'running', 'cancel_requested']
 
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -27,17 +29,13 @@ export function CaseDetailPage() {
     queryKey: ['external-case', caseId],
     queryFn: () => api.getExternalCase(caseId),
   })
-  const recentEntries = api.getRecentTasks().filter((entry) => entry.externalCaseId === caseId)
-  const recentTaskQueries = useQueries({
-    queries: recentEntries.map((entry) => ({
-      queryKey: ['task', entry.taskId],
-      queryFn: () => api.getTask(entry.taskId),
-      refetchInterval: (query: { state: { data?: { status: string } } }) => {
-        const current = query.state.data
-        return current && ['pending', 'running', 'cancel_requested'].includes(current.status) ? 5000 : false
-      },
-      retry: false,
-    })),
+  const caseTasks = useQuery({
+    queryKey: ['case-tasks', caseId],
+    queryFn: () => api.listDiagnosisTasks({ caseId, page: 1, pageSize: 20 }),
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? []
+      return items.some((item) => activeTaskStatuses.includes(item.status)) ? 5000 : false
+    },
   })
 
   if (extCase.isPending) return <PageLoading />
@@ -45,7 +43,7 @@ export function CaseDetailPage() {
     return <p className="py-24 text-center text-ink-48">工单不存在或无权访问</p>
   }
   const c = extCase.data
-  const caseTasks = recentTaskQueries.flatMap((query) => (query.data ? [query.data] : []))
+  const taskItems = caseTasks.data?.items ?? []
 
   return (
     <div>
@@ -104,22 +102,36 @@ export function CaseDetailPage() {
           </Card>
 
           <Card className="p-6">
-            <CardTitle className="mb-1">最近任务入口</CardTitle>
+            <CardTitle className="mb-1">诊断任务历史</CardTitle>
             <p className="mb-3 text-[12px] leading-[1.5] text-ink-48">
-              仅记录本浏览器会话创建的任务，状态每次从后端重新读取。
+              来自服务端的该工单任务记录（分析员可见自己创建的任务，管理员可见全部）；进行中的任务会自动刷新状态。
             </p>
-            {caseTasks.length === 0 ? (
-              <p className="text-[13px] text-ink-48">本会话没有该工单的任务记录</p>
+            {caseTasks.isPending ? (
+              <p className="text-[13px] text-ink-48">加载中…</p>
+            ) : caseTasks.isError ? (
+              <p className="text-[13px] text-ink-48">
+                任务历史读取失败
+                <button
+                  type="button"
+                  className="press ml-2 text-primary hover:underline"
+                  onClick={() => void caseTasks.refetch()}
+                >
+                  重试
+                </button>
+              </p>
+            ) : taskItems.length === 0 ? (
+              <p className="text-[13px] text-ink-48">该工单还没有诊断任务</p>
             ) : (
               <ul className="flex flex-col gap-2.5">
-                {caseTasks.map((t) => (
+                {taskItems.map((t) => (
                   <li key={t.taskId}>
                     <Link
                       to={`/tasks/${t.taskId}`}
                       className="press flex items-center justify-between gap-3 rounded-capsule bg-pearl px-3.5 py-2.5 hover:bg-parchment"
                     >
-                      <span className="text-[13px] text-ink">
-                        {fmtDateTime(t.createdAt)}
+                      <span className="flex min-w-0 flex-col">
+                        <span className="text-[13px] text-ink">{fmtDateTime(t.createdAt)}</span>
+                        <span className="truncate text-[11px] text-ink-48">{t.requestText}</span>
                       </span>
                       <Badge tone={taskStatusMeta[t.status].tone}>
                         {taskStatusMeta[t.status].label}

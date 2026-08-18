@@ -100,13 +100,14 @@ export function WorkbenchPage() {
       idempotencyKey: string
     }) => api.createDiagnosisTask(input, idempotencyKey),
     retry: (failureCount, error) => failureCount < 2 && error instanceof ApiError && error.code === 50301,
-    onSuccess: ({ taskId, createdAt }) => {
+    onSuccess: ({ taskId }) => {
       if (!workspace || !extCase.data) return
       const updated = rememberWorkspaceTask(workspace.workspaceId, taskId)
-      api.rememberRecentTask({ taskId, externalCaseId: extCase.data.externalCaseId, createdAt })
       setWorkspace(updated)
       setWorkspaces(getLocalWorkspaces())
       setRequestText('')
+      void queryClient.invalidateQueries({ queryKey: ['case-tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['diagnosis-tasks'] })
       if (retryOfTaskId) navigate(`/workbench/${workspace.workspaceId}`, { replace: true })
       toast.success('诊断任务已加入当前会话')
     },
