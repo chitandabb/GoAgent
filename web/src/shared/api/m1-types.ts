@@ -276,6 +276,8 @@ export interface DiagnosisTaskListData {
 
 export interface DiagnosisTaskListQuery {
   status?: TaskStatus
+  /** 按创建时冻结的外部工单 ID 过滤（UUID） */
+  caseId?: string
   page?: number
   pageSize?: number
 }
@@ -384,8 +386,24 @@ export type TurnEventType =
   | 'turn_queued'
   | 'turn_running'
   | 'turn_retry_scheduled'
+  | 'turn_message_delta'
   | 'turn_completed'
   | 'turn_failed'
+
+/** turn_message_delta 事件负载：按 position 升序拼接 content 还原完整回答。 */
+export interface TurnMessageDeltaPayload {
+  messageId: string
+  position: number
+  content: string
+}
+
+export function parseTurnMessageDelta(payload: Record<string, unknown>): TurnMessageDeltaPayload | null {
+  const messageId = typeof payload.messageId === 'string' ? payload.messageId : ''
+  const position = typeof payload.position === 'number' ? payload.position : Number.NaN
+  const content = typeof payload.content === 'string' ? payload.content : ''
+  if (!messageId || !Number.isInteger(position) || position < 0 || content.length === 0) return null
+  return { messageId, position, content }
+}
 
 export interface TurnEvent {
   seq: number
@@ -447,8 +465,43 @@ export interface SendMessageInput {
 // ---------------------------------------------------------------- 知识库
 
 export type KnowledgeScope = 'personal' | 'global'
-export type IngestionTaskStatus = 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-export type IngestionStage = 'staged' | 'parsing' | 'chunking' | 'embedding' | 'publishing' | 'done'
+export type IngestionTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'retry_wait'
+  | 'cancel_requested'
+  | 'succeeded'
+  | 'partial_succeeded'
+  | 'failed'
+  | 'cancelled'
+export type IngestionStage =
+  | 'uploaded'
+  | 'scanning'
+  | 'parsing'
+  | 'chunking'
+  | 'indexing'
+  | 'publishing'
+  | 'completed'
+
+/** 企业知识库文档列表行：最新版本号 + 最新解析任务状态。 */
+export interface KnowledgeDocumentListItem {
+  documentId: string
+  title: string
+  scope: KnowledgeScope
+  version: number
+  taskId: string
+  status: IngestionTaskStatus | null
+  stage: IngestionStage | null
+  progressPercent: number
+  createdAt: string
+}
+
+export interface KnowledgeDocumentListData {
+  items: KnowledgeDocumentListItem[]
+  page: number
+  pageSize: number
+  total: number
+}
 
 export interface KnowledgeIngestionResponse {
   documentId: string
