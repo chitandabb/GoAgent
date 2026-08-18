@@ -32,7 +32,27 @@ type IPResolver interface {
 }
 
 type URLPolicy struct {
-	resolver IPResolver
+	resolver                       IPResolver
+	transparentEgressResolverCIDRs []netip.Prefix
+}
+
+type URLPolicyOption func(*URLPolicy)
+
+var transparentEgressProxyRange = netip.MustParsePrefix("198.18.0.0/15")
+
+// WithTransparentEgressResolverCIDRs permits only DNS answers in the explicit
+// RFC 2544 benchmark range used by a trusted transparent egress proxy. It never
+// permits URL literals or private, loopback, link-local, or multicast addresses.
+func WithTransparentEgressResolverCIDRs(prefixes []netip.Prefix) URLPolicyOption {
+	return func(policy *URLPolicy) {
+		for _, prefix := range prefixes {
+			prefix = prefix.Masked()
+			if prefix.IsValid() && prefix.Bits() >= transparentEgressProxyRange.Bits() &&
+				transparentEgressProxyRange.Contains(prefix.Addr()) {
+				policy.transparentEgressResolverCIDRs = append(policy.transparentEgressResolverCIDRs, prefix)
+			}
+		}
+	}
 }
 
 type PublicURL struct {
@@ -44,11 +64,17 @@ func (u PublicURL) String() string { return u.value }
 
 func (u PublicURL) Domain() string { return u.domain }
 
-func NewURLPolicy(resolver IPResolver) *URLPolicy {
+func NewURLPolicy(resolver IPResolver, options ...URLPolicyOption) *URLPolicy {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	return &URLPolicy{resolver: resolver}
+	policy := &URLPolicy{resolver: resolver}
+	for _, option := range options {
+		if option != nil {
+			option(policy)
+		}
+	}
+	return policy
 }
 
 func (p *URLPolicy) Validate(ctx context.Context, raw string) (PublicURL, error) {
@@ -90,7 +116,7 @@ func (p *URLPolicy) Validate(ctx context.Context, raw string) (PublicURL, error)
 			return PublicURL{}, ErrUnsafePublicURL
 		}
 		for _, address := range addresses {
-			if !publicAddress(address) {
+			if !p.publicResolvedAddress(address) {
 				return PublicURL{}, ErrUnsafePublicURL
 			}
 		}
@@ -104,6 +130,23 @@ func (p *URLPolicy) Validate(ctx context.Context, raw string) (PublicURL, error)
 	parsed.Fragment = ""
 	parsed.RawFragment = ""
 	return PublicURL{value: parsed.String(), domain: host}, nil
+}
+
+func (p *URLPolicy) publicResolvedAddress(address netip.Addr) bool {
+	if publicAddress(address) {
+		return true
+	}
+	address = address.Unmap()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() ||
+		address.IsLinkLocalUnicast() || address.IsUnspecified() || address.IsMulticast() {
+		return false
+	}
+	for _, prefix := range p.transparentEgressResolverCIDRs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func publicAddress(address netip.Addr) bool {

@@ -153,6 +153,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-migrate
     restart: "no"
     command: ["./mesguard-migrate", "up"]
@@ -170,6 +171,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-api
     restart: unless-stopped
     environment:
@@ -181,6 +183,7 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS: ${MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS:-}
       MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
       MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
     depends_on:
@@ -199,6 +202,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-outbox-relay
     restart: unless-stopped
     command: ["./mesguard-outbox-relay"]
@@ -221,6 +225,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-diagnosis-worker
     restart: unless-stopped
     command: ["./mesguard-diagnosis-worker"]
@@ -235,6 +240,7 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS: ${MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS:-}
       MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
       MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
     depends_on:
@@ -255,6 +261,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-conversation-worker
     restart: unless-stopped
     command: ["./mesguard-conversation-worker"]
@@ -269,6 +276,7 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       MESGUARD_GITHUB_MCP_TOKEN: ${MESGUARD_GITHUB_MCP_TOKEN:-}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS: ${MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS:-}
       MESGUARD_MINIO_ACCESS_KEY: ${MESGUARD_MINIO_ACCESS_KEY:-mesguard}
       MESGUARD_MINIO_SECRET_KEY: ${MESGUARD_MINIO_SECRET_KEY:-mesguard_dev_secret}
     depends_on:
@@ -289,6 +297,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-knowledge-worker
     restart: unless-stopped
     command: ["./mesguard-knowledge-worker"]
@@ -316,6 +325,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    image: ${MESGUARD_APP_IMAGE:-mesguard-app:latest}
     container_name: mesguard-memory-worker
     restart: unless-stopped
     command: ["./mesguard-memory-worker"]

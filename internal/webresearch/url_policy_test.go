@@ -39,3 +39,32 @@ func TestURLPolicyAllowsOnlyPublicHTTPSTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestURLPolicyAllowsConfiguredTransparentEgressOnlyForDNS(t *testing.T) {
+	resolver := resolverStub{addresses: map[string][]netip.Addr{
+		"proxy.example.org":   {netip.MustParseAddr("198.18.2.112")},
+		"private.example.org": {netip.MustParseAddr("10.0.0.2")},
+		"mixed.example.org":   {netip.MustParseAddr("198.18.2.112"), netip.MustParseAddr("10.0.0.2")},
+	}}
+	policy := NewURLPolicy(resolver, WithTransparentEgressResolverCIDRs([]netip.Prefix{
+		netip.MustParsePrefix("198.18.0.0/15"),
+	}))
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "DNS proxy address", value: "https://proxy.example.org/"},
+		{name: "proxy literal remains denied", value: "https://198.18.2.112/", wantErr: true},
+		{name: "private DNS remains denied", value: "https://private.example.org/", wantErr: true},
+		{name: "mixed DNS remains denied", value: "https://mixed.example.org/", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := policy.Validate(context.Background(), tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error=%v, wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}

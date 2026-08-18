@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -911,22 +912,23 @@ type WebSearchProviderConfig struct {
 // WebSearchConfig 描述公开网页检索的供应商连接与硬预算。
 // Search 与 Content 可以独立选择 Provider，例如 searxng + direct。
 type WebSearchConfig struct {
-	Enabled          bool                               `toml:"enabled"`
-	SearchProvider   string                             `toml:"searchProvider"`
-	ContentProvider  string                             `toml:"contentProvider"`
-	Providers        map[string]WebSearchProviderConfig `toml:"providers"`
-	Provider         string                             `toml:"provider"` // 兼容旧版单 Provider 配置
-	BaseURL          string                             `toml:"baseURL"`
-	APIKeyEnv        string                             `toml:"apiKeyEnv"`
-	TimeoutMillis    int                                `toml:"timeoutMillis"`
-	MaxResults       int                                `toml:"maxResults"`
-	MaxFetchedPages  int                                `toml:"maxFetchedPages"`
-	MaxPageChars     int                                `toml:"maxPageChars"`
-	MaxRounds        int                                `toml:"maxRounds"`
-	MaxResponseBytes int64                              `toml:"maxResponseBytes"`
-	OfficialDomains  []string                           `toml:"officialDomains"`
-	TrustedDomains   []string                           `toml:"trustedDomains"`
-	Redaction        WebSearchRedactionConfig           `toml:"redaction"`
+	Enabled                   bool                               `toml:"enabled"`
+	SearchProvider            string                             `toml:"searchProvider"`
+	ContentProvider           string                             `toml:"contentProvider"`
+	Providers                 map[string]WebSearchProviderConfig `toml:"providers"`
+	Provider                  string                             `toml:"provider"` // 兼容旧版单 Provider 配置
+	BaseURL                   string                             `toml:"baseURL"`
+	APIKeyEnv                 string                             `toml:"apiKeyEnv"`
+	TimeoutMillis             int                                `toml:"timeoutMillis"`
+	MaxResults                int                                `toml:"maxResults"`
+	MaxFetchedPages           int                                `toml:"maxFetchedPages"`
+	MaxPageChars              int                                `toml:"maxPageChars"`
+	MaxRounds                 int                                `toml:"maxRounds"`
+	MaxResponseBytes          int64                              `toml:"maxResponseBytes"`
+	OfficialDomains           []string                           `toml:"officialDomains"`
+	TrustedDomains            []string                           `toml:"trustedDomains"`
+	TransparentEgressCIDRsEnv string                             `toml:"transparentEgressCIDRsEnv"`
+	Redaction                 WebSearchRedactionConfig           `toml:"redaction"`
 }
 
 type WebSearchRedactionConfig struct {
@@ -1026,6 +1028,9 @@ func (c WebSearchConfig) Validate() error {
 	if err := validateWebSearchDomains(c.OfficialDomains, c.TrustedDomains); err != nil {
 		return err
 	}
+	if envName := strings.TrimSpace(c.TransparentEgressCIDRsEnv); envName != "" && !environmentVariableName.MatchString(envName) {
+		return errors.New("webSearch transparentEgressCIDRsEnv is invalid")
+	}
 	if err := c.Redaction.Validate(); err != nil {
 		return err
 	}
@@ -1059,6 +1064,46 @@ func validateWebSearchDomains(official, trusted []string) error {
 		}
 	}
 	return nil
+}
+
+var transparentEgressProxyRange = netip.MustParsePrefix("198.18.0.0/15")
+
+// TransparentEgressCIDRs returns the explicitly configured benchmark range used
+// by some local Docker networks to proxy public DNS answers. It is empty by default.
+func (c WebSearchConfig) TransparentEgressCIDRs() ([]netip.Prefix, error) {
+	envName := strings.TrimSpace(c.TransparentEgressCIDRsEnv)
+	if envName == "" {
+		return nil, nil
+	}
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return nil, nil
+	}
+	values := strings.FieldsFunc(value, func(current rune) bool {
+		return current == ',' || current == '\r' || current == '\n'
+	})
+	if len(values) > 16 {
+		return nil, errors.New("webSearch transparent egress CIDRs exceed 16 entries")
+	}
+	result := make([]netip.Prefix, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("webSearch transparent egress CIDR is invalid: %w", err)
+		}
+		prefix = prefix.Masked()
+		if prefix.Bits() < transparentEgressProxyRange.Bits() || !transparentEgressProxyRange.Contains(prefix.Addr()) {
+			return nil, errors.New("webSearch transparent egress CIDR must be within 198.18.0.0/15")
+		}
+		key := prefix.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, prefix)
+	}
+	return result, nil
 }
 
 func (c WebSearchConfig) APIKey() (string, error) {

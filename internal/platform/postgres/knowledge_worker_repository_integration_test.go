@@ -275,7 +275,7 @@ WHERE version.id = ?`, versionID).Scan(&staged).Error; err != nil {
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
 }
 
-func TestKnowledgeWorkerRepositoryRetryDelayAndPartialReadyDoNotPublish(t *testing.T) {
+func TestKnowledgeWorkerRepositoryRetryDelayAndPartialReadyPublishesFirstVersion(t *testing.T) {
 	db, ctx, cleanup := prepareKnowledgeWorkerIntegration(t)
 	defer cleanup()
 	creatorID, documentID, versionID, taskID, outboxID := insertQueuedKnowledgeTask(t, db, ctx, nil, 3)
@@ -295,10 +295,14 @@ func TestKnowledgeWorkerRepositoryRetryDelayAndPartialReadyDoNotPublish(t *testi
 	if err != nil || second.Lease == nil || second.Lease.AttemptCount != 2 {
 		t.Fatalf("second = %+v err=%v", second, err)
 	}
-	completed, err := repository.Complete(ctx, *second.Lease, knowledgeworker.ExecutionResult{
-		Partial: true, ParserVersion: "parser-v1", ParserMetadata: json.RawMessage(`{"missing":["ocr"]}`),
-		Checkpoint: json.RawMessage(`{"indexed":true}`),
-	}, availableAt.Add(time.Second))
+	partial := knowledgeParsedResult(versionID, "partial retrievable content")
+	partial.Partial = true
+	partial.ParserMetadata = json.RawMessage(`{"missing":["ocr"]}`)
+	staged, err := repository.SaveParsedResult(ctx, *second.Lease, partial, availableAt.Add(500*time.Millisecond))
+	if err != nil || !staged {
+		t.Fatalf("SaveParsedResult partial = %v err=%v", staged, err)
+	}
+	completed, err := repository.Complete(ctx, *second.Lease, partial, availableAt.Add(time.Second))
 	if err != nil || !completed {
 		t.Fatalf("Complete partial = %v err=%v", completed, err)
 	}
@@ -309,10 +313,83 @@ func TestKnowledgeWorkerRepositoryRetryDelayAndPartialReadyDoNotPublish(t *testi
 	if err := db.WithContext(ctx).Raw("SELECT status, is_current FROM knowledge_document_versions WHERE id = ?", versionID).Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version.Status != "partial_ready" || version.IsCurrent {
+	if version.Status != "partial_ready" || !version.IsCurrent {
 		t.Fatalf("version = %+v", version)
 	}
+	results, err := NewKnowledgeRepository(db).SearchFTS(ctx, creatorID, "partial retrievable", 5)
+	if err != nil || len(results) != 1 || results[0].DocumentVersionID != versionID {
+		t.Fatalf("SearchFTS partial = %#v err=%v", results, err)
+	}
 	cleanupKnowledgeWorkerFacts(t, db, creatorID, documentID, versionID, taskID, outboxID)
+}
+
+func TestKnowledgeWorkerRepositoryPartialNewerVersionKeepsCurrentReadyVersion(t *testing.T) {
+	db, ctx, cleanup := prepareKnowledgeWorkerIntegration(t)
+	defer cleanup()
+	creatorID, documentID, currentVersionID, currentTaskID, currentOutboxID := insertQueuedKnowledgeTask(t, db, ctx, nil, 3)
+	partialVersionID, partialTaskID, partialOutboxID := uuid.New(), uuid.New(), uuid.New()
+	control := NewKnowledgeRepository(db)
+	_, err := control.QueueVersion(ctx, knowledge.QueueVersionInput{
+		VersionID: partialVersionID, TaskID: partialTaskID, OutboxEventID: partialOutboxID,
+		CorrelationID: uuid.New(), DocumentID: documentID, CreatedBy: creatorID,
+		Source: objectstore.ObjectRef{
+			Bucket: objectstore.BucketKnowledgeSources, ObjectKey: "knowledge-source/integration/" + partialVersionID.String(),
+			ETag: "etag-partial", SizeBytes: 15, SHA256: knowledge.SHA256Hex("partial-content"), MediaType: "text/plain",
+			OriginalName: "manual-v2.txt",
+		},
+		PipelineVersion: "ingestion-v1", MaxAttempts: 3,
+		IdempotencyKey: uuid.NewString(), RequestFingerprint: knowledge.SHA256Hex("request-" + partialTaskID.String()),
+		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),
+	})
+	if err != nil {
+		t.Fatalf("queue partial version: %v", err)
+	}
+	worker := NewKnowledgeWorkerRepository(db)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	currentClaim, err := worker.Claim(ctx, currentTaskID, currentVersionID, "worker-current", now, now.Add(time.Minute))
+	if err != nil || currentClaim.Lease == nil {
+		t.Fatalf("claim current = %+v err=%v", currentClaim, err)
+	}
+	if completed, err := worker.Complete(ctx, *currentClaim.Lease, knowledgeParsedResult(currentVersionID, "complete baseline"), now.Add(time.Second)); err != nil || !completed {
+		t.Fatalf("complete current = %v err=%v", completed, err)
+	}
+	partialClaim, err := worker.Claim(ctx, partialTaskID, partialVersionID, "worker-partial", now.Add(2*time.Second), now.Add(time.Minute))
+	if err != nil || partialClaim.Lease == nil {
+		t.Fatalf("claim partial = %+v err=%v", partialClaim, err)
+	}
+	partial := knowledgeParsedResult(partialVersionID, "partial update")
+	partial.Partial = true
+	if completed, err := worker.Complete(ctx, *partialClaim.Lease, partial, now.Add(3*time.Second)); err != nil || !completed {
+		t.Fatalf("complete partial = %v err=%v", completed, err)
+	}
+	var current struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	if err := db.WithContext(ctx).Raw(`
+SELECT id FROM knowledge_document_versions WHERE document_id = ? AND is_current = true`, documentID).Scan(&current).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.ID != currentVersionID {
+		t.Fatalf("current version = %s, want complete %s", current.ID, currentVersionID)
+	}
+	var partialVersion struct {
+		Status    string
+		IsCurrent bool
+	}
+	if err := db.WithContext(ctx).Raw("SELECT status, is_current FROM knowledge_document_versions WHERE id = ?", partialVersionID).Scan(&partialVersion).Error; err != nil {
+		t.Fatal(err)
+	}
+	if partialVersion.Status != "partial_ready" || partialVersion.IsCurrent {
+		t.Fatalf("partial version = %+v", partialVersion)
+	}
+	cleanupDB := db.WithContext(context.Background())
+	_ = cleanupDB.Exec("DELETE FROM outbox_events WHERE id IN (?, ?)", currentOutboxID, partialOutboxID).Error
+	_ = cleanupDB.Exec("DELETE FROM knowledge_ingestion_events WHERE task_id IN (?, ?)", currentTaskID, partialTaskID).Error
+	_ = cleanupDB.Exec("DELETE FROM knowledge_ingestion_tasks WHERE id IN (?, ?)", currentTaskID, partialTaskID).Error
+	_ = cleanupDB.Exec("DELETE FROM knowledge_chunks WHERE document_version_id IN (?, ?)", currentVersionID, partialVersionID).Error
+	_ = cleanupDB.Exec("DELETE FROM knowledge_document_versions WHERE id IN (?, ?)", currentVersionID, partialVersionID).Error
+	_ = cleanupDB.Exec("DELETE FROM knowledge_documents WHERE id = ?", documentID).Error
+	_ = cleanupDB.Exec("DELETE FROM users WHERE id = ?", creatorID).Error
 }
 
 func TestKnowledgeRepositoryRequestsCancellationAndWorkerFinalizesIt(t *testing.T) {

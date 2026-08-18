@@ -69,7 +69,6 @@ export interface CreateDiagnosisTaskInput {
   expectedSourceFingerprint: string
   evidenceDataSourceIds?: string[]
   requestText: string
-  attachments?: never[]
   retryOfTaskId?: string | null
 }
 

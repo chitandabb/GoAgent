@@ -512,7 +512,7 @@ JOIN knowledge_document_versions AS v ON v.id = c.document_version_id
 JOIN knowledge_documents AS d ON d.id = v.document_id
 CROSS JOIN search_query AS q
 WHERE d.deleted_at IS NULL
-  AND v.status = 'ready'
+  AND v.status IN ('ready', 'partial_ready')
   AND v.is_current = true
   AND (d.scope = 'global' OR (d.scope = 'personal' AND d.owner_user_id = ?))
   AND c.search_vector @@ q.query
@@ -561,7 +561,7 @@ JOIN knowledge_documents AS d ON d.id = v.document_id
 WHERE embedding.profile_id = ?
   AND embedding.content_sha256 = c.content_sha256
   AND d.deleted_at IS NULL
-  AND v.status = 'ready'
+  AND v.status IN ('ready', 'partial_ready')
   AND v.is_current = true
   AND (d.scope = 'global' OR (d.scope = 'personal' AND d.owner_user_id = ?))
 ORDER BY score DESC, d.id, c.ordinal
@@ -646,7 +646,7 @@ FROM knowledge_chunks AS c
 JOIN knowledge_document_versions AS v ON v.id = c.document_version_id
 JOIN knowledge_documents AS d ON d.id = v.document_id
 WHERE d.deleted_at IS NULL
-  AND v.status = 'ready'
+  AND v.status IN ('ready', 'partial_ready')
   AND v.is_current = true
   AND (d.scope = 'global' OR (d.scope = 'personal' AND d.owner_user_id = ?))
   AND (` + strings.Join(clauses, " OR ") + `)

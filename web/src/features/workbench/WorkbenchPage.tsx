@@ -139,7 +139,6 @@ export function WorkbenchPage() {
         expectedSourceFingerprint: extCase.data.sourceFingerprint,
         evidenceDataSourceIds: checkedDataSources,
         requestText: requestText.trim(),
-        attachments: [],
         retryOfTaskId,
       },
     })

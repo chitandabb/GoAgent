@@ -397,7 +397,7 @@ FROM knowledge_chunks chunk
 JOIN knowledge_document_versions version ON version.id = chunk.document_version_id
 JOIN knowledge_documents document ON document.id = version.document_id
 WHERE chunk.id = ? AND version.id = ? AND chunk.content_sha256 = ?
-  AND version.is_current = true AND version.status = 'ready'
+  AND version.is_current = true AND version.status IN ('ready', 'partial_ready')
   AND document.scope = 'global' AND document.deleted_at IS NULL`,
 		chunkID, versionID, source.ContentSHA256).Scan(&exists)
 	if result.Error != nil {

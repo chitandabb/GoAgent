@@ -65,6 +65,30 @@ func TestDiagnosisTaskRoutesRejectsMissingIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestDiagnosisTaskRoutesRejectsAttachmentsOutsideConversation(t *testing.T) {
+	caseID := uuid.New()
+	useCase := &diagnosisTaskUseCaseStub{}
+	routes, _ := NewDiagnosisTaskRoutes(context.Background(), useCase, identityMiddleware(uuid.New(), false), func(c *gin.Context) { c.Next() })
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/diagnosis-tasks", strings.NewReader(`{
+"externalCaseId":"`+caseID.String()+`",
+"expectedSourceFingerprint":"sha256:source",
+"requestText":"检查",
+"attachments":[{"attachmentId":"`+uuid.NewString()+`","purpose":"log"}]
+}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", uuid.NewString())
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"field":"attachments"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if useCase.createCalls != 0 {
+		t.Fatalf("create calls = %d, want 0", useCase.createCalls)
+	}
+}
+
 func TestDiagnosisTaskRoutesMapsSourceChangedConflict(t *testing.T) {
 	caseID := uuid.New()
 	useCase := &diagnosisTaskUseCaseStub{createErr: diagnosis.ErrSourceChanged}

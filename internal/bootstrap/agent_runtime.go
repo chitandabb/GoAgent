@@ -499,7 +499,7 @@ func buildAgentRuntimeForRole(
 func buildWebResearchService(
 	ctx context.Context,
 	cfg config.WebSearchConfig,
-	_ *zap.Logger,
+	log *zap.Logger,
 ) (*webresearch.Service, error) {
 	sensitiveTerms, err := cfg.Redaction.SensitiveTerms()
 	if err != nil {
@@ -512,7 +512,18 @@ func buildWebResearchService(
 	if err != nil {
 		return nil, err
 	}
-	urlPolicy := webresearch.NewURLPolicy(nil)
+	transparentEgressCIDRs, err := cfg.TransparentEgressCIDRs()
+	if err != nil {
+		return nil, err
+	}
+	if len(transparentEgressCIDRs) > 0 && log != nil {
+		values := make([]string, 0, len(transparentEgressCIDRs))
+		for _, prefix := range transparentEgressCIDRs {
+			values = append(values, prefix.String())
+		}
+		log.Warn("Web research permits configured transparent egress DNS ranges", zap.Strings("cidrs", values))
+	}
+	urlPolicy := webresearch.NewURLPolicy(nil, webresearch.WithTransparentEgressResolverCIDRs(transparentEgressCIDRs))
 	searchProviderName, contentProviderName := cfg.EffectiveProviders()
 	searchProvider, contentProvider, err := buildWebProviders(ctx, cfg, searchProviderName, contentProviderName, urlPolicy)
 	if err != nil {

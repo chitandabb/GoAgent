@@ -37,7 +37,7 @@ FROM knowledge_chunks chunk
 JOIN knowledge_document_versions version ON version.id = chunk.document_version_id
 JOIN knowledge_documents document ON document.id = version.document_id
 WHERE chunk.id = ? AND document.deleted_at IS NULL
-  AND version.status IN ('ready', 'retired')
+  AND version.status IN ('ready', 'partial_ready', 'retired')
   AND (document.scope = 'global' OR (document.scope = 'personal' AND document.owner_user_id = ?))`,
 		chunkID, actorID).Scan(&record)
 	if result.Error != nil {

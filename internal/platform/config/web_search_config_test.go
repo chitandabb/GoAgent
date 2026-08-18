@@ -27,6 +27,7 @@ func TestWebSearchConfigValidate(t *testing.T) {
 		{name: "reject unbounded page size", mutate: func(c *WebSearchConfig) { c.MaxPageChars = 100_001 }, wantErr: true},
 		{name: "reject unbounded public query", mutate: func(c *WebSearchConfig) { c.Redaction.MaxInputRunes = 4097 }, wantErr: true},
 		{name: "reject invalid sensitive terms env", mutate: func(c *WebSearchConfig) { c.Redaction.SensitiveTermsEnv = "private terms" }, wantErr: true},
+		{name: "reject invalid transparent egress env", mutate: func(c *WebSearchConfig) { c.TransparentEgressCIDRsEnv = "private cidrs" }, wantErr: true},
 		{name: "reject invalid official domain", mutate: func(c *WebSearchConfig) { c.OfficialDomains = []string{"https://go.dev"} }, wantErr: true},
 		{name: "reject overlapping source tiers", mutate: func(c *WebSearchConfig) {
 			c.OfficialDomains = []string{"docs.example.com"}
@@ -53,6 +54,23 @@ func TestWebSearchRedactionSensitiveTermsReadsConfiguredEnvironment(t *testing.T
 	}
 	if len(values) != 3 || values[0] != "Company A" || values[2] != "Customer Group" {
 		t.Fatalf("SensitiveTerms() = %v", values)
+	}
+}
+
+func TestWebSearchConfigReadsTransparentEgressCIDRs(t *testing.T) {
+	const envName = "MESGUARD_WEB_EGRESS_CIDRS_TEST"
+	t.Setenv(envName, "198.18.0.0/15, 198.18.1.0/24")
+	prefixes, err := (WebSearchConfig{TransparentEgressCIDRsEnv: envName}).TransparentEgressCIDRs()
+	if err != nil {
+		t.Fatalf("TransparentEgressCIDRs() error: %v", err)
+	}
+	if len(prefixes) != 2 || prefixes[0].String() != "198.18.0.0/15" || prefixes[1].String() != "198.18.1.0/24" {
+		t.Fatalf("TransparentEgressCIDRs() = %v", prefixes)
+	}
+
+	t.Setenv(envName, "10.0.0.0/8")
+	if _, err := (WebSearchConfig{TransparentEgressCIDRsEnv: envName}).TransparentEgressCIDRs(); err == nil {
+		t.Fatal("TransparentEgressCIDRs() accepted a private range")
 	}
 }
 

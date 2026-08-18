@@ -412,10 +412,9 @@ func testAgentConfig() config.Config {
 	}
 }
 
-// TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity 证明仓库生产
+// TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity 证明仓库演示
 // 配置的 [models.chat] activeProfile 身份（provider/model）会原样进入
-// Agent Runtime：硬切后必须是 opencode-go / deepseek-v4-flash。模型工厂使用
-// stub，不创建任何真实 Provider。
+// Agent Runtime。模型工厂使用 stub，不创建任何真实 Provider。
 func TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity(t *testing.T) {
 	var decoded config.Config
 	path := filepath.Join("..", "..", "config", "mesguard.toml")
@@ -434,8 +433,8 @@ func TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildAgentRuntime(): %v", err)
 	}
-	if runtime.modelProvider != "opencode-go" || runtime.modelID != "deepseek-v4-flash" {
-		t.Fatalf("agent runtime identity = %q/%q, want opencode-go/deepseek-v4-flash",
+	if runtime.modelProvider != "stepfun" || runtime.modelID != "step-3.7-flash" {
+		t.Fatalf("agent runtime identity = %q/%q, want stepfun/step-3.7-flash",
 			runtime.modelProvider, runtime.modelID)
 	}
 }

@@ -73,17 +73,12 @@ func (r *DiagnosisTaskRoutes) Register(api *gin.RouterGroup) {
 }
 
 type diagnosisTaskCreateRequest struct {
-	ExternalCaseID            string                       `json:"externalCaseId" binding:"required,uuid"`
-	ExpectedSourceFingerprint string                       `json:"expectedSourceFingerprint" binding:"required,max=128"`
-	EvidenceDataSourceIDs     []string                     `json:"evidenceDataSourceIds"`
-	RequestText               string                       `json:"requestText" binding:"required,max=20000"`
-	Attachments               []diagnosisTaskAttachmentReq `json:"attachments"`
-	RetryOfTaskID             string                       `json:"retryOfTaskId"`
-}
-
-type diagnosisTaskAttachmentReq struct {
-	AttachmentID string `json:"attachmentId" binding:"required,uuid"`
-	Purpose      string `json:"purpose" binding:"required,max=64"`
+	ExternalCaseID            string          `json:"externalCaseId" binding:"required,uuid"`
+	ExpectedSourceFingerprint string          `json:"expectedSourceFingerprint" binding:"required,max=128"`
+	EvidenceDataSourceIDs     []string        `json:"evidenceDataSourceIds"`
+	RequestText               string          `json:"requestText" binding:"required,max=20000"`
+	Attachments               json.RawMessage `json:"attachments"`
+	RetryOfTaskID             string          `json:"retryOfTaskId"`
 }
 
 type diagnosisTaskCreateResponse struct {
@@ -134,16 +129,13 @@ func (r *DiagnosisTaskRoutes) create(c *gin.Context) {
 		}
 		retryOfTaskID = &parsed
 	}
-	attachments := make([]diagnosis.TaskAttachment, 0, len(request.Attachments))
-	for _, attachment := range request.Attachments {
-		attachmentID, parseErr := uuid.Parse(attachment.AttachmentID)
-		if parseErr != nil {
-			AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
-				Field: "attachments.attachmentId", Reason: "必须是合法的 UUID",
-			}}))
-			return
-		}
-		attachments = append(attachments, diagnosis.TaskAttachment{AttachmentID: attachmentID, Purpose: strings.TrimSpace(attachment.Purpose)})
+	// Direct task creation has no conversation message to establish attachment ownership.
+	// Attachment-backed diagnosis must be created through the conversation command path.
+	if len(request.Attachments) != 0 {
+		AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
+			Field: "attachments", Reason: "直接创建诊断任务不支持附件，请通过会话消息创建诊断任务",
+		}}))
+		return
 	}
 
 	correlationID := uuid.New()
@@ -157,7 +149,7 @@ func (r *DiagnosisTaskRoutes) create(c *gin.Context) {
 	}, diagnosis.CreateTaskInput{
 		ExternalCaseID: externalCaseID, ExpectedSourceFingerprint: strings.TrimSpace(request.ExpectedSourceFingerprint),
 		EvidenceDataSourceIDs: evidenceDataSourceIDs, RequestText: request.RequestText,
-		Attachments: attachments, RetryOfTaskID: retryOfTaskID, IdempotencyKey: idempotencyKey,
+		RetryOfTaskID: retryOfTaskID, IdempotencyKey: idempotencyKey,
 		CorrelationID: correlationID,
 	})
 	if err != nil {

@@ -161,19 +161,17 @@ flowchart LR
 # 1. 准备环境变量（全空也能启动，Agent 能力降级）
 Copy-Item .env.compose.example .env
 
-# 2. 启动基础依赖 + 迁移 + API
-docker compose up -d postgres sqlserver sqlserver-seed redis rabbitmq minio
-go run ./cmd/mesguard-migrate up
-go run ./cmd/mesguard-api            # http://127.0.0.1:9090
+# 2. 构建并同步重建完整 Docker 应用链路（API、迁移、relay、四类 worker、SearXNG）
+.\scripts\runtime\rebuild_docker_app.ps1  # API: http://127.0.0.1:9090
 
 # 3. 另开终端启动前端
 cd web
 npm install
-npm run dev                          # http://127.0.0.1:5173
+npm run dev                              # http://127.0.0.1:5173
 
-# 4. 创建账号（密码只走环境变量）
+# 4. 在 Docker API 容器中创建账号（密码只走环境变量）
 $env:MESGUARD_INITIAL_USER_PASSWORD = "change-this-locally"
-go run ./cmd/mesguard-user -username demo-admin -display-name "Demo Admin" -role admin
+docker exec -e MESGUARD_INITIAL_USER_PASSWORD mesguard-api ./mesguard-user -username demo-admin -display-name "Demo Admin" -role admin
 ```
 
 完整 Worker 链路与更多命令见 [开发指南](docs/development.md)。

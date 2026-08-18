@@ -541,16 +541,13 @@ func (r *KnowledgeWorkerRepository) Complete(
 		if err != nil || !owned {
 			return err
 		}
-		publishCurrent := false
-		publicationScope := knowledge.Scope("")
-		if !result.Partial {
-			var publication struct {
-				DocumentID       uuid.UUID       `gorm:"column:document_id"`
-				Scope            knowledge.Scope `gorm:"column:scope"`
-				CandidateVersion int             `gorm:"column:candidate_version"`
-				CurrentVersion   int             `gorm:"column:current_version"`
-			}
-			locked := tx.Raw(`
+		var publication struct {
+			DocumentID       uuid.UUID       `gorm:"column:document_id"`
+			Scope            knowledge.Scope `gorm:"column:scope"`
+			CandidateVersion int             `gorm:"column:candidate_version"`
+			CurrentVersion   int             `gorm:"column:current_version"`
+		}
+		locked := tx.Raw(`
 SELECT document.id AS document_id,
 	   document.scope AS scope,
        version.version AS candidate_version,
@@ -563,24 +560,31 @@ FROM knowledge_documents document
 JOIN knowledge_document_versions version ON version.document_id = document.id
 WHERE version.id = ? AND document.deleted_at IS NULL
 FOR UPDATE OF document`, lease.DocumentVersionID).Scan(&publication)
-			if locked.Error != nil {
-				return TranslateError(locked.Error)
-			}
-			if locked.RowsAffected != 1 {
-				return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
-			}
-			publicationScope = publication.Scope
+		if locked.Error != nil {
+			return TranslateError(locked.Error)
+		}
+		if locked.RowsAffected != 1 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+
+		// A partial first version is still useful for retrieval. A newer partial version,
+		// however, must never displace an existing current version with complete content.
+		publishCurrent := false
+		if result.Partial {
+			publishCurrent = publication.CurrentVersion == 0
+		} else {
 			publishCurrent = shouldPublishKnowledgeVersion(publication.CandidateVersion, publication.CurrentVersion)
-			if publishCurrent {
-				if err := tx.Exec(`
+		}
+		if publishCurrent {
+			if err := tx.Exec(`
 UPDATE knowledge_document_versions
 SET is_current = false, status = 'retired'
 WHERE document_id = ? AND is_current = true AND id <> ?`,
-					publication.DocumentID, lease.DocumentVersionID).Error; err != nil {
-					return TranslateError(err)
-				}
+				publication.DocumentID, lease.DocumentVersionID).Error; err != nil {
+				return TranslateError(err)
 			}
 		}
+		publicationScope := publication.Scope
 		updated := tx.Exec(`
 UPDATE knowledge_ingestion_tasks
 SET status = ?, stage = 'completed', checkpoint = ?::jsonb, progress_percent = 100,

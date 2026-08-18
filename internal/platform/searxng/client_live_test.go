@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	platformfirecrawl "github.com/chitandabb/GoAgent/internal/platform/firecrawl"
+	platformconfig "github.com/chitandabb/GoAgent/internal/platform/config"
 	"github.com/chitandabb/GoAgent/internal/platform/directweb"
+	platformfirecrawl "github.com/chitandabb/GoAgent/internal/platform/firecrawl"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 	"github.com/joho/godotenv"
 )
@@ -32,10 +33,32 @@ var liveSearchClient = func() *Client {
 	return c
 }()
 
+func requireLiveSearxng(t *testing.T) {
+	t.Helper()
+	if os.Getenv("MESGUARD_RUN_LIVE_SEARXNG_TESTS") != "1" {
+		t.Skip("set MESGUARD_RUN_LIVE_SEARXNG_TESTS=1 to run external SearXNG checks")
+	}
+}
+
+func liveURLPolicy(t *testing.T) *webresearch.URLPolicy {
+	t.Helper()
+	if os.Getenv("MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS") == "" {
+		_ = godotenv.Load(filepath.Join("..", "..", "..", ".env"))
+	}
+	prefixes, err := (platformconfig.WebSearchConfig{
+		TransparentEgressCIDRsEnv: "MESGUARD_WEBSEARCH_TRANSPARENT_EGRESS_CIDRS",
+	}).TransparentEgressCIDRs()
+	if err != nil {
+		t.Fatalf("transparent egress CIDRs: %v", err)
+	}
+	return webresearch.NewURLPolicy(nil, webresearch.WithTransparentEgressResolverCIDRs(prefixes))
+}
+
 // TestSearxngLiveSearch verifies the self-hosted SearXNG endpoint returns
 // usable public results through the webresearch pipeline.
 func TestSearxngLiveSearch(t *testing.T) {
-	urlPolicy := webresearch.NewURLPolicy(nil)
+	requireLiveSearxng(t)
+	urlPolicy := liveURLPolicy(t)
 	queryPolicy, err := webresearch.NewQueryPolicy(webresearch.QueryPolicyConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +95,7 @@ func TestSearxngLiveSearch(t *testing.T) {
 // SearXNG discovery (free) + Firecrawl content fetch (metered, at most
 // maxFetchedPages pages per run). Set FIRECRAWL_API_KEY in the environment.
 func TestSearxngSearchFirecrawlFetch(t *testing.T) {
+	requireLiveSearxng(t)
 	if os.Getenv("FIRECRAWL_API_KEY") == "" {
 		_ = godotenv.Load(filepath.Join("..", "..", "..", ".env"))
 	}
@@ -79,7 +103,7 @@ func TestSearxngSearchFirecrawlFetch(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("FIRECRAWL_API_KEY is not configured; skip metered fetch leg")
 	}
-	urlPolicy := webresearch.NewURLPolicy(nil)
+	urlPolicy := liveURLPolicy(t)
 	queryPolicy, err := webresearch.NewQueryPolicy(webresearch.QueryPolicyConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +157,8 @@ func TestSearxngSearchFirecrawlFetch(t *testing.T) {
 // SearXNG discovery + direct public fetch, with zero third-party metered
 // credits. Requires working public DNS on the machine.
 func TestSearxngSearchDirectFetch(t *testing.T) {
-	urlPolicy := webresearch.NewURLPolicy(nil)
+	requireLiveSearxng(t)
+	urlPolicy := liveURLPolicy(t)
 	queryPolicy, err := webresearch.NewQueryPolicy(webresearch.QueryPolicyConfig{})
 	if err != nil {
 		t.Fatal(err)
