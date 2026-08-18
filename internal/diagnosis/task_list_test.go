@@ -65,6 +65,23 @@ func TestDiagnosisTaskServiceListScopesAnalystAndPassesFilter(t *testing.T) {
 	}
 }
 
+func TestDiagnosisTaskServiceListPassesExternalCaseFilter(t *testing.T) {
+	ownerID := uuid.New()
+	caseID := uuid.New()
+	repo := &taskRepositoryStub{}
+	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))
+
+	_, err := service.List(context.Background(), TaskListQuery{
+		Actor: TaskActor{UserID: ownerID, IsAdmin: true}, ExternalCaseID: &caseID, Page: 1, PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if repo.listGotQuery.ExternalCaseID == nil || *repo.listGotQuery.ExternalCaseID != caseID {
+		t.Fatalf("external case filter = %v, want %s", repo.listGotQuery.ExternalCaseID, caseID)
+	}
+}
+
 func TestDiagnosisTaskServiceListNormalizesPagination(t *testing.T) {
 	repo := &taskRepositoryStub{}
 	service, _ := NewDiagnosisTaskService(repo, &taskCaseReaderStub{}, mustTestPolicyBuilder(t))

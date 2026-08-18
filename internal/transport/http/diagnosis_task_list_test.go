@@ -74,3 +74,27 @@ func TestDiagnosisTaskRoutesListMapsForbidden(t *testing.T) {
 		t.Fatalf("status = %d body = %s, want 403", response.Code, response.Body.String())
 	}
 }
+
+func TestDiagnosisTaskRoutesListReadsExternalCaseFilter(t *testing.T) {
+	useCase := &diagnosisTaskUseCaseStub{}
+	routes, err := NewDiagnosisTaskRoutes(
+		context.Background(), useCase, identityMiddleware(uuid.New(), true), func(c *gin.Context) { c.Next() },
+	)
+	if err != nil {
+		t.Fatalf("NewDiagnosisTaskRoutes(): %v", err)
+	}
+	router := NewRouter(zap.NewNop(), func(context.Context) error { return nil }, routes)
+	caseID := uuid.New()
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/diagnosis-tasks?caseId="+caseID.String(), nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if useCase.gotListQuery.ExternalCaseID == nil || *useCase.gotListQuery.ExternalCaseID != caseID {
+		t.Fatalf("external case filter = %v, want %s", useCase.gotListQuery.ExternalCaseID, caseID)
+	}
+	if !useCase.gotListQuery.Actor.IsAdmin {
+		t.Fatalf("actor = %+v, want admin", useCase.gotListQuery.Actor)
+	}
+}

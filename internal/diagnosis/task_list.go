@@ -15,12 +15,14 @@ const (
 )
 
 // TaskListQuery 是任务列表查询。非管理员 Actor 的可见范围固定为
-// 自己创建的任务，管理员可查看全部。
+// 自己创建的任务，管理员可查看全部；ExternalCaseID 可把结果收窄到
+// 指定工单（工单身份取自创建时冻结的快照）。
 type TaskListQuery struct {
-	Actor    TaskActor
-	Status   *TaskStatus
-	Page     int
-	PageSize int
+	Actor          TaskActor
+	Status         *TaskStatus
+	ExternalCaseID *uuid.UUID
+	Page           int
+	PageSize       int
 }
 
 // TaskListItem 是任务列表行：任务安全摘要 + 任务快照中的工单身份。
