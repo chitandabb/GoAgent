@@ -47,13 +47,12 @@ error mapping, role-check middleware.
 
 ### Frontend
 
-The workbench uses shadcn/ui as a source-owned component foundation while
-`design/DESIGN-apple.md` and `web/src/styles/tokens.css` continue to own the
-visual language. The migration outcome and current rules are recorded in
-`design/frontend.md` and `design/DESIGN-apple.md`:
+The workbench uses source-owned UI components with Radix and TanStack primitives;
+`web/src/styles/tokens.css` owns the visual language. The current component and
+interaction rules are recorded in `design/frontend.md`:
 
-- Existing interactive primitives migrate in one pass to shadcn/ui, Radix,
-  TanStack Table, and sonner rather than leaving two component systems.
+- Existing interactive primitives use the adopted Radix, TanStack Table, and
+  project-owned UI components rather than leaving multiple competing systems.
 - Pure presentation components without an established equivalent may remain a
   thin project-owned layer.
 - New complex widgets such as virtualized tables, date pickers, charts,

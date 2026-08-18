@@ -1,64 +1,43 @@
-# MESGuard Documentation
+# MESGuard 文档
 
-This directory is the single location for project documentation.
+根目录 [README](../README.md) 负责项目定位、启动方式和仓库结构；本目录只保留工程设计、开发运行、决策记录和评测事实。
 
-## Active Documents
+## 推荐阅读顺序
 
-| Document | Purpose |
-| --- | --- |
-| [Resume](简历.md) | Resume source of truth; only verified project outcomes may be written as metrics |
-| [Resume Project Points 1-2](resume-project-points-1-2.md) | Business, architecture, implementation, evidence, and interview narrative for the first two MESGuard resume items |
-| [Resume Project Point 3](resume-project-point-3.md) | Business, architecture, implementation, evidence, and interview boundary for mixed-document parsing and Agentic RAG |
-| [Development](development.md) | Local configuration, Docker, tests, and volume operation |
-| [Roadmap](roadmap.md) | Current delivery state and ordered next milestones |
-| [M3 Context Governance Spec](specs/m3-context-governance-and-layered-memory.md) | Implementation-ready scope, user stories, decisions, seams, and acceptance gates for resume point 4 |
-| [Agent Orchestration](design/agent-orchestration.md) | Single-Agent loop, thin Graph, Skill/Tool boundaries, GitHub MCP, and evaluation metrics |
+1. [开发指南](development.md)：本地依赖、Docker、API、前端和测试。
+2. [系统架构](design/system-architecture.md)：服务角色、数据流和故障边界。
+3. [Agent 编排与工具治理](design/agent-orchestration.md)：Runtime、Tool Profile、RunAccess 和 Skill。
+4. [API 与 SSE 契约](design/api.md)：HTTP 资源、认证、幂等、错误和事件流。
+5. [数据库设计](design/database.md)：核心表、版本、事务和历史事实。
+6. [知识入库与检索](design/rag-ingestion-and-retrieval.md)：解析、切块、向量召回和引用。
 
-## Engineering References
+## 工程设计
 
-| Document | Purpose |
-| --- | --- |
-| [Product and Workflow](design/product-and-workflow.md) | Target users, product boundaries, business flows, and staged delivery |
-| [Code Organization](design/code-organization.md) | Production/tool directory roles, package dependency direction, and deferred structural debt |
-| [System Architecture](design/system-architecture.md) | Runtime roles, component topology, data flows, deployment, and failure boundaries |
-| [Domain and State Machine](design/domain-and-state-machine.md) | Domain objects, lifecycle states, invariants, and event rules |
-| [Database Design](design/database.md) | PostgreSQL tables, constraints, indexes, migrations, and transaction boundaries |
-| [Messaging Design](design/messaging.md) | Outbox, RabbitMQ topology, retries, dead letters, acknowledgements, and worker recovery |
-| [API Design](design/api.md) | HTTP resources, authentication, authorization, idempotency, errors, and SSE contracts |
-| [Diagnostic Tools](design/diagnostic-tools.md) | Remote SQL Server, database evidence, logs, and diagnostic Tool governance |
-| [RAG Ingestion and Retrieval](design/rag-ingestion-and-retrieval.md) | Mixed-document ingestion, local layout routing, retrieval, Agentic RAG, Web Search boundary, and evaluation contract |
-| [Context Governance and Memory](design/context-governance-and-memory.md) | Token budgeting, Summary + Tail memory, Prompt Epochs, Tool/Skill cache boundaries, persistence, and evaluation contract |
-| [Frontend Design](design/frontend.md) | React workbench structure, design-token decisions, state-machine-to-UI mapping, and mock replacement |
+- [产品与工作流](design/product-and-workflow.md)
+- [领域与状态机](design/domain-and-state-machine.md)
+- [代码组织](design/code-organization.md)
+- [前端设计](design/frontend.md)
+- [消息与异步任务](design/messaging.md)
+- [诊断工具与安全边界](design/diagnostic-tools.md)
+- [Agent 可观测性](design/agent-observability.md)
+- [上下文治理与记忆](design/context-governance-and-memory.md)
 
-## Decisions
+## 架构决策
 
-| Document | Purpose |
-| --- | --- |
-| [ADR 001](decisions/001-modular-monolith-architecture.md) | Why MESGuard uses a modular monolith and manual dependency injection |
-| [ADR 002](decisions/002-prefer-open-source-components.md) | Prefer mature open-source components; hand-write only thin contract glue |
-| [ADR 003](decisions/003-local-onnx-layout-routing.md) | Why local ONNX handles bounded page/region routing while OCR/VLM remain configurable cloud capabilities |
-| [ADR 004](decisions/004-conversation-driven-diagnosis-commands.md) | Why conversations stay independent while the Agent creates durable diagnosis tasks through a guarded command Tool |
+- [ADR 001：模块化单体与手动依赖注入](decisions/001-modular-monolith-architecture.md)
+- [ADR 002：优先使用成熟开源组件](decisions/002-prefer-open-source-components.md)
+- [ADR 003：本地 ONNX 布局路由](decisions/003-local-onnx-layout-routing.md)
+- [ADR 004：会话驱动的诊断任务命令](decisions/004-conversation-driven-diagnosis-commands.md)
+- [ADR 005：统一 Agent Runtime 与稳定 Tool Profile](decisions/005-unified-agent-runtime-and-stable-tool-profiles.md)
 
-## Evaluation Records
+## 评测与证据
 
-| Document | Purpose |
-| --- | --- |
-| [Evaluations](evaluations/) | Reproducible fixed-set methods and measured observations; raw provider output stays ignored |
+[评测索引](evaluations/README.md)说明每类记录的范围、当前有效性和固定集限制。评测文件只记录可复核的方法与结果，不代表生产承诺。
 
-Documentation rules:
+## 文档规则
 
-- `README.md` at the repository root is only the project entry point.
-- `简历.md` is the only resume fact source. Supporting resume documents explain evidence and
-  boundaries but do not silently change resume metrics.
-- `resume-project-points-1-2.md` and `resume-project-point-3.md` are interview/engineering
-  explainers; measured results must link to an evaluation record and state dataset scope.
-- Operational instructions belong in `development.md`.
-- Current implementation progress and ordered next slices belong in `roadmap.md`.
-- Directory responsibilities and package dependency direction belong in
-  `design/code-organization.md`.
-- Stable product and engineering boundaries belong in the reference documents;
-  they must not be used to claim unimplemented features.
-- `api/openapi.yaml` is the only machine-readable HTTP/SSE contract and only follows implemented Handlers.
-- Long-lived design decisions belong in `decisions/`.
-- Do not duplicate the same command, status, or design explanation in multiple
-  documents.
+- 公开文档只描述当前实现；历史方案必须明确标为历史或已废弃。
+- 运行命令只维护在 [development.md](development.md)，避免多个文档复制不同版本。
+- API 的机器可读事实只维护在 [`api/openapi.yaml`](../api/openapi.yaml)。
+- 不在仓库文档中保存密码、API Key、个人简历和联系方式。
+- 合成测试数据可以提交；真实 ERP、客户、附件和 Provider 响应不得提交。

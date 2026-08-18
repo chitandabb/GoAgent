@@ -101,7 +101,7 @@ cmd / tools
 4. `internal/platform/config/config.go` 和部分 Repository 文件过大；
 5. 若干 `tools` 命令仍在 `package main` 中承载较多评测实现。
 
-在简历第四、第五点与前端完成后，联调前再按以下顺序处理：
+在统一 Runtime、评测和前端联调继续收口后，再按以下顺序处理：
 
 1. 先把评测实现抽到 `internal/evaluation/<capability>`，保留薄 Tool main；
 2. 在同一 package 内拆分大 Config 和 Repository 文件；
@@ -110,7 +110,6 @@ cmd / tools
 
 ## 文档治理
 
-- `docs/简历.md`：唯一简历事实源；
 - `docs/roadmap.md`：当前状态和下一切片；
 - `docs/design/*.md`：稳定设计和边界；
 - `docs/evaluations/*.md`：可复现实验与失败样本；
