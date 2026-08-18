@@ -145,6 +145,8 @@ services:
       TZ: Asia/Shanghai
     ports:
       - "${MESGUARD_SEARXNG_PORT:-8081}:8080"
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
 
   migrate:
     build:

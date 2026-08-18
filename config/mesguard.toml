@@ -38,7 +38,7 @@ conversationTimeoutMillis = 120000
 maxAgentRuns = 2
 maxToolCalls = 8
 maxEvidenceItems = 16
-maxTotalTokens = 16000
+maxTotalTokens = 48000
 timeoutMillis = 90000
 
 [agent.contextMemory]
@@ -320,8 +320,8 @@ timeoutMillis = 30000
 
 [webSearch]
 enabled = true
-searchProvider = "firecrawl"
-contentProvider = "firecrawl"
+searchProvider = "searxng"
+contentProvider = "direct"
 timeoutMillis = 30000
 maxResults = 5
 maxFetchedPages = 3

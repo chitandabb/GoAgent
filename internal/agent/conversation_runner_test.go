@@ -38,6 +38,7 @@ type conversationRunnerModelState struct {
 	searchKnowledgeIfAvailable bool
 	readAttachmentIfAvailable  bool
 	readTaskStatusIfAvailable  bool
+	searchWebIfAvailable       bool
 	omitKnowledgeCitation      bool
 	finalContent               string
 	schemas                    [][]string
@@ -174,6 +175,7 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 	hasKnowledgeResult := false
 	hasAttachmentResult := false
 	hasStatusResult := false
+	hasWebSearchResult := false
 	knowledgeSourceRef := ""
 	for _, message := range input {
 		if message.Role == schema.Tool && message.ToolName == ToolCreateDiagnosisTask {
@@ -194,6 +196,9 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 				knowledgeSourceRef = payload.CitationSources[0].SourceRef
 			}
 		}
+		if message.Role == schema.Tool && message.ToolName == ToolWebSearch {
+			hasWebSearchResult = true
+		}
 	}
 	if m.state.readAttachmentIfAvailable && slices.Contains(names, ToolReadAttachment) && !hasAttachmentResult {
 		return runnerTestToolCall(ToolReadAttachment,
@@ -210,6 +215,9 @@ func (m *conversationRunnerTestModel) Generate(ctx context.Context, input []*sch
 	}
 	if m.state.searchKnowledgeIfAvailable && slices.Contains(names, ToolSearchKnowledge) && !hasKnowledgeResult {
 		return runnerTestToolCall(ToolSearchKnowledge, `{"query":"连接池超时","maxResults":3}`), nil
+	}
+	if m.state.searchWebIfAvailable && slices.Contains(names, ToolWebSearch) && !hasWebSearchResult {
+		return runnerTestToolCall(ToolWebSearch, `{"query":"PostgreSQL timeout","maxResults":3}`), nil
 	}
 	if knowledgeSourceRef != "" {
 		if m.state.omitKnowledgeCitation {

@@ -1,0 +1,103 @@
+# MESGuard 自托管 SearXNG 配置（本地开发/演示用）
+# 基于官方默认值，做三处覆盖：
+#   1. 关闭限流器（本地可信网络，避免 Docker 网关来源被 403）
+#   2. 启用 JSON 输出（webresearch 的 searxng provider 依赖 format=json）
+#   3. 引擎白名单：中国大陆可直接访问的后端，去掉 Google/DDG/Brave 等
+# 生产部署请重新生成 secret_key 并按需调整引擎。
+use_default_settings: true
+
+general:
+  instance_name: "MESGuard Search"
+  debug: false
+
+server:
+  # 本地演示用固定 key；生产环境请更换为随机值（openssl rand -hex 32）
+  secret_key: "mesguard-local-dev-only-please-rotate"
+  limiter: false
+  public_instance: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 1
+  default_lang: "zh-CN"
+  autocomplete: ""
+
+ui:
+  default_theme: simple
+
+outgoing:
+  request_timeout: 6.0
+  pool_connections: 20
+  pool_maxsize: 20
+
+engines:
+  # 中国大陆可达的通用搜索
+  - name: baidu
+    disabled: false
+  - name: quark
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: 360search
+    disabled: false
+  - name: bing
+    disabled: false
+  # 技术/代码/文档
+  - name: github
+    disabled: false
+  - name: stackexchange
+    disabled: false
+  - name: pypi
+    disabled: false
+  - name: npm
+    disabled: false
+  # 学术
+  - name: arxiv
+    disabled: false
+  - name: pubmed
+    disabled: false
+  - name: openalex
+    disabled: false
+  # 文献知识
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: true
+  # 明确禁用的引擎（国内不可达、需要 API key 或质量差）
+  - name: google
+    disabled: true
+  - name: "google cse"
+    disabled: true
+  - name: google_images
+    disabled: true
+  - name: google_news
+    disabled: true
+  - name: google_scholar
+    disabled: true
+  - name: google_videos
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: duckduckgo_web
+    disabled: true
+  - name: duckduckgo_extra
+    disabled: true
+  - name: duckduckgo_definitions
+    disabled: true
+  - name: duckduckgo_weather
+    disabled: true
+  - name: brave
+    disabled: true
+  - name: braveapi
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: yahoo
+    disabled: true
+  - name: yandex
+    disabled: true
+  - name: yandex_api
+    disabled: true

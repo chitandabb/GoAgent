@@ -55,10 +55,21 @@ type ConversationRunnerConfig struct {
 	MemorySourceRecoveryMaxCalls int
 	EnableStreaming              bool
 	ContextPreflight             ConversationContextPreflightConfig
+	// WebResearch 为本次 Conversation 轮次注入 web research RunState。
+	// 非 nil 时 web_search/fetch_public_page 工具才会被装配（见
+	// default_runner.go）；nil 表示部署未装配 web 工具。Conversation 没有
+	// 工单快照，敏感词表固定为空。
+	WebResearch WebResearchRunContext
 	// SQLDataSourceID 是启动期解析的只读数据源 UUID；非零时 Conversation
 	// RunAccess 获得 sql.read 并把该 ID 作为唯一数据源 Grant。零值表示
 	// 部署未配置 Conversation 只读数据源，不授予任何 sql.read。
 	SQLDataSourceID uuid.UUID
+}
+
+// WebResearchRunContext 注入每轮 web research 状态。webresearch.Service
+// 实现该接口；引擎测试使用 stub 代替。
+type WebResearchRunContext interface {
+	WithRunContext(ctx context.Context, userID string, sensitiveTerms []string) (context.Context, error)
 }
 
 // ConversationRunner executes one lightweight workbench turn. It is separate
@@ -84,6 +95,7 @@ type ConversationRunner struct {
 	memorySourceRecoveryMaxCalls int
 	enableStreaming              bool
 	contextPreflight             ConversationContextPreflightConfig
+	webResearch                  WebResearchRunContext
 	sqlDataSourceID              uuid.UUID
 }
 
@@ -174,6 +186,7 @@ func NewConversationRunner(cfg ConversationRunnerConfig) (*ConversationRunner, e
 		memorySourceRecoveryMaxCalls: cfg.MemorySourceRecoveryMaxCalls,
 		enableStreaming:              cfg.EnableStreaming,
 		contextPreflight:             cfg.ContextPreflight,
+		webResearch:                  cfg.WebResearch,
 		sqlDataSourceID:              cfg.SQLDataSourceID,
 	}, nil
 }
@@ -248,6 +261,19 @@ func (r *ConversationRunner) Respond(ctx context.Context, request conversation.A
 	runCtx = resilience.WithRunIdentity(runCtx, resilience.RunIdentity{
 		RunID: request.UserMessage.ID.String(), ConversationID: request.Conversation.ID.String(),
 	})
+	if r.webResearch != nil {
+		// web_search/fetch_public_page 工具要求 ctx 携带本轮 RunState
+		// （service.Search 第一步 runStateForUser）。Conversation 没有工单
+		// 快照，敏感词表固定为空；与 Diagnosis Worker 的注入保持一致。
+		runCtx, err = r.webResearch.WithRunContext(
+			runCtx, commandContext.Actor.UserID.String(), nil,
+		)
+		if err != nil {
+			return conversation.AgentResponse{}, fmt.Errorf(
+				"build web research run scope: %w", err,
+			)
+		}
+	}
 	runCtx, agentSpan := observability.StartAgentRun(runCtx, "conversation")
 	runCtx = observability.BindTraceIdentity(runCtx)
 	traceID = observability.TraceID(runCtx)

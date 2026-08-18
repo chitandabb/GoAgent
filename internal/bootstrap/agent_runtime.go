@@ -449,6 +449,10 @@ func buildAgentRuntimeForRole(
 			ToolGrowthReserveTokens: cfg.Agent.ContextMemory.ToolGrowthReserveTokens,
 		}
 	}
+	var conversationWebResearch mesagent.WebResearchRunContext
+	if runtime.webResearch != nil {
+		conversationWebResearch = runtime.webResearch
+	}
 	runtime.conversation, err = mesagent.NewConversationRunner(mesagent.ConversationRunnerConfig{
 		ChatModel: chatModel, CitationRepairer: citationRepairer,
 		CitationRepairPolicy: citationRepairPolicy, ToolCatalog: conversationCatalog,
@@ -466,6 +470,7 @@ func buildAgentRuntimeForRole(
 		MemorySourceRecoveryMaxCalls: cfg.Agent.ContextMemory.SourceRecoveryMaxCalls,
 		ContextPreflight:             contextPreflight,
 		SQLDataSourceID:              conversationSQLDataSourceID,
+		WebResearch:                  conversationWebResearch,
 	})
 	if err != nil {
 		_ = runtime.close()

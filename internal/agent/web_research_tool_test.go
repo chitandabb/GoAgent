@@ -7,13 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
+	"github.com/chitandabb/GoAgent/internal/conversation"
 	"github.com/chitandabb/GoAgent/internal/webresearch"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type webResearcherStub struct {
@@ -143,4 +147,90 @@ func TestConversationProfileExposesWebToolsAndExecutionRequiresWebPermission(t *
 	if _, err := guarded.InvokableRun(denied, `{"query":"PostgreSQL timeout"}`); !errors.Is(err, ErrToolNotAllowed) {
 		t.Fatalf("denied web_search error=%v, want ErrToolNotAllowed", err)
 	}
+}
+
+// TestConversationRunnerInjectsWebResearchRunState 是 Conversation web 工具
+// 全链路的回归测试：此前 Conversation Runner 从未调用 WithRunContext 注入
+// RunState，web_search 在真实 Service 上总是失败为
+// ErrRunStateRequired（safeWebResearchError 兜底为 "public web research is
+// unavailable" 并被标成 tool_call_rejected）。现在 Runner 注入 RunState 后，
+// 工具必须通过真实 QueryPolicy/URLPolicy 完成一次搜索。
+func TestConversationRunnerInjectsWebResearchRunState(t *testing.T) {
+	queryPolicy, err := webresearch.NewQueryPolicy(webresearch.QueryPolicyConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlPolicy := webresearch.NewURLPolicy(nil)
+	service, err := webresearch.NewService(webresearch.ServiceConfig{
+		SearchProvider:  staticSearchProvider{},
+		ContentProvider: staticContentProvider{urlPolicy: urlPolicy},
+		QueryPolicy:     queryPolicy, URLPolicy: urlPolicy,
+		MaxResults: 5, MaxFetchedPages: 1, MaxPageChars: 4000, MaxRounds: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchTool, err := NewWebSearchTool(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := NewConversationDefaultToolCatalog(context.Background(), DefaultToolCatalogDependencies{
+		ExternalCases: runnerTestCaseGetter{}, WebSearch: searchTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &conversationRunnerModelState{searchWebIfAvailable: true}
+	runner, err := NewConversationRunner(ConversationRunnerConfig{
+		ChatModel:         &conversationRunnerTestModel{state: state},
+		ToolCatalog:       catalog,
+		SystemInstruction: "conversation web research test",
+		ModelProvider:     "fixture", ModelID: "fixture-v1",
+		PromptVersion: "conversation-test-v1", Logger: zap.NewNop(),
+		MaxContextRunes: conversation.MaxContentRunes,
+		WebResearch:     service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, ctx := conversationRunnerRequest(nil)
+	response, err := runner.Respond(ctx, request)
+	if err != nil {
+		t.Fatalf("Respond(): %v", err)
+	}
+	if response.Content == "" {
+		t.Fatal("response content is empty after web search turn")
+	}
+	// 模型必须真正看到 web_search 的执行结果（而不是被拒绝的失败编码）。
+	found := false
+	for _, input := range state.inputs {
+		for _, entry := range input {
+			if strings.Contains(entry, string(schema.Tool)+"\x00"+ToolWebSearch) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("model never received a web_search tool result; schemas=%v inputs=%v", state.schemas, state.inputs)
+	}
+}
+
+// staticSearchProvider 固定返回一条真实公网候选（不发起网络调用）。
+type staticSearchProvider struct{}
+
+func (staticSearchProvider) Search(context.Context, webresearch.PublicQuery, int) ([]webresearch.ProviderSearchResult, error) {
+	return []webresearch.ProviderSearchResult{{
+		URL: "https://www.postgresql.org/docs/current/logical-replication.html",
+		Title: "PostgreSQL: Documentation: 17: Chapter 31. Logical Replication",
+		Description: "Logical replication is a method of replicating data objects and their changes, based on their replication identity.",
+	}}, nil
+}
+
+// staticContentProvider 直接返回页面内容（URLPolicy 已由 Service 校验）。
+type staticContentProvider struct{ urlPolicy *webresearch.URLPolicy }
+
+func (p staticContentProvider) Fetch(ctx context.Context, target webresearch.PublicURL) (webresearch.ProviderPage, error) {
+	return webresearch.ProviderPage{
+		URL: target.String(), Title: "Logical Replication", Markdown: "# Logical Replication\n\nLogical replication is a method of replicating data.",
+	}, nil
 }
