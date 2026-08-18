@@ -3,10 +3,13 @@
 /.firecrawl/
 /.playwright-cli/
 /.scratch/
-/.claude/settings.local.json
+/.claude/
 /docs/evidence/
 /docs/demos/
 /logs/
 /output/
 *.exe
 *.test
+*.log
+.DS_Store
+coverage/
