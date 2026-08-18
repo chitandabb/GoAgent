@@ -44,16 +44,9 @@ export async function changePassword(
   currentPassword: string,
   newPassword: string,
 ): Promise<void> {
-  try {
-    await request<unknown>('/api/v1/auth/change-password', {
-      method: 'POST',
-      body: JSON.stringify({ currentPassword, newPassword }),
-    })
-    setCSRFToken(null)
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      throw new ApiError(error.code, '后端暂未提供修改密码接口', error.status, error.requestId)
-    }
-    throw error
-  }
+  await request<unknown>('/api/v1/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  })
+  setCSRFToken(null)
 }

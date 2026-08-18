@@ -13,7 +13,7 @@ export function AdminLayout() {
     <div>
       <PageHeader
         title="系统管理"
-        subtitle="用户、依赖状态与运行指标（演示数据，部分管理操作为演示实现）"
+        subtitle="用户管理已接入真实后端；数据源与 Catalog 管理、系统状态监控尚未提供后端接口"
       />
       <div className="mb-6 flex items-center gap-2">
         <NavLink to="/admin/users" className={tabCls}>
