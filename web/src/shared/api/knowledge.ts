@@ -1,9 +1,17 @@
 import { request } from './client'
 import type {
   KnowledgeCitationData,
+  KnowledgeDocumentListData,
   KnowledgeIngestionResponse,
   KnowledgeIngestionTask,
 } from './m1-types'
+
+/** 分页查询企业知识库文档列表（global 范围，按创建时间倒序）。管理员专用。 */
+export function listKnowledgeDocuments(page = 1, pageSize = 20): Promise<KnowledgeDocumentListData> {
+  return request<KnowledgeDocumentListData>(
+    `/api/v1/admin/knowledge-ingestion-tasks?page=${page}&pageSize=${pageSize}`,
+  )
+}
 
 /** 上传企业知识文档（首个版本）。multipart: file + title（可选）。 */
 export function createKnowledgeDocument(

@@ -640,7 +640,7 @@ paths:
     get:
       operationId: listDiagnosisTasks
       summary: 分页查询当前用户可见的诊断任务
-      description: 分析员只能看到自己创建的任务，管理员可查看全部；按创建时间倒序，支持 status 筛选。工单身份来自创建时冻结的快照。
+      description: 分析员只能看到自己创建的任务，管理员可查看全部；按创建时间倒序，支持 status 与 caseId 筛选。工单身份来自创建时冻结的快照。
       security:
         - sessionCookie: []
       parameters:
@@ -650,6 +650,13 @@ paths:
           schema:
             type: string
             enum: [pending, running, cancel_requested, succeeded, failed, cancelled]
+        - name: caseId
+          in: query
+          required: false
+          description: 按创建时冻结的外部工单 ID 过滤；必须是合法 UUID
+          schema:
+            type: string
+            format: uuid
         - name: page
           in: query
           required: false
@@ -1112,6 +1119,39 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         "409": {$ref: "#/components/responses/Conflict"}
         "503": {$ref: "#/components/responses/DependencyUnavailable"}
+  /api/v1/admin/knowledge-ingestion-tasks:
+    get:
+      operationId: listKnowledgeDocuments
+      summary: 管理员分页查询企业知识库文档列表
+      description: 返回 global 范围文档（按创建时间倒序），每行附带最新版本号和最新解析任务状态；不返回文档内容或对象存储地址。
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 文档列表与分页信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeDocumentListResponse"
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
   /api/v1/admin/knowledge-ingestion-tasks/{taskId}:
     get:
       operationId: getKnowledgeIngestionTask
@@ -1914,7 +1954,7 @@ components:
         seq: {type: integer, format: int64, minimum: 1}
         eventType:
           type: string
-          enum: [turn_queued, turn_running, turn_retry_scheduled, turn_completed, turn_failed]
+          enum: [turn_queued, turn_running, turn_retry_scheduled, turn_message_delta, turn_completed, turn_failed]
         payload:
           type: object
           additionalProperties: true
@@ -2550,3 +2590,46 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/KnowledgeIngestionTaskData"
+    KnowledgeDocumentListItem:
+      type: object
+      required: [documentId, title, scope, version, taskId, status, stage, progressPercent, createdAt]
+      properties:
+        documentId: {type: string, format: uuid}
+        title: {type: string}
+        scope:
+          type: string
+          enum: [global, personal]
+        version:
+          type: integer
+          description: 最新版本号；尚无版本的文档为 0
+        taskId:
+          type: string
+          format: uuid
+          description: 最新解析任务 ID；尚无任务的文档为 nil UUID
+        status:
+          type: [string, "null"]
+          enum: [pending, running, retry_wait, cancel_requested, succeeded, partial_succeeded, failed, cancelled, null]
+        stage:
+          type: [string, "null"]
+          enum: [uploaded, scanning, parsing, chunking, indexing, publishing, completed, null]
+        progressPercent: {type: integer, minimum: 0, maximum: 100}
+        createdAt: {type: string, format: date-time}
+    KnowledgeDocumentListData:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeDocumentListItem"
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, format: int64, minimum: 0}
+    KnowledgeDocumentListResponse:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required: [data]
+          properties:
+            data:
+              $ref: "#/components/schemas/KnowledgeDocumentListData"

@@ -122,7 +122,7 @@ export function recoverTask(
 
 export function listDiagnosisTasks(query: DiagnosisTaskListQuery = {}): Promise<DiagnosisTaskListData> {
   return request<DiagnosisTaskListData>(
-    `/api/v1/diagnosis-tasks${queryString({ status: query.status, page: query.page, pageSize: query.pageSize })}`,
+    `/api/v1/diagnosis-tasks${queryString({ status: query.status, caseId: query.caseId, page: query.page, pageSize: query.pageSize })}`,
   )
 }
 
