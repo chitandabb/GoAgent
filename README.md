@@ -10,7 +10,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![RabbitMQ](https://img.shields.io/badge/RabbitMQ-AMQP-FF6600?logo=rabbitmq&logoColor=white)](https://www.rabbitmq.com/)
 [![MinIO](https://img.shields.io/badge/MinIO-S3-D14C02?logo=minio&logoColor=white)](https://min.io/)
-[![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 开发语言：Go + TypeScript/React ｜ 运行环境：Docker Compose 一键启动 ｜ 状态：前后端真实联调可用
 
@@ -191,6 +191,6 @@ go run ./cmd/mesguard-user -username demo-admin -display-name "Demo Admin" -role
 
 ## 📄 许可证
 
-仓库保留原始 [GopherAI](https://github.com/youngyangyang04/GopherAI) 基线中的 **GPLv3** 许可证（见 [LICENSE](LICENSE)）。本项目在该开源基线上持续演进，当前不再额外声明新的授权方式。
+本项目基于 **MIT 许可证**开放（见 [LICENSE](LICENSE)）。
 
 > 演示环境使用**合成数据**（ERP、账号、工单、文档均为本地构造），不含任何真实客户信息与真实密钥；请勿将演示配置用于生产环境。
