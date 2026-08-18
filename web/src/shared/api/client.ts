@@ -33,7 +33,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
 
-  if (init.body && !headers.has('Content-Type')) {
+  if (init.body && !headers.has('Content-Type') && !(init.body instanceof FormData)) {
+    // FormData 必须由浏览器自动设置 multipart/form-data; boundary=...，
+    // 手动覆盖为 application/json 会导致服务端无法解析上传文件。
     headers.set('Content-Type', 'application/json')
   }
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) {
