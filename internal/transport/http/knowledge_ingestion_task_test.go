@@ -20,6 +20,9 @@ type knowledgeTaskUseCaseStub struct {
 	cancelResult    knowledge.IngestionCancelResult
 	cancelErr       error
 	cancelRequested uuid.UUID
+	listPage        knowledge.DocumentListPage
+	gotPage         int
+	gotSize         int
 }
 
 func (s *knowledgeTaskUseCaseStub) Get(context.Context, uuid.UUID) (knowledge.IngestionTaskDetail, error) {
@@ -31,6 +34,52 @@ func (s *knowledgeTaskUseCaseStub) Cancel(
 ) (knowledge.IngestionCancelResult, error) {
 	s.cancelRequested = requestedBy
 	return s.cancelResult, s.cancelErr
+}
+
+func (s *knowledgeTaskUseCaseStub) ListDocuments(_ context.Context, page, pageSize int) (knowledge.DocumentListPage, error) {
+	s.gotPage, s.gotSize = page, pageSize
+	return s.listPage, nil
+}
+
+func TestKnowledgeIngestionTaskListReturnsDocuments(t *testing.T) {
+	adminID := uuid.New()
+	documentID := uuid.New()
+	useCase := &knowledgeTaskUseCaseStub{listPage: knowledge.DocumentListPage{
+		Items: []knowledge.DocumentListItem{{
+			DocumentID: documentID, Title: "回冲科目对照表", Scope: knowledge.ScopeGlobal,
+			Version: 3, TaskID: uuid.New(), Status: knowledge.IngestionSucceeded,
+			Stage: knowledge.IngestionStageCompleted, ProgressPercent: 100,
+			AttemptCount: 1, MaxAttempts: 3,
+			CreatedAt: time.Date(2026, 8, 10, 15, 0, 0, 0, time.UTC),
+		}},
+		Total: 1, Page: 1, PageSize: 20,
+	}}
+	router := newKnowledgeTaskTestRouter(t, useCase, adminID, true)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet,
+		"/api/v1/admin/knowledge-ingestion-tasks?page=1&pageSize=20", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if useCase.gotPage != 1 || useCase.gotSize != 20 {
+		t.Fatalf("list pagination = %d/%d", useCase.gotPage, useCase.gotSize)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"title":"回冲科目对照表"`) || !strings.Contains(body, `"version":3`) ||
+		!strings.Contains(body, `"progressPercent":100`) || !strings.Contains(body, `"total":1`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestKnowledgeIngestionTaskListRequiresAdmin(t *testing.T) {
+	useCase := &knowledgeTaskUseCaseStub{}
+	router := newKnowledgeTaskTestRouter(t, useCase, uuid.New(), false)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet,
+		"/api/v1/admin/knowledge-ingestion-tasks", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestKnowledgeIngestionTaskGetReturnsProgressWithoutCheckpointOrObjectKey(t *testing.T) {

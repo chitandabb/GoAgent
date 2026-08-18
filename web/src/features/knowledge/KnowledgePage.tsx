@@ -1,15 +1,15 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, Upload } from 'lucide-react'
+import { ChevronDown, FileText, RotateCcw, Upload } from 'lucide-react'
 import { useAuth } from '@/app/auth'
 import * as api from '@/shared/api'
 import type {
   IngestionStage,
   IngestionTaskStatus,
-  KnowledgeIngestionTask,
+  KnowledgeDocumentListItem,
 } from '@/shared/api/m1-types'
 import type { Tone } from '@/shared/lib/status'
-import { fmtDateTime } from '@/shared/lib/fmt'
+import { fmtDateTime, shortId } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Card } from '@/shared/ui/Card'
@@ -17,54 +17,64 @@ import { ConfirmDialog } from '@/shared/ui/Dialog'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { FieldLabel, TextInput } from '@/shared/ui/Field'
 import { PageHeader } from '@/shared/ui/PageHeader'
+import { Spinner } from '@/shared/ui/Spinner'
 import { useToast } from '@/shared/ui/Toast'
 
-const terminalStatuses: IngestionTaskStatus[] = ['succeeded', 'failed', 'cancelled']
+const terminalStatuses: IngestionTaskStatus[] = ['succeeded', 'partial_succeeded', 'failed', 'cancelled']
 
 const statusMeta: Record<IngestionTaskStatus, { label: string; tone: Tone }> = {
   pending: { label: '等待中', tone: 'gray' },
-  queued: { label: '排队中', tone: 'blue' },
   running: { label: '解析中', tone: 'blue' },
+  retry_wait: { label: '等待重试', tone: 'orange' },
+  cancel_requested: { label: '取消中', tone: 'orange' },
   succeeded: { label: '已完成', tone: 'green' },
+  partial_succeeded: { label: '部分完成', tone: 'orange' },
   failed: { label: '失败', tone: 'red' },
   cancelled: { label: '已取消', tone: 'orange' },
 }
 
 const stageLabels: Record<IngestionStage, string> = {
-  staged: '文件已暂存',
+  uploaded: '文件已暂存',
+  scanning: '校验扫描',
   parsing: '解析内容',
   chunking: '生成检索块',
-  embedding: '生成向量',
+  indexing: '建立索引',
   publishing: '发布知识',
-  done: '处理完成',
+  completed: '处理完成',
 }
 
-interface UploadRecord {
-  taskId: string
-  fileName: string
-  title: string
-  initialTask: KnowledgeIngestionTask
+function statusBadgeTone(status: IngestionTaskStatus | null): Tone {
+  if (!status || !(status in statusMeta)) return 'gray'
+  return statusMeta[status].tone
 }
 
-function IngestionRecord({
-  record,
-  onCancel,
+function statusLabel(status: IngestionTaskStatus | null): string {
+  if (!status) return '暂无解析任务'
+  return status in statusMeta ? statusMeta[status].label : status
+}
+
+function DocumentRow({
+  item,
   cancelling,
+  onCancel,
+  onUploadVersion,
+  versionUploading,
 }: {
-  record: UploadRecord
-  onCancel: (taskId: string) => void
+  item: KnowledgeDocumentListItem
   cancelling: boolean
+  onCancel: (taskId: string) => void
+  onUploadVersion: (item: KnowledgeDocumentListItem) => void
+  versionUploading: boolean
 }) {
-  const taskQuery = useQuery({
-    queryKey: ['ingestion-task', record.taskId],
-    queryFn: () => api.getKnowledgeIngestionTask(record.taskId),
-    initialData: record.initialTask,
-    refetchInterval: (query) =>
-      query.state.data && terminalStatuses.includes(query.state.data.status) ? false : 2000,
+  const [detailOpen, setDetailOpen] = useState(false)
+  const active = item.status !== null && !terminalStatuses.includes(item.status)
+  const progress = Math.max(0, Math.min(100, item.progressPercent))
+  // 展开失败详情时才拉取任务事实（含 attempt 与安全错误摘要）
+  const detail = useQuery({
+    queryKey: ['ingestion-task', item.taskId],
+    queryFn: () => api.getKnowledgeIngestionTask(item.taskId),
+    enabled: detailOpen && item.taskId !== '',
   })
-  const task = taskQuery.data
-  const active = !terminalStatuses.includes(task.status)
-  const progress = Math.max(0, Math.min(100, task.progressPercent))
 
   return (
     <Card className="px-5 py-4">
@@ -74,49 +84,90 @@ function IngestionRecord({
             <FileText className="size-4" />
           </div>
           <div className="min-w-0">
-            <p className="truncate font-semibold text-ink">{record.title || record.fileName}</p>
-            <p className="mt-0.5 truncate text-[12px] text-ink-48">{record.fileName}</p>
+            <div className="flex items-center gap-2">
+              <p className="truncate font-semibold text-ink">{item.title || '未命名文档'}</p>
+              <Badge tone="gray">v{item.version}</Badge>
+            </div>
+            <p className="mt-0.5 text-[12px] text-ink-48">
+              创建于 {fmtDateTime(item.createdAt)}
+              {item.stage ? ` · ${stageLabels[item.stage] ?? item.stage}` : ''}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Badge tone={statusMeta[task.status].tone} dot={active}>
-            {statusMeta[task.status].label}
+          <Badge tone={statusBadgeTone(item.status)} dot={active}>
+            {statusLabel(item.status)}
           </Badge>
-          {active && (
-            <Button
-              variant="danger-ghost"
-              size="sm"
-              disabled={cancelling || Boolean(task.cancelRequestedAt)}
-              onClick={() => onCancel(task.taskId)}
-            >
-              {task.cancelRequestedAt ? '取消中…' : '取消解析'}
+          {active && item.status !== 'cancel_requested' && (
+            <Button variant="danger-ghost" size="sm" disabled={cancelling} onClick={() => onCancel(item.taskId)}>
+              {cancelling ? '取消中…' : '取消解析'}
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setDetailOpen((current) => !current)}
+            aria-expanded={detailOpen}
+          >
+            <ChevronDown className={`size-3.5 transition-transform ${detailOpen ? 'rotate-180' : ''}`} />
+            详情
+          </Button>
+          <Button
+            variant="neutral"
+            size="sm"
+            disabled={versionUploading}
+            onClick={() => onUploadVersion(item)}
+          >
+            <RotateCcw className="size-3.5" />
+            上传新版本
+          </Button>
         </div>
       </div>
 
-      <div className="mt-4">
-        <div className="mb-1.5 flex items-center justify-between text-[12px] text-ink-48">
-          <span>{stageLabels[task.stage]}</span>
-          <span className="tabular-nums">{progress}%</span>
+      {active && (
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center justify-between text-[12px] text-ink-48">
+            <span>{stageLabels[item.stage ?? 'uploaded']}</span>
+            <span className="tabular-nums">{progress}%</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-pearl">
+            <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
+          </div>
         </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-pearl">
-          <div
-            className={`h-full rounded-full transition-[width] ${task.status === 'failed' ? 'bg-danger' : task.status === 'cancelled' ? 'bg-warn' : 'bg-primary'}`}
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      </div>
-
-      {task.lastError?.message && (
-        <p className="mt-3 rounded-utility bg-danger-soft px-3 py-2 text-[12px] text-danger">
-          {task.lastError.message}
-        </p>
       )}
-      <p className="mt-3 text-[11px] text-ink-48">
-        创建于 {fmtDateTime(task.createdAt)} · 已尝试 {task.attemptCount}/{task.maxAttempts} 次
-        {taskQuery.isError ? ' · 状态刷新失败，将自动重试' : ''}
-      </p>
+
+      {detailOpen && (
+        <div className="mt-4 rounded-utility bg-pearl px-4 py-3 text-[12px] leading-[1.7] text-ink-80">
+          {detail.isPending ? (
+            <span className="text-ink-48">正在读取任务事实…</span>
+          ) : detail.isError ? (
+            <span className="text-ink-48">
+              任务详情读取失败
+              <button
+                type="button"
+                className="press ml-2 text-primary hover:underline"
+                onClick={() => void detail.refetch()}
+              >
+                重试
+              </button>
+            </span>
+          ) : (
+            <>
+              <p>
+                任务 {shortId(detail.data.taskId)} · 已尝试 {detail.data.attemptCount}/
+                {detail.data.maxAttempts} 次
+                {detail.data.updatedAt ? ` · 更新于 ${fmtDateTime(detail.data.updatedAt)}` : ''}
+              </p>
+              {detail.data.lastError && (
+                <p className="mt-1 text-danger">
+                  失败原因（{detail.data.lastError.code}）：{detail.data.lastError.message}
+                </p>
+              )}
+              {!detail.data.lastError && <p className="mt-1 text-ink-48">该任务没有记录错误摘要。</p>}
+            </>
+          )}
+        </div>
+      )}
     </Card>
   )
 }
@@ -128,52 +179,52 @@ export function KnowledgePage() {
   const isAdmin = user?.role === 'admin'
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
-  const [records, setRecords] = useState<UploadRecord[]>([])
+  const [page, setPage] = useState(1)
   const [cancelTaskId, setCancelTaskId] = useState<string | null>(null)
+  const [versionTarget, setVersionTarget] = useState<KnowledgeDocumentListItem | null>(null)
+  const versionFileRef = useRef<HTMLInputElement>(null)
+
+  const documents = useQuery({
+    queryKey: ['knowledge-documents', page],
+    queryFn: () => api.listKnowledgeDocuments(page, 20),
+    enabled: isAdmin,
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? []
+      return items.some((item) => item.status !== null && !terminalStatuses.includes(item.status))
+        ? 2000
+        : false
+    },
+  })
 
   const upload = useMutation({
-    mutationFn: async ({ selectedFile, documentTitle }: { selectedFile: File; documentTitle: string }) => {
-      const response = await api.createKnowledgeDocument(
-        selectedFile,
-        documentTitle,
-        api.createIdempotencyKey(),
-      )
-      return { response, selectedFile, documentTitle }
-    },
-    onSuccess: ({ response, selectedFile, documentTitle }) => {
-      const initialTask: KnowledgeIngestionTask = {
-        taskId: response.taskId,
-        documentId: response.documentId,
-        documentVersionId: response.documentVersionId,
-        status: response.status,
-        stage: response.stage,
-        attemptCount: 0,
-        maxAttempts: 0,
-        progressPercent: 0,
-        createdAt: response.createdAt,
-        updatedAt: response.createdAt,
-      }
-      setRecords((current) => [
-        {
-          taskId: response.taskId,
-          fileName: selectedFile.name,
-          title: documentTitle.trim(),
-          initialTask,
-        },
-        ...current.filter((item) => item.taskId !== response.taskId),
-      ])
+    mutationFn: ({ selectedFile, documentTitle }: { selectedFile: File; documentTitle: string }) =>
+      api.createKnowledgeDocument(selectedFile, documentTitle, api.createIdempotencyKey()),
+    onSuccess: (response) => {
       setFile(null)
       setTitle('')
+      setPage(1)
+      void queryClient.invalidateQueries({ queryKey: ['knowledge-documents'] })
       toast.success(response.replayed ? '已恢复相同上传任务' : '上传成功，服务端正在解析')
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : '上传失败'),
   })
 
+  const uploadVersion = useMutation({
+    mutationFn: ({ documentId, selectedFile }: { documentId: string; selectedFile: File }) =>
+      api.createKnowledgeDocumentVersion(documentId, selectedFile, api.createIdempotencyKey()),
+    onSuccess: (response) => {
+      setVersionTarget(null)
+      void queryClient.invalidateQueries({ queryKey: ['knowledge-documents'] })
+      toast.success(response.replayed ? '已恢复相同版本任务' : '新版本已上传，服务端正在解析')
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : '上传新版本失败'),
+  })
+
   const cancel = useMutation({
     mutationFn: (taskId: string) => api.cancelKnowledgeIngestionTask(taskId),
-    onSuccess: (task) => {
-      queryClient.setQueryData(['ingestion-task', task.taskId], task)
+    onSuccess: () => {
       setCancelTaskId(null)
+      void queryClient.invalidateQueries({ queryKey: ['knowledge-documents'] })
       toast.success('已提交取消请求')
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : '取消失败'),
@@ -187,6 +238,24 @@ export function KnowledgePage() {
     upload.mutate({ selectedFile: file, documentTitle: title })
   }
 
+  const chooseVersionFile = (item: KnowledgeDocumentListItem) => {
+    setVersionTarget(item)
+    versionFileRef.current?.click()
+  }
+
+  const onVersionFileChosen = (files: FileList | null) => {
+    const selected = files?.[0] ?? null
+    if (versionTarget && selected) {
+      uploadVersion.mutate({ documentId: versionTarget.documentId, selectedFile: selected })
+    } else {
+      setVersionTarget(null)
+    }
+  }
+
+  const items = documents.data?.items ?? []
+  const total = documents.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / 20))
+
   return (
     <div>
       <PageHeader
@@ -197,7 +266,9 @@ export function KnowledgePage() {
       {!isAdmin && (
         <Card className="mb-5 border-warn bg-warn-soft px-5 py-3.5">
           <p className="text-[13px] font-semibold text-warn">仅管理员可管理企业知识库</p>
-          <p className="mt-1 text-[12px] text-ink-48">当前账号无法上传或取消知识文档解析任务。</p>
+          <p className="mt-1 text-[12px] text-ink-48">
+            当前账号无法上传文档、查看解析任务或取消解析；知识助手仍可检索已发布的企业知识。
+          </p>
         </Card>
       )}
 
@@ -237,27 +308,84 @@ export function KnowledgePage() {
       </Card>
 
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-[15px] font-semibold text-ink">本次上传记录</h2>
-        <p className="text-[11px] text-ink-48">列表接口尚未提供，当前仅显示本次会话上传记录，刷新页面后会清空。</p>
+        <h2 className="text-[15px] font-semibold text-ink">文档库</h2>
+        {isAdmin && total > 0 && <p className="text-[11px] text-ink-48">共 {total} 个文档</p>}
       </div>
 
-      {records.length === 0 ? (
+      {!isAdmin ? (
         <EmptyState
-          title="本次会话还没有上传记录"
-          description="管理员上传文档后，解析状态与进度会显示在这里。"
+          title="文档列表仅管理员可见"
+          description="企业知识库的文档清单与解析进度属于管理视角；分析员可在知识助手中检索已发布知识。"
+        />
+      ) : documents.isPending ? (
+        <div className="flex justify-center py-10">
+          <Spinner />
+        </div>
+      ) : documents.isError ? (
+        <EmptyState
+          title="文档列表读取失败"
+          description={documents.error instanceof Error ? documents.error.message : '请稍后重试'}
+          action={
+            <Button variant="neutral" size="sm" onClick={() => void documents.refetch()}>
+              重新加载
+            </Button>
+          }
+        />
+      ) : items.length === 0 ? (
+        <EmptyState
+          title="知识库还没有文档"
+          description="上传第一份企业文档后，这里会显示版本与解析状态。"
         />
       ) : (
-        <div className="grid gap-3">
-          {records.map((record) => (
-            <IngestionRecord
-              key={record.taskId}
-              record={record}
-              cancelling={cancel.isPending && cancel.variables === record.taskId}
-              onCancel={setCancelTaskId}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid gap-3">
+            {items.map((item) => (
+              <DocumentRow
+                key={item.documentId}
+                item={item}
+                cancelling={cancel.isPending && cancel.variables === item.taskId}
+                onCancel={setCancelTaskId}
+                onUploadVersion={chooseVersionFile}
+                versionUploading={uploadVersion.isPending && uploadVersion.variables?.documentId === item.documentId}
+              />
+            ))}
+          </div>
+          {totalPages > 1 && (
+            <div className="mt-4 flex items-center justify-center gap-3 text-[12px] text-ink-48">
+              <Button
+                variant="neutral"
+                size="sm"
+                disabled={page <= 1 || documents.isFetching}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                上一页
+              </Button>
+              <span className="tabular-nums">
+                第 {page} / {totalPages} 页
+              </span>
+              <Button
+                variant="neutral"
+                size="sm"
+                disabled={page >= totalPages || documents.isFetching}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              >
+                下一页
+              </Button>
+            </div>
+          )}
+        </>
       )}
+
+      {/* 为已有文档上传不可变新版本的隐藏入口 */}
+      <input
+        ref={versionFileRef}
+        type="file"
+        className="hidden"
+        onChange={(event) => {
+          onVersionFileChosen(event.target.files)
+          event.target.value = ''
+        }}
+      />
 
       <ConfirmDialog
         open={Boolean(cancelTaskId)}

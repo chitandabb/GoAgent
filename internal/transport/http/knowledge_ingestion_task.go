@@ -17,6 +17,7 @@ import (
 type knowledgeIngestionTaskUseCase interface {
 	Get(context.Context, uuid.UUID) (knowledge.IngestionTaskDetail, error)
 	Cancel(context.Context, uuid.UUID, uuid.UUID) (knowledge.IngestionCancelResult, error)
+	ListDocuments(context.Context, int, int) (knowledge.DocumentListPage, error)
 }
 
 type KnowledgeIngestionTaskRoutes struct {
@@ -38,6 +39,7 @@ func NewKnowledgeIngestionTaskRoutes(
 func (r *KnowledgeIngestionTaskRoutes) Register(api *gin.RouterGroup) {
 	routes := api.Group("/admin/knowledge-ingestion-tasks")
 	routes.Use(r.auth)
+	routes.GET("", r.list)
 	routes.GET("/:taskId", r.get)
 	routes.POST("/:taskId/cancel", r.csrf, r.cancel)
 }
@@ -63,6 +65,74 @@ type knowledgeIngestionTaskResponse struct {
 type knowledgeIngestionError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+func (r *KnowledgeIngestionTaskRoutes) list(c *gin.Context) {
+	current, exists := identityFromContext(c)
+	if !exists {
+		AbortWithError(c, apperror.New(apperror.CodeUnauthorized))
+		return
+	}
+	if !current.User.IsAdmin() {
+		AbortWithError(c, apperror.New(apperror.CodeForbidden))
+		return
+	}
+	query, ok := BindQuery[knowledgeDocumentListQuery](c)
+	if !ok {
+		return
+	}
+	query.Normalize()
+	page, err := r.useCase.ListDocuments(c.Request.Context(), query.Page, query.PageSize)
+	if err != nil {
+		AbortWithError(c, translateKnowledgeTaskControlError(err))
+		return
+	}
+	items := make([]knowledgeDocumentListItemResponse, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, knowledgeDocumentListItemResponse{
+			DocumentID: item.DocumentID.String(), Title: item.Title, Scope: item.Scope,
+			Version: item.Version, TaskID: item.TaskID.String(), Status: item.Status,
+			Stage: item.Stage, ProgressPercent: item.ProgressPercent,
+			CreatedAt: item.CreatedAt.UTC().Format(timeRFC3339Nano),
+		})
+	}
+	WriteSuccess(c, knowledgeDocumentListResponse{
+		Items: items, Page: page.Page, PageSize: page.PageSize, Total: page.Total,
+	})
+}
+
+type knowledgeDocumentListQuery struct {
+	PageQuery
+}
+
+func (q *knowledgeDocumentListQuery) Normalize() {
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.PageSize < 1 {
+		q.PageSize = knowledge.DefaultDocumentListPageSize
+	} else if q.PageSize > knowledge.MaxDocumentListPageSize {
+		q.PageSize = knowledge.MaxDocumentListPageSize
+	}
+}
+
+type knowledgeDocumentListItemResponse struct {
+	DocumentID      string                        `json:"documentId"`
+	Title           string                        `json:"title"`
+	Scope           knowledge.Scope               `json:"scope"`
+	Version         int                           `json:"version"`
+	TaskID          string                        `json:"taskId"`
+	Status          knowledge.IngestionTaskStatus `json:"status"`
+	Stage           knowledge.IngestionStage      `json:"stage"`
+	ProgressPercent int                           `json:"progressPercent"`
+	CreatedAt       string                        `json:"createdAt"`
+}
+
+type knowledgeDocumentListResponse struct {
+	Items    []knowledgeDocumentListItemResponse `json:"items"`
+	Page     int                                 `json:"page"`
+	PageSize int                                 `json:"pageSize"`
+	Total    int64                               `json:"total"`
 }
 
 func (r *KnowledgeIngestionTaskRoutes) get(c *gin.Context) {

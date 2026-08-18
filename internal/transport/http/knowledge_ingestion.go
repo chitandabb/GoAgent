@@ -120,6 +120,10 @@ func (r *KnowledgeIngestionRoutes) queue(c *gin.Context, documentID uuid.UUID, c
 
 	title := strings.TrimSpace(fields["title"])
 	if createDocument {
+		if title == "" {
+			// 前端承诺「标题可选，留空则由服务端处理」：回落为原始文件名。
+			title = staged.originalName
+		}
 		if title == "" || len([]rune(title)) > 512 {
 			AbortWithError(c, apperror.NewWithFields(apperror.CodeInvalidArgument, []apperror.FieldError{{
 				Field: "title", Reason: "不能为空且不能超过 512 个字符",
