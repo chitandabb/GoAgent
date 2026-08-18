@@ -307,7 +307,7 @@ workerRenewIntervalMillis = 30000
 workerMaxAttempts = 4
 
 [githubMCP]
-enabled = false
+enabled = true
 endpoint = "https://api.githubcopilot.com/mcp/"
 tokenEnv = "MESGUARD_GITHUB_MCP_TOKEN"
 timeoutMillis = 30000
