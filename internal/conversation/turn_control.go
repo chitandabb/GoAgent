@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +12,11 @@ import (
 const (
 	DefaultTurnEventLimit = 100
 	MaxTurnEventLimit     = 200
+
+	// TurnDeltaChunkRunes 是 turn_message_delta 事件单块内容的最大 rune 数。
+	// 分块推送让前端能以打字机效果流式渲染助手回答，事件仍然一次性落库，
+	// 但 SSE 订阅者按序逐块收到内容。
+	TurnDeltaChunkRunes = 40
 )
 
 type TurnEventType string
@@ -19,13 +25,15 @@ const (
 	TurnEventQueued         TurnEventType = "turn_queued"
 	TurnEventRunning        TurnEventType = "turn_running"
 	TurnEventRetryScheduled TurnEventType = "turn_retry_scheduled"
+	TurnEventMessageDelta   TurnEventType = "turn_message_delta"
 	TurnEventCompleted      TurnEventType = "turn_completed"
 	TurnEventFailed         TurnEventType = "turn_failed"
 )
 
 func (e TurnEventType) Valid() bool {
 	switch e {
-	case TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled, TurnEventCompleted, TurnEventFailed:
+	case TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled,
+		TurnEventMessageDelta, TurnEventCompleted, TurnEventFailed:
 		return true
 	default:
 		return false
@@ -34,6 +42,36 @@ func (e TurnEventType) Valid() bool {
 
 func (e TurnEventType) IsTerminal() bool {
 	return e == TurnEventCompleted || e == TurnEventFailed
+}
+
+// ChunkTurnContent 按 rune 边界（而非字节边界）把回答内容切成等长块，
+// 保证中文等多字节字符不会被截断。size <= 0 时返回 nil。
+func ChunkTurnContent(content string, size int) []string {
+	if size <= 0 {
+		return nil
+	}
+	runes := []rune(content)
+	if len(runes) == 0 {
+		return []string{}
+	}
+	chunks := make([]string, 0, (len(runes)+size-1)/size)
+	for start := 0; start < len(runes); start += size {
+		end := start + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[start:end]))
+	}
+	return chunks
+}
+
+// joinTurnChunks 把分块按顺序拼回原始内容，用于测试与校验。
+func joinTurnChunks(chunks []string) string {
+	var builder strings.Builder
+	for _, chunk := range chunks {
+		builder.WriteString(chunk)
+	}
+	return builder.String()
 }
 
 type TurnDetail struct {

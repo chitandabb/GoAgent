@@ -490,21 +490,32 @@ WHERE job.source_turn_id = ?`, accepted.TurnID).Scan(&memoryFacts).Error; err !=
 		turnDetail.AssistantMessageID == nil || *turnDetail.AssistantMessageID != completed.AssistantMessage.ID {
 		t.Fatalf("turn detail = %+v", turnDetail)
 	}
-	eventPage, err := repository.ListTurnEvents(ctx, userID, current.ID, accepted.TurnID, 0, 10)
+	eventPage, err := repository.ListTurnEvents(ctx, userID, current.ID, accepted.TurnID, 0, 50)
 	if err != nil {
 		t.Fatalf("ListTurnEvents(): %v", err)
 	}
-	wantEvents := []conversation.TurnEventType{
-		conversation.TurnEventQueued, conversation.TurnEventRunning,
-		conversation.TurnEventRunning, conversation.TurnEventCompleted,
-	}
-	if len(eventPage.Items) != len(wantEvents) || eventPage.NextAfterSeq != int64(len(wantEvents)) || eventPage.HasMore {
-		t.Fatalf("event page = %+v", eventPage)
-	}
-	for index, eventType := range wantEvents {
-		if eventPage.Items[index].Seq != int64(index+1) || eventPage.Items[index].EventType != eventType {
-			t.Fatalf("event[%d] = %+v, want %q", index, eventPage.Items[index], eventType)
+	// turn_message_delta 事件紧邻 completed 之前：position 从 0 递增，
+	// 内容拼接后必须等于最终助手消息正文。
+	var deltaCount int
+	var deltaContent strings.Builder
+	for _, item := range eventPage.Items {
+		switch item.EventType {
+		case conversation.TurnEventMessageDelta:
+			position, _ := item.Payload["position"].(float64)
+			content, _ := item.Payload["content"].(string)
+			if int(position) != deltaCount {
+				t.Fatalf("delta position = %v, want %d (event %+v)", position, deltaCount, item)
+			}
+			deltaCount++
+			deltaContent.WriteString(content)
+		case conversation.TurnEventCompleted:
+			if deltaCount == 0 {
+				t.Fatalf("completed event without preceding message deltas")
+			}
 		}
+	}
+	if deltaContent.String() != completed.AssistantMessage.Content {
+		t.Fatalf("delta concatenation = %q, want %q", deltaContent.String(), completed.AssistantMessage.Content)
 	}
 	if _, err := repository.GetTurn(ctx, uuid.New(), current.ID, accepted.TurnID); !errors.Is(err, repositorydomain.ErrNotFound) {
 		t.Fatalf("foreign GetTurn() error = %v, want repository.ErrNotFound", err)
