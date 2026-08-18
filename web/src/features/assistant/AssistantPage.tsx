@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/shared/api'
 import type { ConversationCitation, ConversationMessage } from '@/shared/api/m1-types'
+import { parseTurnMessageDelta } from '@/shared/api/m1-types'
 import { fmtDateTime } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
@@ -11,7 +12,7 @@ import { useToast } from '@/shared/ui/Toast'
 import { AttachmentPreviewDialog, useAttachmentPreview } from '@/shared/ui/AttachmentPreview'
 import { MessageBubble, fmtBytes } from './MessageBubble'
 
-type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'failed'
+type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'finalizing' | 'failed'
 
 interface UploadEntry {
   key: string
@@ -26,12 +27,43 @@ interface LastTurn {
   attachments: { attachmentId: string }[]
 }
 
+interface ActiveTurn {
+  turnId: string
+  phase: TurnPhase
+  failure?: string
+  assistantMessageId?: string
+  streamed: string
+}
+
 const turnPhaseMeta: Record<TurnPhase, { label: string; tone: 'gray' | 'info' | 'warn' }> = {
   submitting: { label: '发送中…', tone: 'gray' },
   queued: { label: '排队中', tone: 'gray' },
   running: { label: '助手思考中', tone: 'info' },
   retry: { label: '重试中', tone: 'warn' },
+  finalizing: { label: '整理回答…', tone: 'gray' },
   failed: { label: '生成失败', tone: 'warn' },
+}
+
+/** 回答内容被服务端按 40 rune 分块推送；收到即整体可见，这里用逐字动画平滑呈现。 */
+function useTypewriterReveal(target: string, active: boolean, resetKey: string): number {
+  const [revealed, setRevealed] = useState(0)
+  useEffect(() => {
+    setRevealed(0)
+  }, [resetKey])
+  useEffect(() => {
+    if (!active) return
+    const totalRunes = [...target].length
+    if (revealed >= totalRunes) return
+    const frame = requestAnimationFrame(() => {
+      setRevealed((current) => {
+        const remaining = totalRunes - current
+        const step = Math.max(4, Math.ceil(remaining / 12))
+        return Math.min(totalRunes, current + step)
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active, target, revealed])
+  return active ? Math.min(revealed, [...target].length) : 0
 }
 
 function knowledgeChunkIdFromRef(sourceRef: string): string | null {
@@ -40,24 +72,42 @@ function knowledgeChunkIdFromRef(sourceRef: string): string | null {
   return chunkId && chunkId.length > 0 ? chunkId : null
 }
 
+function joinedDeltaChunks(chunks: Map<number, string> | null): string {
+  if (!chunks || chunks.size === 0) return ''
+  return [...chunks.keys()]
+    .sort((a, b) => a - b)
+    .map((position) => chunks.get(position) ?? '')
+    .join('')
+}
+
 export function AssistantPage() {
   const qc = useQueryClient()
   const toast = useToast()
   const [activeId, setActiveId] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [uploads, setUploads] = useState<UploadEntry[]>([])
-  const [turn, setTurn] = useState<{ turnId: string; phase: TurnPhase; failure?: string } | null>(null)
+  const [turn, setTurn] = useState<ActiveTurn | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
   const lastTurnRef = useRef<LastTurn | null>(null)
+  // delta 分块按 position 累积，重连/回放重发同一 position 时天然去重
+  const deltaChunksRef = useRef<Map<number, string> | null>(null)
   const preview = useAttachmentPreview()
 
-  const conversations = useQuery({
+  const turnStreaming = turn !== null && turn.phase !== 'failed'
+  const revealedRunes = useTypewriterReveal(turn?.streamed ?? '', turnStreaming, turn?.turnId ?? '')
+
+  const conversations = useInfiniteQuery({
     queryKey: ['conversations'],
-    queryFn: () => api.listConversations(1, 50),
+    queryFn: ({ pageParam }) => api.listConversations(pageParam, 50),
+    initialPageParam: 1,
+    getNextPageParam: (lastPage) => {
+      const totalPages = Math.max(1, Math.ceil(lastPage.total / lastPage.pageSize))
+      return lastPage.page < totalPages ? lastPage.page + 1 : undefined
+    },
   })
-  const conversationList = conversations.data?.items ?? []
+  const conversationList = conversations.data?.pages.flatMap((page) => page.items) ?? []
 
   // 默认选中最近会话
   useEffect(() => {
@@ -76,6 +126,7 @@ export function AssistantPage() {
     setUploads([])
     setTurn(null)
     lastTurnRef.current = null
+    deltaChunksRef.current = null
   }, [activeId])
 
   const messages = useQuery({
@@ -85,11 +136,27 @@ export function AssistantPage() {
   })
   const orderedMessages = [...(messages.data ?? [])].sort((a, b) => a.seq - b.seq)
 
-  // 新消息 / turn 状态变化时自动滚到底部
+  // 新消息 / 流式内容推进时自动滚到底部
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [orderedMessages, turn])
+  }, [orderedMessages, turn, revealedRunes])
+
+  // finalizing：逐字动画追平且持久化助手消息回填后，无缝移除流式气泡；5 秒兜底
+  useEffect(() => {
+    if (!turn || turn.phase !== 'finalizing') return
+    if (turn.assistantMessageId) {
+      const caughtUp = revealedRunes >= [...turn.streamed].length
+      const settled = orderedMessages.some((message) => message.id === turn.assistantMessageId)
+      if (caughtUp && settled) {
+        setTurn(null)
+        return
+      }
+    }
+    const timer = window.setTimeout(() => setTurn(null), 5000)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turn, revealedRunes, orderedMessages])
 
   const createConv = useMutation({
     mutationFn: () => api.createConversation(''),
@@ -133,13 +200,15 @@ export function AssistantPage() {
 
   const submitTurn = async (content: string, attachments: { attachmentId: string }[]) => {
     if (!activeId || turn) return
-    setTurn({ turnId: '', phase: 'submitting' })
+    deltaChunksRef.current = new Map()
+    setTurn({ turnId: '', phase: 'submitting', streamed: '' })
     try {
       const result = await api.appendTurn(activeId, { content, attachments }, api.createIdempotencyKey())
       const turnId = result.turnId
       setTurn({
         turnId,
         phase: result.status === 'failed' ? 'failed' : result.status === 'retry_scheduled' ? 'retry' : 'running',
+        streamed: '',
       })
       // 乐观插入用户消息
       qc.setQueryData<ConversationMessage[]>(['conversation-messages', activeId], (current = []) => [
@@ -151,6 +220,23 @@ export function AssistantPage() {
       unsubscribeRef.current?.()
       unsubscribeRef.current = api.subscribeTurnEvents(activeId, turnId, {
         onEvent: (event) => {
+          if (event.eventType === 'turn_message_delta') {
+            const delta = parseTurnMessageDelta(event.payload)
+            if (!delta) return
+            const chunks = deltaChunksRef.current ?? new Map<number, string>()
+            deltaChunksRef.current = chunks
+            chunks.set(delta.position, delta.content)
+            const streamed = [...chunks.keys()]
+              .sort((a, b) => a - b)
+              .map((position) => chunks.get(position) ?? '')
+              .join('')
+            setTurn((current) =>
+              current && current.turnId === turnId
+                ? { ...current, streamed, assistantMessageId: delta.messageId }
+                : current,
+            )
+            return
+          }
           setTurn((current) => {
             if (!current || current.turnId !== turnId) return current
             switch (event.eventType) {
@@ -178,11 +264,16 @@ export function AssistantPage() {
                   turnId,
                   phase: 'failed',
                   failure: detail.failureSummary || '请稍后重试',
+                  streamed: joinedDeltaChunks(deltaChunksRef.current),
                 }),
               )
-              .catch(() => setTurn({ turnId, phase: 'failed', failure: '生成失败' }))
+              .catch(() => setTurn({ turnId, phase: 'failed', failure: '生成失败', streamed: joinedDeltaChunks(deltaChunksRef.current) }))
           } else {
-            setTurn(null)
+            // 保留已流式呈现的内容，由 finalizing 副作用在动画追平且持久化消息
+            // 回填后移除流式气泡，避免内容跳变
+            setTurn((current) =>
+              current && current.turnId === turnId ? { ...current, phase: 'finalizing' } : current,
+            )
           }
           void qc.invalidateQueries({ queryKey: ['conversation-messages', activeId] })
           void qc.invalidateQueries({ queryKey: ['conversations'] })
@@ -271,23 +362,35 @@ export function AssistantPage() {
               点击上方"新对话"开始
             </p>
           ) : (
-            conversationList.map((conv) => (
-              <button
-                key={conv.id}
-                type="button"
-                onClick={() => setActiveId(conv.id)}
-                className={`press mb-1 block w-full rounded-capsule px-3 py-2.5 text-left ${
-                  conv.id === activeId ? 'bg-parchment' : 'hover:bg-pearl'
-                }`}
-              >
-                <p className="line-clamp-1 text-[13px] font-semibold text-ink">
-                  {conv.title || '未命名对话'}
-                </p>
-                <p className="mt-0.5 text-[11px] text-ink-48">
-                  {fmtDateTime(conv.updatedAt)}
-                </p>
-              </button>
-            ))
+            <>
+              {conversationList.map((conv) => (
+                <button
+                  key={conv.id}
+                  type="button"
+                  onClick={() => setActiveId(conv.id)}
+                  className={`press mb-1 block w-full rounded-capsule px-3 py-2.5 text-left ${
+                    conv.id === activeId ? 'bg-parchment' : 'hover:bg-pearl'
+                  }`}
+                >
+                  <p className="line-clamp-1 text-[13px] font-semibold text-ink">
+                    {conv.title || '未命名对话'}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-ink-48">
+                    {fmtDateTime(conv.updatedAt)}
+                  </p>
+                </button>
+              ))}
+              {conversations.hasNextPage && (
+                <button
+                  type="button"
+                  className="press mt-1 block w-full rounded-capsule px-3 py-2 text-center text-[12px] text-primary hover:bg-pearl disabled:opacity-45"
+                  disabled={conversations.isFetchingNextPage}
+                  onClick={() => void conversations.fetchNextPage()}
+                >
+                  {conversations.isFetchingNextPage ? '加载中…' : `加载更多（共 ${conversations.data?.pages[0].total ?? 0} 个会话）`}
+                </button>
+              )}
+            </>
           )}
         </div>
         <div className="border-t border-divider px-3 py-2.5 text-[11px] leading-[1.6] text-ink-48">
@@ -322,27 +425,43 @@ export function AssistantPage() {
             </div>
           ) : (
             <div className="flex flex-col gap-5">
-              {orderedMessages.map((message) => (
-                <MessageBubble key={message.id} message={message} onCitationClick={openCitation} />
-              ))}
+              {orderedMessages
+                .filter((message) => message.id !== turn?.assistantMessageId)
+                .map((message) => (
+                  <MessageBubble key={message.id} message={message} onCitationClick={openCitation} />
+                ))}
               {turn && (
                 <div className="flex flex-col items-start">
-                  <div className="flex max-w-[85%] items-center gap-2.5 rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-3.5">
+                  {turn.streamed.length > 0 ? (
+                    <div className="max-w-[85%] rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-4">
+                      <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">
+                        {[...turn.streamed].slice(0, turn.phase === 'failed' ? undefined : revealedRunes).join('')}
+                        {turn.phase !== 'failed' && (
+                          <span className="ml-0.5 inline-block h-[15px] w-[7px] translate-y-[2px] animate-pulse rounded-[1px] bg-ink-48" />
+                        )}
+                      </p>
+                    </div>
+                  ) : null}
+                  <div className="mt-2 flex max-w-[85%] items-center gap-2.5">
                     {turn.phase !== 'failed' ? (
-                      <>
-                        <Spinner />
-                        <span className="text-[13px] text-ink-80">{turnPhaseMeta[turn.phase].label}</span>
-                      </>
+                      turn.streamed.length === 0 && (
+                        <>
+                          <Spinner />
+                          <span className="text-[13px] text-ink-80">{turnPhaseMeta[turn.phase].label}</span>
+                        </>
+                      )
                     ) : (
-                      <Badge tone="red">{turnPhaseMeta[turn.phase].label}</Badge>
-                    )}
-                    {turn.phase === 'failed' && turn.failure && (
-                      <span className="max-w-[420px] text-[12px] text-danger">{turn.failure}</span>
-                    )}
-                    {turn.phase === 'failed' && lastTurnRef.current && (
-                      <Button size="sm" variant="ghost" onClick={retryTurn}>
-                        重试
-                      </Button>
+                      <>
+                        <Badge tone="red">{turnPhaseMeta[turn.phase].label}</Badge>
+                        {turn.failure && (
+                          <span className="max-w-[420px] text-[12px] text-danger">{turn.failure}</span>
+                        )}
+                        {lastTurnRef.current && (
+                          <Button size="sm" variant="ghost" onClick={retryTurn}>
+                            重试
+                          </Button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>

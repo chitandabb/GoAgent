@@ -935,8 +935,19 @@ WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expire
 		if query.RowsAffected != 1 {
 			return conversation.ErrTurnLeaseLost
 		}
+		assistantMessageIDString := assistantMessageID.String()
+		chunks := conversation.ChunkTurnContent(response.Content, conversation.TurnDeltaChunkRunes)
+		for position, chunk := range chunks {
+			if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventMessageDelta, map[string]any{
+				"messageId": assistantMessageIDString,
+				"position":  position,
+				"content":   chunk,
+			}, completedAt); err != nil {
+				return err
+			}
+		}
 		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
-			"assistantMessageId": assistantMessageID.String(),
+			"assistantMessageId": assistantMessageIDString,
 			"citationCount":      len(response.Citations),
 		}, completedAt); err != nil {
 			return err
@@ -1308,8 +1319,19 @@ WHERE id = ? AND user_id = ? AND status = ?`,
 		if query.RowsAffected != 1 {
 			return conversation.ErrTurnLeaseLost
 		}
+		assistantMessageIDString := assistantMessageID.String()
+		chunks := conversation.ChunkTurnContent(response.Content, conversation.TurnDeltaChunkRunes)
+		for position, chunk := range chunks {
+			if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventMessageDelta, map[string]any{
+				"messageId": assistantMessageIDString,
+				"position":  position,
+				"content":   chunk,
+			}, completedAt); err != nil {
+				return err
+			}
+		}
 		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
-			"assistantMessageId": assistantMessageID.String(),
+			"assistantMessageId": assistantMessageIDString,
 			"citationCount":      len(response.Citations),
 		}, completedAt); err != nil {
 			return err

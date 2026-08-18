@@ -10,7 +10,7 @@ import (
 
 func TestTurnEventTerminalSemantics(t *testing.T) {
 	for _, eventType := range []TurnEventType{
-		TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled,
+		TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled, TurnEventMessageDelta,
 	} {
 		if !eventType.Valid() || eventType.IsTerminal() {
 			t.Fatalf("event %q validity=%v terminal=%v", eventType, eventType.Valid(), eventType.IsTerminal())
@@ -23,6 +23,40 @@ func TestTurnEventTerminalSemantics(t *testing.T) {
 	}
 	if TurnEventType("unknown").Valid() || TurnEventType("unknown").IsTerminal() {
 		t.Fatal("unknown event must be invalid and non-terminal")
+	}
+}
+
+func TestChunkTurnContentByRunes(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		size    int
+		want    []string
+	}{
+		{name: "empty", content: "", size: 40, want: []string{}},
+		{name: "single chunk", content: "你好", size: 40, want: []string{"你好"}},
+		{name: "exact boundary", content: "abcdef", size: 3, want: []string{"abc", "def"}},
+		{name: "rune boundary not byte boundary", content: "一二三四五", size: 2, want: []string{"一二", "三四", "五"}},
+		{name: "longer than one chunk", content: "hello world hello world", size: 8, want: []string{"hello wo", "rld hell", "o world"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ChunkTurnContent(test.content, test.size)
+			if len(got) != len(test.want) {
+				t.Fatalf("ChunkTurnContent(%q, %d) = %v, want %v", test.content, test.size, got, test.want)
+			}
+			for index := range got {
+				if got[index] != test.want[index] {
+					t.Fatalf("ChunkTurnContent(%q, %d)[%d] = %q, want %q", test.content, test.size, index, got[index], test.want[index])
+				}
+			}
+			if joined := joinTurnChunks(got); joined != test.content {
+				t.Fatalf("joined chunks = %q, want %q", joined, test.content)
+			}
+		})
+	}
+	if got := ChunkTurnContent("abc", 0); got != nil {
+		t.Fatalf("ChunkTurnContent with size 0 = %v, want nil", got)
 	}
 }
 
