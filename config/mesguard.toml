@@ -16,8 +16,8 @@ errorLogIntervalMillis = 60000
 allowedOrigins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:9090", "http://127.0.0.1:9090"]
 cookieDomain = ""
 cookieSecure = false
-sessionIdleMinutes = 120
-sessionAbsoluteMinutes = 720
+sessionIdleMinutes = 60
+sessionAbsoluteMinutes = 480
 
 [agent]
 skillsDirectory = "config/skills"
@@ -34,11 +34,11 @@ conversationCitationRepairTimeoutMillis = 30000
 conversationCitationRepairMaxOutputTokens = 768
 conversationMaxIterations = 8
 conversationMaxContextRunes = 32000
-conversationTimeoutMillis = 120000
+conversationTimeoutMillis = 180000
 maxAgentRuns = 2
-maxToolCalls = 8
+maxToolCalls = 16
 maxEvidenceItems = 16
-maxTotalTokens = 48000
+maxTotalTokens = 86000
 timeoutMillis = 90000
 
 [agent.contextMemory]
@@ -60,11 +60,11 @@ sourceRecoveryMaxCalls = 2
 memoryMaxRatio = 0.20
 summaryMaxRatio = 0.05
 tailMaxRatio = 0.15
-preflightTimeoutMillis = 250
+preflightTimeoutMillis = 500
 softThresholdRatio = 0.70
 hardThresholdRatio = 0.85
-toolGrowthReserveTokens = 8192
-syncCompactionTimeoutMillis = 90000
+toolGrowthReserveTokens = 16384
+syncCompactionTimeoutMillis = 45000
 
 [agent.contextMemory.summary]
 enabled = true
@@ -102,9 +102,9 @@ apiKeyEnv = "DASHSCOPE_API_KEY"
 model = "qwen3.6-flash"
 thinkingMode = "disabled"
 temperature = 0.0
-timeoutMillis = 3000
+timeoutMillis = 10000
 contextWindowTokens = 131072
-maxOutputTokens = 256
+maxOutputTokens = 512
 promptSafetyMarginTokens = 2048
 promptSafetyMarginRatio = 0.05
 tokenizerStrategy = "local_calibrated"
@@ -120,9 +120,9 @@ reasoningEffort = "low"
 responseFormat = "json_schema"
 responseSchema = "conversation_memory_v2"
 temperature = 0.0
-timeoutMillis = 60000
+timeoutMillis = 30000
 contextWindowTokens = 131072
-maxOutputTokens = 6144
+maxOutputTokens = 4096
 promptSafetyMarginTokens = 2048
 promptSafetyMarginRatio = 0.05
 tokenizerStrategy = "local_calibrated"
@@ -212,11 +212,11 @@ timeoutMillis = 30000
 # 进程级配额治理：每个进程（backend、conversation-worker、
 # diagnosis-worker、knowledge-worker 共 4 个）各自执行平滑 RPM/TPM 预算，
 # 同一进程所有消费者共享一个 limiter/client。默认值保证
-# 4 × 200 RPM = 800 ≤ 900 RPM、4 × 150000 TPM = 600000 ≤ 600000 TPM，
-# 保持在仓库的保守运行安全边界内；这不是账号额度声明。水平扩容需
+# 4 × 200 RPM = 800 ≤ 900 RPM、4 × 140000 TPM = 560000 < 600000 TPM，
+# 保留余量供评测/观测工具作为独立进程消费；不是账号额度声明。水平扩容需
 # 重新分配这些值。
 rpm = 200
-tpm = 150000
+tpm = 140000
 # 最大尝试次数包含首次调用；只有 429、明确可重试 5xx 与 timeout/transport
 # 会重试，400/401 与 context canceled/deadline 不重试。
 maxAttempts = 3
@@ -241,7 +241,7 @@ model = "qwen-vl-ocr-latest"
 promptFile = "config/prompts/ocr-extraction.md"
 promptVersion = "ocr-extraction-v1"
 timeoutMillis = 120000
-maxOutputTokens = 2048
+maxOutputTokens = 4096
 
 [models.vision]
 enabled = true
@@ -284,7 +284,7 @@ database = "mesguard"
 passwordEnv = "MESGUARD_POSTGRES_PASSWORD"
 sslMode = "disable"
 maxIdleConns = 10
-maxOpenConns = 100
+maxOpenConns = 20
 
 [redis]
 host = "127.0.0.1"
@@ -324,8 +324,8 @@ searchProvider = "searxng"
 contentProvider = "direct"
 timeoutMillis = 30000
 maxResults = 5
-maxFetchedPages = 3
-maxPageChars = 20000
+maxFetchedPages = 2
+maxPageChars = 10000
 maxRounds = 2
 maxResponseBytes = 2097152
 officialDomains = ["go.dev", "pkg.go.dev", "cloudwego.io", "postgresql.org", "redis.io", "min.io", "rabbitmq.com", "docs.docker.com", "learn.microsoft.com", "docs.firecrawl.dev", "ietf.org", "rfc-editor.org", "w3.org", "nist.gov"]
@@ -390,7 +390,7 @@ writeTimeoutMillis = 200
 semanticEnabled = true
 semanticMinimumSimilarity = 0.8721208486635312
 semanticCandidateLimit = 5
-semanticEmbeddingTimeoutMillis = 1500
+semanticEmbeddingTimeoutMillis = 3000
 semanticProfileFingerprint = "98c558789fbf5e908a7ac30dfe2abae293587550343547d14c04e078d11ae667"
 
 [semanticAnswerCache.redisStack]
@@ -417,7 +417,7 @@ enabled = false
 modelProfile = "qwen-rewrite"
 promptFile = "config/prompts/query-rewrite.md"
 promptVersion = "query-rewrite-v2"
-timeoutMillis = 3000
+timeoutMillis = 10000
 maxSubqueries = 1
 maxOutputRunes = 2048
 
@@ -524,7 +524,7 @@ Low = "low"
 
 [sqlserver.investigation]
 allowedSchemas = ["dbo"]
-maxQueryBytes = 8192
+maxQueryBytes = 16384
 maxRows = 100
 maxResultBytes = 262144
 maxConcurrentQueries = 2

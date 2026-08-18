@@ -95,10 +95,11 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				cfg.Agent.ContextMemory.MemoryMaxRatio != 0.20 ||
 				cfg.Agent.ContextMemory.SummaryMaxRatio != 0.05 ||
 				cfg.Agent.ContextMemory.TailMaxRatio != 0.15 ||
-				cfg.Agent.ContextMemory.PreflightTimeoutMillis != 250 ||
+				cfg.Agent.ContextMemory.PreflightTimeoutMillis != 500 ||
 				cfg.Agent.ContextMemory.SoftThresholdRatio != 0.70 ||
 				cfg.Agent.ContextMemory.HardThresholdRatio != 0.85 ||
-				cfg.Agent.ContextMemory.ToolGrowthReserveTokens != 8192 {
+				cfg.Agent.ContextMemory.ToolGrowthReserveTokens != 16384 ||
+				cfg.Agent.ContextMemory.SyncCompactionTimeoutMillis != 45000 {
 				t.Fatalf("%q context-memory shadow preflight = %+v", path, cfg.Agent.ContextMemory)
 			}
 			if cfg.RabbitMQ.MemoryCompactionQueue != "mesguard.conversation.memory.compact" ||

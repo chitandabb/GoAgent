@@ -7,6 +7,7 @@ services:
     image: ${MESGUARD_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     container_name: mesguard-postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: ${MESGUARD_POSTGRES_USER:-mesguard}
       POSTGRES_PASSWORD: ${MESGUARD_POSTGRES_PASSWORD:-mesguard_dev_password}
