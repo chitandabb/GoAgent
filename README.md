@@ -12,15 +12,13 @@
 [![MinIO](https://img.shields.io/badge/MinIO-S3-D14C02?logo=minio&logoColor=white)](https://min.io/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-开发语言：Go + TypeScript/React ｜ 运行环境：Docker Compose 一键启动 ｜ 状态：前后端真实联调可用
+开发语言：Go + TypeScript/React ｜ 运行环境：Docker Compose 一键启动
 
 </div>
 
 ---
 
-## 🖥️ 界面演示（真实运行截图）
-
-打开仓库就能"看见"系统长什么样。以下截图全部来自 **真实前后端联调环境**（Vite 前端 + 本地 API + PostgreSQL/RabbitMQ/MinIO + 异步 Worker），不是原型图。
+## 🖥️ 界面演示
 
 ### 会话助手：流式回答 · 附件 · 知识引用
 
@@ -153,7 +151,7 @@ flowchart LR
 | 前端 | React 19 · TypeScript · Vite · TanStack Query · Tailwind CSS 4 |
 | 其他 | ONNX Runtime（版式路由）· OpenTelemetry · 可选 LLM/Embedding/Rerank Provider |
 
-## 🚀 快速开始（看完就能跑）
+## 🚀 快速开始
 
 需要：Go 1.25.3、Node.js 22+、Docker Desktop。
 
@@ -178,7 +176,7 @@ docker exec -e MESGUARD_INITIAL_USER_PASSWORD mesguard-api ./mesguard-user -user
 
 ## 🧪 评测与证据
 
-项目内沉淀了固定数据集评测与受控 Smoke：工具选择、安全 Text-to-SQL、RAG 检索、文档解析吞吐、证据门禁等均有可复现方法与结果记录（详见 [评测索引](docs/evaluations/README.md)）。所有数字均标注固定本地数据集范围，**不冒充生产 SLA**。
+项目内沉淀了固定数据集评测与受控 Smoke：工具选择、安全 Text-to-SQL、RAG 检索、文档解析吞吐、证据门禁等均有可复现方法与结果记录（详见 [评测索引](docs/evaluations/README.md)）。所有数字均标注固定本地数据集范围。
 
 ## 📚 文档
 
