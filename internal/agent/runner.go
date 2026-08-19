@@ -482,7 +482,22 @@ func (r *Runner) rewriteToolArguments(ctx context.Context, name, arguments strin
 }
 
 func rejectUnknownTool(_ context.Context, name, _ string) (string, error) {
-	return "", fmt.Errorf("%w: %s", ErrToolNotAllowed, name)
+	// A model can emit a tool name mentioned in a Skill but absent from the
+	// deployment Profile. Return a tool-shaped, non-authorizing result so the
+	// model can choose another permitted path without restarting the task.
+	encoded, err := json.Marshal(struct {
+		OK        bool   `json:"ok"`
+		Tool      string `json:"tool"`
+		Error     string `json:"error"`
+		Retryable bool   `json:"retryable"`
+		Guidance  string `json:"guidance"`
+	}{
+		Tool: name, Error: "tool_not_available", Guidance: "仅使用当前 Tool Schema 中实际提供的工具；如已有工单证据足够，请直接输出完整 JSON 报告。",
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode unknown tool feedback: %w", err)
+	}
+	return string(encoded), nil
 }
 
 type executionTrace struct {

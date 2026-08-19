@@ -31,9 +31,9 @@ export function DossierPanel({
       <div className="border-b border-divider px-5 py-4">
         <div className="mb-2 flex items-center justify-between gap-3">
           <p className="text-[11px] font-semibold text-ink-48">当前卷宗</p>
-          <Button size="icon" variant="neutral" className="!size-8" onClick={onNewWorkspace} title="为当前工单新建会话">
+          <Button size="icon" variant="neutral" className="!size-8" onClick={onNewWorkspace} title="为当前工单新建本地工作区">
             <Plus />
-            <span className="sr-only">为当前工单新建会话</span>
+            <span className="sr-only">为当前工单新建本地工作区</span>
           </Button>
         </div>
         <p className="text-[13px] font-semibold text-ink">{extCase.externalCaseKey}</p>

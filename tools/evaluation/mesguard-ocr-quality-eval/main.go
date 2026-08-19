@@ -24,7 +24,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const evaluatorVersion = "ocr-quality-eval-v1"
+const evaluatorVersion = "ocr-quality-eval-v2"
 
 const maxPairedCharacterComparisonCells int64 = 64_000_000
 
@@ -50,7 +50,8 @@ type observation struct {
 	RasterSHA256      string                             `json:"rasterSha256"`
 	RenderMillis      float64                            `json:"renderMillis"`
 	ProviderMillis    float64                            `json:"providerMillis,omitempty"`
-	StrictJSONSuccess bool                               `json:"strictJsonSuccess"`
+	ResponseValidated bool                               `json:"responseValidated"`
+	FailureReason     string                             `json:"failureReason,omitempty"`
 	Usage             *knowledgeenrichment.ProviderUsage `json:"usage,omitempty"`
 	EstimatedCostCNY  float64                            `json:"estimatedCostCny,omitempty"`
 	OCRText           string                             `json:"ocrText,omitempty"`
@@ -120,13 +121,13 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		generator, err := visualmodel.NewDashScopeModel(ctx, cfg.Models.OCR, "models.ocr")
+		generator, err := visualmodel.NewOpenAICompatibleModel(ctx, cfg.Models.OCR, "models.ocr")
 		if err != nil {
 			return err
 		}
 		processor, err = visualmodel.NewProcessor(&visualmodel.Endpoint{
 			Generator: generator, Provider: cfg.Models.OCR.Provider, Model: cfg.Models.OCR.Model,
-			Prompt: prompt, PromptVersion: cfg.Models.OCR.PromptVersion,
+			Prompt: prompt, PromptVersion: cfg.Models.OCR.PromptVersion, ResponseFormat: cfg.Models.OCR.ResponseFormat,
 		}, nil)
 		if err != nil {
 			return err
@@ -244,10 +245,18 @@ func evaluateCandidate(
 	ocr, err := processor.ExtractOCR(ctx, fmt.Sprintf("%s/page-%d-%s.png", filepath.Base(sourceName), page, label), rendered.Raster.MediaType, rendered.Raster.Content)
 	current.ProviderMillis = float64(time.Since(started).Microseconds()) / 1000
 	if err != nil {
+		var failure *knowledgeenrichment.ProviderFailure
+		if errors.As(err, &failure) && failure != nil {
+			current.FailureReason = failure.Reason
+			if failure.Usage != nil && failure.Usage.Validate() == nil {
+				current.Usage = failure.Usage
+				current.EstimatedCostCNY = estimatedOCRCost(failure.Usage, inputPricePerMillion, outputPricePerMillion)
+			}
+		}
 		current.Error = err.Error()
 		return current, err
 	}
-	current.StrictJSONSuccess, current.OCRText, current.Usage = true, ocr.Text, ocr.Usage
+	current.ResponseValidated, current.OCRText, current.Usage = true, ocr.Text, ocr.Usage
 	current.EstimatedCostCNY = estimatedOCRCost(ocr.Usage, inputPricePerMillion, outputPricePerMillion)
 	return current, nil
 }

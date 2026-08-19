@@ -10,6 +10,7 @@ import type {
 } from '@/shared/api/m1-types'
 import type { Tone } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
+import { knowledgeDocumentFileAccept, knowledgeDocumentFormatLabel } from '@/shared/lib/knowledge-upload'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Card } from '@/shared/ui/Card'
@@ -276,7 +277,7 @@ export function KnowledgePage() {
         <div className="mb-4">
           <h2 className="text-[15px] font-semibold text-ink">上传企业文档</h2>
           <p className="mt-1 text-[12px] leading-[1.6] text-ink-48">
-            支持 PDF、PNG、JPEG、文本（含 txt、md 等）和由这些文件组成的 ZIP。服务端会校验文件签名；超出大小限制会由服务端拒绝。
+            支持 {knowledgeDocumentFormatLabel}。服务端会校验文件签名；超出大小限制会由服务端拒绝。
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
@@ -285,6 +286,7 @@ export function KnowledgePage() {
             <input
               id="knowledge-file"
               type="file"
+              accept={knowledgeDocumentFileAccept}
               disabled={!isAdmin || upload.isPending}
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               className="focus-ring block h-10 w-full rounded-[12px] border border-hairline bg-canvas px-3 py-2 text-[12px] text-ink file:mr-3 file:border-0 file:bg-transparent file:text-[12px] file:font-semibold file:text-primary disabled:cursor-not-allowed disabled:opacity-45"
@@ -380,6 +382,7 @@ export function KnowledgePage() {
       <input
         ref={versionFileRef}
         type="file"
+        accept={knowledgeDocumentFileAccept}
         className="hidden"
         onChange={(event) => {
           onVersionFileChosen(event.target.files)

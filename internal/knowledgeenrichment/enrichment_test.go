@@ -39,6 +39,56 @@ func TestOrchestratorPlansSkipMissingAndBudgetDeterministically(t *testing.T) {
 	}
 }
 
+func TestOrchestratorClassifiesNoUsableVisualContentAsSkipped(t *testing.T) {
+	orchestrator, err := New(Config{MaxEnrichments: 1, MinPixels: 1}, processorFunc(
+		func(context.Context, Request) (ProviderResult, error) {
+			return ProviderResult{}, ErrNoUsableContent
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := orchestrator.Enrich(context.Background(), Source{}, []knowledgeparser.VisualAsset{
+		visualAsset(0, knowledgeparser.VisualAssetSourceImage, "image/png", 100, 100),
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Partial || output.Cause != nil || len(output.Records) != 1 ||
+		output.Records[0].Status != StatusSkipped || output.Records[0].Reason != "no_usable_content" {
+		t.Fatalf("output = %+v", output)
+	}
+}
+
+func TestOrchestratorPersistsProviderFailureAuditMetadata(t *testing.T) {
+	failure := NewProviderFailure(
+		"dashscope", "qwen-vl-ocr-latest", ProviderFailureOutputTruncated,
+		&ProviderUsage{PromptTokens: 1200, CompletionTokens: 4096, TotalTokens: 5296},
+		errors.New("visual model response was truncated"),
+	)
+	orchestrator, err := New(Config{MaxEnrichments: 1, MinPixels: 1}, processorFunc(
+		func(context.Context, Request) (ProviderResult, error) {
+			return ProviderResult{}, failure
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := orchestrator.Enrich(context.Background(), Source{}, []knowledgeparser.VisualAsset{
+		visualAsset(0, knowledgeparser.VisualAssetSourceImage, "image/png", 100, 100),
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := output.Records[0]
+	if !output.Partial || output.Cause == nil || record.Status != StatusMissing ||
+		record.Reason != ProviderFailureOutputTruncated || record.Provider != "dashscope" ||
+		record.Model != "qwen-vl-ocr-latest" || record.Usage == nil ||
+		record.Usage.TotalTokens != 5296 {
+		t.Fatalf("output = %+v", output)
+	}
+}
+
 func TestOrchestratorSkipsUnreferencedEmbeddedAssets(t *testing.T) {
 	called := false
 	orchestrator, _ := New(Config{MaxEnrichments: 1, MinPixels: 1}, processorFunc(

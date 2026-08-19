@@ -56,6 +56,9 @@ func (p *Processor) Recover(ctx context.Context, request knowledgetable.Request)
 	if response == nil {
 		return knowledgetable.Result{}, errors.New("table model returned an empty response")
 	}
+	if response.ResponseMeta != nil && strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
+		return knowledgetable.Result{}, errors.New("table model response was truncated")
+	}
 	decoded, err := decodeResponse(response.Content)
 	if err != nil {
 		return knowledgetable.Result{}, err
@@ -93,15 +96,28 @@ func applyStructuralQualityGuard(result *knowledgetable.Result) {
 			break
 		}
 	}
-	if !ambiguous {
+	if ambiguous {
+		markPartialTableResult(result, "multiline_cell_structure_ambiguous",
+			"multiline cell text may contain collapsed visible rows")
+		return
+	}
+	// Warnings and confidence <= 0.8 are the model's only explicit signal that
+	// row bands or spans are uncertain. Preserve the cells for inspection, but
+	// never publish that result as complete.
+	if len(result.Warnings) > 0 || result.Confidence <= 0.8 {
+		markPartialTableResult(result, "table_structure_uncertain", "table model reported structural uncertainty")
+	}
+}
+
+func markPartialTableResult(result *knowledgetable.Result, reason, warning string) {
+	if result == nil {
 		return
 	}
 	result.Partial = true
-	result.Reason = "multiline_cell_structure_ambiguous"
+	result.Reason = reason
 	if result.Confidence > 0.8 {
 		result.Confidence = 0.8
 	}
-	const warning = "multiline cell text may contain collapsed visible rows"
 	for _, current := range result.Warnings {
 		if current == warning {
 			return
@@ -121,10 +137,13 @@ func buildMessage(prompt string, request knowledgetable.Request) *schema.Message
 		Type: schema.ChatMessagePartTypeText, Text: strings.TrimSpace(prompt) + locator,
 	}, {
 		Type: schema.ChatMessagePartTypeImageURL,
-		Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{
-			Base64Data: stringPointer(base64.StdEncoding.EncodeToString(request.Asset.Content)),
-			MIMEType:   request.Asset.MediaType,
-		}},
+		Image: &schema.MessageInputImage{
+			MessagePartCommon: schema.MessagePartCommon{
+				Base64Data: stringPointer(base64.StdEncoding.EncodeToString(request.Asset.Content)),
+				MIMEType:   request.Asset.MediaType,
+			},
+			Detail: schema.ImageURLDetailHigh,
+		},
 	}}
 	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}
 }

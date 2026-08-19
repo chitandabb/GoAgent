@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/chitandabb/GoAgent/internal/repository"
 )
 
 const ReadonlyQueryPolicyVersion = "tsql-readonly-v1"
@@ -29,7 +31,7 @@ const (
 	QueryRejectedTooManyObjects     QueryRejectionReason = "too_many_objects"
 )
 
-var ErrReadonlyQueryRejected = errors.New("readonly query rejected")
+var ErrReadonlyQueryRejected = repository.ErrReadonlyQueryRejected
 
 // QueryGuardError 只暴露稳定原因码，不携带原始 SQL、标识符或字面量。
 // 上层可记录查询指纹和原因码，但不能把模型生成的敏感 SQL 写入普通日志。

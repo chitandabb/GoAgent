@@ -26,6 +26,15 @@ import (
 
 const multipartMetadataAllowance int64 = 1 << 20
 
+var knowledgeUploadMediaTypes = map[string]string{
+	".txt":  "text/plain; charset=utf-8",
+	".md":   "text/markdown; charset=utf-8",
+	".pdf":  "application/pdf",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
 type knowledgeIngestionUseCase interface {
 	QueueSource(context.Context, knowledge.QueueSourceInput) (knowledge.QueueVersionResult, error)
 }
@@ -338,37 +347,18 @@ func validateKnowledgeFile(path, originalName string) (string, string, error) {
 		return "", "", invalidUploadField("file", "文件名不合法")
 	}
 	ext := strings.ToLower(filepath.Ext(name))
-	mediaTypes := map[string]string{
-		".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
-		".log": "text/plain; charset=utf-8", ".json": "text/plain; charset=utf-8",
-		".csv": "text/plain; charset=utf-8", ".sql": "text/plain; charset=utf-8",
-		".xml": "text/plain; charset=utf-8", ".yaml": "text/plain; charset=utf-8",
-		".yml": "text/plain; charset=utf-8",
-		".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-		".png":  "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-	}
-	canonicalMediaType, ok := mediaTypes[ext]
+	canonicalMediaType, ok := knowledgeUploadMediaTypes[ext]
 	if !ok {
 		return "", "", invalidUploadField("file", "文件格式不受支持")
 	}
 	switch ext {
-	case ".txt", ".md", ".log", ".json", ".csv", ".sql", ".xml", ".yaml", ".yml":
+	case ".txt", ".md":
 		if err := validateUTF8File(path); err != nil {
 			return "", "", invalidUploadField("file", "文本文件必须是 UTF-8 且不能包含 NUL 字符")
 		}
 	case ".pdf":
 		if !fileHasPrefix(path, []byte("%PDF-")) {
 			return "", "", invalidUploadField("file", "PDF 文件签名与扩展名不一致")
-		}
-	case ".png":
-		if !fileHasPrefix(path, []byte("\x89PNG\r\n\x1a\n")) {
-			return "", "", invalidUploadField("file", "PNG 文件签名与扩展名不一致")
-		}
-	case ".jpg", ".jpeg":
-		if !fileHasPrefix(path, []byte{0xff, 0xd8, 0xff}) {
-			return "", "", invalidUploadField("file", "JPEG 文件签名与扩展名不一致")
 		}
 	case ".docx", ".xlsx", ".pptx":
 		if err := validateOfficePackage(path, ext); err != nil {

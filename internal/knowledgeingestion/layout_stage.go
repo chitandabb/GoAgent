@@ -87,7 +87,9 @@ func (s *LayoutStage) Analyze(
 		return LayoutOutput{}, knowledgelayout.ErrInvalidInput
 	}
 	documentSource := layoutDocumentSource(source)
-	sourceRaster, err := layoutSourceRaster(source.MediaType, parsed.VisualAssets)
+	sourceRaster, err := layoutSourceRaster(
+		source.MediaType, parsed.VisualAssets, s.config.CropConfig.MaxPixels, s.config.CropConfig.MaxBytes,
+	)
 	if err != nil {
 		return LayoutOutput{}, err
 	}
@@ -205,20 +207,29 @@ func layoutDocumentSource(source knowledgeparser.Input) knowledgelayout.Document
 	}
 }
 
-func layoutSourceRaster(mediaType string, assets []knowledgeparser.VisualAsset) (*knowledgelayout.RasterPage, error) {
+func layoutSourceRaster(
+	mediaType string,
+	assets []knowledgeparser.VisualAsset,
+	maxPixels int64,
+	maxBytes int64,
+) (*knowledgelayout.RasterPage, error) {
 	if mediaType != "image/png" && mediaType != "image/jpeg" {
 		return nil, nil
 	}
-	if len(assets) != 1 || assets[0].Kind != knowledgeparser.VisualAssetSourceImage ||
-		assets[0].MediaType != mediaType {
+	if maxPixels < 1 || maxBytes < 1 || len(assets) != 1 ||
+		assets[0].Kind != knowledgeparser.VisualAssetSourceImage || assets[0].MediaType != mediaType {
 		return nil, knowledgelayout.ErrInvalidInput
 	}
 	asset := assets[0]
 	if len(asset.Content) == 0 || asset.Width < 1 || asset.Height < 1 {
 		return nil, knowledgelayout.ErrInvalidInput
 	}
-	return &knowledgelayout.RasterPage{
+	raster := knowledgelayout.RasterPage{
 		MediaType: asset.MediaType, Width: asset.Width, Height: asset.Height,
 		Content: append([]byte(nil), asset.Content...),
-	}, nil
+	}
+	if err := raster.Validate(maxPixels, maxBytes); err != nil {
+		return nil, fmt.Errorf("%w: source image exceeds layout raster limits", knowledgeparser.ErrResourceLimit)
+	}
+	return &raster, nil
 }

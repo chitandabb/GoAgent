@@ -34,6 +34,7 @@ type DefaultRunnerDependencies struct {
 	AttachmentReader          attachment.Reader
 	ConversationMemorySources ConversationMemorySourceReader
 	ContextPreflight          DiagnosisContextPreflightConfig
+	MaxIterations             int
 	Logger                    *zap.Logger
 	ModelProvider             string
 	ModelID                   string
@@ -91,6 +92,7 @@ func NewDefaultRunner(ctx context.Context, dependencies DefaultRunnerDependencie
 		Mode:                  dependencies.Mode,
 		GitHubArgumentRewrite: dependencies.GitHubArgumentRewrite,
 		ContextPreflight:      dependencies.ContextPreflight,
+		MaxIterations:         dependencies.MaxIterations,
 		ModelProvider:         dependencies.ModelProvider,
 		ModelID:               dependencies.ModelID,
 		Logger:                dependencies.Logger,

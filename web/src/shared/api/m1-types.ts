@@ -87,6 +87,16 @@ export type TaskStatus =
   | 'failed'
   | 'cancelled'
 
+export interface DiagnosisTaskAttachment {
+  attachmentId: string
+  sourceMessageId: string
+  purpose: string
+  originalName: string
+  mediaType: string
+  sizeBytes: number
+  contentSha256: string
+}
+
 export interface DiagnosisTask {
   taskId: string
   externalCaseId: string
@@ -103,6 +113,7 @@ export interface DiagnosisTask {
   updatedAt: string
   reportAvailable: boolean
   reportId?: string
+  attachments: DiagnosisTaskAttachment[]
 }
 
 export type TaskEventType =
@@ -355,7 +366,6 @@ export interface ConversationMessagesData {
 export type TurnStatus =
   | 'queued'
   | 'running'
-  | 'retry_scheduled'
   | 'completed'
   | 'failed'
 

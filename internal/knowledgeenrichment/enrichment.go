@@ -15,6 +15,7 @@ import (
 var (
 	ErrUnavailable      = errors.New("knowledge visual enrichment is unavailable")
 	ErrUnsupportedInput = errors.New("knowledge visual enrichment input is unsupported")
+	ErrNoUsableContent  = errors.New("knowledge visual enrichment produced no usable content")
 )
 
 type Route string
@@ -81,6 +82,49 @@ func (u ProviderUsage) Validate() error {
 		return errors.New("knowledge visual enrichment provider usage is invalid")
 	}
 	return nil
+}
+
+const (
+	ProviderFailureNoUsableContent = "no_usable_content"
+	ProviderFailureOutputTruncated = "output_truncated"
+	ProviderFailureInvalidOutput   = "invalid_provider_output"
+	ProviderFailureEmptyResponse   = "empty_provider_response"
+	providerFailureProcessorFailed = "processor_failed"
+)
+
+// ProviderFailure preserves safe audit metadata for a provider call that did
+// not produce indexable content. Its wrapped cause remains available to the
+// orchestrator for retry and partial-ingestion decisions.
+type ProviderFailure struct {
+	Provider string
+	Model    string
+	Reason   string
+	Usage    *ProviderUsage
+	cause    error
+}
+
+func NewProviderFailure(provider, model, reason string, usage *ProviderUsage, cause error) *ProviderFailure {
+	if cause == nil {
+		cause = errors.New("knowledge visual enrichment provider failed")
+	}
+	return &ProviderFailure{
+		Provider: provider, Model: model, Reason: reason,
+		Usage: cloneProviderUsage(usage), cause: cause,
+	}
+}
+
+func (f *ProviderFailure) Error() string {
+	if f == nil || f.cause == nil {
+		return "knowledge visual enrichment provider failed"
+	}
+	return f.cause.Error()
+}
+
+func (f *ProviderFailure) Unwrap() error {
+	if f == nil {
+		return nil
+	}
+	return f.cause
 }
 
 type Processor interface {
@@ -221,11 +265,20 @@ func (o *Orchestrator) EnrichPlanned(
 			if ctx.Err() != nil {
 				return Output{}, ctx.Err()
 			}
-			record.Status = StatusMissing
-			record.Reason = "processor_failed"
-			output.Partial = true
-			if output.Cause == nil {
-				output.Cause = err
+			failureReason := captureProviderFailure(&record, err)
+			if errors.Is(err, ErrNoUsableContent) {
+				record.Status = StatusSkipped
+				record.Reason = ProviderFailureNoUsableContent
+			} else {
+				record.Status = StatusMissing
+				record.Reason = providerFailureProcessorFailed
+				if failureReason != "" {
+					record.Reason = failureReason
+				}
+				output.Partial = true
+				if output.Cause == nil {
+					output.Cause = err
+				}
 			}
 			output.Records = append(output.Records, record)
 			continue
@@ -259,6 +312,33 @@ func (o *Orchestrator) EnrichPlanned(
 		output.Records = append(output.Records, record)
 	}
 	return output, nil
+}
+
+func captureProviderFailure(record *Record, err error) string {
+	var failure *ProviderFailure
+	if !errors.As(err, &failure) || failure == nil || !validProviderFailureReason(failure.Reason) {
+		return ""
+	}
+	if strings.TrimSpace(failure.Provider) != "" {
+		record.Provider = strings.TrimSpace(failure.Provider)
+	}
+	if strings.TrimSpace(failure.Model) != "" {
+		record.Model = strings.TrimSpace(failure.Model)
+	}
+	if failure.Usage != nil && failure.Usage.Validate() == nil {
+		record.Usage = cloneProviderUsage(failure.Usage)
+	}
+	return failure.Reason
+}
+
+func validProviderFailureReason(reason string) bool {
+	switch reason {
+	case ProviderFailureNoUsableContent, ProviderFailureOutputTruncated,
+		ProviderFailureInvalidOutput, ProviderFailureEmptyResponse:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *Orchestrator) process(

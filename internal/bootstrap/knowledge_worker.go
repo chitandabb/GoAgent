@@ -187,13 +187,13 @@ func buildVisualProcessor(ctx context.Context, cfg config.Config) (knowledgeenri
 		if err != nil {
 			return nil, err
 		}
-		generator, err := platformvisualmodel.NewDashScopeModel(ctx, cfg.Models.OCR, "models.ocr")
+		generator, err := platformvisualmodel.NewOpenAICompatibleModel(ctx, cfg.Models.OCR, "models.ocr")
 		if err != nil {
 			return nil, err
 		}
 		ocrEndpoint = &platformvisualmodel.Endpoint{
 			Generator: generator, Provider: cfg.Models.OCR.Provider, Model: cfg.Models.OCR.Model,
-			Prompt: prompt, PromptVersion: cfg.Models.OCR.PromptVersion,
+			Prompt: prompt, PromptVersion: cfg.Models.OCR.PromptVersion, ResponseFormat: cfg.Models.OCR.ResponseFormat,
 		}
 	}
 	if cfg.Models.Vision.Enabled {
@@ -201,13 +201,13 @@ func buildVisualProcessor(ctx context.Context, cfg config.Config) (knowledgeenri
 		if err != nil {
 			return nil, err
 		}
-		generator, err := platformvisualmodel.NewDashScopeModel(ctx, cfg.Models.Vision, "models.vision")
+		generator, err := platformvisualmodel.NewOpenAICompatibleModel(ctx, cfg.Models.Vision, "models.vision")
 		if err != nil {
 			return nil, err
 		}
 		visionEndpoint = &platformvisualmodel.Endpoint{
 			Generator: generator, Provider: cfg.Models.Vision.Provider, Model: cfg.Models.Vision.Model,
-			Prompt: prompt, PromptVersion: cfg.Models.Vision.PromptVersion,
+			Prompt: prompt, PromptVersion: cfg.Models.Vision.PromptVersion, ResponseFormat: cfg.Models.Vision.ResponseFormat,
 		}
 	}
 	if ocrEndpoint == nil && visionEndpoint == nil {
@@ -224,7 +224,7 @@ func buildTableProcessor(ctx context.Context, cfg config.Config) (*platformtable
 	if err != nil {
 		return nil, err
 	}
-	generator, err := platformvisualmodel.NewDashScopeModel(ctx, cfg.Models.Table, "models.table")
+	generator, err := platformvisualmodel.NewOpenAICompatibleModel(ctx, cfg.Models.Table, "models.table")
 	if err != nil {
 		return nil, err
 	}

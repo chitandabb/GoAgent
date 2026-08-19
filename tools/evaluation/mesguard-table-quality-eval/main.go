@@ -147,7 +147,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		generator, err := platformvisualmodel.NewDashScopeModel(ctx, cfg.Models.Table, "models.table")
+		generator, err := platformvisualmodel.NewOpenAICompatibleModel(ctx, cfg.Models.Table, "models.table")
 		if err != nil {
 			return err
 		}

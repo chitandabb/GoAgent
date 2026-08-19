@@ -1,12 +1,15 @@
 package httptransport
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +67,65 @@ func TestKnowledgeIngestionCreateDocumentQueuesGlobalVersion(t *testing.T) {
 		useCase.input.ExpectedSourceSHA256 == "" || useCase.input.RequestFingerprint == "" {
 		t.Fatalf("uploaded input = %+v bytes = %q", useCase.input, useCase.bytes)
 	}
+}
+
+func TestValidateKnowledgeFileAllowsOnlySupportedDocumentFormats(t *testing.T) {
+	officeDocument := minimalOfficeUploadFixture(t, "word/document.xml")
+	officeWorkbook := minimalOfficeUploadFixture(t, "xl/workbook.xml")
+	officePresentation := minimalOfficeUploadFixture(t, "ppt/presentation.xml")
+	tests := []struct {
+		name      string
+		content   []byte
+		mediaType string
+	}{
+		{name: "manual.txt", content: []byte("plain text"), mediaType: "text/plain; charset=utf-8"},
+		{name: "manual.md", content: []byte("# Manual"), mediaType: "text/markdown; charset=utf-8"},
+		{name: "manual.pdf", content: []byte("%PDF-1.7\n"), mediaType: "application/pdf"},
+		{name: "manual.docx", content: officeDocument, mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+		{name: "manual.xlsx", content: officeWorkbook, mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+		{name: "manual.pptx", content: officePresentation, mediaType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), test.name)
+			if err := os.WriteFile(path, test.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			name, mediaType, err := validateKnowledgeFile(path, test.name)
+			if err != nil || name != test.name || mediaType != test.mediaType {
+				t.Fatalf("validateKnowledgeFile = %q, %q, %v", name, mediaType, err)
+			}
+		})
+	}
+	for _, name := range []string{
+		"events.log", "data.json", "records.csv", "migration.sql", "data.xml", "config.yaml", "config.yml",
+		"diagram.png", "diagram.jpg", "diagram.jpeg", "diagram.gif", "archive.zip",
+	} {
+		t.Run("reject_"+name, func(t *testing.T) {
+			if _, _, err := validateKnowledgeFile("", name); err == nil {
+				t.Fatalf("validateKnowledgeFile accepted %q", name)
+			}
+		})
+	}
+}
+
+func minimalOfficeUploadFixture(t *testing.T, mainPart string) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	archive := zip.NewWriter(&output)
+	for _, name := range []string{"[Content_Types].xml", mainPart} {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte("fixture")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func TestKnowledgeIngestionReplayReturnsOK(t *testing.T) {

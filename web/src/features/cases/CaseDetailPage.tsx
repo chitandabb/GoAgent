@@ -64,12 +64,17 @@ export function CaseDetailPage() {
           </span>
         }
         actions={
-          <Button onClick={() => {
-            const workspace = openCaseWorkspace(c.externalCaseId)
-            navigate(`/workbench/${workspace.workspaceId}`)
-          }}>
-            在工作台打开
-          </Button>
+          <>
+            <Button variant="neutral" onClick={() => navigate(`/assistant?caseId=${encodeURIComponent(c.externalCaseId)}`)}>
+              在助手中讨论
+            </Button>
+            <Button onClick={() => {
+              const workspace = openCaseWorkspace(c.externalCaseId)
+              navigate(`/workbench/${workspace.workspaceId}`)
+            }}>
+              在工作台打开
+            </Button>
+          </>
         }
       />
 

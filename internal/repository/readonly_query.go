@@ -7,7 +7,12 @@ import (
 	"github.com/google/uuid"
 )
 
-var ErrReadonlyQueryUnavailable = errors.New("readonly query unavailable")
+var (
+	ErrReadonlyQueryUnavailable = errors.New("readonly query unavailable")
+	// ErrReadonlyQueryRejected means a generated query was blocked before execution.
+	// It is a safe, non-retryable semantic result for an Agent to correct.
+	ErrReadonlyQueryRejected = errors.New("readonly query rejected")
+)
 
 // ReadonlyQueryResult 是 SQL 只读执行器返回给 Agent 层的稳定 DTO。
 // Rows 只包含已经经过结果大小限制和 JSON 安全转换的值。

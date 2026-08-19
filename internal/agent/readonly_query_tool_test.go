@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/repository"
+	"github.com/chitandabb/GoAgent/internal/resilience"
 	"github.com/google/uuid"
 )
 
@@ -113,6 +115,31 @@ func TestExecuteReadonlyQueryToolPropagatesContextAndSafeExecutorErrors(t *testi
 		ctx, `{"query":"SELECT * FROM dbo.Tickets"}`,
 	); err == nil || !strings.Contains(err.Error(), "readonly query unavailable") {
 		t.Fatalf("executor error = %v", err)
+	}
+}
+
+func TestExecuteReadonlyQueryToolReturnsSafeFeedbackForGuardRejection(t *testing.T) {
+	executor := &stubReadonlyQueryExecutor{err: resilience.StrictFailure(repository.ErrReadonlyQueryRejected)}
+	current, err := NewExecuteReadonlyQueryTool(executor)
+	if err != nil {
+		t.Fatalf("NewExecuteReadonlyQueryTool: %v", err)
+	}
+	ctx := agentruntime.WithRunAccess(context.Background(),
+		mustConversationSQLAccess(t, []uuid.UUID{uuid.New()}))
+	result, err := current.InvokableRun(ctx, `{"query":"SELECT * FROM dbo.Tickets"}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var payload struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Guidance string `json:"guidance"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if payload.OK || payload.Error != "query_rejected" || !strings.Contains(payload.Guidance, "search_schema_catalog") {
+		t.Fatalf("unexpected query rejection feedback: %+v", payload)
 	}
 }
 

@@ -600,6 +600,7 @@ type AgentConfig struct {
 	ConversationMaxIterations                 int                 `toml:"conversationMaxIterations"`
 	ConversationMaxContextRunes               int                 `toml:"conversationMaxContextRunes"`
 	ConversationTimeoutMillis                 int                 `toml:"conversationTimeoutMillis"`
+	DiagnosisMaxIterations                    int                 `toml:"diagnosisMaxIterations"`
 	MaxAgentRuns                              int                 `toml:"maxAgentRuns"`
 	MaxToolCalls                              int                 `toml:"maxToolCalls"`
 	MaxEvidenceItems                          int                 `toml:"maxEvidenceItems"`
@@ -840,6 +841,9 @@ func (c AgentConfig) Validate() error {
 	}
 	if c.TimeoutMillis != 0 && (c.TimeoutMillis < 1000 || c.TimeoutMillis > 600_000) {
 		return errors.New("agent timeoutMillis must be between 1000 and 600000 when configured")
+	}
+	if c.DiagnosisMaxIterations != 0 && (c.DiagnosisMaxIterations < 1 || c.DiagnosisMaxIterations > 16) {
+		return errors.New("agent diagnosisMaxIterations must be between 1 and 16 when configured")
 	}
 	if c.ConversationMaxIterations != 0 && (c.ConversationMaxIterations < 1 || c.ConversationMaxIterations > 16) {
 		return errors.New("agent conversationMaxIterations must be between 1 and 16 when configured")

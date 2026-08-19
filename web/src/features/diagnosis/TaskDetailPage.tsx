@@ -324,6 +324,19 @@ export function TaskDetailPage() {
               <div><dt className="text-ink-48">补充说明</dt><dd className="mt-0.5 whitespace-pre-wrap break-words">{value.requestText}</dd></div>
               <div><dt className="text-ink-48">快照 ID</dt><dd className="mt-0.5"><code className="text-[12px] text-ink-48">{shortId(value.caseSnapshotId)}</code></dd></div>
               {value.retryOfTaskId && <div><dt className="text-ink-48">重试自</dt><dd className="mt-0.5"><Link className="text-primary" to={`/tasks/${value.retryOfTaskId}`}>{shortId(value.retryOfTaskId)}</Link></dd></div>}
+              {value.attachments.length > 0 && (
+                <div>
+                  <dt className="text-ink-48">冻结附件</dt>
+                  <dd className="mt-1 flex flex-col gap-1.5">
+                    {value.attachments.map((attachment) => (
+                      <div key={attachment.attachmentId} className="rounded-utility bg-pearl px-3 py-2 text-[12px]">
+                        <p className="truncate font-semibold text-ink" title={attachment.originalName}>{attachment.originalName}</p>
+                        <p className="mt-0.5 text-ink-48">{attachment.mediaType} · {attachment.sizeBytes} B · {attachment.purpose}</p>
+                      </div>
+                    ))}
+                  </dd>
+                </div>
+              )}
             </dl>
           </Card>
           <Card className="bg-pearl p-6">

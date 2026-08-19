@@ -450,7 +450,7 @@ func buildProviderRunners(ctx context.Context, cfg config.Config, opts options, 
 	dashConfig := cfg.Models.Vision
 	dashConfig.MaxOutputTokens = opts.maxOutputTokens
 	dashConfig.TimeoutMillis = int(opts.providerTimeout.Milliseconds())
-	dashGenerator, err := visualmodel.NewDashScopeModel(ctx, dashConfig, "models.vision")
+	dashGenerator, err := visualmodel.NewOpenAICompatibleModel(ctx, dashConfig, "models.vision")
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func buildProviderRunners(ctx context.Context, cfg config.Config, opts options, 
 	for index := range result {
 		processor, err := visualmodel.NewProcessor(nil, &visualmodel.Endpoint{
 			Generator: generators[index], Provider: result[index].name, Model: result[index].model,
-			Prompt: prompt, PromptVersion: cfg.Models.Vision.PromptVersion,
+			Prompt: prompt, PromptVersion: cfg.Models.Vision.PromptVersion, ResponseFormat: cfg.Models.Vision.ResponseFormat,
 		})
 		if err != nil {
 			return nil, err

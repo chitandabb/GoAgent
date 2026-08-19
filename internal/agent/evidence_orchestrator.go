@@ -12,6 +12,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/resilience"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"go.uber.org/zap"
 )
@@ -340,6 +341,17 @@ func (o *EvidenceOrchestrator) runAgent(ctx context.Context, state *evidenceStat
 	if err != nil {
 		if ctx.Err() != nil {
 			return state, ctx.Err()
+		}
+		// These failures are caused by the model reaching a local iteration or
+		// tool-policy boundary. Replaying the same task at the Worker layer
+		// repeats the same prompt and only adds a 30-second delay; let the
+		// Evidence Gate perform its bounded repair run instead.
+		if errors.Is(err, adk.ErrExceedMaxIterations) ||
+			errors.Is(err, ErrAgentToolRunLimitExhausted) ||
+			errors.Is(err, ErrToolNotAllowed) {
+			state.lastAgentFailure = "本轮调查达到模型工具或迭代边界，转入结构化报告修复"
+			state.gaps = append(state.gaps, state.lastAgentFailure)
+			return state, nil
 		}
 		if errors.Is(err, ErrToolCallBudgetExhausted) || errors.Is(err, ErrTokenBudgetExhausted) ||
 			state.budget.exhausted() {

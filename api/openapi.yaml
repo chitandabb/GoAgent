@@ -2520,7 +2520,7 @@ components:
         file:
           type: string
           format: binary
-          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX、PNG 和 JPEG。
+          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX 和 PPTX。
     KnowledgeDocumentVersionRequest:
       type: object
       additionalProperties: false
@@ -2529,7 +2529,7 @@ components:
         file:
           type: string
           format: binary
-          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX、PNG 和 JPEG。
+          description: 最大 50 MiB；支持 UTF-8 TXT/Markdown、PDF、DOCX、XLSX 和 PPTX。
     KnowledgeIngestionData:
       type: object
       required: [documentId, documentVersionId, version, taskId, status, stage, replayed, createdAt]

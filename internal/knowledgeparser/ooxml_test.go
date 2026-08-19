@@ -55,8 +55,84 @@ func TestOOXMLParserExtractsXLSXSheetsAndCellTypes(t *testing.T) {
 	if result.ParserVersion != XLSXParserVersion || len(result.Elements) != 1 ||
 		result.Elements[0].ElementType != knowledge.ElementTable ||
 		strings.Join(result.Elements[0].SectionPath, "/") != "Faults" ||
-		result.Elements[0].ContentText != "timeout | 30s\n5" {
+		result.Elements[0].ContentText != "| timeout | 30s |\n| --- | --- |\n| 5 |  |" {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestOOXMLParserEscapesXLSXCellsForMarkdownTableChunks(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: XLSXMediaType, OriginalName: "data.xlsx",
+		Content: officeFixture(map[string]string{
+			"xl/workbook.xml":            `<workbook xmlns:r="relationships"><sheets><sheet name="Faults" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+			"xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+			"xl/worksheets/sheet1.xml": `<worksheet><sheetData>
+				<row r="1"><c r="A1" t="inlineStr"><is><t>alarm|code</t></is></c><c r="B1" t="inlineStr"><is><t>meaning</t></is></c></row>
+				<row r="2"><c r="A2" t="inlineStr"><is><t>E01</t></is></c><c r="B2" t="inlineStr"><is><t>line one&#10;line two</t></is></c></row>
+			</sheetData></worksheet>`,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.Elements) != 1 || result.Elements[0].ContentText != "| alarm\\|code | meaning |\n| --- | --- |\n| E01 | line one<br>line two |" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestOOXMLParserPadsXLSXRowsToLaterColumnWidth(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: XLSXMediaType, OriginalName: "sparse.xlsx",
+		Content: officeFixture(map[string]string{
+			"xl/workbook.xml":            `<workbook xmlns:r="relationships"><sheets><sheet name="Faults" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+			"xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+			"xl/worksheets/sheet1.xml": `<worksheet><sheetData>
+				<row r="1"><c r="A1" t="inlineStr"><is><t>code</t></is></c></row>
+				<row r="2"><c r="A2" t="inlineStr"><is><t>E01</t></is></c><c r="B2" t="inlineStr"><is><t>overheat</t></is></c></row>
+			</sheetData></worksheet>`,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(result.Elements) != 1 || result.Elements[0].ContentText != "| code |  |\n| --- | --- |\n| E01 | overheat |" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestOOXMLParserXLSXChunksRepeatWorksheetHeader(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	longValue := strings.Repeat("x", 72)
+	worksheet := `<worksheet><sheetData>
+		<row r="1"><c r="A1" t="inlineStr"><is><t>code</t></is></c><c r="B1" t="inlineStr"><is><t>description</t></is></c></row>
+		<row r="2"><c r="A2" t="inlineStr"><is><t>E01</t></is></c><c r="B2" t="inlineStr"><is><t>` + longValue + `</t></is></c></row>
+		<row r="3"><c r="A3" t="inlineStr"><is><t>E02</t></is></c><c r="B3" t="inlineStr"><is><t>` + longValue + `</t></is></c></row>
+	</sheetData></worksheet>`
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: XLSXMediaType, OriginalName: "data.xlsx",
+		Content: officeFixture(map[string]string{
+			"xl/workbook.xml":            `<workbook xmlns:r="relationships"><sheets><sheet name="Faults" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+			"xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+			"xl/worksheets/sheet1.xml":   worksheet,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	chunks, err := knowledge.ChunkElements(result.Elements, knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16})
+	if err != nil {
+		t.Fatalf("ChunkElements: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %+v", chunks)
+	}
+	for _, chunk := range chunks {
+		if !strings.HasPrefix(chunk.ContentText, "| code | description |\n| --- | --- |\n") ||
+			len([]rune(chunk.ContentText)) > 128 {
+			t.Fatalf("chunk = %+v", chunk)
+		}
 	}
 }
 
@@ -102,6 +178,40 @@ func TestOOXMLParserExtractsEmbeddedVisualAssetsDeterministically(t *testing.T) 
 	}
 }
 
+func TestOOXMLParserOnlyReferencesDrawingMLAndVMLImages(t *testing.T) {
+	parser, _ := NewOOXMLParser(testParserLimits())
+	result, err := parser.Parse(context.Background(), Input{
+		MediaType: DOCXMediaType, OriginalName: "manual.docx",
+		Content: officeFixtureBytes(map[string][]byte{
+			"word/document.xml": []byte(`<w:document xmlns:w="w" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:f="https://example.invalid/not-drawing"><w:body>
+				<w:p><w:r><w:t>Text</w:t></w:r></w:p>
+				<w:hyperlink r:embed="rIdNotAnImage"><w:r><w:t>Link</w:t></w:r></w:hyperlink>
+				<f:blip r:embed="rIdDecoy"/>
+				<w:drawing><a:blip r:embed="rIdDrawing"/></w:drawing>
+				<v:imagedata r:id="rIdVML"/>
+			</w:body></w:document>`),
+			"word/_rels/document.xml.rels": []byte(`<Relationships><Relationship Id="rIdNotAnImage" Target="media/decoy.png"/><Relationship Id="rIdDecoy" Target="media/decoy.png"/><Relationship Id="rIdDrawing" Target="media/drawing.png"/><Relationship Id="rIdVML" Target="media/vml.png"/></Relationships>`),
+			"word/media/decoy.png":         rasterFixture(t, "png", 100, 100),
+			"word/media/drawing.png":       rasterFixture(t, "png", 100, 100),
+			"word/media/vml.png":           rasterFixture(t, "png", 100, 100),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	relationships := make(map[string]string, len(result.VisualAssets))
+	for _, asset := range result.VisualAssets {
+		relationships[asset.SourcePath] = asset.RelationshipID
+		if asset.RelationshipID != "" && asset.SourcePart != "word/document.xml" {
+			t.Fatalf("visual asset source part = %+v", asset)
+		}
+	}
+	if len(result.VisualAssets) != 3 || relationships["word/media/decoy.png"] != "" ||
+		relationships["word/media/drawing.png"] != "rIdDrawing" || relationships["word/media/vml.png"] != "rIdVML" {
+		t.Fatalf("visual assets = %+v", result.VisualAssets)
+	}
+}
+
 func TestOOXMLParserLocatesPPTXImageByPresentationOrder(t *testing.T) {
 	parser, _ := NewOOXMLParser(testParserLimits())
 	result, err := parser.Parse(context.Background(), Input{
@@ -110,7 +220,7 @@ func TestOOXMLParserLocatesPPTXImageByPresentationOrder(t *testing.T) {
 			"ppt/presentation.xml":             []byte(`<p:presentation xmlns:p="p" xmlns:r="relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>`),
 			"ppt/_rels/presentation.xml.rels":  []byte(`<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>`),
 			"ppt/slides/slide1.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>`),
-			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:pic><a:blipFill><a:blip r:embed="rIdImage"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
 			"ppt/slides/_rels/slide2.xml.rels": []byte(`<Relationships><Relationship Id="rIdImage" Target="../media/image1.png"/></Relationships>`),
 			"ppt/media/image1.png":             rasterFixture(t, "png", 100, 100),
 		}),
@@ -132,8 +242,8 @@ func TestOOXMLParserPreservesRepeatedPPTXImageOccurrences(t *testing.T) {
 		Content: officeFixtureBytes(map[string][]byte{
 			"ppt/presentation.xml":             []byte(`<p:presentation xmlns:p="p" xmlns:r="relationships"><p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>`),
 			"ppt/_rels/presentation.xml.rels":  []byte(`<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/><Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>`),
-			"ppt/slides/slide1.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
-			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/slide1.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:sld>`),
+			"ppt/slides/slide2.xml":            []byte(`<p:sld xmlns:p="p" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:pic><a:blipFill><a:blip r:embed="rIdShared"/></a:blipFill></p:pic><a:p><a:r><a:t>First</a:t></a:r></a:p></p:sld>`),
 			"ppt/slides/_rels/slide1.xml.rels": []byte(`<Relationships><Relationship Id="rIdShared" Target="../media/shared.png"/></Relationships>`),
 			"ppt/slides/_rels/slide2.xml.rels": []byte(`<Relationships><Relationship Id="rIdShared" Target="../media/shared.png"/></Relationships>`),
 			"ppt/media/shared.png":             rasterFixture(t, "png", 100, 100),

@@ -24,14 +24,15 @@ type Generator interface {
 }
 
 type Endpoint struct {
-	Generator     Generator
-	Provider      string
-	Model         string
-	Prompt        string
-	PromptVersion string
+	Generator      Generator
+	Provider       string
+	Model          string
+	Prompt         string
+	PromptVersion  string
+	ResponseFormat string
 }
 
-func NewDashScopeModel(ctx context.Context, cfg config.MultimodalModelConfig, owner string) (Generator, error) {
+func NewOpenAICompatibleModel(ctx context.Context, cfg config.MultimodalModelConfig, owner string) (Generator, error) {
 	if err := cfg.Validate(owner); err != nil {
 		return nil, err
 	}
@@ -41,11 +42,23 @@ func NewDashScopeModel(ctx context.Context, cfg config.MultimodalModelConfig, ow
 	}
 	maxOutputTokens := cfg.MaxOutputTokens
 	temperature := float32(0)
-	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey: apiKey, BaseURL: strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
-		Model: strings.TrimSpace(cfg.Model), Timeout: time.Duration(cfg.TimeoutMillis) * time.Millisecond,
-		MaxTokens: &maxOutputTokens, Temperature: &temperature,
-	})
+	chatModelConfig := &openai.ChatModelConfig{
+		APIKey:      apiKey,
+		BaseURL:     strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		Model:       strings.TrimSpace(cfg.Model),
+		Timeout:     time.Duration(cfg.TimeoutMillis) * time.Millisecond,
+		MaxTokens:   &maxOutputTokens,
+		Temperature: &temperature,
+	}
+	if effort := strings.ToLower(strings.TrimSpace(cfg.ReasoningEffort)); effort != "" {
+		chatModelConfig.ReasoningEffort = openai.ReasoningEffortLevel(effort)
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ResponseFormat), "json_object") {
+		chatModelConfig.ResponseFormat = &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+		}
+	}
+	chatModel, err := openai.NewChatModel(ctx, chatModelConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create %s model: %w", owner, err)
 	}
@@ -62,8 +75,8 @@ type OCRResult struct {
 	Usage *knowledgeenrichment.ProviderUsage
 }
 
-// ExtractOCR exposes the same strict OCR path for bounded provider evaluation
-// without constructing ingestion-only visual assets.
+// ExtractOCR exposes the bounded OCR path for provider evaluation without
+// constructing ingestion-only visual assets.
 func (p *Processor) ExtractOCR(ctx context.Context, sourcePath, mediaType string, content []byte) (OCRResult, error) {
 	if p == nil || p.ocr == nil {
 		return OCRResult{}, knowledgeenrichment.ErrUnavailable
@@ -72,25 +85,38 @@ func (p *Processor) ExtractOCR(ctx context.Context, sourcePath, mediaType string
 		(mediaType != "image/png" && mediaType != "image/jpeg") || len(content) == 0 {
 		return OCRResult{}, errors.New("OCR evaluation input is invalid")
 	}
-	message := buildImageMessage(
+	message := buildImageMessageWithDetail(
 		p.ocr.Prompt,
 		fmt.Sprintf("\nSource path: %s\nProcessing hint: quality_evaluation", sourcePath),
 		mediaType,
 		content,
+		schema.ImageURLDetailHigh,
 	)
 	response, err := p.ocr.Generator.Generate(ctx, []*schema.Message{message})
 	if err != nil {
 		return OCRResult{}, fmt.Errorf("visual model request: %w", err)
 	}
 	if response == nil {
-		return OCRResult{}, errors.New("visual model returned an empty response")
+		return OCRResult{}, providerFailure(
+			p.ocr, nil, knowledgeenrichment.ProviderFailureEmptyResponse,
+			errors.New("visual model returned an empty response"),
+		)
 	}
-	decoded, err := decodeVisualResponse(response.Content)
+	if response.ResponseMeta != nil && strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
+		return OCRResult{}, providerFailure(
+			p.ocr, response, knowledgeenrichment.ProviderFailureOutputTruncated,
+			errors.New("visual model response was truncated"),
+		)
+	}
+	decoded, err := decodeEndpointResponse(p.ocr, response.Content)
 	if err != nil {
-		return OCRResult{}, err
+		return OCRResult{}, providerFailure(p.ocr, response, knowledgeenrichment.ProviderFailureInvalidOutput, err)
 	}
 	if decoded.OCRText == "" {
-		return OCRResult{}, errors.New("visual model returned no usable OCR text")
+		return OCRResult{}, providerFailure(
+			p.ocr, response, knowledgeenrichment.ProviderFailureNoUsableContent,
+			errors.New("visual model returned no usable OCR text"),
+		)
 	}
 	return OCRResult{Text: decoded.OCRText, Usage: responseUsage(response)}, nil
 }
@@ -108,6 +134,12 @@ func NewProcessor(ocr, vision *Endpoint) (*Processor, error) {
 			strings.TrimSpace(endpoint.PromptVersion) == "" {
 			return nil, errors.New("visual model endpoint is incomplete")
 		}
+		if !supportedEndpointResponseFormat(endpoint.ResponseFormat) {
+			return nil, errors.New("visual model endpoint response format is unsupported")
+		}
+	}
+	if vision != nil && strings.EqualFold(strings.TrimSpace(vision.ResponseFormat), "text") {
+		return nil, errors.New("visual semantics endpoint must use structured JSON output")
 	}
 	return &Processor{ocr: ocr, vision: vision}, nil
 }
@@ -116,48 +148,59 @@ func (p *Processor) Process(ctx context.Context, request knowledgeenrichment.Req
 	if p == nil {
 		return knowledgeenrichment.ProviderResult{}, knowledgeenrichment.ErrUnavailable
 	}
-	endpoint, partial, reason, err := p.endpointFor(request)
-	if err != nil {
-		return knowledgeenrichment.ProviderResult{}, err
-	}
 	if request.Asset.Kind == knowledgeparser.VisualAssetDocumentPage {
 		return knowledgeenrichment.ProviderResult{}, errors.Join(
 			knowledgeenrichment.ErrUnsupportedInput,
 			errors.New("Eino OpenAI chat model does not encode PDF file_url input"),
 		)
 	}
-	message := buildMessage(endpoint.Prompt, request)
-	response, err := endpoint.Generator.Generate(ctx, []*schema.Message{message})
-	if err != nil {
-		return knowledgeenrichment.ProviderResult{}, fmt.Errorf("visual model request: %w", err)
-	}
-	if response == nil {
-		return knowledgeenrichment.ProviderResult{}, errors.New("visual model returned an empty response")
-	}
-	decoded, err := decodeVisualResponse(response.Content)
+	endpoint, partial, reason, err := p.endpointFor(request)
 	if err != nil {
 		return knowledgeenrichment.ProviderResult{}, err
 	}
-	elements := make([]knowledge.DocumentElement, 0, 2)
-	if decoded.OCRText != "" {
-		elements = append(elements, knowledge.DocumentElement{
-			ElementType: knowledge.ElementOCRText, ContentText: decoded.OCRText,
-			Metadata: visualMetadata(request, endpoint, "ocr"),
-		})
+	message := buildMessage(endpoint.Prompt, request)
+	response, generateErr := endpoint.Generator.Generate(ctx, []*schema.Message{message})
+	if generateErr != nil {
+		return knowledgeenrichment.ProviderResult{}, fmt.Errorf("visual model request: %w", generateErr)
 	}
-	if decoded.Description != "" && request.Route == knowledgeenrichment.RouteOCRVLM {
-		elements = append(elements, knowledge.DocumentElement{
-			ElementType: knowledge.ElementImageDescription, ContentText: decoded.Description,
-			Metadata: visualMetadata(request, endpoint, "vlm"),
-		})
+	if response == nil {
+		return knowledgeenrichment.ProviderResult{}, providerFailure(
+			endpoint, nil, knowledgeenrichment.ProviderFailureEmptyResponse,
+			errors.New("visual model returned an empty response"),
+		)
 	}
+	if response.ResponseMeta != nil && strings.EqualFold(strings.TrimSpace(response.ResponseMeta.FinishReason), "length") {
+		return knowledgeenrichment.ProviderResult{}, providerFailure(
+			endpoint, response, knowledgeenrichment.ProviderFailureOutputTruncated,
+			errors.New("visual model response was truncated"),
+		)
+	}
+	decoded, decodeErr := decodeEndpointResponse(endpoint, response.Content)
+	if decodeErr != nil {
+		return knowledgeenrichment.ProviderResult{}, providerFailure(
+			endpoint, response, knowledgeenrichment.ProviderFailureInvalidOutput, decodeErr,
+		)
+	}
+	elements := visualOutputElements(request, endpoint, decoded)
 	if len(elements) == 0 {
-		return knowledgeenrichment.ProviderResult{}, errors.New("visual model returned no usable OCR or description text")
+		return knowledgeenrichment.ProviderResult{}, providerFailure(
+			endpoint, response, knowledgeenrichment.ProviderFailureNoUsableContent,
+			knowledgeenrichment.ErrNoUsableContent,
+		)
 	}
 	return knowledgeenrichment.ProviderResult{
 		Provider: endpoint.Provider, Model: endpoint.Model, Elements: elements,
 		Partial: partial, Reason: reason, Usage: responseUsage(response),
 	}, nil
+}
+
+func supportedEndpointResponseFormat(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "json_object", "text":
+		return true
+	default:
+		return false
+	}
 }
 
 func responseUsage(response *schema.Message) *knowledgeenrichment.ProviderUsage {
@@ -171,6 +214,41 @@ func responseUsage(response *schema.Message) *knowledgeenrichment.ProviderUsage 
 	}
 }
 
+func providerFailure(
+	endpoint *Endpoint,
+	response *schema.Message,
+	reason string,
+	cause error,
+) error {
+	if endpoint == nil {
+		return cause
+	}
+	return knowledgeenrichment.NewProviderFailure(
+		endpoint.Provider, endpoint.Model, reason, responseUsage(response), cause,
+	)
+}
+
+func visualOutputElements(
+	request knowledgeenrichment.Request,
+	endpoint *Endpoint,
+	decoded visualResponse,
+) []knowledge.DocumentElement {
+	elements := make([]knowledge.DocumentElement, 0, 1)
+	if decoded.OCRText != "" && request.Route == knowledgeenrichment.RouteOCR {
+		elements = append(elements, knowledge.DocumentElement{
+			ElementType: knowledge.ElementOCRText, ContentText: decoded.OCRText,
+			Metadata: visualMetadata(request, endpoint, "ocr"),
+		})
+	}
+	if decoded.Description != "" && request.Route == knowledgeenrichment.RouteOCRVLM {
+		elements = append(elements, knowledge.DocumentElement{
+			ElementType: knowledge.ElementImageDescription, ContentText: decoded.Description,
+			Metadata: visualMetadata(request, endpoint, "vlm"),
+		})
+	}
+	return elements
+}
+
 func (p *Processor) endpointFor(request knowledgeenrichment.Request) (*Endpoint, bool, string, error) {
 	switch request.Route {
 	case knowledgeenrichment.RouteOCR:
@@ -179,16 +257,10 @@ func (p *Processor) endpointFor(request knowledgeenrichment.Request) (*Endpoint,
 		}
 		return p.ocr, false, "", nil
 	case knowledgeenrichment.RouteOCRVLM:
-		if request.Asset.Kind == knowledgeparser.VisualAssetDocumentPage {
-			if p.ocr == nil {
-				return nil, false, "", knowledgeenrichment.ErrUnavailable
-			}
-			return p.ocr, true, "vision_not_configured_for_document_page", nil
-		}
 		if p.vision != nil {
 			return p.vision, false, "", nil
 		}
-		if p.ocr != nil {
+		if p.ocr != nil && !strings.EqualFold(strings.TrimSpace(p.ocr.ResponseFormat), "text") {
 			return p.ocr, true, "vision_not_configured", nil
 		}
 		return nil, false, "", knowledgeenrichment.ErrUnavailable
@@ -205,18 +277,33 @@ func buildMessage(prompt string, request knowledgeenrichment.Request) *schema.Me
 			request.Asset.SourcePath, *request.Asset.PageNumber, request.Reason,
 		)
 	}
-	return buildImageMessage(prompt, locator, request.Asset.MediaType, request.Asset.Content)
+	detail := schema.ImageURLDetailLow
+	if request.Route == knowledgeenrichment.RouteOCR {
+		detail = schema.ImageURLDetailHigh
+	}
+	return buildImageMessageWithDetail(prompt, locator, request.Asset.MediaType, request.Asset.Content, detail)
 }
 
 func buildImageMessage(prompt, locator, mediaType string, content []byte) *schema.Message {
+	return buildImageMessageWithDetail(prompt, locator, mediaType, content, schema.ImageURLDetailLow)
+}
+
+func buildImageMessageWithDetail(
+	prompt, locator, mediaType string,
+	content []byte,
+	detail schema.ImageURLDetail,
+) *schema.Message {
 	parts := []schema.MessageInputPart{{
 		Type: schema.ChatMessagePartTypeText, Text: strings.TrimSpace(prompt) + locator,
 	}, {
 		Type: schema.ChatMessagePartTypeImageURL,
-		Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{
-			Base64Data: stringPointer(base64.StdEncoding.EncodeToString(content)),
-			MIMEType:   mediaType,
-		}},
+		Image: &schema.MessageInputImage{
+			MessagePartCommon: schema.MessagePartCommon{
+				Base64Data: stringPointer(base64.StdEncoding.EncodeToString(content)),
+				MIMEType:   mediaType,
+			},
+			Detail: detail,
+		},
 	}}
 	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}
 }
@@ -226,8 +313,32 @@ type visualResponse struct {
 	Description string `json:"description"`
 }
 
+const maxVisualOutputRunes = 100_000
+
+func decodeEndpointResponse(endpoint *Endpoint, content string) (visualResponse, error) {
+	format := ""
+	if endpoint != nil {
+		format = strings.ToLower(strings.TrimSpace(endpoint.ResponseFormat))
+	}
+	switch format {
+	case "", "json_object":
+		return decodeVisualResponse(content)
+	case "text":
+		return decodePlainTextOCRResponse(content)
+	default:
+		return visualResponse{}, fmt.Errorf("visual model response format %q is unsupported", format)
+	}
+}
+
+func decodePlainTextOCRResponse(content string) (visualResponse, error) {
+	text := strings.TrimSpace(content)
+	if err := validateVisualResponseText(text); err != nil {
+		return visualResponse{}, err
+	}
+	return visualResponse{OCRText: text}, nil
+}
+
 func decodeVisualResponse(content string) (visualResponse, error) {
-	const maxVisualOutputRunes = 100_000
 	normalized, err := normalizeVisualJSON(content)
 	if err != nil {
 		return visualResponse{}, err
@@ -244,11 +355,20 @@ func decodeVisualResponse(content string) (visualResponse, error) {
 	}
 	result.OCRText = strings.TrimSpace(result.OCRText)
 	result.Description = strings.TrimSpace(result.Description)
-	if strings.ContainsRune(result.OCRText, 0) || strings.ContainsRune(result.Description, 0) ||
-		len([]rune(result.OCRText)) > maxVisualOutputRunes || len([]rune(result.Description)) > maxVisualOutputRunes {
-		return visualResponse{}, errors.New("visual model JSON text exceeds safety limits")
+	if err := validateVisualResponseText(result.OCRText); err != nil {
+		return visualResponse{}, err
+	}
+	if err := validateVisualResponseText(result.Description); err != nil {
+		return visualResponse{}, err
 	}
 	return result, nil
+}
+
+func validateVisualResponseText(text string) error {
+	if strings.ContainsRune(text, 0) || len([]rune(text)) > maxVisualOutputRunes {
+		return errors.New("visual model output text exceeds safety limits")
+	}
+	return nil
 }
 
 func normalizeVisualJSON(content string) (string, error) {

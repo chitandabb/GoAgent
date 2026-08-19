@@ -525,9 +525,10 @@ file=<binary>
 当前每次上传一个文件，scope 由路由固定为 `session`，客户端不能扩大范围。API 先将输入流式写入
 有大小上限的临时文件并计算 SHA-256，校验后写入 MinIO，不使用 Base64，也不把完整文件读入内存。
 
-允许类型为 UTF-8 TXT/Markdown/LOG/JSON/CSV/SQL/XML/YAML、PDF、DOCX、XLSX、PPTX、PNG 和
-JPEG。服务端校验扩展名对应的文件签名或 OOXML 主结构；加密 Office 包、宏格式、任意 ZIP、
-可执行文件、NUL 文本和非 UTF-8 文本均拒绝。单文件上限复用 `[minio].maxObjectBytes`。
+允许类型为 UTF-8 TXT/Markdown、PDF、DOCX、XLSX 和 PPTX。服务端校验扩展名对应的文件签名或
+OOXML 主结构；加密 Office 包、宏格式、任意 ZIP、独立图片、其他文本格式、可执行文件、NUL 文本和
+非 UTF-8 文本均拒绝。PDF 页面和 Office 内嵌图片只作为已接受文档的内部处理对象，不是独立上传格式。
+单文件上限复用 `[minio].maxObjectBytes`。
 
 幂等状态存 PostgreSQL：
 

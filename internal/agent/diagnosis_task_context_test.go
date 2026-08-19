@@ -76,7 +76,7 @@ func newTaskContextRunnerTest(t *testing.T, chatModel model.ToolCallingChatModel
 	return runner
 }
 
-const diagnosisTaskContextBlockForTest = "<task_context>\n{\"policySchemaVersion\":1,\"effectivePermissions\":[\"case.read\"],\"externalCaseId\":\"11111111-1111-1111-1111-111111111111\"}\n</task_context>"
+const diagnosisTaskContextBlockForTest = "<task_context>\n{\"policySchemaVersion\":1,\"effectivePermissions\":[\"case.read\"],\"externalCaseId\":\"11111111-1111-1111-1111-111111111111\",\"attachmentCount\":0}\n</task_context>"
 
 func TestRunnerAppendsDiagnosisTaskContextOnlyAtSystemTail(t *testing.T) {
 	recording := &taskContextRecordingModel{}

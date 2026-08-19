@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const maxMultimodalPromptBytes = 16 * 1024
+const (
+	maxMultimodalPromptBytes = 16 * 1024
+	maxQwenOCROutputTokens   = 4096
+)
 
 type MultimodalModelConfig struct {
 	Enabled         bool   `toml:"enabled"`
@@ -17,6 +20,8 @@ type MultimodalModelConfig struct {
 	Model           string `toml:"model"`
 	PromptFile      string `toml:"promptFile"`
 	PromptVersion   string `toml:"promptVersion"`
+	ReasoningEffort string `toml:"reasoningEffort"`
+	ResponseFormat  string `toml:"responseFormat"`
 	TimeoutMillis   int    `toml:"timeoutMillis"`
 	MaxOutputTokens int    `toml:"maxOutputTokens"`
 }
@@ -29,8 +34,8 @@ func (c MultimodalModelConfig) Validate(owner string) error {
 	if !c.Enabled {
 		return nil
 	}
-	if strings.ToLower(strings.TrimSpace(c.Provider)) != "dashscope" {
-		return fmt.Errorf("%s provider must be dashscope", owner)
+	if !modelName.MatchString(strings.TrimSpace(c.Provider)) {
+		return fmt.Errorf("%s provider is invalid", owner)
 	}
 	endpoint, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || endpoint.Host == "" || endpoint.Path == "" {
@@ -53,11 +58,28 @@ func (c MultimodalModelConfig) Validate(owner string) error {
 	if !modelName.MatchString(strings.TrimSpace(c.PromptVersion)) {
 		return fmt.Errorf("%s promptVersion is invalid", owner)
 	}
+	if effort := strings.ToLower(strings.TrimSpace(c.ReasoningEffort)); effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+		return fmt.Errorf("%s reasoningEffort must be low, medium, high, or empty", owner)
+	}
+	format := strings.ToLower(strings.TrimSpace(c.ResponseFormat))
+	if format != "" && format != "json_object" && format != "text" {
+		return fmt.Errorf("%s responseFormat must be json_object, text, or empty", owner)
+	}
+	if format == "text" && owner != "models.ocr" {
+		return fmt.Errorf("%s responseFormat text is only supported for models.ocr", owner)
+	}
+	if (owner == "models.vision" || owner == "models.table") && format != "json_object" {
+		return fmt.Errorf("%s responseFormat must be json_object", owner)
+	}
 	if c.TimeoutMillis < 1_000 || c.TimeoutMillis > 300_000 {
 		return fmt.Errorf("%s timeoutMillis must be between 1000 and 300000", owner)
 	}
 	if c.MaxOutputTokens < 128 || c.MaxOutputTokens > 16_384 {
 		return fmt.Errorf("%s maxOutputTokens must be between 128 and 16384", owner)
+	}
+	if owner == "models.ocr" && strings.EqualFold(strings.TrimSpace(c.Provider), "dashscope") &&
+		strings.EqualFold(strings.TrimSpace(c.Model), "qwen-vl-ocr-latest") && c.MaxOutputTokens > maxQwenOCROutputTokens {
+		return fmt.Errorf("%s maxOutputTokens must not exceed %d for qwen-vl-ocr-latest", owner, maxQwenOCROutputTokens)
 	}
 	return nil
 }

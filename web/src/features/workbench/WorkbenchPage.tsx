@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Files, PanelLeft, Send, ShieldCheck } from 'lucide-react'
+import { Files, MessageCircle, PanelLeft, Send, ShieldCheck } from 'lucide-react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import * as api from '@/shared/api'
 import { ApiError } from '@/shared/api'
@@ -170,7 +170,7 @@ export function WorkbenchPage() {
       <div className="flex min-h-[calc(100dvh-2.75rem)] items-center justify-center px-6">
         <EmptyState
           title="工作区不在当前浏览器"
-          description="诊断会话只保存于创建它的浏览器会话中；任务仍可通过任务 ID 读取。"
+          description="本地工作区只保存于创建它的浏览器会话中；服务端诊断任务仍可通过任务 ID 读取。"
           action={<Button onClick={() => navigate('/cases')}>重新选择工单</Button>}
         />
       </div>
@@ -215,10 +215,22 @@ export function WorkbenchPage() {
               <p className="text-[10px] text-ink-48">诊断会话 · {workspace.taskIds.length} 次运行</p>
             </div>
           </div>
-          <Button size="sm" variant="neutral" className="xl:hidden" onClick={() => setDossierOpen(true)}>
-            <Files />
-            卷宗
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="icon"
+              variant="neutral"
+              className="!size-8"
+              onClick={() => navigate(`/assistant?caseId=${encodeURIComponent(extCase.data.externalCaseId)}`)}
+              title="在助手中讨论当前工单"
+            >
+              <MessageCircle />
+              <span className="sr-only">在助手中讨论当前工单</span>
+            </Button>
+            <Button size="sm" variant="neutral" className="xl:hidden" onClick={() => setDossierOpen(true)}>
+              <Files />
+              卷宗
+            </Button>
+          </div>
         </header>
 
         <div ref={streamRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-6 sm:px-6">

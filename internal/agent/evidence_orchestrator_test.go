@@ -12,6 +12,7 @@ import (
 
 	"github.com/chitandabb/GoAgent/internal/agentruntime"
 	"github.com/chitandabb/GoAgent/internal/resilience"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -75,6 +76,34 @@ func TestEvidenceOrchestratorAcceptsValidReport(t *testing.T) {
 		if strings.Contains(strings.ToLower(step.Summary), "reasoningcontent") {
 			t.Fatalf("investigation leaked raw reasoning: %+v", step)
 		}
+	}
+}
+
+func TestEvidenceOrchestratorRepairsAfterAgentIterationLimit(t *testing.T) {
+	first := RunResult{
+		ToolExecutions: []ToolExecution{{Name: ToolReadExternalCase, Succeeded: true, EvidenceID: "evidence:first"}},
+		EvidenceItems: []EvidenceItem{{
+			ID: "evidence:first", SourceType: EvidenceSourceCaseSnapshot,
+			SourceTool: ToolReadExternalCase, SourceRef: "evidence:first",
+			CollectedAt: time.Unix(1, 0).UTC(), Snapshot: `{"externalCaseKey":"TKT-1"}`,
+		}},
+	}
+	invoker := &scriptedAgentInvoker{runs: []scriptedAgentRun{
+		{result: first, err: adk.ErrExceedMaxIterations},
+		{result: evidenceRunResult(t, validEvidenceReport())},
+	}}
+	orchestrator := newEvidenceOrchestratorTest(t, invoker, EvidenceOrchestratorConfig{})
+
+	result, err := orchestrator.Invoke(evidenceTestContext(t), RunRequest{UserQuery: "诊断工单"})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if result.Partial || result.AgentRuns != 2 {
+		t.Fatalf("iteration-limit repair did not stay within Evidence Gate: %+v", result)
+	}
+	requests := invoker.snapshotRequests()
+	if len(requests) != 2 || !strings.Contains(requests[1].UserQuery, "达到模型工具或迭代边界") {
+		t.Fatalf("repair request = %+v", requests)
 	}
 }
 

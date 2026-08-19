@@ -1,4 +1,10 @@
-import type { ConversationCitation, ConversationMessage } from '@/shared/api/m1-types'
+import { Link } from 'react-router'
+import type {
+  ConversationCaseReference,
+  ConversationCitation,
+  ConversationMessage,
+  ConversationTaskReference,
+} from '@/shared/api/m1-types'
 import { Badge } from '@/shared/ui/Badge'
 
 export function fmtBytes(bytes: number): string {
@@ -76,6 +82,38 @@ function CitationList({
   )
 }
 
+function ReferenceList({
+  caseReferences,
+  taskReferences,
+}: {
+  caseReferences: ConversationCaseReference[]
+  taskReferences: ConversationTaskReference[]
+}) {
+  if (caseReferences.length === 0 && taskReferences.length === 0) return null
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {caseReferences.map((reference) => (
+        <Link
+          key={`${reference.kind}-${reference.externalCaseId}`}
+          to={`/cases/${reference.externalCaseId}`}
+          className="press rounded-capsule bg-parchment px-2.5 py-1 text-[11px] font-semibold text-primary hover:underline"
+        >
+          {reference.kind === 'selected' ? '当前工单' : '提及工单'}
+        </Link>
+      ))}
+      {taskReferences.map((reference) => (
+        <Link
+          key={`${reference.kind}-${reference.taskId}`}
+          to={`/tasks/${reference.taskId}`}
+          className="press rounded-capsule bg-pearl px-2.5 py-1 text-[11px] font-semibold text-primary hover:underline"
+        >
+          {reference.kind === 'created' ? '查看已创建诊断任务' : '关联诊断任务'}
+        </Link>
+      ))}
+    </div>
+  )
+}
+
 export function MessageBubble({
   message,
   onCitationClick,
@@ -99,6 +137,7 @@ export function MessageBubble({
             ))}
           </div>
         )}
+        <ReferenceList caseReferences={message.caseReferences} taskReferences={message.taskReferences} />
         <div className="max-w-[75%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[14px] leading-[1.6] text-white">
           {message.content}
         </div>
@@ -110,6 +149,7 @@ export function MessageBubble({
     <div className="flex flex-col items-start">
       <div className="max-w-[85%] rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-4">
         <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">{message.content}</p>
+        <ReferenceList caseReferences={message.caseReferences} taskReferences={message.taskReferences} />
         <CitationList citations={message.citations} onCitationClick={onCitationClick} />
       </div>
     </div>

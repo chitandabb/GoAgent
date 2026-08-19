@@ -382,6 +382,7 @@ func buildAgentRuntimeForRole(
 		CreateDiagnosisTask:   builders.conversationCreator,
 		AttachmentReader:      builders.attachmentReader,
 		ContextPreflight:      diagnosisPreflight,
+		MaxIterations:         cfg.Agent.DiagnosisMaxIterations,
 		ModelProvider:         runtime.modelProvider,
 		ModelID:               runtime.modelID,
 		Logger:                log.Named("runner"),

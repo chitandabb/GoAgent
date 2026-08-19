@@ -841,6 +841,14 @@ type conversationToolRecord struct {
 	schemaDiagnosticError string
 }
 
+// readonlyQueryToolDiagnosticOutput mirrors the Agent Tool's stable wire contract.
+// OK is a pointer so an older result without this field remains distinguishable.
+type readonlyQueryToolDiagnosticOutput struct {
+	OK    *bool  `json:"ok"`
+	Error string `json:"error,omitempty"`
+	repository.ReadonlyQueryResult
+}
+
 type conversationToolRecorder struct {
 	mu    sync.Mutex
 	calls []conversationToolRecord
@@ -949,11 +957,16 @@ func (t *recordingConversationTool) InvokableRun(
 		if err != nil && record.errorType == "" {
 			record.errorType = conversationSQLErrorType(err)
 		} else {
-			var result repository.ReadonlyQueryResult
+			var result readonlyQueryToolDiagnosticOutput
 			if unmarshalErr := json.Unmarshal([]byte(output), &result); unmarshalErr == nil {
-				record.columns = result.Columns
-				record.rows = result.Rows
-				record.truncated = result.Truncated
+				if result.OK != nil && !*result.OK {
+					record.succeeded = false
+					record.errorType = conversationSQLResultErrorType(result.Error)
+				} else {
+					record.columns = result.Columns
+					record.rows = result.Rows
+					record.truncated = result.Truncated
+				}
 			}
 		}
 	case mesagent.ToolSearchSchemaCatalog:
@@ -1009,6 +1022,15 @@ func conversationSQLErrorType(err error) string {
 		return "guard_rejected"
 	case errors.Is(err, repository.ErrSchemaCatalogAuthorizationDenied):
 		return "catalog_denied"
+	default:
+		return "execution_error"
+	}
+}
+
+func conversationSQLResultErrorType(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "query_rejected":
+		return "guard_rejected"
 	default:
 		return "execution_error"
 	}

@@ -24,7 +24,7 @@
 - queued version、pending task、首个 event 和 Outbox 的 PostgreSQL 原子创建；
 - 独立 Knowledge Worker、Element Artifact、fenced Chunk staging 与原子 `ready/current` 发布；
 - UTF-8 TXT/Markdown、嵌入文本 PDF、DOCX、XLSX、PPTX 的确定性解析；
-- PDF 无文本页、PNG/JPEG 独立图片和 Office media 的受限视觉资产提取、引用定位及后端路由；
+- PDF 无文本页和 Office media 的受限视觉资产提取、引用定位及后端路由；
 - Artifact schema v6 的视觉/版面/provider usage/Element合并 provenance、结构化表格 metadata、`partial_ready` 降级和视觉-only 永久失败语义；
 - 固定 PP-DocLayout-M/ONNX Runtime 契约、PDFium-WASM 页面渲染、区域级 OCR/VLM 显式路由与整页重复调用抑制；
 - PDF 页数/文本预算以及 OOXML 条目、展开大小、XML、工作表行列等资源边界；
@@ -69,7 +69,7 @@
    供应商必须配置化，不能把某一家云服务写死在领域逻辑中。
 2. Go 是业务编排和核心后端语言，但允许把成熟的文档解析、OCR 或多模态能力作为独立容器、
    CLI 或 HTTP 服务接入，不要求用 Go 重写底层算法。
-3. 首版格式范围保留 TXT/Markdown、PDF、扫描 PDF、DOCX、XLSX、PPTX、PNG/JPEG。
+3. 首版外部上传格式限定为 TXT/Markdown、PDF、DOCX、XLSX 和 PPTX；扫描 PDF 是 PDF 处理路径，PDF 页面和 Office 内嵌图片不是独立上传格式。
 4. 初始容量边界采用单文件 50 MiB、最多 500 页、单批次 20 个文件、单用户最多 2 个处理中
    批次；后续只有评测和真实容量证据才能调整。
 5. 默认部署环境按无 NVIDIA GPU、Windows 宿主机和中低配置服务器设计；GPU 只能作为可选加速，
@@ -266,7 +266,7 @@ DeepSeek 官方直连 Adapter 晋级门槛不变。
 
 1. 生产目标是企业内网私有化部署、可访问公网的单租户部署，还是需要同时支持两者？
 2. 文档和附件是否可能包含客户名称、数据库内容、日志、源代码或其他禁止发往公网的敏感信息？
-3. 首版必须支持哪些格式和规模上限：Markdown/TXT、PDF、DOCX、XLSX、PPTX、PNG/JPEG、扫描 PDF；单文件和单批次上限分别是多少？
+3. 首版必须支持哪些格式和规模上限：Markdown/TXT、PDF、DOCX、XLSX、PPTX；扫描 PDF 作为 PDF 处理路径，单文件和单批次上限分别是多少？
 4. “聊天附件”和“工单附件”默认是仅本次会话使用、保存到个人知识库，还是必须由用户显式选择；全局知识库是否仅管理员可发布？
 5. 本地部署可假设有 NVIDIA GPU 吗；若没有，CPU 核数、内存和可接受的单文档处理时间是什么？
 6. 是否允许配置云端 OCR/VLM/Embedding/Rerank 供应商作为可选能力；若允许，哪些数据经过脱敏后才能外发，谁负责审批？
@@ -590,10 +590,10 @@ Embedding 不但成本高，还可能把表格、错误栈和步骤列表切坏�
 - `elements/s`、`chunks/s`：定位解析和索引阶段；
 - 端到端 P50/P95、失败/partial 比例、CPU/内存峰值和云端调用/Token 成本。
 
-固定 `rag-ingestion-v1` 建议至少 40 份可公开或合成的工业文档，覆盖 8 种格式和规模分层：
-TXT/Markdown、原生 PDF、扫描 PDF、DOCX、XLSX、PPTX、PNG/JPEG；同时包含纯文本、表格、截图、
-图表、混排页面和至少一批接近上限的大文档。数据集冻结 SHA-256、页数、元素类型和预期状态，
-失败样本不能从结果中删除。
+固定 `rag-ingestion-v1` 建议至少 40 份可公开或合成的工业文档，覆盖六种外部上传格式及规模分层：
+TXT、Markdown、原生/扫描 PDF、DOCX、XLSX、PPTX；同时包含纯文本、表格、截图、图表、混排页面和
+至少一批接近上限的大文档。截图和图表通过 PDF 页面或 Office 内嵌媒体覆盖，不单列独立图片上传。
+数据集冻结 SHA-256、页数、元素类型和预期状态，失败样本不能从结果中删除。
 
 配对实验固定同一机器、数据库、对象、模型 profile、网络和 Worker 资源，每个 variant 预热后至少
 重复 5 次，报告中位数与离散程度：
@@ -1060,9 +1060,9 @@ Element Artifact、Embedding 或在线 `search_knowledge`；其中上传 API、�
    `POST /api/v1/admin/knowledge-documents/{documentId}/versions`。首版使用有界流式 multipart 暂存，
    单文件上限由 `[knowledge].maxUploadBytes` 配置且不能超过 MinIO 上限；临时文件在请求结束后删除，
    不把 50 MiB 原文整体读入 Go 内存。
-2. 上传格式限制为 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX、PNG/JPEG；首层校验文本编码、
-   PDF/图片魔数以及 Office ZIP 主结构和加密标记。该校验不是杀毒软件，也不能替代后续解析沙箱、
-   解压规模、页数/像素和宏/外链限制。
+2. 上传格式限制为 UTF-8 TXT/Markdown、PDF、DOCX、XLSX、PPTX；首层校验文本编码、PDF 魔数以及
+   Office ZIP 主结构和加密标记。PDF 页面与 Office 内嵌媒体仅在文档已通过上传校验后进入内部视觉处理。
+   该校验不是杀毒软件，也不能替代后续解析沙箱、解压规模、页数/像素和宏/外链限制。
 3. `Idempotency-Key` 当前要求 UUID。请求指纹覆盖操作、已有 document id、标题、原文件名、规范媒体
    类型、大小、原文 SHA-256、pipeline version 和 retry budget；同键同指纹在上传 MinIO 前重放原
    task，同键不同指纹返回 `40911`，并发重复由数据库唯一约束和冲突后回读兜底。
@@ -1152,25 +1152,30 @@ M2-A4 收工时仍未实现 PDF/Office Parser、逐页文本/扫描/复杂图表
 
 2026-08-04 在不破坏 M2-A5 确定性文本事实的前提下接入视觉资产阶段：
 
-1. PDF 无嵌入文本页产出 `document_page`，保留页码和源文件 SHA-256；PNG/JPEG 产出
-   `source_image`；DOCX/XLSX/PPTX 从包内 `media` 目录提取支持的视觉文件。所有视觉资产先做
-   文件签名、尺寸、SHA-256、单项/总量预算校验，原始字节只存在受限执行和模型请求内。
+1. PDF 无嵌入文本页产出 `document_page`，保留页码和源文件 SHA-256；DOCX/XLSX/PPTX 从包内
+   `media` 目录提取支持的视觉文件。所有视觉资产先做文件签名、尺寸、SHA-256、单项/总量预算校验，
+   原始字节只存在受限执行和模型请求内。
 2. Office relationship 只允许解析到同一 package root。图片记录 `sourcePart`、
    `relationshipId`、媒体路径和页码；同一图片被多个 PPTX slide 引用时保留多个可追溯 occurrence。
    没有关系引用的孤立媒体仍写入 Artifact 审计记录，但路由为 `unreferenced_asset`，不调用模型。
 3. 路由由后端确定：小图片 `decorative_small_image` 跳过；可识别但暂不支持模型输入的媒体
-   `unsupported_media_type` 跳过；PDF 页面缺少嵌入文本时走 OCR；足够大的 PNG/JPEG 走 OCR+VLM。
-   每个任务还有独立的 `maxVisualEnrichments` 上限，超限资产只记录 `budget_exceeded`。
+   `unsupported_media_type` 跳过；PDF 页面缺少嵌入文本时走 OCR；符合尺寸门槛的 PDF/Office 视觉资产
+   走 OCR+VLM。每个任务还有独立的 `maxVisualEnrichments` 上限，超限资产只记录 `budget_exceeded`。
 4. Element Artifact 从 schema v1 升为 v2，记录视觉位置、媒体类型、尺寸、内容哈希、路由、
-   状态、原因、provider/model 和输出 Element 索引，禁止写入原始图片字节。原生文本存在但视觉
+   状态、原因、provider/model、provider usage 和输出 Element 索引，禁止写入原始图片字节。原生文本存在但视觉
    处理不可用时版本发布为 `partial_ready` 且 `is_current=false`；纯视觉文档没有可检索文本时
-   返回永久 `invalid_ingestion_input`，不生成空 Chunk。
+   返回永久 `invalid_ingestion_input`，不生成空 Chunk。模型调用已发生但没有可索引结果时，安全失败
+   原因（例如 `output_truncated`）和合法 usage 仍写入视觉资产记录，避免把已计费失败伪装成普通跳过。
 5. `[models.ocr]` 与 `[models.vision]` 独立配置 provider、模型、Prompt 文件、Prompt version、
-   超时和输出预算。DashScope 适配器只接受严格单对象 JSON，拒绝未知字段、尾随内容、NUL 和
-   超大输出；凭证只注入 Knowledge Worker。最小 PNG 已完成真实 Vision 链路烟测，隔离的
-   `qwen-vl-ocr-latest` PNG 烟测也已完成并保存 provider/model/Prompt metadata；直接 PDF
-   `file_url` 输入单独验证为当前 Eino OpenAI adapter 不支持，现归类为永久输入能力错误，
-   不再进入无意义重试。不能声称 OCR 质量、扫描文档召回或吞吐提升。
+   超时和输出预算。`qwen-vl-ocr-latest` 的生产 OCR 合同是纯可见文本，`responseFormat=text` 仅允许
+   `models.ocr`；Vision 和 Table 必须使用 `json_object`。DashScope 适配器拒绝未知字段、尾随内容、NUL、
+   超大输出和 `finish_reason=length`；Qwen OCR 的 provider 输出上限为 4,096 tokens，超过后记录
+   `output_truncated`，不索引部分文本。凭证只注入 Knowledge Worker。最小 PNG 已完成真实 Vision 链路烟测，
+   隔离的 `qwen-vl-ocr-latest` PNG 烟测也已完成并保存 provider/model/Prompt metadata；直接 PDF
+   `file_url` 输入单独验证为当前 Eino OpenAI adapter 不支持，现归类为永久输入能力错误，不再进入无意义重试。
+   不能声称 OCR 质量、扫描文档召回或吞吐提升；当前主路径已经按布局区域裁剪，风险只在超长的单个 OCR
+   区域或 `FullPageBox` 兜底区域。若真实语料证明它们会触发 provider 上限，后续应在该区域内二次切分并去重，
+   不能靠提高该模型的 token 配置解决。
 
 已通过视觉 Parser/路由/Artifact 单测、全量 `go test ./...`、`go vet ./...`、关键包 race
 测试、PostgreSQL/RabbitMQ/MinIO integration 测试和 `docker compose config --quiet`；烟测
@@ -1245,7 +1250,8 @@ PP-StructureV3 的“布局分析 -> 元素分析 -> 数据格式化”一致。
    `TableRecoveryProcessor` 要求 Markdown、cell row/column、rowSpan/columnSpan、header、置信度、
    warning、provider/model/Prompt version 和 Usage；严格拒绝未知 JSON 字段、重复坐标、非法跨度、
    无有效单元格和越界输出；
-2. `[models.table]` 使用独立 Prompt 和输出预算，当前 DashScope `qwen3-vl-plus` 是第一个适配器。
+2. `[models.table]` 使用独立 Prompt、严格 `json_object` 合同和输出预算，当前生产适配器为 StepFun
+   `step-3.7-flash`；它与视觉语义路由保持独立，不通过 OCR 文本 endpoint 回退。
    表格结构写入 Element metadata/MinIO Artifact，`ElementTable.ContentText` 保存 Markdown 检索投影，
    不新增 cell 关系表；Provider 不可用时可以回退通用视觉文字，但必须标记 partial；
 3. 同页 native text、table、picture 和 decorative 四路测试已验证只裁剪 table/picture，分别调用
@@ -1268,8 +1274,10 @@ VLM 的行列恢复不足，再把 PP-StructureV3 作为只处理 table crop 的
 零调用合同、真实 smoke 费用门禁和人工复核字段见
 [`evaluations/table-recovery-v1.md`](../evaluations/table-recovery-v1.md)。NIST IR 8107 单区域两次真实
 调用共使用 2,507 Token、约 0.014432 元；关键文字可检索，但两次都没有恢复纵向合并单元格的
-三行 span。适配器现把 multiline/`<br>` cell 强制标记为 partial 并限制置信度。该结果不能宣称通用
-表格准确率，精确 merged-cell 恢复保留为 PP-StructureV3 或更强表格模型的增强依据。
+三行 span。适配器现把 multiline/`<br>` cell、任意模型 warning 或不高于 0.8 的 confidence 强制标记为
+`partial` 并限制置信度。单靠结果文本无法可靠区分“合法长单元格”与“模型把多行用空格合并”的情况；
+没有模型 warning 或额外图像行带证据时不使用字符串启发式伪造该判断。该结果不能宣称通用表格准确率，
+精确 merged-cell 恢复保留为 PP-StructureV3 或更强表格模型的增强依据。
 
 参考：
 

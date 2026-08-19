@@ -47,6 +47,50 @@ func TestProcessorRecoversStrictTableStructure(t *testing.T) {
 	}
 }
 
+func TestProcessorRejectsMissingMergedCellSpan(t *testing.T) {
+	processor, err := NewProcessor(Endpoint{
+		Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage(`{
+				"markdown":"| standard | description |\n| --- | --- |\n| ISO 10303 | 207 |\n|  | 224 |\n|  | 238 |",
+				"cells":[
+					{"row":0,"column":0,"rowSpan":1,"columnSpan":1,"text":"standard","header":true},
+					{"row":0,"column":1,"rowSpan":1,"columnSpan":1,"text":"description","header":true},
+					{"row":1,"column":0,"rowSpan":1,"columnSpan":1,"text":"ISO 10303","header":false},
+					{"row":1,"column":1,"rowSpan":1,"columnSpan":1,"text":"207","header":false},
+					{"row":2,"column":1,"rowSpan":1,"columnSpan":1,"text":"224","header":false},
+					{"row":3,"column":1,"rowSpan":1,"columnSpan":1,"text":"238","header":false}
+				],"confidence":0.95,"warnings":[]
+			}`, nil), nil
+		}),
+		Provider: "dashscope", Model: "qwen3-vl-flash", Prompt: "recover table", PromptVersion: "table-recovery-v2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = processor.Recover(context.Background(), tableRequest())
+	if err == nil || !strings.Contains(err.Error(), "grid gap") {
+		t.Fatalf("Recover error = %v", err)
+	}
+}
+
+func TestProcessorRejectsTruncatedTableResponse(t *testing.T) {
+	processor, err := NewProcessor(Endpoint{
+		Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			message := schema.AssistantMessage(`{"markdown":"| a |","cells":[]}`, nil)
+			message.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+			return message, nil
+		}),
+		Provider: "dashscope", Model: "qwen3-vl-plus", Prompt: "recover table", PromptVersion: "table-recovery-v2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = processor.Recover(context.Background(), tableRequest())
+	if err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("Recover error = %v", err)
+	}
+}
+
 func TestProcessorRejectsUnknownFieldsAndInvalidCells(t *testing.T) {
 	responses := []string{
 		`{"markdown":"| a |","cells":[],"confidence":1,"warnings":[],"unexpected":true}`,
@@ -76,7 +120,8 @@ func TestProcessorBuildsBoundedImageMessage(t *testing.T) {
 			if len(messages) != 1 || len(messages[0].UserInputMultiContent) != 2 ||
 				!strings.Contains(messages[0].UserInputMultiContent[0].Text, "Page: 1") ||
 				messages[0].UserInputMultiContent[1].Image == nil ||
-				messages[0].UserInputMultiContent[1].Image.MIMEType != "image/png" {
+				messages[0].UserInputMultiContent[1].Image.MIMEType != "image/png" ||
+				messages[0].UserInputMultiContent[1].Image.Detail != schema.ImageURLDetailHigh {
 				t.Fatalf("messages = %+v", messages)
 			}
 			return schema.AssistantMessage(`{"markdown":"| a |\n| --- |\n| 1 |","cells":[{"row":0,"column":0,"rowSpan":1,"columnSpan":1,"text":"a","header":true},{"row":1,"column":0,"rowSpan":1,"columnSpan":1,"text":"1","header":false}],"confidence":1,"warnings":[]}`, nil), nil
@@ -119,6 +164,37 @@ func TestProcessorMarksCollapsedVisibleRowsPartial(t *testing.T) {
 	}
 	if !result.Partial || result.Reason != "multiline_cell_structure_ambiguous" ||
 		result.Confidence != 0.8 || len(result.Warnings) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestProcessorMarksWarningOnlyTablePartial(t *testing.T) {
+	processor, err := NewProcessor(Endpoint{
+		Generator: generatorFunc(func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage(`{
+              "markdown":"| standard | description |\n|---|---|\n| ISO | 207 a 224 b |",
+              "cells":[
+                {"row":0,"column":0,"rowSpan":1,"columnSpan":1,"text":"standard","header":true},
+                {"row":0,"column":1,"rowSpan":1,"columnSpan":1,"text":"description","header":true},
+                {"row":1,"column":0,"rowSpan":1,"columnSpan":1,"text":"ISO","header":false},
+                {"row":1,"column":1,"rowSpan":1,"columnSpan":1,"text":"207 a 224 b","header":false}
+              ],
+              "confidence":0.8,
+              "warnings":["row boundaries are ambiguous"]
+            }`, nil), nil
+		}),
+		Provider: "dashscope", Model: "qwen3-vl-plus", Prompt: "recover table",
+		PromptVersion: "table-recovery-v3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := processor.Recover(context.Background(), tableRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Partial || result.Reason != "table_structure_uncertain" || result.Confidence != 0.8 ||
+		len(result.Warnings) != 2 || result.Warnings[0] != "row boundaries are ambiguous" {
 		t.Fatalf("result = %+v", result)
 	}
 }

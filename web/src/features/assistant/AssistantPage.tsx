@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { X } from 'lucide-react'
+import { useSearchParams } from 'react-router'
 import * as api from '@/shared/api'
-import type { ConversationCitation, ConversationMessage } from '@/shared/api/m1-types'
+import type {
+  ConversationCaseReference,
+  ConversationCitation,
+  ConversationMessage,
+} from '@/shared/api/m1-types'
 import { parseTurnMessageDelta } from '@/shared/api/m1-types'
 import { fmtDateTime } from '@/shared/lib/fmt'
+import { knowledgeDocumentFileAccept } from '@/shared/lib/knowledge-upload'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Card } from '@/shared/ui/Card'
@@ -11,8 +18,9 @@ import { Spinner } from '@/shared/ui/Spinner'
 import { useToast } from '@/shared/ui/Toast'
 import { AttachmentPreviewDialog, useAttachmentPreview } from '@/shared/ui/AttachmentPreview'
 import { MessageBubble, fmtBytes } from './MessageBubble'
+import { clearActiveTurn, loadActiveTurn, saveActiveTurn } from './turn-store'
 
-type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'finalizing' | 'failed'
+type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'reconnecting' | 'finalizing' | 'failed'
 
 interface UploadEntry {
   key: string
@@ -25,6 +33,7 @@ interface UploadEntry {
 interface LastTurn {
   content: string
   attachments: { attachmentId: string }[]
+  caseReferences: ConversationCaseReference[]
 }
 
 interface ActiveTurn {
@@ -33,13 +42,15 @@ interface ActiveTurn {
   failure?: string
   assistantMessageId?: string
   streamed: string
+  connectionLost?: boolean
 }
 
 const turnPhaseMeta: Record<TurnPhase, { label: string; tone: 'gray' | 'info' | 'warn' }> = {
   submitting: { label: '发送中…', tone: 'gray' },
   queued: { label: '排队中', tone: 'gray' },
   running: { label: '助手思考中', tone: 'info' },
-  retry: { label: '重试中', tone: 'warn' },
+  retry: { label: '系统重试中', tone: 'warn' },
+  reconnecting: { label: '正在恢复连接', tone: 'warn' },
   finalizing: { label: '整理回答…', tone: 'gray' },
   failed: { label: '生成失败', tone: 'warn' },
 }
@@ -83,7 +94,10 @@ function joinedDeltaChunks(chunks: Map<number, string> | null): string {
 export function AssistantPage() {
   const qc = useQueryClient()
   const toast = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedCaseId = searchParams.get('caseId')
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(() => requestedCaseId)
   const [input, setInput] = useState('')
   const [uploads, setUploads] = useState<UploadEntry[]>([])
   const [turn, setTurn] = useState<ActiveTurn | null>(null)
@@ -91,12 +105,152 @@ export function AssistantPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const unsubscribeRef = useRef<(() => void) | null>(null)
   const lastTurnRef = useRef<LastTurn | null>(null)
+  const autoCreatedForCaseRef = useRef<string | null>(null)
   // delta 分块按 position 累积，重连/回放重发同一 position 时天然去重
   const deltaChunksRef = useRef<Map<number, string> | null>(null)
   const preview = useAttachmentPreview()
 
   const turnStreaming = turn !== null && turn.phase !== 'failed'
   const revealedRunes = useTypewriterReveal(turn?.streamed ?? '', turnStreaming, turn?.turnId ?? '')
+
+  const subscribeToTurn = useCallback((conversationId: string, turnId: string) => {
+    unsubscribeRef.current?.()
+    unsubscribeRef.current = api.subscribeTurnEvents(conversationId, turnId, {
+      onEvent: (event) => {
+        if (event.eventType === 'turn_message_delta') {
+          const delta = parseTurnMessageDelta(event.payload)
+          if (!delta) return
+          const chunks = deltaChunksRef.current ?? new Map<number, string>()
+          deltaChunksRef.current = chunks
+          chunks.set(delta.position, delta.content)
+          setTurn((current) =>
+            current && current.turnId === turnId
+              ? {
+                  ...current,
+                  streamed: joinedDeltaChunks(chunks),
+                  assistantMessageId: delta.messageId,
+                  connectionLost: false,
+                }
+              : current,
+          )
+          return
+        }
+        setTurn((current) => {
+          if (!current || current.turnId !== turnId) return current
+          switch (event.eventType) {
+            case 'turn_queued':
+              return { ...current, phase: 'queued', failure: undefined, connectionLost: false }
+            case 'turn_running':
+              return { ...current, phase: 'running', failure: undefined, connectionLost: false }
+            case 'turn_retry_scheduled':
+              return { ...current, phase: 'retry', failure: undefined, connectionLost: false }
+            case 'turn_failed':
+              return { ...current, phase: 'failed', connectionLost: false }
+            default:
+              return current
+          }
+        })
+      },
+      onStatus: (status) => {
+        if (status === 'reconnecting') {
+          setTurn((current) =>
+            current && current.turnId === turnId
+              ? { ...current, phase: 'reconnecting', connectionLost: false }
+              : current,
+          )
+          return
+        }
+        if (status === 'connected') {
+          setTurn((current) =>
+            current && current.turnId === turnId && current.phase === 'reconnecting'
+              ? { ...current, phase: 'running', failure: undefined, connectionLost: false }
+              : current,
+          )
+          return
+        }
+        if (status !== 'failed') return
+        void api.getTurn(conversationId, turnId).then((detail) => {
+          if (detail.status === 'completed') {
+            clearActiveTurn(conversationId, turnId)
+            setTurn((current) => current?.turnId === turnId ? null : current)
+            void qc.invalidateQueries({ queryKey: ['conversation-messages', conversationId] })
+            return
+          }
+          if (detail.status === 'failed') {
+            setTurn((current) =>
+              current && current.turnId === turnId
+                ? {
+                    ...current,
+                    phase: 'failed',
+                    failure: detail.failureSummary || '请检查输入后重试',
+                    connectionLost: false,
+                  }
+                : current,
+            )
+            return
+          }
+          setTurn((current) =>
+            current && current.turnId === turnId
+              ? {
+                  ...current,
+                  phase: 'reconnecting',
+                  failure: '实时事件连接已停止，任务仍在服务端执行。',
+                  connectionLost: true,
+                }
+              : current,
+          )
+        }).catch(() => {
+          setTurn((current) =>
+            current && current.turnId === turnId
+              ? {
+                  ...current,
+                  phase: 'reconnecting',
+                  failure: '暂时无法确认生成状态，请重新连接。',
+                  connectionLost: true,
+                }
+              : current,
+          )
+        })
+      },
+      onTerminal: (finalEvent) => {
+        const failed = finalEvent?.eventType === 'turn_failed'
+        if (failed) {
+          void api.getTurn(conversationId, turnId).then((detail) =>
+            setTurn((current) =>
+              current && current.turnId === turnId
+                ? {
+                    ...current,
+                    phase: 'failed',
+                    failure: detail.failureSummary || '请检查输入后重试',
+                    connectionLost: false,
+                  }
+                : current,
+            ),
+          ).catch(() =>
+            setTurn((current) =>
+              current && current.turnId === turnId
+                ? { ...current, phase: 'failed', failure: '生成失败', connectionLost: false }
+                : current,
+            ),
+          )
+        } else {
+          clearActiveTurn(conversationId, turnId)
+          setTurn((current) =>
+            current && current.turnId === turnId ? { ...current, phase: 'finalizing' } : current,
+          )
+        }
+        void qc.invalidateQueries({ queryKey: ['conversation-messages', conversationId] })
+        void qc.invalidateQueries({ queryKey: ['conversations'] })
+      },
+      onError: (error) => {
+        setTurn((current) =>
+          current && current.turnId === turnId && current.phase === 'reconnecting'
+            ? { ...current, failure: error.message }
+            : current,
+        )
+      },
+    })
+  }, [qc])
 
   const conversations = useInfiniteQuery({
     queryKey: ['conversations'],
@@ -108,6 +262,16 @@ export function AssistantPage() {
     },
   })
   const conversationList = conversations.data?.pages.flatMap((page) => page.items) ?? []
+  const selectedCase = useQuery({
+    queryKey: ['external-case', selectedCaseId],
+    queryFn: () => api.getExternalCase(selectedCaseId!),
+    enabled: Boolean(selectedCaseId),
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (requestedCaseId) setSelectedCaseId(requestedCaseId)
+  }, [requestedCaseId])
 
   // 默认选中最近会话
   useEffect(() => {
@@ -128,6 +292,48 @@ export function AssistantPage() {
     lastTurnRef.current = null
     deltaChunksRef.current = null
   }, [activeId])
+
+  // 刷新或返回工作台后，从服务端状态和可回放事件恢复仍在执行的回合。
+  useEffect(() => {
+    if (!activeId) return
+    const stored = loadActiveTurn(activeId)
+    if (!stored) return
+    let mounted = true
+    lastTurnRef.current = stored.input
+    deltaChunksRef.current = new Map()
+    void api.getTurn(activeId, stored.turnId).then((detail) => {
+      if (!mounted) return
+      if (detail.status === 'completed') {
+        clearActiveTurn(activeId, stored.turnId)
+        void qc.invalidateQueries({ queryKey: ['conversation-messages', activeId] })
+        return
+      }
+      const phase: TurnPhase = detail.status === 'queued'
+        ? detail.retryAt ? 'retry' : 'queued'
+        : detail.status === 'running'
+          ? 'running'
+          : 'failed'
+      setTurn({
+        turnId: stored.turnId,
+        phase,
+        failure: detail.failureSummary || undefined,
+        streamed: '',
+      })
+      if (detail.status !== 'failed') subscribeToTurn(activeId, stored.turnId)
+    }).catch((error) => {
+      if (!mounted) return
+      setTurn({
+        turnId: stored.turnId,
+        phase: 'reconnecting',
+        failure: error instanceof Error ? error.message : '暂时无法恢复生成状态，请重新连接。',
+        streamed: '',
+        connectionLost: true,
+      })
+    })
+    return () => {
+      mounted = false
+    }
+  }, [activeId, qc, subscribeToTurn])
 
   const messages = useQuery({
     queryKey: ['conversation-messages', activeId],
@@ -164,8 +370,24 @@ export function AssistantPage() {
       qc.invalidateQueries({ queryKey: ['conversations'] })
       setActiveId(conv.id)
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : '创建会话失败'),
+    onError: (error) => {
+      autoCreatedForCaseRef.current = null
+      toast.error(error instanceof Error ? error.message : '创建会话失败')
+    },
   })
+
+  useEffect(() => {
+    if (
+      !requestedCaseId ||
+      activeId ||
+      conversations.isPending ||
+      conversationList.length > 0 ||
+      createConv.isPending ||
+      autoCreatedForCaseRef.current === requestedCaseId
+    ) return
+    autoCreatedForCaseRef.current = requestedCaseId
+    createConv.mutate()
+  }, [activeId, conversationList.length, conversations.isPending, createConv, requestedCaseId])
 
   const uploadOne = async (key: string, file: File) => {
     if (!activeId) return
@@ -198,94 +420,38 @@ export function AssistantPage() {
     })
   }
 
-  const submitTurn = async (content: string, attachments: { attachmentId: string }[]) => {
-    if (!activeId || turn) return
+  const submitTurn = async (
+    content: string,
+    attachments: { attachmentId: string }[],
+    caseReferences: ConversationCaseReference[],
+    force = false,
+  ) => {
+    if (!activeId || (turn && !force)) return
+    const conversationId = activeId
     deltaChunksRef.current = new Map()
     setTurn({ turnId: '', phase: 'submitting', streamed: '' })
     try {
-      const result = await api.appendTurn(activeId, { content, attachments }, api.createIdempotencyKey())
+      const result = await api.appendTurn(
+        conversationId,
+        { content, attachments, caseReferences },
+        api.createIdempotencyKey(),
+      )
       const turnId = result.turnId
+      const submitted = { content, attachments, caseReferences }
+      lastTurnRef.current = submitted
+      saveActiveTurn(conversationId, { turnId, input: submitted })
       setTurn({
         turnId,
-        phase: result.status === 'failed' ? 'failed' : result.status === 'retry_scheduled' ? 'retry' : 'running',
+        phase: result.status === 'queued' ? 'queued' : result.status === 'failed' ? 'failed' : 'running',
         streamed: '',
       })
       // 乐观插入用户消息
-      qc.setQueryData<ConversationMessage[]>(['conversation-messages', activeId], (current = []) => [
+      qc.setQueryData<ConversationMessage[]>(['conversation-messages', conversationId], (current = []) => [
         ...current,
         result.userMessage,
       ])
       void qc.invalidateQueries({ queryKey: ['conversations'] })
-
-      unsubscribeRef.current?.()
-      unsubscribeRef.current = api.subscribeTurnEvents(activeId, turnId, {
-        onEvent: (event) => {
-          if (event.eventType === 'turn_message_delta') {
-            const delta = parseTurnMessageDelta(event.payload)
-            if (!delta) return
-            const chunks = deltaChunksRef.current ?? new Map<number, string>()
-            deltaChunksRef.current = chunks
-            chunks.set(delta.position, delta.content)
-            const streamed = [...chunks.keys()]
-              .sort((a, b) => a - b)
-              .map((position) => chunks.get(position) ?? '')
-              .join('')
-            setTurn((current) =>
-              current && current.turnId === turnId
-                ? { ...current, streamed, assistantMessageId: delta.messageId }
-                : current,
-            )
-            return
-          }
-          setTurn((current) => {
-            if (!current || current.turnId !== turnId) return current
-            switch (event.eventType) {
-              case 'turn_queued':
-                return { ...current, phase: 'queued' }
-              case 'turn_running':
-                return { ...current, phase: 'running' }
-              case 'turn_retry_scheduled':
-                return { ...current, phase: 'retry' }
-              case 'turn_failed':
-                return { ...current, phase: 'failed' }
-              default:
-                return current
-            }
-          })
-        },
-        onStatus: () => {},
-        onTerminal: (finalEvent) => {
-          const failed = finalEvent?.eventType === 'turn_failed'
-          if (failed) {
-            void api
-              .getTurn(activeId, turnId)
-              .then((detail) =>
-                setTurn({
-                  turnId,
-                  phase: 'failed',
-                  failure: detail.failureSummary || '请稍后重试',
-                  streamed: joinedDeltaChunks(deltaChunksRef.current),
-                }),
-              )
-              .catch(() => setTurn({ turnId, phase: 'failed', failure: '生成失败', streamed: joinedDeltaChunks(deltaChunksRef.current) }))
-          } else {
-            // 保留已流式呈现的内容，由 finalizing 副作用在动画追平且持久化消息
-            // 回填后移除流式气泡，避免内容跳变
-            setTurn((current) =>
-              current && current.turnId === turnId ? { ...current, phase: 'finalizing' } : current,
-            )
-          }
-          void qc.invalidateQueries({ queryKey: ['conversation-messages', activeId] })
-          void qc.invalidateQueries({ queryKey: ['conversations'] })
-        },
-        onError: (error) => {
-          setTurn((current) =>
-            current && current.turnId === turnId
-              ? { ...current, phase: 'failed', failure: error.message }
-              : current,
-          )
-        },
-      })
+      if (result.status !== 'failed') subscribeToTurn(conversationId, turnId)
     } catch (error) {
       setTurn(null)
       toast.error(error instanceof Error ? error.message : '发送失败')
@@ -294,6 +460,10 @@ export function AssistantPage() {
 
   const send = async () => {
     if (!activeId || !input.trim() || turn) return
+    if (selectedCaseId && !selectedCase.data) {
+      toast.error(selectedCase.isError ? '当前工单不可访问' : '正在读取当前工单，请稍候')
+      return
+    }
     const text = input.trim()
     const pending = uploads
     if (pending.some((entry) => entry.status !== 'ready')) return
@@ -302,14 +472,33 @@ export function AssistantPage() {
     const attachments = pending
       .filter((entry): entry is UploadEntry & { attachmentId: string } => Boolean(entry.attachmentId))
       .map((entry) => ({ attachmentId: entry.attachmentId }))
-    lastTurnRef.current = { content: text, attachments }
-    void submitTurn(text, attachments)
+    const caseReferences: ConversationCaseReference[] = selectedCaseId
+      ? [{ externalCaseId: selectedCaseId, kind: 'selected' }]
+      : []
+    lastTurnRef.current = { content: text, attachments, caseReferences }
+    void submitTurn(text, attachments, caseReferences)
   }
 
   const retryTurn = () => {
     const last = lastTurnRef.current
-    if (!activeId || !last || turn) return
-    void submitTurn(last.content, last.attachments)
+    if (!activeId || !last || !turn || turn.phase !== 'failed') return
+    unsubscribeRef.current?.()
+    clearActiveTurn(activeId, turn.turnId)
+    setTurn(null)
+    void submitTurn(last.content, last.attachments, last.caseReferences, true)
+  }
+
+  const reconnectTurn = () => {
+    if (!activeId || !turn || !turn.connectionLost) return
+    setTurn((current) => current ? { ...current, failure: undefined, connectionLost: false } : current)
+    subscribeToTurn(activeId, turn.turnId)
+  }
+
+  const clearSelectedCase = () => {
+    setSelectedCaseId(null)
+    const next = new URLSearchParams(searchParams)
+    next.delete('caseId')
+    setSearchParams(next, { replace: true })
   }
 
   const openCitation = (citation: ConversationCitation) => {
@@ -332,7 +521,8 @@ export function AssistantPage() {
   const readyToSend = Boolean(
     activeId &&
       input.trim() &&
-      uploads.every((entry) => entry.status === 'ready'),
+      uploads.every((entry) => entry.status === 'ready') &&
+      (!selectedCaseId || selectedCase.data),
   )
 
   return (
@@ -443,7 +633,17 @@ export function AssistantPage() {
                     </div>
                   ) : null}
                   <div className="mt-2 flex max-w-[85%] items-center gap-2.5">
-                    {turn.phase !== 'failed' ? (
+                    {turn.connectionLost ? (
+                      <>
+                        <Badge tone="red">连接已断开</Badge>
+                        {turn.failure && (
+                          <span className="max-w-[420px] text-[12px] text-danger">{turn.failure}</span>
+                        )}
+                        <Button size="sm" variant="ghost" onClick={reconnectTurn}>
+                          重新连接
+                        </Button>
+                      </>
+                    ) : turn.phase !== 'failed' ? (
                       turn.streamed.length === 0 && (
                         <>
                           <Spinner />
@@ -472,6 +672,29 @@ export function AssistantPage() {
 
         {/* 输入区 */}
         <div className="border-t border-divider p-4">
+          {selectedCaseId && (
+            <div className="mb-2.5 flex items-center gap-2 rounded-capsule bg-parchment px-3 py-1.5 text-[12px] text-ink-80">
+              <span className="font-semibold text-ink">当前工单</span>
+              {selectedCase.isPending ? (
+                <Spinner />
+              ) : selectedCase.data ? (
+                <span className="min-w-0 truncate">
+                  {selectedCase.data.externalCaseKey} · {selectedCase.data.title}
+                </span>
+              ) : (
+                <span className="text-danger">工单不可访问</span>
+              )}
+              <button
+                type="button"
+                className="press focus-ring ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-full text-ink-48 hover:bg-canvas hover:text-danger"
+                onClick={clearSelectedCase}
+                aria-label="移除当前工单"
+                title="移除当前工单"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          )}
           {uploads.length > 0 && (
             <div className="mb-2.5 flex flex-wrap gap-2">
               {uploads.map((entry) => (
@@ -493,8 +716,9 @@ export function AssistantPage() {
                     className="press text-ink-48 hover:text-danger"
                     onClick={() => setUploads((current) => current.filter((item) => item.key !== entry.key))}
                     aria-label="移除附件"
+                    title="移除附件"
                   >
-                    ✕
+                    <X size={14} aria-hidden="true" />
                   </button>
                 </span>
               ))}
@@ -514,6 +738,7 @@ export function AssistantPage() {
             <input
               ref={fileInputRef}
               type="file"
+              accept={knowledgeDocumentFileAccept}
               multiple
               className="hidden"
               onChange={(event) => {

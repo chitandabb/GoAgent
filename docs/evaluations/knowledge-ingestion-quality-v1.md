@@ -176,9 +176,14 @@ docker compose -f docker-compose.yml -f docker-compose.layout.yml build knowledg
 ## Bounded OCR Pair
 
 The OCR evaluator defaults to dry-run. Provider execution requires an explicit flag and always
-uses exactly two render candidates for one selected PDF page. The test used USPTO patent
-US4575330 page 8, an image-only two-column prose page, with `qwen-vl-ocr-latest` and the same
-strict JSON prompt.
+uses exactly two render candidates for one selected PDF page. The table below is a legacy
+2026-08-05 v1 run over USPTO patent US4575330 page 8, an image-only two-column prose page.
+That run used the retired structured-JSON OCR contract and remains historical evidence only; it
+must not be read as a current plain-text OCR baseline. The current evaluator records
+`responseValidated` and writes v2 reports separately. The provider maximum for
+`qwen-vl-ocr-latest` is 4,096 output tokens. A response ending with `finish_reason=length` is
+rejected and recorded as `output_truncated`, with usage retained for cost accounting; it is
+never indexed as complete OCR.
 
 | Metric | 20M candidate | 8M candidate |
 |---|---:|---:|
@@ -188,7 +193,7 @@ strict JSON prompt.
 | OCR latency | 19,466.14 ms | 13,514.29 ms |
 | Prompt / completion Token | 8,176 / 1,512 | 7,741 / 1,553 |
 | Total Token | 9,688 | 9,294 |
-| Strict JSON | pass | pass |
+| Legacy strict JSON response | pass | pass |
 | Estimated cost | CNY 0.003209 | CNY 0.003099 |
 
 The 8M candidate reduced encoded bytes by 91.2%, provider latency by 30.6%, and total Token by

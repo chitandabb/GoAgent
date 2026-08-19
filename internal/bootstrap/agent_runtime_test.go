@@ -422,6 +422,7 @@ func TestBuildAgentRuntimeCarriesProductionActiveProfileIdentity(t *testing.T) {
 		t.Fatalf("DecodeFile(%q): %v", path, err)
 	}
 	cfg := testAgentConfig()
+	cfg.Agent.DiagnosisMaxIterations = 3
 	cfg.Models.Chat = decoded.Models.Chat
 	runtime, err := buildAgentRuntime(
 		context.Background(), cfg, stubAgentExternalCases{}, nil, nil, zap.NewNop(), agentRuntimeBuilders{

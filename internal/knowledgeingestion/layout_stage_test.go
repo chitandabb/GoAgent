@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -54,6 +55,19 @@ func TestLayoutStageCropsOnlyActionableImageRegions(t *testing.T) {
 		output.Pages[0].Regions[0].Crop == nil || output.Pages[0].Regions[1].Crop == nil ||
 		output.Pages[0].Regions[2].Crop != nil {
 		t.Fatalf("output = %+v", output)
+	}
+}
+
+func TestLayoutSourceRasterRejectsOversizeSourceBeforeDecode(t *testing.T) {
+	content := []byte("not-an-image")
+	asset := knowledgeparser.VisualAsset{
+		Index: 0, Kind: knowledgeparser.VisualAssetSourceImage, SourcePath: "source",
+		MediaType: "image/png", SizeBytes: int64(len(content)), SHA256: rasterSHA256(content),
+		Width: 8000, Height: 5000, Content: content,
+	}
+	raster, err := layoutSourceRaster("image/png", []knowledgeparser.VisualAsset{asset}, 20_000_000, 1<<20)
+	if raster != nil || !errors.Is(err, knowledgeparser.ErrResourceLimit) {
+		t.Fatalf("layoutSourceRaster = %+v, %v", raster, err)
 	}
 }
 

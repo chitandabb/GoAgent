@@ -142,6 +142,9 @@ func (e *Executor) Execute(
 	if e.layoutStage != nil && len(parsed.Pages) > 0 {
 		analyzed, analyzeErr := e.layoutStage.Analyze(ctx, parserInput, parsed)
 		if analyzeErr != nil {
+			if errors.Is(analyzeErr, knowledgeparser.ErrResourceLimit) {
+				return knowledgeworker.ExecutionResult{}, permanentCause(analyzeErr)
+			}
 			return knowledgeworker.ExecutionResult{}, analyzeErr
 		}
 		if len(analyzed.Pages) > 0 {

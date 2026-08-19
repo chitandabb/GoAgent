@@ -23,6 +23,11 @@ func TestResultValidateRejectsCorruptStructure(t *testing.T) {
 		{name: "empty cells", mutate: func(r *Result) { r.Cells = nil }},
 		{name: "duplicate coordinate", mutate: func(r *Result) { r.Cells = append(r.Cells, r.Cells[0]) }},
 		{name: "invalid span", mutate: func(r *Result) { r.Cells[0].ColumnSpan = 0 }},
+		{name: "overlapping spans", mutate: func(r *Result) { r.Cells[0].RowSpan = 2 }},
+		{name: "grid gap", mutate: func(r *Result) { r.Cells = r.Cells[:3] }},
+		{name: "logical grid exceeds limit", mutate: func(r *Result) {
+			r.Cells = []Cell{{Row: 0, Column: 0, RowSpan: maxTableCells, ColumnSpan: maxTableCells, Text: "x"}}
+		}},
 		{name: "nan confidence", mutate: func(r *Result) { r.Confidence = math.NaN() }},
 		{name: "partial without reason", mutate: func(r *Result) { r.Partial = true }},
 		{name: "complete with reason", mutate: func(r *Result) { r.Reason = "unexpected" }},
@@ -36,6 +41,25 @@ func TestResultValidateRejectsCorruptStructure(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestResultValidateAcceptsMergedCellsThatCoverTheGrid(t *testing.T) {
+	result := Result{
+		Provider: "dashscope", Model: "qwen3-vl-plus", PromptVersion: "table-recovery-v1",
+		Markdown: "| standard | description |\n| --- | --- |\n| ISO 10303 | 207 |\n|  | 224 |\n|  | 238 |",
+		Cells: []Cell{
+			{Row: 0, Column: 0, RowSpan: 1, ColumnSpan: 1, Text: "standard", Header: true},
+			{Row: 0, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "description", Header: true},
+			{Row: 1, Column: 0, RowSpan: 3, ColumnSpan: 1, Text: "ISO 10303"},
+			{Row: 1, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "207"},
+			{Row: 2, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "224"},
+			{Row: 3, Column: 1, RowSpan: 1, ColumnSpan: 1, Text: "238"},
+		},
+		Confidence: 0.9,
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
 	}
 }
 

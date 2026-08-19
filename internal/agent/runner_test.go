@@ -720,3 +720,26 @@ func runnerTestAccess(t *testing.T, permissions ...agentruntime.Permission) agen
 func withRunnerTestRunAccess(ctx context.Context, access agentruntime.RunAccess) context.Context {
 	return agentruntime.WithRunAccess(ctx, access)
 }
+
+func TestRejectUnknownToolReturnsRecoverableFeedback(t *testing.T) {
+	result, err := rejectUnknownTool(context.Background(), "read_attachment", "{}")
+	if err != nil {
+		t.Fatalf("rejectUnknownTool: %v", err)
+	}
+	var payload struct {
+		OK        bool   `json:"ok"`
+		Tool      string `json:"tool"`
+		Error     string `json:"error"`
+		Retryable bool   `json:"retryable"`
+		Guidance  string `json:"guidance"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("decode feedback: %v", err)
+	}
+	if payload.OK || payload.Tool != "read_attachment" || payload.Error != "tool_not_available" || payload.Retryable {
+		t.Fatalf("unexpected unknown tool feedback: %+v", payload)
+	}
+	if !strings.Contains(payload.Guidance, "JSON") {
+		t.Fatalf("unknown tool feedback does not guide final report: %q", payload.Guidance)
+	}
+}

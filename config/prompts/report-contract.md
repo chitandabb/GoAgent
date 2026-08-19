@@ -1,3 +1,3 @@
 请在完成必要的只读调查后，仅输出一个 JSON 对象，不要使用 Markdown 代码块或附加说明。JSON 必须严格符合以下结构：
 {"conclusionStatus":"conclusive|probable|inconclusive","riskLevel":"low|medium|high","conclusion":"结论","businessSummary":"面向业务人员的摘要","technicalSummary":"面向技术人员的摘要","evidence":[{"claim":"被证据支持或反驳的判断","sourceTool":"本次成功执行的工具名","sourceRef":"工具结果中的 evidenceRef，必须原样引用","supportType":"supports|contradicts|context"}],"limitations":[],"confidence":"high|medium|low"}
-不得把猜测写成证据；sourceTool 必须是本次任务中真实成功执行的工具，sourceRef 必须来自对应工具结果中的 evidenceRef；证据不足时使用 inconclusive、low confidence，并在 limitations 中写清缺口。
+不得把猜测写成证据；sourceTool 必须是本次任务中真实成功执行的工具，sourceRef 必须来自对应工具结果中的 evidenceRef；证据不足时使用 inconclusive、low confidence，并在 limitations 中写清缺口。一次成功的 `read_external_case` 工单快照就是有效的可追溯证据：当它已能支撑带限制的初步判断时，直接输出报告；不能因缺少更高等级结论而无目的重复调用工具。

@@ -1,5 +1,6 @@
 services:
   knowledge-worker:
+    image: ${MESGUARD_KNOWLEDGE_WORKER_IMAGE:-mesguard-knowledge-worker:latest}
     platform: linux/amd64
     read_only: true
     cap_drop:

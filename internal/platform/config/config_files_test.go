@@ -25,6 +25,9 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 				t.Fatalf("%q conversation prompt version = %q, want conversation-v9 for readonly SQL counting semantics",
 					path, cfg.Agent.ConversationPromptVersion)
 			}
+			if cfg.Agent.DiagnosisMaxIterations != 3 {
+				t.Fatalf("%q diagnosis iteration cap = %d, want 3 for bounded repair budget", path, cfg.Agent.DiagnosisMaxIterations)
+			}
 			memoryProfile, err := cfg.Models.Chat.ConversationMemoryProfile()
 			if err != nil {
 				t.Fatalf("ConversationMemoryProfile(%q): %v", path, err)
@@ -100,6 +103,29 @@ func TestRepositoryConfigFilesDecodeAndValidate(t *testing.T) {
 			if cfg.RabbitMQ.MemoryCompactionQueue != "mesguard.conversation.memory.compact" ||
 				cfg.RabbitMQ.MemoryCompactionRoutingKey != "conversation.memory.compact" {
 				t.Fatalf("%q memory compaction topology = %+v", path, cfg.RabbitMQ)
+			}
+			ocr := cfg.Models.OCR
+			if !ocr.Enabled || ocr.Provider != "dashscope" ||
+				ocr.BaseURL != "https://dashscope.aliyuncs.com/compatible-mode/v1" ||
+				ocr.APIKeyEnv != "DASHSCOPE_API_KEY" || ocr.Model != "qwen-vl-ocr-latest" ||
+				ocr.PromptVersion != "ocr-extraction-v2" || ocr.ReasoningEffort != "" ||
+				ocr.ResponseFormat != "text" || ocr.TimeoutMillis != 90_000 || ocr.MaxOutputTokens != 4096 {
+				t.Fatalf("%q OCR cost and output contract = %+v", path, ocr)
+			}
+			vision := cfg.Models.Vision
+			if !vision.Enabled || vision.Provider != "dashscope" ||
+				vision.BaseURL != "https://dashscope.aliyuncs.com/compatible-mode/v1" ||
+				vision.APIKeyEnv != "DASHSCOPE_API_KEY" || vision.Model != "qwen3-vl-flash" ||
+				vision.PromptVersion != "visual-description-v4" || vision.ReasoningEffort != "" ||
+				vision.ResponseFormat != "json_object" || vision.TimeoutMillis != 90_000 || vision.MaxOutputTokens != 512 {
+				t.Fatalf("%q vision cost and output contract = %+v", path, vision)
+			}
+			table := cfg.Models.Table
+			if !table.Enabled || table.Provider != "stepfun" ||
+				table.APIKeyEnv != "MESGUARD_STEPFUN_API_KEY" || table.Model != "step-3.7-flash" ||
+				table.PromptVersion != "table-recovery-v2" || table.ResponseFormat != "json_object" ||
+				table.TimeoutMillis != 120_000 || table.MaxOutputTokens != 4096 {
+				t.Fatalf("%q table cost and output contract = %+v", path, table)
 			}
 			if cfg.Models.Judge.Enabled {
 				t.Fatalf("%q enables the offline Judge by default", path)

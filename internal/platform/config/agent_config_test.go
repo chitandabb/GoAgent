@@ -13,6 +13,7 @@ func TestAgentConfigValidate(t *testing.T) {
 	configured.MaxEvidenceItems = 16
 	configured.MaxTotalTokens = 16000
 	configured.TimeoutMillis = 90000
+	configured.DiagnosisMaxIterations = 6
 	configured.ConversationMaxIterations = 8
 	configured.ConversationMaxContextRunes = 32000
 	configured.ConversationTimeoutMillis = 60000
@@ -46,6 +47,11 @@ func TestAgentConfigValidate(t *testing.T) {
 	invalidBudget.MaxTotalTokens = 999
 	if err := invalidBudget.Validate(); err == nil {
 		t.Fatal("Validate accepted too-small maxTotalTokens")
+	}
+	invalidDiagnosisIterations := valid
+	invalidDiagnosisIterations.DiagnosisMaxIterations = 17
+	if err := invalidDiagnosisIterations.Validate(); err == nil {
+		t.Fatal("Validate accepted too-large diagnosisMaxIterations")
 	}
 	invalidVersion := valid
 	invalidVersion.PromptVersion = "invalid version"

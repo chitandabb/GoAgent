@@ -1,8 +1,10 @@
 package knowledgeingestion
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,6 +55,142 @@ func TestExecutorProducesArtifactAndChunksFromVerifiedMarkdown(t *testing.T) {
 	var artifact elementArtifact
 	if err := json.Unmarshal(store.artifact, &artifact); err != nil || len(artifact.Elements) != 2 {
 		t.Fatalf("artifact=%+v err=%v", artifact, err)
+	}
+}
+
+func TestExecutorPublishesOOXMLVisualAssetsWithoutPages(t *testing.T) {
+	content := ooxmlExecutorFixture(t)
+	parser, err := knowledgeparser.NewOOXMLParser(knowledgeparser.Limits{
+		MaxDocumentUnits: 5000, MaxArchiveEntries: 128, MaxExpandedBytes: 1 << 20,
+		MaxXMLBytes: 1 << 20, MaxExtractedRunes: 10000, MaxSpreadsheetRows: 100,
+		MaxSpreadsheetColumns: 32, MaxVisualAssets: 8, MaxVisualAssetBytes: 1 << 16,
+		MaxTotalVisualBytes: 1 << 17,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryStore{source: content}
+	requests := 0
+	executor, err := NewExecutor(store, parser, Config{
+		MaxSourceBytes: int64(len(content) + 1), MaxArtifactBytes: 1 << 20,
+		ChunkOptions: knowledge.TextChunkOptions{MaxRunes: 256, OverlapRunes: 16},
+		VisualConfig: knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
+		VisualProcessor: processorFunc(func(context.Context, knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error) {
+			requests++
+			return knowledgeenrichment.ProviderResult{
+				Provider: "stepfun", Model: "step-3.7-flash",
+				Elements: []knowledge.DocumentElement{{
+					ElementType: knowledge.ElementImageDescription,
+					ContentText: "embedded diagram",
+				}},
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := executorTask(content, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	task.Source.OriginalName = "fixture.docx"
+	result, err := executor.Execute(context.Background(), task, func(context.Context, knowledgeworker.CheckpointUpdate) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if requests != 1 || len(result.Chunks) < 2 || len(result.Embeddings) != 0 {
+		t.Fatalf("result requests=%d chunks=%d embeddings=%d", requests, len(result.Chunks), len(result.Embeddings))
+	}
+	var artifact elementArtifact
+	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.VisualAssets) != 1 {
+		t.Fatalf("visual assets = %+v", artifact.VisualAssets)
+	}
+	asset := artifact.VisualAssets[0]
+	if asset.Status != knowledgeenrichment.StatusCompleted || asset.Provider != "stepfun" ||
+		asset.Model != "step-3.7-flash" || len(asset.OutputElementIndexes) != 1 {
+		t.Fatalf("visual asset = %+v", asset)
+	}
+}
+
+func TestExecutorLeavesLayoutAdapterInputErrorsRetryable(t *testing.T) {
+	raster := ingestionLayoutRasterFixture(t, 100, 80)
+	asset := knowledgeparser.VisualAsset{
+		Index: 0, Kind: knowledgeparser.VisualAssetSourceImage, SourcePath: "source",
+		MediaType: raster.MediaType, SizeBytes: int64(len(raster.Content)), SHA256: rasterSHA256(raster.Content),
+		Width: raster.Width, Height: raster.Height, Content: raster.Content,
+	}
+	parser := parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{
+			ParserVersion: "test-v1", VisualAssets: []knowledgeparser.VisualAsset{asset},
+			Pages: []knowledgeparser.PageObservation{{
+				PageNumber: 1, ExtractionComplete: true,
+				VisualCandidateCount: 1, VisualCandidatesKnown: true,
+			}},
+			Metadata: json.RawMessage("{\"mediaType\":\"image/png\"}"),
+		}, nil
+	})
+	stage := testLayoutStage(t, pageAnalyzerFunc(func(
+		context.Context, knowledgelayout.AnalysisRequest,
+	) (knowledgelayout.AnalysisResult, error) {
+		return knowledgelayout.AnalysisResult{}, knowledgelayout.ErrInvalidInput
+	}))
+	executor, err := NewExecutor(&memoryStore{source: raster.Content}, parser, Config{
+		MaxSourceBytes: int64(len(raster.Content) + 1), MaxArtifactBytes: 1 << 20,
+		ChunkOptions: knowledge.TextChunkOptions{MaxRunes: 256, OverlapRunes: 16},
+		VisualConfig: knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
+		LayoutStage:  stage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Execute(
+		context.Background(), executorTask(raster.Content, "image/png"),
+		func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil },
+	)
+	if errors.Is(err, knowledgeworker.ErrPermanentInput) || !errors.Is(err, knowledgelayout.ErrInvalidInput) {
+		t.Fatalf("Execute error = %v", err)
+	}
+}
+
+func TestExecutorClassifiesLayoutResourceLimitsAsPermanent(t *testing.T) {
+	raster := ingestionLayoutRasterFixture(t, 100, 80)
+	asset := knowledgeparser.VisualAsset{
+		Index: 0, Kind: knowledgeparser.VisualAssetSourceImage, SourcePath: "source",
+		MediaType: raster.MediaType, SizeBytes: int64(len(raster.Content)), SHA256: rasterSHA256(raster.Content),
+		Width: raster.Width, Height: raster.Height, Content: raster.Content,
+	}
+	parser := parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{
+			ParserVersion: "test-v1", VisualAssets: []knowledgeparser.VisualAsset{asset},
+			Pages: []knowledgeparser.PageObservation{{
+				PageNumber: 1, ExtractionComplete: true,
+				VisualCandidateCount: 1, VisualCandidatesKnown: true,
+			}},
+			Metadata: json.RawMessage("{\"mediaType\":\"image/png\"}"),
+		}, nil
+	})
+	stage := testLayoutStage(t, pageAnalyzerFunc(func(
+		context.Context, knowledgelayout.AnalysisRequest,
+	) (knowledgelayout.AnalysisResult, error) {
+		return knowledgelayout.AnalysisResult{}, errors.Join(knowledgeparser.ErrResourceLimit, errors.New("layout raster budget exceeded"))
+	}))
+	executor, err := NewExecutor(&memoryStore{source: raster.Content}, parser, Config{
+		MaxSourceBytes: int64(len(raster.Content) + 1), MaxArtifactBytes: 1 << 20,
+		ChunkOptions: knowledge.TextChunkOptions{MaxRunes: 256, OverlapRunes: 16},
+		VisualConfig: knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
+		LayoutStage:  stage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = executor.Execute(
+		context.Background(), executorTask(raster.Content, "image/png"),
+		func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil },
+	)
+	if !errors.Is(err, knowledgeworker.ErrPermanentInput) || !errors.Is(err, knowledgeparser.ErrResourceLimit) {
+		t.Fatalf("Execute error = %v", err)
 	}
 }
 
@@ -223,6 +361,139 @@ func TestExecutorPersistsMissingVisualAssetsAsPartialArtifact(t *testing.T) {
 		artifact.VisualAssets[0].SourcePart != "word/document.xml" ||
 		artifact.VisualAssets[0].ContentSHA256 != knowledge.SHA256Hex(string(visualContent)) ||
 		bytes.Contains(store.artifact, visualContent) {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+}
+
+func TestExecutorArtifactsTruncatedOCRWithUsage(t *testing.T) {
+	content := []byte("# Native text\n\nThis document remains searchable when an OCR region is truncated.")
+	visualContent := []byte("visual")
+	parser := parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{
+			ParserVersion: "mixed-parser-v1",
+			Elements:      []knowledge.DocumentElement{{Index: 0, ElementType: knowledge.ElementText, ContentText: "Native text"}},
+			VisualAssets: []knowledgeparser.VisualAsset{{
+				Index: 0, Kind: knowledgeparser.VisualAssetEmbeddedImage, SourcePath: "word/media/image1.png",
+				SourcePart: "word/document.xml", RelationshipID: "rIdImage", MediaType: "image/png",
+				SizeBytes: int64(len(visualContent)), SHA256: knowledge.SHA256Hex(string(visualContent)),
+				Width: 100, Height: 100, Content: visualContent,
+			}},
+			Metadata: json.RawMessage(`{"visualAssetCount":1}`),
+		}, nil
+	})
+	processor := processorFunc(func(context.Context, knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error) {
+		return knowledgeenrichment.ProviderResult{}, knowledgeenrichment.NewProviderFailure(
+			"dashscope", "qwen-vl-ocr-latest", knowledgeenrichment.ProviderFailureOutputTruncated,
+			&knowledgeenrichment.ProviderUsage{PromptTokens: 1200, CompletionTokens: 4096, TotalTokens: 5296},
+			errors.New("visual model response was truncated"),
+		)
+	})
+	store := &memoryStore{source: content}
+	executor, err := NewExecutor(store, parser, Config{
+		MaxSourceBytes: 1024, MaxArtifactBytes: 16 * 1024,
+		ChunkOptions: knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16},
+		VisualConfig: knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 4096}, VisualProcessor: processor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), executorTask(content, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"), func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil })
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !result.Partial || len(result.Chunks) == 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	var artifact elementArtifact
+	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	asset := artifact.VisualAssets[0]
+	if asset.Status != knowledgeenrichment.StatusMissing || asset.Reason != knowledgeenrichment.ProviderFailureOutputTruncated ||
+		asset.Provider != "dashscope" || asset.Model != "qwen-vl-ocr-latest" || asset.Usage == nil || asset.Usage.TotalTokens != 5296 {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+}
+
+func TestExecutorRendersPDFDocumentPageIntoOCRLayoutRegion(t *testing.T) {
+	pdfContent := []byte("%PDF-layout-test")
+	raster := ingestionLayoutRasterFixture(t, 100, 80)
+	pageNumber := 1
+	parser := parserFunc(func(context.Context, knowledgeparser.Input) (knowledgeparser.Result, error) {
+		return knowledgeparser.Result{
+			ParserVersion: "pdf-parser-v1",
+			VisualAssets: []knowledgeparser.VisualAsset{{
+				Index: 0, Kind: knowledgeparser.VisualAssetDocumentPage, PageNumber: &pageNumber,
+				SourcePath: "pages/1", MediaType: "application/pdf", SizeBytes: int64(len(pdfContent)),
+				SHA256: knowledge.SHA256Hex(string(pdfContent)),
+			}},
+			Pages: []knowledgeparser.PageObservation{{
+				PageNumber: 1, ExtractionComplete: true,
+			}},
+			Metadata: json.RawMessage(`{"mediaType":"application/pdf","visualAssetCount":1}`),
+		}, nil
+	})
+	stage := testLayoutStage(t, pageAnalyzerFunc(func(
+		context.Context, knowledgelayout.AnalysisRequest,
+	) (knowledgelayout.AnalysisResult, error) {
+		return knowledgelayout.AnalysisResult{
+			Plan: knowledgelayout.Plan{
+				PageClass: knowledgelayout.PageScanned,
+				Routes: []knowledgelayout.RegionRoute{testLayoutRoute(
+					0, knowledgelayout.RegionText, knowledgelayout.RouteCloudOCR,
+				)},
+			},
+			Render: &knowledgelayout.RenderResult{
+				PageNumber: 1, Raster: raster,
+			},
+		}, nil
+	}))
+	processorCalls := 0
+	processor := processorFunc(func(_ context.Context, request knowledgeenrichment.Request) (knowledgeenrichment.ProviderResult, error) {
+		processorCalls++
+		if request.Route != knowledgeenrichment.RouteOCR ||
+			request.Asset.Kind != knowledgeparser.VisualAssetLayoutRegion ||
+			request.Asset.MediaType != "image/png" || request.Asset.PageNumber == nil ||
+			*request.Asset.PageNumber != 1 || len(request.Asset.Content) == 0 {
+			t.Fatalf("request = %+v", request)
+		}
+		return knowledgeenrichment.ProviderResult{
+			Provider: "stepfun", Model: "step-3.7-flash",
+			Elements: []knowledge.DocumentElement{{
+				ElementType: knowledge.ElementOCRText, ContentText: "Rendered page OCR text",
+			}},
+		}, nil
+	})
+	store := &memoryStore{source: pdfContent}
+	executor, err := NewExecutor(store, parser, Config{
+		MaxSourceBytes: int64(len(pdfContent)) + 1, MaxArtifactBytes: 32 * 1024,
+		ChunkOptions:    knowledge.TextChunkOptions{MaxRunes: 128, OverlapRunes: 16},
+		VisualConfig:    knowledgeenrichment.Config{MaxEnrichments: 2, MinPixels: 1},
+		VisualProcessor: processor, LayoutStage: stage,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(
+		context.Background(), executorTask(pdfContent, "application/pdf"),
+		func(context.Context, knowledgeworker.CheckpointUpdate) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if processorCalls != 1 || result.Partial || len(result.Chunks) != 1 {
+		t.Fatalf("calls=%d partial=%v chunks=%+v", processorCalls, result.Partial, result.Chunks)
+	}
+	var artifact elementArtifact
+	if err := json.Unmarshal(store.artifact, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.VisualAssets) != 2 || artifact.VisualAssets[0].Kind != knowledgeparser.VisualAssetDocumentPage ||
+		artifact.VisualAssets[0].Status != knowledgeenrichment.StatusSkipped ||
+		artifact.VisualAssets[0].Reason != "superseded_by_layout_regions" ||
+		artifact.VisualAssets[1].Kind != knowledgeparser.VisualAssetLayoutRegion ||
+		artifact.VisualAssets[1].Status != knowledgeenrichment.StatusCompleted ||
+		artifact.VisualAssets[1].Provider != "stepfun" || artifact.Layout == nil {
 		t.Fatalf("artifact = %+v", artifact)
 	}
 }
@@ -575,6 +846,43 @@ func TestExecutorClassifiesUnsupportedVisualInputAsPermanent(t *testing.T) {
 	if !errors.Is(err, knowledgeworker.ErrPermanentInput) || !errors.Is(err, knowledgeenrichment.ErrUnsupportedInput) {
 		t.Fatalf("Execute error = %v", err)
 	}
+}
+
+func ooxmlExecutorFixture(t *testing.T) []byte {
+	t.Helper()
+	const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	var output bytes.Buffer
+	archive := zip.NewWriter(&output)
+	files := map[string]string{
+		"[Content_Types].xml":          `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+		"_rels/.rels":                  `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDocument" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+		"word/_rels/document.xml.rels": `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`,
+		"word/document.xml":            `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:t>Operational note</w:t></w:r><w:drawing><a:graphic><a:graphicData><a:blip r:embed="rIdImage"/></a:graphicData></a:graphic></w:drawing></w:p></w:body></w:document>`,
+	}
+	for name, content := range files {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(entry, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry, err := archive.Create("word/media/image1.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write(imageBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func executorTask(content []byte, mediaType string) knowledgeworker.Task {

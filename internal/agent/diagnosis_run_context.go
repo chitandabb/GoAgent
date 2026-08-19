@@ -233,14 +233,15 @@ type diagnosisDataSourceProjection struct {
 }
 
 // diagnosisTaskContextProjection 是 task_context 的唯一投影结构：只包含
-// Policy 协议版本、有效权限、当前工单 ID 与当前授权数据源的 id/role/
-// safetyMode；凭证、连接地址、用户输入、附件正文、依赖错误和 Prompt
-// 指令永不进入。encoding/json 默认 SetEscapeHTML，恶意值无法闭合外层
+// Policy 协议版本、有效权限、当前工单 ID、已冻结附件数量与当前授权数据源的
+// id/role/safetyMode；凭证、连接地址、用户输入、附件 ID/正文、依赖错误和
+// Prompt 指令永不进入。encoding/json 默认 SetEscapeHTML，恶意值无法闭合外层
 // <task_context> 块。
 type diagnosisTaskContextProjection struct {
 	PolicySchemaVersion  int                             `json:"policySchemaVersion"`
 	EffectivePermissions []string                        `json:"effectivePermissions"`
 	ExternalCaseID       string                          `json:"externalCaseId"`
+	AttachmentCount      int                             `json:"attachmentCount"`
 	DataSources          []diagnosisDataSourceProjection `json:"dataSources,omitempty"`
 }
 
@@ -269,10 +270,15 @@ func renderDiagnosisTaskContext(
 	if caseIDs := access.Grants().ExternalCaseIDs(); len(caseIDs) > 0 {
 		externalCaseID = caseIDs[0].String()
 	}
+	attachmentCount := 0
+	if access.Allows(agentruntime.PermissionAttachmentRead) {
+		attachmentCount = len(access.Grants().AttachmentIDs())
+	}
 	encoded, err := json.Marshal(diagnosisTaskContextProjection{
 		PolicySchemaVersion:  policy.SchemaVersion(),
 		EffectivePermissions: permissions,
 		ExternalCaseID:       externalCaseID,
+		AttachmentCount:      attachmentCount,
 		DataSources:          grantedSources,
 	})
 	if err != nil {

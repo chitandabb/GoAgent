@@ -195,9 +195,53 @@ func (p OOXMLParser) parseWorksheet(
 	sharedStrings []string,
 	budget *runeBudget,
 ) (string, int, error) {
+	columns := 0
+	firstPassRows, err := p.visitWorksheetRows(ctx, content, sharedStrings, func(cells []string) error {
+		if len(cells) > columns {
+			columns = len(cells)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if columns == 0 {
+		return "", firstPassRows, nil
+	}
+	var output strings.Builder
+	rowCount, err := p.visitWorksheetRows(ctx, content, sharedStrings, func(cells []string) error {
+		row := spreadsheetMarkdownRow(cells, columns)
+		if output.Len() == 0 {
+			delimiter := spreadsheetMarkdownDelimiter(columns)
+			if err := budget.consume(row + "\n" + delimiter); err != nil {
+				return err
+			}
+			output.WriteString(row)
+			output.WriteByte('\n')
+			output.WriteString(delimiter)
+			return nil
+		}
+		row = "\n" + row
+		if err := budget.consume(row); err != nil {
+			return err
+		}
+		output.WriteString(row)
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return output.String(), rowCount, nil
+}
+
+func (p OOXMLParser) visitWorksheetRows(
+	ctx context.Context,
+	content []byte,
+	sharedStrings []string,
+	visit func([]string) error,
+) (int, error) {
 	decoder := newStrictXMLDecoder(content)
 	var (
-		output      strings.Builder
 		rowCells    []string
 		occupied    map[int]struct{}
 		rowCount    int
@@ -212,14 +256,14 @@ func (p OOXMLParser) parseWorksheet(
 	)
 	for {
 		if err := ctx.Err(); err != nil {
-			return "", 0, err
+			return 0, err
 		}
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
-			return output.String(), rowCount, nil
+			return rowCount, nil
 		}
 		if err != nil {
-			return "", 0, fmt.Errorf("%w: decode XLSX worksheet: %v", ErrInvalidContent, err)
+			return 0, fmt.Errorf("%w: decode XLSX worksheet: %v", ErrInvalidContent, err)
 		}
 		switch current := token.(type) {
 		case xml.StartElement:
@@ -229,7 +273,7 @@ func (p OOXMLParser) parseWorksheet(
 				if rowDepth == 1 {
 					rowCount++
 					if rowCount > p.limits.MaxSpreadsheetRows {
-						return "", 0, fmt.Errorf("%w: worksheet row count exceeds limit %d", ErrResourceLimit, p.limits.MaxSpreadsheetRows)
+						return 0, fmt.Errorf("%w: worksheet row count exceeds limit %d", ErrResourceLimit, p.limits.MaxSpreadsheetRows)
 					}
 					rowCells = nil
 					occupied = make(map[int]struct{})
@@ -243,16 +287,16 @@ func (p OOXMLParser) parseWorksheet(
 					cellType = xmlAttribute(current.Attr, "t")
 					cellColumn, err = spreadsheetColumnIndex(xmlAttribute(current.Attr, "r"))
 					if err != nil {
-						return "", 0, fmt.Errorf("%w: XLSX %v", ErrInvalidContent, err)
+						return 0, fmt.Errorf("%w: XLSX %v", ErrInvalidContent, err)
 					}
 					if cellColumn < 0 {
 						cellColumn = len(rowCells)
 					}
 					if cellColumn >= p.limits.MaxSpreadsheetColumns {
-						return "", 0, fmt.Errorf("%w: worksheet column index exceeds limit %d", ErrResourceLimit, p.limits.MaxSpreadsheetColumns)
+						return 0, fmt.Errorf("%w: worksheet column index exceeds limit %d", ErrResourceLimit, p.limits.MaxSpreadsheetColumns)
 					}
 					if _, exists := occupied[cellColumn]; exists {
-						return "", 0, fmt.Errorf("%w: worksheet contains duplicate cells", ErrInvalidContent)
+						return 0, fmt.Errorf("%w: worksheet contains duplicate cells", ErrInvalidContent)
 					}
 					rawValue.Reset()
 					inlineValue.Reset()
@@ -287,7 +331,7 @@ func (p OOXMLParser) parseWorksheet(
 				if cellDepth == 1 {
 					value, err := spreadsheetCellValue(cellType, rawValue.String(), inlineValue.String(), sharedStrings)
 					if err != nil {
-						return "", 0, fmt.Errorf("%w: XLSX %v", ErrInvalidContent, err)
+						return 0, fmt.Errorf("%w: XLSX %v", ErrInvalidContent, err)
 					}
 					for len(rowCells) <= cellColumn {
 						rowCells = append(rowCells, "")
@@ -303,14 +347,10 @@ func (p OOXMLParser) parseWorksheet(
 					for len(rowCells) > 0 && strings.TrimSpace(rowCells[len(rowCells)-1]) == "" {
 						rowCells = rowCells[:len(rowCells)-1]
 					}
-					if row := strings.TrimSpace(strings.Join(rowCells, " | ")); row != "" {
-						if output.Len() > 0 {
-							row = "\n" + row
+					if spreadsheetRowHasValue(rowCells) && visit != nil {
+						if err := visit(rowCells); err != nil {
+							return 0, err
 						}
-						if err := budget.consume(row); err != nil {
-							return "", 0, err
-						}
-						output.WriteString(row)
 					}
 				}
 				if rowDepth > 0 {
@@ -319,6 +359,38 @@ func (p OOXMLParser) parseWorksheet(
 			}
 		}
 	}
+}
+
+func spreadsheetRowHasValue(cells []string) bool {
+	for _, cell := range cells {
+		if strings.TrimSpace(cell) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func spreadsheetMarkdownRow(cells []string, columns int) string {
+	parts := make([]string, columns)
+	for index := range parts {
+		if index >= len(cells) {
+			continue
+		}
+		value := strings.ReplaceAll(cells[index], "\\", "\\\\")
+		value = strings.ReplaceAll(value, "|", "\\|")
+		value = strings.ReplaceAll(value, "\r\n", "<br>")
+		value = strings.ReplaceAll(value, "\r", "<br>")
+		value = strings.ReplaceAll(value, "\n", "<br>")
+		parts[index] = strings.TrimSpace(value)
+	}
+	return "| " + strings.Join(parts, " | ") + " |"
+}
+
+func spreadsheetMarkdownDelimiter(columns int) string {
+	if columns < 1 {
+		return ""
+	}
+	return "| " + strings.TrimSuffix(strings.Repeat("--- | ", columns), " ")
 }
 
 func spreadsheetColumnIndex(reference string) (int, error) {

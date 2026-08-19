@@ -92,6 +92,10 @@ func TestDiagnosisRunContextDerivesAccessFromFrozenPolicyAndCeiling(t *testing.T
 		!access.Grants().AllowsAttachment(attachmentID) {
 		t.Fatalf("effective grants = %v", access.Grants())
 	}
+	if !strings.Contains(runContext.TaskContext(), `"attachmentCount":1`) ||
+		strings.Contains(runContext.TaskContext(), attachmentID.String()) {
+		t.Fatalf("task_context must disclose only the available attachment count: %s", runContext.TaskContext())
+	}
 	assertRunAccessSubsetOfPolicy(t, access, policy)
 }
 
@@ -288,6 +292,7 @@ func TestDiagnosisTaskContextDeterministicSortedAndInjectionSafe(t *testing.T) {
 		PolicySchemaVersion  int      `json:"policySchemaVersion"`
 		EffectivePermissions []string `json:"effectivePermissions"`
 		ExternalCaseID       string   `json:"externalCaseId"`
+		AttachmentCount      int      `json:"attachmentCount"`
 		DataSources          []struct {
 			ID         string `json:"id"`
 			Role       string `json:"role"`
@@ -297,7 +302,7 @@ func TestDiagnosisTaskContextDeterministicSortedAndInjectionSafe(t *testing.T) {
 	if err := json.Unmarshal([]byte(inner), &projection); err != nil {
 		t.Fatalf("decode task_context: %v", err)
 	}
-	if projection.PolicySchemaVersion != 1 || projection.ExternalCaseID != caseID.String() {
+	if projection.PolicySchemaVersion != 1 || projection.ExternalCaseID != caseID.String() || projection.AttachmentCount != 0 {
 		t.Fatalf("task_context projection = %+v", projection)
 	}
 	wantPermissions := []string{"case.read", "knowledge.read", "sql.read"}

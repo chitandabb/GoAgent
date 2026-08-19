@@ -120,19 +120,56 @@ func visualRelationshipIDs(ctx context.Context, content []byte, relationships ma
 		if !ok {
 			continue
 		}
-		for _, attribute := range start.Attr {
-			if attribute.Name.Local != "embed" && attribute.Name.Local != "link" {
+		for _, relationshipID := range visualRelationshipIDsForElement(start) {
+			if _, ok := relationships[relationshipID]; !ok {
 				continue
 			}
-			if _, ok := relationships[attribute.Value]; !ok {
-				continue
+			if _, exists := seen[relationshipID]; !exists {
+				seen[relationshipID] = struct{}{}
+				result = append(result, relationshipID)
 			}
-			if _, exists := seen[attribute.Value]; !exists {
-				seen[attribute.Value] = struct{}{}
+		}
+	}
+}
+
+const (
+	drawingMLNamespace           = "http://schemas.openxmlformats.org/drawingml/2006/main"
+	drawingMLStrictNamespace     = "http://purl.oclc.org/ooxml/drawingml/main"
+	vmlNamespace                 = "urn:schemas-microsoft-com:vml"
+	relationshipsNamespace       = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+	relationshipsStrictNamespace = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+)
+
+// visualRelationshipIDsForElement only accepts the OOXML constructs that carry
+// raster image references. Generic embed/link attributes are used by unrelated
+// package parts and must not consume visual-enrichment budget.
+func visualRelationshipIDsForElement(element xml.StartElement) []string {
+	result := make([]string, 0, 2)
+	switch {
+	case element.Name.Local == "blip" && isDrawingMLNamespace(element.Name.Space):
+		for _, attribute := range element.Attr {
+			if (attribute.Name.Local == "embed" || attribute.Name.Local == "link") &&
+				isRelationshipsNamespace(attribute.Name.Space) && strings.TrimSpace(attribute.Value) != "" {
+				result = append(result, attribute.Value)
+			}
+		}
+	case element.Name.Local == "imagedata" && element.Name.Space == vmlNamespace:
+		for _, attribute := range element.Attr {
+			if attribute.Name.Local == "id" && isRelationshipsNamespace(attribute.Name.Space) &&
+				strings.TrimSpace(attribute.Value) != "" {
 				result = append(result, attribute.Value)
 			}
 		}
 	}
+	return result
+}
+
+func isDrawingMLNamespace(value string) bool {
+	return value == drawingMLNamespace || value == drawingMLStrictNamespace
+}
+
+func isRelationshipsNamespace(value string) bool {
+	return value == relationshipsNamespace || value == relationshipsStrictNamespace
 }
 
 func (a *ooxmlArchive) pptxSlidePages(ctx context.Context) (map[string]int, error) {

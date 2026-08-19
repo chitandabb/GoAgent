@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	maxTableCells       = 10_000
-	maxTableRunes       = 100_000
-	maxTableWarnings    = 32
-	maxTableWarningSize = 256
+	maxTableCells         = 10_000
+	maxTableGridPositions = 100_000
+	maxTableRunes         = 100_000
+	maxTableWarnings      = 32
+	maxTableWarningSize   = 256
 )
 
 var (
@@ -95,7 +96,7 @@ func (r Result) Validate() error {
 		return errors.New("knowledge table recovery structure is invalid")
 	}
 	seen := make(map[[2]int]struct{}, len(r.Cells))
-	cellRunes, nonEmptyCells := 0, 0
+	cellRunes, nonEmptyCells, rowLimit, columnLimit := 0, 0, 0, 0
 	for _, cell := range r.Cells {
 		if cell.Row < 0 || cell.Column < 0 || cell.Row > maxTableCells || cell.Column > maxTableCells ||
 			cell.RowSpan < 1 || cell.ColumnSpan < 1 || cell.RowSpan > maxTableCells || cell.ColumnSpan > maxTableCells ||
@@ -108,6 +109,8 @@ func (r Result) Validate() error {
 			return errors.New("knowledge table recovery cell coordinate is duplicated")
 		}
 		seen[coordinate] = struct{}{}
+		rowLimit = max(rowLimit, cell.Row+cell.RowSpan)
+		columnLimit = max(columnLimit, cell.Column+cell.ColumnSpan)
 		cellRunes += utf8.RuneCountInString(cell.Text)
 		if strings.TrimSpace(cell.Text) != "" {
 			nonEmptyCells++
@@ -118,6 +121,28 @@ func (r Result) Validate() error {
 	}
 	if nonEmptyCells == 0 {
 		return errors.New("knowledge table recovery has no non-empty cells")
+	}
+	if rowLimit > maxTableGridPositions/columnLimit {
+		return errors.New("knowledge table recovery logical grid exceeds limit")
+	}
+	occupied := make(map[[2]int]struct{}, rowLimit*columnLimit)
+	for _, cell := range r.Cells {
+		for row := cell.Row; row < cell.Row+cell.RowSpan; row++ {
+			for column := cell.Column; column < cell.Column+cell.ColumnSpan; column++ {
+				position := [2]int{row, column}
+				if _, overlap := occupied[position]; overlap {
+					return errors.New("knowledge table recovery cell spans overlap")
+				}
+				occupied[position] = struct{}{}
+			}
+		}
+	}
+	for row := 0; row < rowLimit; row++ {
+		for column := 0; column < columnLimit; column++ {
+			if _, covered := occupied[[2]int{row, column}]; !covered {
+				return errors.New("knowledge table recovery cell spans leave a grid gap")
+			}
+		}
 	}
 	if len(r.Warnings) > maxTableWarnings {
 		return errors.New("knowledge table recovery warnings exceed limit")

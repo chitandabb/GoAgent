@@ -21,7 +21,7 @@ sessionAbsoluteMinutes = 480
 
 [agent]
 skillsDirectory = "/app/config/skills"
-promptVersion = "diagnosis-v3"
+promptVersion = "diagnosis-v4"
 systemPromptFile = "/app/config/prompts/diagnosis-system.md"
 baselinePromptFile = "/app/config/prompts/evaluation-baseline.md"
 reportContractFile = "/app/config/prompts/report-contract.md"
@@ -35,6 +35,7 @@ conversationCitationRepairMaxOutputTokens = 768
 conversationMaxIterations = 8
 conversationMaxContextRunes = 32000
 conversationTimeoutMillis = 180000
+diagnosisMaxIterations = 3
 maxAgentRuns = 2
 maxToolCalls = 16
 maxEvidenceItems = 16
@@ -232,8 +233,11 @@ baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 apiKeyEnv = "DASHSCOPE_API_KEY"
 model = "qwen-vl-ocr-latest"
 promptFile = "/app/config/prompts/ocr-extraction.md"
-promptVersion = "ocr-extraction-v1"
-timeoutMillis = 120000
+promptVersion = "ocr-extraction-v2"
+reasoningEffort = ""
+responseFormat = "text"
+timeoutMillis = 90000
+# qwen-vl-ocr-latest caps output at 4096 tokens; truncation is recorded as output_truncated.
 maxOutputTokens = 4096
 
 [models.vision]
@@ -241,20 +245,24 @@ enabled = true
 provider = "dashscope"
 baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 apiKeyEnv = "DASHSCOPE_API_KEY"
-model = "qwen3-vl-plus"
+model = "qwen3-vl-flash"
 promptFile = "/app/config/prompts/visual-description.md"
-promptVersion = "visual-description-v2"
-timeoutMillis = 120000
-maxOutputTokens = 2048
+promptVersion = "visual-description-v4"
+reasoningEffort = ""
+responseFormat = "json_object"
+timeoutMillis = 90000
+maxOutputTokens = 512
 
 [models.table]
 enabled = true
-provider = "dashscope"
-baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-apiKeyEnv = "DASHSCOPE_API_KEY"
-model = "qwen3-vl-plus"
+provider = "stepfun"
+baseURL = "https://api.stepfun.com/step_plan/v1"
+apiKeyEnv = "MESGUARD_STEPFUN_API_KEY"
+model = "step-3.7-flash"
 promptFile = "/app/config/prompts/table-recovery.md"
 promptVersion = "table-recovery-v2"
+reasoningEffort = "low"
+responseFormat = "json_object"
 timeoutMillis = 120000
 maxOutputTokens = 4096
 
@@ -363,8 +371,8 @@ parserMaxDocumentUnits = 500
 parserMaxArchiveEntries = 4096
 parserMaxExpandedBytes = 268435456
 parserMaxXMLBytes = 33554432
-parserMaxExtractedRunes = 2000000
-parserMaxSpreadsheetRows = 10000
+parserMaxExtractedRunes = 3000000
+parserMaxSpreadsheetRows = 50000
 parserMaxSpreadsheetColumns = 512
 parserMaxVisualAssets = 256
 parserMaxVisualAssetBytes = 16777216
@@ -417,7 +425,7 @@ maxSubqueries = 1
 maxOutputRunes = 2048
 
 [knowledge.layout]
-enabled = false
+enabled = true
 provider = "onnxruntime"
 modelName = "PP-DocLayout-M"
 modelVersion = "7dbfcce3154a55776dc71ca026a4a2a8388dad8d"
