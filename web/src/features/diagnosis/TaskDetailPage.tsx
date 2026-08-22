@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { RotateCcw } from 'lucide-react'
 import { useAuth } from '@/app/auth'
 import * as api from '@/shared/api'
-import { ApiError } from '@/shared/api'
-import type { DiagnosisReportEvidence, SseConnectionState, TaskEvent } from '@/shared/api/m1-types'
+import type { DiagnosisReportEvidence } from '@/shared/api/m1-types'
 import { taskStatusMeta } from '@/shared/lib/status'
 import { fmtDateTime, shortId } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
@@ -17,25 +16,25 @@ import { EmptyState } from '@/shared/ui/EmptyState'
 import { FieldLabel, TextArea } from '@/shared/ui/Field'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { PageLoading } from '@/shared/ui/Spinner'
-import { useToast } from '@/shared/ui/Toast'
-import { EventTimeline } from './EventTimeline'
-import { findWorkspaceForTask } from '@/features/workbench/workspace-store'
+import { EventTimeline } from '@/shared/diagnosis-run/EventTimeline'
+import { useDiagnosisRun } from '@/shared/diagnosis-run/useDiagnosisRun'
+import { findWorkspaceForTask } from '@/shared/workspace/workspace-store'
 
 const tabs = [
-  { value: 'timeline', label: '执行过程' },
-  { value: 'evidence', label: '证据明细' },
-  { value: 'tools', label: '工具执行' },
+  { value: 'timeline', label: '处理进度' },
+  { value: 'evidence', label: '引用依据' },
+  { value: 'tools', label: '调用记录' },
 ]
 
 const evidenceSourceLabels: Record<DiagnosisReportEvidence['sourceType'], string> = {
-  case_snapshot: '工单快照',
-  schema_catalog: 'Schema Catalog',
-  sql_object_definition: 'SQL 对象定义',
-  sql_query: 'SQL 查询',
-  code_search: '代码检索',
-  attachment: '附件',
-  knowledge_chunk: '知识片段',
-  web: '网页',
+  case_snapshot: '工单信息',
+  schema_catalog: '数据目录',
+  sql_object_definition: '数据结构',
+  sql_query: '业务数据',
+  code_search: '代码记录',
+  attachment: '工单附件',
+  knowledge_chunk: '企业资料',
+  web: '外部网页',
 }
 
 const evidenceSupportLabels: Record<DiagnosisReportEvidence['supportType'], string> = {
@@ -50,34 +49,30 @@ const evidenceValidityLabels: Record<DiagnosisReportEvidence['validityStatus'], 
   invalid: '无效',
 }
 
-function mergeEvents(current: TaskEvent[], incoming: TaskEvent): TaskEvent[] {
-  if (current.some((event) => event.seq === incoming.seq)) return current
-  return [...current, incoming].sort((a, b) => a.seq - b.seq)
-}
-
 export function TaskDetailPage() {
   const { taskId = '' } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const queryClient = useQueryClient()
-  const toast = useToast()
-  const [events, setEvents] = useState<TaskEvent[]>([])
-  const [connection, setConnection] = useState<SseConnectionState>('loading-history')
-  const [streamError, setStreamError] = useState('')
   const [tab, setTab] = useState('timeline')
-  const [cancelOpen, setCancelOpen] = useState(false)
-  const [recoverOpen, setRecoverOpen] = useState(false)
-  const [recoverReason, setRecoverReason] = useState('')
-  const [streamGeneration, setStreamGeneration] = useState(0)
   const localWorkspace = findWorkspaceForTask(taskId)
 
-  const task = useQuery({
-    queryKey: ['task', taskId],
-    queryFn: () => api.getTask(taskId),
-    refetchInterval: (query) => {
-      const value = query.state.data
-      return value && ['pending', 'running', 'cancel_requested'].includes(value.status) ? 5000 : false
-    },
+  const {
+    task,
+    events,
+    connection,
+    streamError,
+    reconnect,
+    cancel,
+    cancelOpen,
+    setCancelOpen,
+    recover,
+    recoverOpen,
+    setRecoverOpen,
+    recoverReason,
+    setRecoverReason,
+  } = useDiagnosisRun(taskId, {
+    cancelSuccessMessage: '已提交取消请求，将在任务边界停止',
+    recoverSuccessMessage: '任务已重新入队，恢复操作已记录审计',
   })
   const externalCase = useQuery({
     queryKey: ['external-case', task.data?.externalCaseId],
@@ -90,50 +85,6 @@ export function TaskDetailPage() {
     queryFn: () => api.getReportByTask(taskId),
     enabled: tab === 'evidence' && task.data?.reportAvailable === true,
     retry: false,
-  })
-
-  useEffect(() => {
-    setEvents([])
-    setStreamError('')
-    if (!task.isSuccess) return
-
-    return api.subscribeTaskEvents(taskId, {
-      onEvent: (event) => {
-        setEvents((current) => mergeEvents(current, event))
-        void queryClient.invalidateQueries({ queryKey: ['task', taskId] })
-      },
-      onStatus: (state) => {
-        setConnection(state)
-        if (state === 'connected') setStreamError('')
-      },
-      onTerminal: () => void queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
-      onError: (error) => {
-        setStreamError(error.message)
-      },
-    })
-  }, [queryClient, streamGeneration, task.isSuccess, taskId])
-
-  const cancel = useMutation({
-    mutationFn: () => api.cancelTask(taskId),
-    onSuccess: (updated) => {
-      queryClient.setQueryData(['task', taskId], updated)
-      setCancelOpen(false)
-      toast.success('已提交取消请求，将在任务边界停止')
-    },
-    onError: (error) => toast.error(error instanceof Error ? error.message : '取消失败'),
-  })
-  const recover = useMutation({
-    mutationFn: ({ reason, idempotencyKey }: { reason: string; idempotencyKey: string }) =>
-      api.recoverTask(taskId, reason, idempotencyKey),
-    retry: (failureCount, error) =>
-      failureCount < 2 && error instanceof ApiError && error.code === 50301,
-    onSuccess: () => {
-      setRecoverOpen(false)
-      setRecoverReason('')
-      setStreamGeneration((value) => value + 1)
-      toast.success('任务已重新入队，恢复操作已记录审计')
-      void queryClient.invalidateQueries({ queryKey: ['task', taskId] })
-    },
   })
 
   if (task.isPending) return <PageLoading />
@@ -162,14 +113,14 @@ export function TaskDetailPage() {
 
   return (
     <div className="pb-24">
-      <Link to="/tasks" className="press mb-4 inline-block text-[13px] text-primary">‹ 返回最近任务</Link>
+      <Link to="/tasks" className="press mb-4 inline-block text-[13px] text-primary">‹ 返回排查任务</Link>
       <PageHeader
-        eyebrow={<span>诊断任务 <code>{shortId(value.taskId)}</code></span>}
+        eyebrow={<span>排查任务 <code>{shortId(value.taskId)}</code></span>}
         title={caseTitle}
         subtitle={
           <span className="flex flex-wrap items-center gap-2.5">
             <Badge tone={meta.tone} dot={active}>{meta.label}</Badge>
-            <span>创建于 {fmtDateTime(value.createdAt)} · 第 {value.attemptCount} 次执行</span>
+            <span>提交于 {fmtDateTime(value.createdAt)} · 第 {value.attemptCount} 次处理</span>
           </span>
         }
         actions={
@@ -191,11 +142,11 @@ export function TaskDetailPage() {
             {canRecover && <Button variant="ghost" onClick={() => setRecoverOpen(true)}>恢复任务</Button>}
             {terminal && (
               <Button variant="ghost" onClick={() => navigate(`/cases/${value.externalCaseId}/diagnose?retryOf=${value.taskId}`)}>
-                重新诊断
+                重新处理
               </Button>
             )}
             {value.reportAvailable && (
-              <Button onClick={() => navigate(`/tasks/${value.taskId}/report`)}>查看正式报告</Button>
+              <Button onClick={() => navigate(`/tasks/${value.taskId}/report`)}>查看完整结果</Button>
             )}
           </>
         }
@@ -203,10 +154,10 @@ export function TaskDetailPage() {
 
       {value.status === 'failed' && (
         <div className="mb-5 rounded-utility border border-danger/25 bg-danger-soft px-5 py-4">
-          <p className="text-[14px] font-semibold text-danger">{value.lastErrorCode || '诊断失败'}</p>
-          <p className="mt-1 text-[13px] leading-[1.6] text-ink-80">{value.lastErrorMessage || '后端未提供更多失败信息'}</p>
+          <p className="text-[14px] font-semibold text-danger">{value.lastErrorCode || '处理失败'}</p>
+          <p className="mt-1 text-[13px] leading-[1.6] text-ink-80">{value.lastErrorMessage || '暂时没有更多失败信息'}</p>
           {user?.role === 'admin' && !canRecover && (
-            <p className="mt-2 text-[12px] text-ink-48">该错误不满足后端允许的管理员恢复条件。</p>
+            <p className="mt-2 text-[12px] text-ink-48">该任务当前不能从页面恢复，请检查失败原因后重新处理。</p>
           )}
         </div>
       )}
@@ -217,7 +168,7 @@ export function TaskDetailPage() {
           {tab === 'timeline' ? (
             <Card className="p-6">
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-                <CardTitle>执行过程</CardTitle>
+                <CardTitle>处理进度</CardTitle>
                 {connection === 'loading-history' ? (
                   <Badge tone="gray" dot>正在补读历史</Badge>
                 ) : connection === 'reconnecting' ? (
@@ -237,11 +188,7 @@ export function TaskDetailPage() {
                     <Button
                       size="sm"
                       variant="neutral"
-                      onClick={() => {
-                        setStreamError('')
-                        setConnection('loading-history')
-                        setStreamGeneration((value) => value + 1)
-                      }}
+                      onClick={reconnect}
                     >
                       <RotateCcw />
                       重新连接
@@ -254,15 +201,15 @@ export function TaskDetailPage() {
           ) : tab === 'evidence' ? (
             <Card className="p-6">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <CardTitle>证据明细</CardTitle>
+                <CardTitle>引用依据</CardTitle>
                 <span className="text-[11px] text-ink-48">
-                  来自正式报告的声明与溯源元数据，不展示原始证据正文
+                  来自本次排查记录，可用于与开发人员核对
                 </span>
               </div>
               {!value.reportAvailable ? (
                 <EmptyState
-                  title="报告尚未生成"
-                  description="证据明细来自正式诊断报告；报告生成后此处会自动展示。"
+                  title="结果尚未生成"
+                  description="任务完成后，这里会显示可核对的引用依据。"
                 />
               ) : report.isPending ? (
                 <PageLoading />
@@ -293,10 +240,12 @@ export function TaskDetailPage() {
                             )}
                           </div>
                           <p className="mt-1.5 text-[13px] font-semibold leading-[1.55] text-ink">{evidence.claim}</p>
-                          <p className="mt-1 break-all text-[11px] leading-[1.55] text-ink-48">
-                            {evidence.sourceTool} · {evidence.sourceRef}
-                            {evidence.location ? ` · ${evidence.location}` : ''}
-                          </p>
+                          {user?.role === 'admin' && (
+                            <details className="mt-1 text-[11px] leading-[1.55] text-ink-48">
+                              <summary className="cursor-pointer font-semibold">来源明细（管理员）</summary>
+                              <p className="mt-1 break-all">{evidence.sourceTool} · {evidence.sourceRef}{evidence.location ? ` · ${evidence.location}` : ''}</p>
+                            </details>
+                          )}
                           {evidence.redactionStatus === 'redacted' && (
                             <p className="mt-1 text-[11px] text-warn">该证据已脱敏</p>
                           )}
@@ -310,8 +259,8 @@ export function TaskDetailPage() {
           ) : (
             <Card className="p-6">
               <EmptyState
-                title="工具执行接口尚未开放"
-                description="当前后端未提供独立工具执行列表，页面不会继续显示 Mock 记录。"
+                title="暂无调用记录"
+                description="当前任务没有可单独展示的系统调用记录。"
               />
             </Card>
           )}
@@ -319,10 +268,10 @@ export function TaskDetailPage() {
 
         <div className="flex flex-col gap-5">
           <Card className="p-6">
-            <CardTitle className="mb-3">任务输入</CardTitle>
+            <CardTitle className="mb-3">提交内容</CardTitle>
             <dl className="flex flex-col gap-3 text-[13px]">
               <div><dt className="text-ink-48">补充说明</dt><dd className="mt-0.5 whitespace-pre-wrap break-words">{value.requestText}</dd></div>
-              <div><dt className="text-ink-48">快照 ID</dt><dd className="mt-0.5"><code className="text-[12px] text-ink-48">{shortId(value.caseSnapshotId)}</code></dd></div>
+              {user?.role === 'admin' && <div><dt className="text-ink-48">记录编号</dt><dd className="mt-0.5"><code className="text-[12px] text-ink-48">{shortId(value.caseSnapshotId)}</code></dd></div>}
               {value.retryOfTaskId && <div><dt className="text-ink-48">重试自</dt><dd className="mt-0.5"><Link className="text-primary" to={`/tasks/${value.retryOfTaskId}`}>{shortId(value.retryOfTaskId)}</Link></dd></div>}
               {value.attachments.length > 0 && (
                 <div>
@@ -340,15 +289,15 @@ export function TaskDetailPage() {
             </dl>
           </Card>
           <Card className="bg-pearl p-6">
-            <p className="text-[12px] leading-[1.7] text-ink-48">任务基于创建时保存的不可变工单快照执行。关闭浏览器或 SSE 断开都不会取消任务。</p>
+            <p className="text-[12px] leading-[1.7] text-ink-48">任务会保留提交时的工单信息。关闭浏览器不会取消正在进行的处理。</p>
           </Card>
         </div>
       </div>
 
       <ConfirmDialog
         open={cancelOpen}
-        title="取消诊断任务"
-        message="取消请求只会在后端任务边界生效；浏览器断开不会触发取消。确认提交？"
+        title="取消排查任务"
+        message="确认取消当前排查任务？已经完成的处理记录会保留。"
         confirmLabel="确认取消"
         danger
         busy={cancel.isPending}
@@ -372,7 +321,7 @@ export function TaskDetailPage() {
           </>
         }
       >
-        <p className="mb-4 text-[13px] leading-[1.7] text-ink-80">恢复会保留原任务输入与创建时冻结的授权策略，并由后端判断当前错误、依赖和状态是否仍允许恢复。</p>
+        <p className="mb-4 text-[13px] leading-[1.7] text-ink-80">恢复后会继续使用原工单信息和排查范围。</p>
         <FieldLabel htmlFor="recover-reason">恢复原因</FieldLabel>
         <TextArea id="recover-reason" value={recoverReason} maxLength={1000} onChange={(event) => setRecoverReason(event.target.value)} />
         {recover.isError && <p className="mt-3 text-[13px] text-danger">{recover.error instanceof Error ? recover.error.message : '恢复失败'}</p>}

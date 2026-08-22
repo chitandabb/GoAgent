@@ -5,7 +5,37 @@ import type {
   ConversationMessage,
   ConversationTaskReference,
 } from '@/shared/api/m1-types'
-import { Badge } from '@/shared/ui/Badge'
+import { AssistantMarkdown } from './AssistantMarkdown'
+import { AnswerActivity } from './AnswerActivity'
+import { CitationList } from './CitationList'
+
+const technicalTaskStatusLabels: Record<string, string> = {
+  pending: '等待处理',
+  running: '处理中',
+  succeeded: '已完成',
+  failed: '处理失败',
+  cancelled: '已取消',
+  cancel_requested: '取消中',
+}
+
+/** 会话正文只展示业务信息，内部任务编号和英文状态由右侧卷宗承载。 */
+export function formatAssistantContent(content: string, hasCreatedTask = false): string {
+  // 引用 marker 只用于后端校验和引用卡定位，不属于面向用户的回答正文。
+  const normalized = content
+    .replace(/\s*\[source:(?:knowledge|attachment|web):[^\]\r\n]+\]/gi, '')
+    .replace(/\s*\[supporting marker:\s*\]/gi, '')
+    .trim()
+  if (/任务\s*ID\s*[:：]/i.test(normalized) || (hasCreatedTask && /异步诊断任务|当前状态/i.test(normalized))) {
+    return '排查任务已创建，处理进度和结果会在右侧工单卷宗中实时更新。'
+  }
+  return normalized
+    .replace(/^\s*[-*]\s*任务\s*ID[^\n]*$/gim, '')
+    .replace(/^\s*[-*]\s*状态[^\n]*$/gim, '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '排查任务')
+    .replace(/`(pending|running|succeeded|failed|cancelled|cancel_requested)`/gi, (_, status: string) => technicalTaskStatusLabels[status.toLowerCase()] ?? status)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
 
 export function fmtBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
@@ -13,73 +43,6 @@ export function fmtBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-}
-
-export function citationLabel(citation: ConversationCitation): string {
-  if (citation.sourceType === 'web') {
-    const url = citation.sourceRef.startsWith('http') ? citation.sourceRef : `https://${citation.sourceRef}`
-    try {
-      const host = new URL(url).hostname.replace(/^www\./, '')
-      return host || citation.sourceRef
-    } catch {
-      return citation.sourceRef
-    }
-  }
-  if (citation.sourceType === 'attachment') {
-    return '附件引用'
-  }
-  if (citation.sourceType === 'knowledge_chunk') {
-    return '知识库引用'
-  }
-  return citation.sourceRef
-}
-
-export function citationKindBadge(citation: ConversationCitation): 'orange' | 'blue' | 'gray' {
-  if (citation.sourceType === 'web') return 'orange'
-  if (citation.sourceType === 'knowledge_chunk') return 'blue'
-  return 'gray'
-}
-
-function CitationList({
-  citations,
-  onCitationClick,
-}: {
-  citations: ConversationCitation[]
-  onCitationClick: (citation: ConversationCitation) => void
-}) {
-  if (citations.length === 0) return null
-  return (
-    <div className="mt-3 border-t border-divider pt-2.5">
-      <p className="mb-1.5 text-[11px] font-semibold text-ink-48">引用</p>
-      <ul className="flex flex-col gap-1">
-        {citations.map((citation, index) => (
-          <li key={`${citation.sourceRef}-${index}`} className="flex items-baseline gap-2 text-[12px]">
-            <Badge tone={citationKindBadge(citation)}>
-              {citation.sourceType === 'web' ? '网络' : citation.sourceType === 'knowledge_chunk' ? '知识库' : '附件'}
-            </Badge>
-            {citation.sourceType === 'web' ? (
-              <a
-                href={citation.sourceRef.startsWith('http') ? citation.sourceRef : `https://${citation.sourceRef}`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-primary hover:underline"
-              >
-                {citationLabel(citation)}
-              </a>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onCitationClick(citation)}
-                className="press text-primary hover:underline"
-              >
-                {citationLabel(citation)}
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
 }
 
 function ReferenceList({
@@ -107,7 +70,7 @@ function ReferenceList({
           to={`/tasks/${reference.taskId}`}
           className="press rounded-capsule bg-pearl px-2.5 py-1 text-[11px] font-semibold text-primary hover:underline"
         >
-          {reference.kind === 'created' ? '查看已创建诊断任务' : '关联诊断任务'}
+          {reference.kind === 'created' ? '排查任务已创建 · 查看进度' : '查看关联任务'}
         </Link>
       ))}
     </div>
@@ -137,8 +100,8 @@ export function MessageBubble({
             ))}
           </div>
         )}
-        <ReferenceList caseReferences={message.caseReferences} taskReferences={message.taskReferences} />
-        <div className="max-w-[75%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[14px] leading-[1.6] text-white">
+        <ReferenceList caseReferences={message.caseReferences} taskReferences={[]} />
+        <div className="max-w-[75%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-primary px-4 py-2.5 text-[14px] leading-[1.6] text-white">
           {message.content}
         </div>
       </div>
@@ -148,9 +111,19 @@ export function MessageBubble({
   return (
     <div className="flex flex-col items-start">
       <div className="max-w-[85%] rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-4">
-        <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">{message.content}</p>
+        <AssistantMarkdown
+          content={formatAssistantContent(
+            message.content,
+            message.taskReferences.some((reference) => reference.kind === 'created'),
+          )}
+        />
         <ReferenceList caseReferences={message.caseReferences} taskReferences={message.taskReferences} />
-        <CitationList citations={message.citations} onCitationClick={onCitationClick} />
+        <AnswerActivity
+          conversationId={message.conversationId}
+          turnId={message.turnId}
+          provenance={message.provenance}
+        />
+        <CitationList message={message} onCitationClick={onCitationClick} />
       </div>
     </div>
   )

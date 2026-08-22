@@ -2,15 +2,25 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import * as api from '@/shared/api'
 import { caseStatusMeta, priorityMeta, taskStatusMeta } from '@/shared/lib/status'
-import { fmtDateTime, shortId } from '@/shared/lib/fmt'
+import { fmtDateTime } from '@/shared/lib/fmt'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { Card, CardTitle } from '@/shared/ui/Card'
 import { PageHeader } from '@/shared/ui/PageHeader'
 import { PageLoading } from '@/shared/ui/Spinner'
-import { openCaseWorkspace } from '@/features/workbench/workspace-store'
+import { openCaseWorkspace } from '@/shared/workspace/workspace-store'
 
 const activeTaskStatuses = ['pending', 'running', 'cancel_requested']
+const caseTypeLabels: Record<string, string> = {
+  production_fault: '生产异常',
+  quality_issue: '质量问题',
+  performance_issue: '性能问题',
+}
+const moduleLabels: Record<string, string> = {
+  'Production Reporting': '生产报工',
+  Inventory: '库存管理',
+  Scheduling: '生产排程',
+}
 
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -31,7 +41,7 @@ export function CaseDetailPage() {
   })
   const caseTasks = useQuery({
     queryKey: ['case-tasks', caseId],
-    queryFn: () => api.listDiagnosisTasks({ caseId, page: 1, pageSize: 20 }),
+    queryFn: () => api.listDiagnosisTasks({ caseId, page: 1, pageSize: 5 }),
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? []
       return items.some((item) => activeTaskStatuses.includes(item.status)) ? 5000 : false
@@ -44,6 +54,7 @@ export function CaseDetailPage() {
   }
   const c = extCase.data
   const taskItems = caseTasks.data?.items ?? []
+  const totalTaskCount = caseTasks.data?.total ?? taskItems.length
 
   return (
     <div>
@@ -66,13 +77,13 @@ export function CaseDetailPage() {
         actions={
           <>
             <Button variant="neutral" onClick={() => navigate(`/assistant?caseId=${encodeURIComponent(c.externalCaseId)}`)}>
-              在助手中讨论
+              询问助手
             </Button>
             <Button onClick={() => {
               const workspace = openCaseWorkspace(c.externalCaseId)
               navigate(`/workbench/${workspace.workspaceId}`)
             }}>
-              在工作台打开
+              整理问题
             </Button>
           </>
         }
@@ -91,26 +102,15 @@ export function CaseDetailPage() {
             <div className="divide-y divide-divider">
               <InfoRow label="客户" value={c.customerName || '—'} />
               <InfoRow label="产品" value={[c.productName, c.productVersion].filter(Boolean).join(' ') || '—'} />
-              <InfoRow label="工单类型" value={c.caseType || '—'} />
-              <InfoRow label="业务模块" value={c.module || c.category || '—'} />
+              <InfoRow label="问题类型" value={(c.caseType && caseTypeLabels[c.caseType]) || c.caseType || '—'} />
+              <InfoRow label="业务模块" value={(c.module && moduleLabels[c.module]) || c.module || c.category || '—'} />
               <InfoRow label="上报时间" value={fmtDateTime(c.reportedAt)} />
-              <InfoRow label="来源更新" value={fmtDateTime(c.sourceUpdatedAt)} />
-              <InfoRow
-                label="来源指纹"
-                value={
-                  <code className="text-[12px] text-ink-48">
-                    {shortId(c.sourceFingerprint.replace('sha256:', ''))}
-                  </code>
-                }
-              />
+              <InfoRow label="最近更新" value={fmtDateTime(c.sourceUpdatedAt)} />
             </div>
           </Card>
 
           <Card className="p-6">
-            <CardTitle className="mb-1">诊断任务历史</CardTitle>
-            <p className="mb-3 text-[12px] leading-[1.5] text-ink-48">
-              来自服务端的该工单任务记录（分析员可见自己创建的任务，管理员可见全部）；进行中的任务会自动刷新状态。
-            </p>
+            <CardTitle className="mb-1">排查记录</CardTitle>
             {caseTasks.isPending ? (
               <p className="text-[13px] text-ink-48">加载中…</p>
             ) : caseTasks.isError ? (
@@ -125,26 +125,33 @@ export function CaseDetailPage() {
                 </button>
               </p>
             ) : taskItems.length === 0 ? (
-              <p className="text-[13px] text-ink-48">该工单还没有诊断任务</p>
+              <p className="text-[13px] text-ink-48">该工单还没有排查记录</p>
             ) : (
-              <ul className="flex flex-col gap-2.5">
-                {taskItems.map((t) => (
-                  <li key={t.taskId}>
-                    <Link
-                      to={`/tasks/${t.taskId}`}
-                      className="press flex items-center justify-between gap-3 rounded-capsule bg-pearl px-3.5 py-2.5 hover:bg-parchment"
-                    >
-                      <span className="flex min-w-0 flex-col">
-                        <span className="text-[13px] text-ink">{fmtDateTime(t.createdAt)}</span>
-                        <span className="truncate text-[11px] text-ink-48">{t.requestText}</span>
-                      </span>
-                      <Badge tone={taskStatusMeta[t.status].tone}>
-                        {taskStatusMeta[t.status].label}
-                      </Badge>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="flex flex-col gap-2.5">
+                  {taskItems.map((t) => (
+                    <li key={t.taskId}>
+                      <Link
+                        to={`/tasks/${t.taskId}`}
+                        className="press flex items-center justify-between gap-3 rounded-capsule bg-pearl px-3.5 py-2.5 hover:bg-parchment"
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="text-[13px] text-ink">{fmtDateTime(t.createdAt)}</span>
+                          <span className="truncate text-[11px] text-ink-48">{t.requestText}</span>
+                        </span>
+                        <Badge tone={taskStatusMeta[t.status].tone}>
+                          {taskStatusMeta[t.status].label}
+                        </Badge>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+                {totalTaskCount > taskItems.length && (
+                  <Link to="/tasks" className="press mt-3 inline-block text-[12px] text-primary hover:underline">
+                    查看全部 {totalTaskCount} 个任务
+                  </Link>
+                )}
+              </>
             )}
           </Card>
         </div>

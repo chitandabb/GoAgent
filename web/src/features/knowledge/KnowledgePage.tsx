@@ -261,7 +261,7 @@ export function KnowledgePage() {
     <div>
       <PageHeader
         title="企业知识库"
-        subtitle="上传正式资料并跟踪服务端解析、切块、向量化与发布进度"
+        subtitle="维护可供助手引用的企业制度、操作手册和历史案例"
       />
 
       {!isAdmin && (
@@ -317,7 +317,7 @@ export function KnowledgePage() {
       {!isAdmin ? (
         <EmptyState
           title="文档列表仅管理员可见"
-          description="企业知识库的文档清单与解析进度属于管理视角；分析员可在知识助手中检索已发布知识。"
+          description="文档清单和发布状态仅系统管理员可见；业务人员可在助手中使用已发布资料。"
         />
       ) : documents.isPending ? (
         <div className="flex justify-center py-10">

@@ -1,5 +1,5 @@
 import { Navigate, useParams, useSearchParams } from 'react-router'
-import { openCaseWorkspace } from './workspace-store'
+import { openCaseWorkspace } from '@/shared/workspace/workspace-store'
 
 export function CaseWorkbenchRedirect() {
   const { caseId = '' } = useParams()

@@ -1,192 +1,165 @@
-# MESGuard · 工业软件智能诊断与知识问答 Agent
+# MESGuard
 
 <div align="center">
 
-> **MESGuard** 是一个面向工业软件场景的证据驱动诊断 Agent：把 ERP/MES 工单、只读业务数据、企业知识文档和会话上下文组织成**可追溯、可审计、有引用**的智能诊断与问答闭环。
+面向客服、实施和现场人员的业务问题整理与智能排查系统。
+
+MESGuard 将客户工单、只读业务数据和企业知识资料组织为可追溯的排查过程，并生成可供开发人员继续处理的交接摘要。
 
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Gin](https://img.shields.io/badge/Gin-1.11-00ADD8?logo=go)](https://github.com/gin-gonic/gin)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![RabbitMQ](https://img.shields.io/badge/RabbitMQ-AMQP-FF6600?logo=rabbitmq&logoColor=white)](https://www.rabbitmq.com/)
-[![MinIO](https://img.shields.io/badge/MinIO-S3-D14C02?logo=minio&logoColor=white)](https://min.io/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-开发语言：Go + TypeScript/React ｜ 运行环境：Docker Compose 一键启动
+[文档](docs/README.md) · [开发指南](docs/development.md) · [系统架构](docs/design/system-architecture.md) · [评测记录](docs/evaluations/README.md)
 
 </div>
 
----
+![MESGuard 统一助手与工单卷宗](docs/screenshots/unified-assistant-e2e-20260822.png)
 
-## 🖥️ 界面演示
+## Overview
 
-### 会话助手：流式回答 · 附件 · 知识引用
+MESGuard 围绕“客户问题如何可靠地交给开发处理”组织工作流：业务人员可以在统一助手中查询企业知识、关联工单并发起排查任务；Agent 在冻结的权限范围内读取资料和业务数据；异步 Worker 执行调查，最终在工单卷宗中保留过程、证据状态和报告。
 
-<p align="center">
-<img src="docs/screenshots/hero-assistant-chat.png" width="720" alt="会话助手流式回答"/>
-</p>
+系统不会在证据不足时强行给出确定结论。排查任务的执行状态与报告的结论状态相互独立：任务可以成功完成，同时报告明确标记为 `inconclusive`。
 
-向企业知识库提问时，回答会**引用原文**，点击引用即可打开原文预览：
+## Core capabilities
 
-<p align="center">
-<img src="docs/screenshots/rag-citation-answer.png" width="720" alt="RAG 知识引用回答"/>
-</p>
+- **统一会话工作台**：会话、知识问答、工单选择和排查卷宗集中在同一界面；模型回答支持 Markdown、附件和可展开引用。
+- **可见的 Agent 活动**：运行期间展示经过脱敏的工具名称、输入摘要、结果摘要和耗时；不暴露思维链、系统提示词、密钥或原始数据库行。
+- **可追溯的企业知识问答**：支持文本、Office 和 PDF 文档入库，使用 FTS、Vector 与 RRF 混合召回，并将回答引用绑定到文档、页码和原文片段。
+- **异步排查任务**：工单快照、Outbox、RabbitMQ、Worker、租约 fencing、幂等、取消、重试、报告和复核记录均持久化，前端通过 SSE 更新任务时间线。
+- **受控业务数据访问**：Schema Catalog、QueryGuard、只读账号、查询超时和结果行数限制共同约束 Text-to-SQL。
+- **证据门禁**：Evidence Gate 根据有效证据决定报告为 `conclusive`、`probable` 或 `inconclusive`，避免把推测写成事实。
+- **运行观测**：支持 OpenTelemetry 导出；可选部署 Langfuse 查看 Trace、Generation、Span、工具调用和 Token 使用情况。
 
-<p align="center">
-<img src="docs/screenshots/rag-citation-preview.png" width="720" alt="引用原文预览"/>
-</p>
-
-### 诊断工作台与异步任务
-
-从工单发起诊断 → 后台 Worker 执行 → 前端实时展示进度与结果：
-
-<p align="center">
-<img src="docs/screenshots/workbench.png" width="720" alt="诊断工作台"/>
-</p>
-
-<p align="center">
-<img src="docs/screenshots/workbench-diagnosis-done.png" width="720" alt="诊断完成"/>
-</p>
-
-任务详情页提供完整时间线、证据明细与正式报告：
-
-<p align="center">
-<img src="docs/screenshots/task-detail.png" width="720" alt="任务详情时间线"/>
-</p>
-
-<p align="center">
-<img src="docs/screenshots/evidence-tab.png" width="720" alt="证据明细"/>
-</p>
-
-<p align="center">
-<img src="docs/screenshots/report-page.png" width="720" alt="正式报告"/>
-</p>
-
-### 打开看看吧（更多页面）
-
-<details>
-<summary>点击展开：工单列表 / 任务筛选 / 知识库 / 复核记录</summary>
-
-外部工单列表（来源指纹、数据源切换）：
-
-<p align="center"><img src="docs/screenshots/cases-list.png" width="720" alt="外部工单列表"/></p>
-
-诊断任务列表（状态筛选、任务 ID 直开）：
-
-<p align="center"><img src="docs/screenshots/tasks-list.png" width="720" alt="诊断任务列表"/></p>
-
-企业知识库（文档版本、解析任务进度）：
-
-<p align="center"><img src="docs/screenshots/knowledge-library.png" width="720" alt="知识库文档管理"/></p>
-
-人工复核记录（管理员视角）：
-
-<p align="center"><img src="docs/screenshots/admin-review.png" width="720" alt="复核记录"/></p>
-
-</details>
-
----
-
-## ✨ 它能做什么
-
-- **统一 Agent 运行时与权限治理**：Conversation 与 Diagnosis 共用固定 Tool Profile，执行期通过 `RunAccess`、`ResourceGrant` 和诊断任务冻结的 `InvestigationPolicy` 双重门禁，模型能力与执行权限分离。
-- **可审计的异步诊断任务**：工单快照、附件快照、Outbox、RabbitMQ Worker、租约 fencing、幂等、取消、重试、报告与人工复核全部持久化，SSE 实时推送任务时间线。
-- **安全 Text-to-SQL**：Schema Catalog 白名单 + SQL 静态检查（QueryGuard）+ 只读账号 + 超时/行数限制，层层防护后才允许模型查询 ERP/MES 数据库。
-- **文档知识库与可追溯 RAG**：多格式文档解析（文本/Office/PDF）、版本化入库、Embedding + FTS/Vector/RRF 混合召回、引用绑定原文与页码、点击即预览。
-- **会话助手**：会话消息持久化，异步 Worker 生成回答并**分块流式推送**（SSE `turn_message_delta`），支持附件上传与知识/附件/网页三类引用。
-- **前后端真实联调**：React 工作台（React 19 + TanStack Query + Tailwind 4）直接对接 Go API，未实现的能力显示诚实空态，不用 Mock 冒充实现。
-
-## 🤔 为什么需要它
-
-- 工业售后/实施场景里，故障排查依赖人工翻阅工单、查库、查文档，结果不可追溯、复用率低。
-- 让 Agent 带着**冻结的权限和引用证据**去调查：每一步都有依据，每一份报告都能回查。
-- 演示环境使用合成 ERP 数据，可一键 Docker 启动完整链路，适合作为可运行的作品集项目。
-
-## 🏗️ 技术架构
+## Workflow
 
 ```mermaid
 flowchart LR
-  subgraph Frontend[React 工作台 :5173]
-    W[Web / Vite / TanStack Query]
-  end
-  subgraph API[Go API :9090]
-    A[Gin 路由]
-    AUTH[Session + CSRF + RBAC]
-    OUT[Outbox 事务]
-  end
-  subgraph Infra[基础设施]
-    PG[(PostgreSQL 16 + pgvector)]
-    SQL[(SQL Server 只读)]
-    RD[(Redis)]
-    MQ{{RabbitMQ}}
-    MI[(MinIO)]
-  end
-  subgraph Workers[异步 Worker]
-    DW[diagnosis-worker]
-    CW[conversation-worker]
-    KW[knowledge-worker]
-    MW[memory-worker]
-  end
-
-  W -->|HTTP / SSE| A
-  A --> AUTH
-  A --> PG
-  A --> OUT --> MQ --> DW & CW & KW & MW
-  A --> SQL
-  A --> RD
-  A --> MI
-  DW --> PG
-  CW --> PG
-  KW --> PG & MI
+  U[业务人员] --> W[React 工作台]
+  W --> C[Conversation API]
+  C --> CW[Conversation Worker]
+  CW --> K[企业知识库]
+  CW --> D[创建排查任务]
+  D --> O[Outbox]
+  O --> MQ[RabbitMQ]
+  MQ --> DW[Diagnosis Worker]
+  DW --> X[工单 / 只读业务数据 / 文档]
+  DW --> E[Evidence Gate]
+  E --> R[排查报告]
+  R -->|SSE| W
 ```
 
-### 技术栈
+## Architecture
 
-| 层 | 选型 |
+| Layer | Components |
 | --- | --- |
-| 后端 | Go 1.25 · Gin · GORM · Eino (Agent 编排) · Zap |
-| 数据 | PostgreSQL 16 + pgvector · SQL Server 2022 · Redis 7 |
-| 异步 | RabbitMQ · Outbox 模式 · 多 Worker（诊断/会话/知识/记忆） |
-| 存储 | MinIO（附件与知识源对象） |
-| 前端 | React 19 · TypeScript · Vite · TanStack Query · Tailwind CSS 4 |
-| 其他 | ONNX Runtime（版式路由）· OpenTelemetry · 可选 LLM/Embedding/Rerank Provider |
+| Web | React 19, TypeScript, Vite, TanStack Query, Tailwind CSS 4 |
+| API | Go 1.25, Gin, GORM, Eino, Zap |
+| Data | PostgreSQL 16 + pgvector, SQL Server 2022, Redis 7 |
+| Messaging | RabbitMQ, transactional Outbox, diagnosis/conversation/knowledge/memory workers |
+| Object storage | MinIO |
+| Knowledge processing | Office/PDF parsing, embedding, reranking, optional ONNX Runtime layout routing |
+| Observability | OpenTelemetry, optional self-hosted Langfuse |
 
-## 🚀 快速开始
+详细的服务职责、数据流和故障边界见 [系统架构](docs/design/system-architecture.md)。
 
-需要：Go 1.25.3、Node.js 22+、Docker Desktop。
+## Quick start
+
+### Prerequisites
+
+- Docker Desktop with Docker Compose
+- PowerShell 7（执行仓库脚本时）
+- Go 1.25.3 和 Node.js 22+（仅本地开发需要）
+
+### Start with Docker Compose
 
 ```powershell
-# 1. 准备环境变量（全空也能启动，Agent 能力降级）
 Copy-Item .env.compose.example .env
-
-# 2. 构建并同步重建完整 Docker 应用链路（API、迁移、relay、四类 worker、SearXNG）
-.\scripts\runtime\rebuild_docker_app.ps1  # API: http://127.0.0.1:9090
-
-# 3. 另开终端启动前端
-cd web
-npm install
-npm run dev                              # http://127.0.0.1:5173
-
-# 4. 在 Docker API 容器中创建账号（密码只走环境变量）
-$env:MESGUARD_INITIAL_USER_PASSWORD = "change-this-locally"
-docker exec -e MESGUARD_INITIAL_USER_PASSWORD mesguard-api ./mesguard-user -username demo-admin -display-name "Demo Admin" -role admin
+docker compose up -d --build
 ```
 
-完整 Worker 链路与更多命令见 [开发指南](docs/development.md)。
+创建本地管理员账号：
 
-## 🧪 评测与证据
+```powershell
+$env:MESGUARD_INITIAL_USER_PASSWORD = "replace-with-a-local-password"
+docker exec `
+  -e MESGUARD_INITIAL_USER_PASSWORD `
+  mesguard-api `
+  ./mesguard-user `
+  -username demo-admin `
+  -display-name "Demo Admin" `
+  -role admin
+```
 
-项目内沉淀了固定数据集评测与受控 Smoke：工具选择、安全 Text-to-SQL、RAG 检索、文档解析吞吐、证据门禁等均有可复现方法与结果记录（详见 [评测索引](docs/evaluations/README.md)）。所有数字均标注固定本地数据集范围。
+启动完成后访问：
 
-## 📚 文档
+| Service | URL |
+| --- | --- |
+| Web | <http://127.0.0.1:5173> |
+| API health | <http://127.0.0.1:9090/healthz> |
+| MinIO console | <http://127.0.0.1:9001> |
 
-- [文档总览](docs/README.md) — 设计、决策、评测索引
-- [系统架构](docs/design/system-architecture.md) · [Agent 编排](docs/design/agent-orchestration.md)
-- [API 与 SSE 契约](docs/design/api.md) · [数据库设计](docs/design/database.md)
-- [知识入库与检索](docs/design/rag-ingestion-and-retrieval.md) · [前端设计](docs/design/frontend.md)
+需要自托管网页搜索时，使用 `web-search-self-hosted` profile：
 
-## 📄 许可证
+```powershell
+docker compose --profile web-search-self-hosted up -d --build
+```
 
-本项目基于 **MIT 许可证**开放（见 [LICENSE](LICENSE)）。
+环境变量、Provider 配置、Worker 重建和本地前端开发命令统一维护在 [开发指南](docs/development.md)。
 
-> 演示环境使用**合成数据**（ERP、账号、工单、文档均为本地构造），不含任何真实客户信息与真实密钥；请勿将演示配置用于生产环境。
+## Configuration
+
+- [`.env.compose.example`](.env.compose.example) 定义 Docker Compose 使用的端口、初始账号和基础设施凭据变量。
+- [`config/mesguard.toml`](config/mesguard.toml) 是本地开发配置。
+- [`config/mesguard.docker.toml`](config/mesguard.docker.toml) 是容器运行配置。
+- Web Search、OCR/VLM、Embedding 和 Rerank 依赖外部 Provider；未配置时按对应降级路径运行。
+- 仓库中的默认值仅用于本地开发。部署到其他环境前必须替换密码、密钥、域名和存储配置。
+
+## Verification
+
+```powershell
+go test ./...
+
+Set-Location web
+npm ci
+npm run build
+```
+
+项目将可复现评测与前后端联调记录分开维护：
+
+- [评测索引](docs/evaluations/README.md)：固定数据集、方法、结果及适用边界。
+- [统一助手全链路验收](docs/testing/full-chain-acceptance-2026-08-22.md)：知识问答、工具活动、任务创建、Evidence Gate 和工单卷宗联调。
+- [会话工具活动验收](docs/testing/unified-chat-tool-activity-2026-08-22.md)：回答来源、工具摘要、重试和缓存路径。
+
+这些结果来自本地受控环境，不代表生产 SLA。
+
+## Project status
+
+当前版本已打通会话、知识入库与检索、工单排查任务、异步 Worker、报告和前端工作台。仍需注意以下边界：
+
+- 复杂根因调查依赖数据目录、只读业务数据和企业资料的覆盖度；证据不足时报告会提前结束。
+- 部分外部 Provider 能力需要单独配置密钥和网络访问。
+- 当前观测与评测数据来自固定本地环境，不能直接外推到生产负载。
+- 生产部署仍需补充告警、备份、密钥管理、数据保留和高可用配置。
+
+最新实现状态与后续计划见 [Roadmap](docs/roadmap.md)。
+
+## Documentation
+
+- [文档索引](docs/README.md)
+- [产品与工作流](docs/design/product-and-workflow.md)
+- [Agent 编排与工具治理](docs/design/agent-orchestration.md)
+- [API 与 SSE 契约](docs/design/api.md)
+- [数据库设计](docs/design/database.md)
+- [知识入库与检索](docs/design/rag-ingestion-and-retrieval.md)
+- [前端设计](docs/design/frontend.md)
+- [Agent 可观测性](docs/design/agent-observability.md)
+
+## License
+
+MESGuard is available under the [MIT License](LICENSE).
+
+仓库内的演示账号、ERP 工单和知识资料均为本地合成或公开测试数据，不包含真实客户信息和生产密钥。

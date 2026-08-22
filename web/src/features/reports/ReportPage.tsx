@@ -25,14 +25,14 @@ const verdictOptions: { value: ReviewVerdict; label: string }[] = [
 ]
 
 const evidenceSourceLabels: Record<DiagnosisReportEvidence['sourceType'], string> = {
-  case_snapshot: '工单快照',
-  schema_catalog: 'Schema Catalog',
-  sql_object_definition: 'SQL 对象定义',
-  sql_query: 'SQL 查询',
-  code_search: '代码检索',
-  attachment: '附件',
-  knowledge_chunk: '知识片段',
-  web: '网页',
+  case_snapshot: '工单信息',
+  schema_catalog: '数据目录',
+  sql_object_definition: '数据结构',
+  sql_query: '业务数据',
+  code_search: '代码记录',
+  attachment: '工单附件',
+  knowledge_chunk: '企业资料',
+  web: '外部网页',
 }
 
 const confidenceLabels = { high: '高', medium: '中', low: '低' } as const
@@ -120,13 +120,13 @@ export function ReportPage() {
       </div>
 
       <header className="mb-8">
-        <p className="mb-2 text-[13px] font-semibold text-ink-48">正式诊断报告</p>
+        <p className="mb-2 text-[13px] font-semibold text-ink-48">排查结果</p>
         <Card className="p-7 sm:p-8">
           <div className="flex flex-wrap items-start justify-between gap-5">
             <div>
               <p className="text-[12px] font-semibold text-ink-48">结论状态</p>
               <h1 className="mt-1 text-[28px] font-semibold leading-tight text-ink">{conclusion.label}</h1>
-              <p className="mt-2 text-[13px] text-ink-48">置信度 {confidenceLabels[value.confidence]} · {value.partial ? '部分报告' : '完整报告'}</p>
+              <p className="mt-2 text-[13px] text-ink-48">可信度 {confidenceLabels[value.confidence]} · {value.partial ? '仍需补充信息' : '信息完整'}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={risk.tone}>{risk.label}</Badge>
@@ -142,22 +142,22 @@ export function ReportPage() {
 
       <section className="mb-8 grid gap-5 md:grid-cols-2">
         <Card className="p-6">
-          <CardTitle className="mb-3">业务摘要</CardTitle>
+          <CardTitle className="mb-3">问题摘要</CardTitle>
           <p className="whitespace-pre-wrap text-[14px] leading-[1.75] text-ink-80">{value.businessSummary}</p>
         </Card>
         <Card className="p-6">
-          <CardTitle className="mb-3">技术摘要</CardTitle>
+          <CardTitle className="mb-3">排查说明</CardTitle>
           <p className="whitespace-pre-wrap text-[14px] leading-[1.75] text-ink-80">{value.technicalSummary}</p>
         </Card>
-        <ListSection title="限制条件" items={value.limitations} emptyText="报告未声明额外限制" />
-        <ListSection title="缺失证据" items={value.missingEvidence} emptyText="报告未声明缺失证据" />
+        <ListSection title="注意事项" items={value.limitations} emptyText="暂无额外注意事项" />
+        <ListSection title="待补充信息" items={value.missingEvidence} emptyText="暂无待补充信息" />
       </section>
 
       <section className="mb-8">
-        <h2 className="mb-1 text-[19px] font-semibold text-ink">有序证据声明</h2>
-        <p className="mb-4 text-[13px] leading-[1.6] text-ink-48">这里只展示后端返回的证据声明与溯源元数据，不包含也不补造原始证据正文。</p>
+        <h2 className="mb-1 text-[19px] font-semibold text-ink">引用依据</h2>
+        <p className="mb-4 text-[13px] leading-[1.6] text-ink-48">以下内容来自本次排查记录，可用于与开发人员共同核对。</p>
         {value.evidence.length === 0 ? (
-          <Card><EmptyState title="没有证据声明" description="正式报告未返回证据声明。" /></Card>
+          <Card><EmptyState title="暂无引用依据" description="这份排查结果没有可展示的引用记录。" /></Card>
         ) : (
           <ol className="flex flex-col gap-3">
             {value.evidence.map((evidence, index) => (
@@ -169,19 +169,19 @@ export function ReportPage() {
                       <div className="mb-2 flex flex-wrap items-center gap-2">
                         <Badge tone="blue">{evidenceSourceLabels[evidence.sourceType]}</Badge>
                         <Badge tone={evidence.supportType === 'contradicts' ? 'red' : evidence.supportType === 'supports' ? 'green' : 'gray'}>{supportLabels[evidence.supportType]}</Badge>
-                        <Badge tone={evidence.validityStatus === 'valid' ? 'green' : 'orange'}>{evidence.validityStatus}</Badge>
                       </div>
                       <p className="text-[14px] font-semibold leading-[1.6] text-ink">{evidence.claim}</p>
-                      <dl className="mt-3 grid gap-x-5 gap-y-1 text-[12px] text-ink-48 sm:grid-cols-2">
-                        <div className="break-all">声明键：{evidence.claimKey}</div>
-                        <div className="break-all">来源引用：{evidence.sourceRef}</div>
-                        <div className="break-all">来源工具：{evidence.sourceTool}</div>
-                        <div className="break-all">位置：{evidence.location || '未提供'}</div>
-                        <div className="break-all">内容哈希：{shortId(evidence.contentHash.replace('sha256:', ''))}</div>
-                        <div>采集时间：{fmtDateTime(evidence.collectedAt)}</div>
-                        <div>脱敏：{evidence.redactionStatus === 'redacted' ? '已脱敏' : '不需要'}</div>
-                        <div>截断：{evidence.truncated ? '是' : '否'}</div>
-                      </dl>
+                      {user?.role === 'admin' && (
+                        <details className="mt-3 text-[11px] text-ink-48">
+                          <summary className="cursor-pointer font-semibold">来源明细（管理员）</summary>
+                          <dl className="mt-2 grid gap-x-5 gap-y-1 sm:grid-cols-2">
+                            <div className="break-all">来源引用：{evidence.sourceRef}</div>
+                            <div className="break-all">采集方式：{evidence.sourceTool}</div>
+                            <div className="break-all">位置：{evidence.location || '未提供'}</div>
+                            <div>采集时间：{fmtDateTime(evidence.collectedAt)}</div>
+                          </dl>
+                        </details>
+                      )}
                     </div>
                   </div>
                 </Card>
@@ -191,33 +191,27 @@ export function ReportPage() {
         )}
       </section>
 
-      <section className="mb-8 grid gap-5 sm:grid-cols-2">
-        <Card className="p-6">
-          <CardTitle className="mb-2">Token 使用</CardTitle>
-          <dl>
-            <MetaRow label="模型调用">{value.usage.modelCalls}</MetaRow>
-            <MetaRow label="Prompt Token">{value.usage.promptTokens}</MetaRow>
-            <MetaRow label="Completion Token">{value.usage.completionTokens}</MetaRow>
-            <MetaRow label="总 Token">{value.usage.totalTokens}</MetaRow>
-            <MetaRow label="缓存 / 推理">{value.usage.cachedTokens} / {value.usage.reasoningTokens}</MetaRow>
-          </dl>
-        </Card>
-        <Card className="p-6">
-          <CardTitle className="mb-2">运行版本</CardTitle>
-          <dl>
-            <MetaRow label="模型">{value.modelProvider} / {value.modelId}</MetaRow>
-            <MetaRow label="Prompt">{value.promptVersion}</MetaRow>
-            <MetaRow label="选择技能">{value.selectedSkill}</MetaRow>
-            <MetaRow label="执行技能">{value.executedSkills.join('、') || '无'}</MetaRow>
-            <MetaRow label="Agent 运行">{value.agentRuns}</MetaRow>
-            <MetaRow label="停止原因">{value.stopReason || '未提供'}</MetaRow>
-          </dl>
-        </Card>
-      </section>
+      {user?.role === 'admin' && (
+        <details className="mb-8 rounded-card border border-hairline bg-canvas p-5 text-[12px] text-ink-48 print:hidden">
+          <summary className="cursor-pointer font-semibold text-ink-80">运行明细（管理员）</summary>
+          <div className="mt-4 grid gap-5 sm:grid-cols-2">
+            <dl>
+              <MetaRow label="模型调用">{value.usage.modelCalls}</MetaRow>
+              <MetaRow label="Token 总量">{value.usage.totalTokens}</MetaRow>
+              <MetaRow label="缓存 / 推理">{value.usage.cachedTokens} / {value.usage.reasoningTokens}</MetaRow>
+            </dl>
+            <dl>
+              <MetaRow label="模型">{value.modelProvider} / {value.modelId}</MetaRow>
+              <MetaRow label="提示版本">{value.promptVersion}</MetaRow>
+              <MetaRow label="停止原因">{value.stopReason || '未提供'}</MetaRow>
+            </dl>
+          </div>
+        </details>
+      )}
 
       <section className="mb-8">
-        <h2 className="mb-1 text-[19px] font-semibold text-ink">人工复核</h2>
-        <p className="mb-4 text-[13px] text-ink-48">复核只评价本报告，不会回写 MES/ERP，也不会自动进入知识库。</p>
+        <h2 className="mb-1 text-[19px] font-semibold text-ink">处理反馈</h2>
+        <p className="mb-4 text-[13px] text-ink-48">记录这份排查结果是否可用于后续跟进。</p>
         <Card className="p-6">
           {reviews.isPending ? (
             <PageLoading />
@@ -244,11 +238,11 @@ export function ReportPage() {
           )}
 
           {user?.role === 'admin' ? (
-            <div className="rounded-utility bg-pearl px-4 py-3 text-[13px] text-ink-48">管理员可查看复核历史，但不能代替任务创建者提交复核。</div>
+            <div className="rounded-utility bg-pearl px-4 py-3 text-[13px] text-ink-48">系统管理员可以查看反馈记录，反馈由任务创建者提交。</div>
           ) : (
             <div className="border-t border-divider pt-5 print:hidden">
-              <FieldLabel>提交复核</FieldLabel>
-              <div className="mb-4 flex flex-wrap gap-3" role="radiogroup" aria-label="复核结论">
+              <FieldLabel>处理结果</FieldLabel>
+              <div className="mb-4 flex flex-wrap gap-3" role="radiogroup" aria-label="处理反馈">
                 {verdictOptions.map((option) => (
                   <label key={option.value} className="flex h-10 items-center gap-2 rounded-utility border border-hairline px-4 text-[13px]">
                     <input type="radio" name="review-verdict" value={option.value} checked={verdict === option.value} onChange={() => setVerdict(option.value)} className="size-4 accent-primary" />
@@ -256,16 +250,16 @@ export function ReportPage() {
                   </label>
                 ))}
               </div>
-              <TextArea placeholder="评论（可选）" maxLength={2000} value={comment} onChange={(event) => setComment(event.target.value)} className="mb-4" />
+              <TextArea placeholder="补充说明（可选）" maxLength={2000} value={comment} onChange={(event) => setComment(event.target.value)} className="mb-4" />
               <div className="flex justify-end">
-                <Button disabled={!verdict || submit.isPending} onClick={() => submit.mutate()}>{submit.isPending ? '提交中…' : '提交复核'}</Button>
+                <Button disabled={!verdict || submit.isPending} onClick={() => submit.mutate()}>{submit.isPending ? '保存中…' : '保存反馈'}</Button>
               </div>
             </div>
           )}
         </Card>
       </section>
 
-      <p className="pb-4 text-[12px] text-ink-48">报告 {value.reportId} · 生成于 {fmtDateTime(value.generatedAt)} · Schema v{value.reportSchemaVersion}</p>
+      <p className="pb-4 text-[12px] text-ink-48">生成于 {fmtDateTime(value.generatedAt)}</p>
     </div>
   )
 }

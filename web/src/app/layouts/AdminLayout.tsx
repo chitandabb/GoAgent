@@ -10,23 +10,25 @@ const tabCls = ({ isActive }: { isActive: boolean }) =>
 
 export function AdminLayout() {
   return (
-    <div>
+    <div className="flex min-h-full flex-col">
       <PageHeader
         title="系统管理"
-        subtitle="用户管理已接入真实后端；数据源与 Catalog 管理、系统状态监控尚未提供后端接口"
+        subtitle="集中维护账号权限、业务数据源与运行状态"
       />
-      <div className="mb-6 flex items-center gap-2">
+      <div className="mb-6 flex shrink-0 items-center gap-2 overflow-x-auto">
         <NavLink to="/admin/users" className={tabCls}>
-          用户管理
+          账号与权限
         </NavLink>
         <NavLink to="/admin/data-sources" className={tabCls}>
-          数据源与 Catalog
+          业务数据源
         </NavLink>
         <NavLink to="/admin/system" className={tabCls}>
-          系统状态
+          运行状态
         </NavLink>
       </div>
-      <Outlet />
+      <div className="min-h-0 flex-1">
+        <Outlet />
+      </div>
     </div>
   )
 }

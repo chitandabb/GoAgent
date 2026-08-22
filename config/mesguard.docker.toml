@@ -3,7 +3,7 @@ host = "0.0.0.0"
 port = 9090
 
 [observability]
-enabled = false
+enabled = true
 serviceName = "mesguard-api"
 environment = "development"
 otlpEndpoint = "http://langfuse-web:3000/api/public/otel/v1/traces"

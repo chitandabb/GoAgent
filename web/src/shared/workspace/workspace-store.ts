@@ -1,3 +1,4 @@
+// 浏览器侧的工作区索引只负责导航上下文，不替代服务端任务事实。
 export interface LocalWorkspace {
   workspaceId: string
   externalCaseId: string
@@ -6,7 +7,8 @@ export interface LocalWorkspace {
   updatedAt: string
 }
 
-const STORAGE_KEY = 'mesguard.local-workspaces.v1'
+// v2 invalidates pre-cleanup task references that only existed in the browser session.
+const STORAGE_KEY = 'mesguard.local-workspaces.v2'
 const MAX_WORKSPACES = 12
 const MAX_TASKS_PER_WORKSPACE = 20
 

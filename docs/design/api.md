@@ -863,12 +863,15 @@ assistant message 的 `citations` 是有序数组，每项只返回：
 尖括号、引号和反引号都不是语法字符，且 marker 必须与同一 Agent
 run 中后端验证过的 Tool 来源完全匹配的 marker。重复 marker 在持久化时去重并按首次出现排序，
 未知/篡改/超过 20 个不同来源的回答不会生成 assistant message。HTTP 消息补读和完成幂等回放均
-返回相同 `citations`；SSE `turn_completed` 仍只发布安全的 assistant message ID 和引用数量，客户端
-收到终态后通过消息/回放响应读取完整引用元数据。知识和附件正文不得从 `sourceRef` 直接拼对象
+返回相同 `citations`，并为助手消息返回 `turnId` 与安全的 `provenance`（执行路径、缓存层、工具次数、
+来源类型计数和耗时）；SSE `turn_completed` 同步发布同一来源摘要，客户端收到终态后仍通过消息/回放
+响应读取完整引用元数据。知识和附件正文不得从 `sourceRef` 直接拼对象
 地址，必须调用已有受权预览 API；网页只允许打开返回的 HTTPS URL。
 
 ### 会话回合事件约定
 
 `GET /api/v1/conversations/{conversationId}/turns/{turnId}` 返回回合当前安全摘要：状态、用户/助手消息 ID、尝试次数、时间、自动重试时间和面向用户的失败摘要。它不返回 `lease_owner`、请求指纹、模型配置、Prompt、工具结果或异常堆栈。
 
-`GET .../events` 默认返回 JSON 游标页；当 `Accept` 包含 `text/event-stream` 时返回 SSE。事件表是事实源，Redis/RabbitMQ 只负责唤醒和投递。事件类型为 `turn_queued`、`turn_running`、`turn_retry_scheduled`、`turn_completed` 和 `turn_failed`。临时模型/Tool 失败转为带 `retry_at` 的 queued 回合，`turn_retry_scheduled` 不是终态；只有达到自动重试上限才写 `turn_failed`，SSE 在发送完成/失败终态后关闭。
+会话摘要的 `title` 在创建时可以为空；首条用户消息入库后，后端会自动生成不超过 72 个字符的短标题，并在列表响应中同时提供 `firstUserMessage` 作为历史空标题会话的展示回退。显式传入的标题不会被覆盖。
+
+`GET .../events` 默认返回 JSON 游标页；当 `Accept` 包含 `text/event-stream` 时返回 SSE。事件表是事实源，Redis/RabbitMQ 只负责唤醒和投递。事件类型为 `turn_queued`、`turn_running`、`turn_retry_scheduled`、`turn_tool_started`、`turn_tool_completed`、`turn_message_delta`、`turn_completed` 和 `turn_failed`。工具事件只保存专用投影器生成的工具名称、业务显示名、脱敏输入/结果摘要、状态和耗时，不保存原始参数、原始结果、底层异常、Prompt 或模型思维过程。临时模型/Tool 失败转为带 `retry_at` 的 queued 回合，`turn_retry_scheduled` 不是终态；只有达到自动重试上限才写 `turn_failed`，SSE 在发送完成/失败终态后关闭。

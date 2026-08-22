@@ -18,8 +18,8 @@ interface Meta {
 }
 
 export const taskStatusMeta: Record<TaskStatus, Meta> = {
-  pending: { label: '等待执行', tone: 'gray' },
-  running: { label: '执行中', tone: 'blue' },
+  pending: { label: '等待处理', tone: 'gray' },
+  running: { label: '处理中', tone: 'blue' },
   cancel_requested: { label: '取消中', tone: 'orange' },
   succeeded: { label: '已完成', tone: 'green' },
   failed: { label: '失败', tone: 'red' },
@@ -90,9 +90,9 @@ export const catalogStatusMeta: Record<'draft' | 'published' | 'retired', Meta> 
 }
 
 export const scanStatusMeta: Record<'succeeded' | 'running' | 'failed', Meta> = {
-  succeeded: { label: '扫描成功', tone: 'green' },
-  running: { label: '扫描中', tone: 'blue' },
-  failed: { label: '扫描失败', tone: 'red' },
+  succeeded: { label: '更新成功', tone: 'green' },
+  running: { label: '更新中', tone: 'blue' },
+  failed: { label: '更新失败', tone: 'red' },
 }
 
 export const toolStatusMeta: Record<'succeeded' | 'failed' | 'timed_out', Meta> = {

@@ -30,10 +30,10 @@ export function DossierPanel({
     <div className="flex min-h-full flex-col bg-canvas">
       <div className="border-b border-divider px-5 py-4">
         <div className="mb-2 flex items-center justify-between gap-3">
-          <p className="text-[11px] font-semibold text-ink-48">当前卷宗</p>
-          <Button size="icon" variant="neutral" className="!size-8" onClick={onNewWorkspace} title="为当前工单新建本地工作区">
+          <p className="text-[11px] font-semibold text-ink-48">工单信息</p>
+          <Button size="icon" variant="neutral" className="!size-8" onClick={onNewWorkspace} title="为当前工单新建排查记录">
             <Plus />
-            <span className="sr-only">为当前工单新建本地工作区</span>
+            <span className="sr-only">为当前工单新建排查记录</span>
           </Button>
         </div>
         <p className="text-[13px] font-semibold text-ink">{extCase.externalCaseKey}</p>
@@ -59,7 +59,7 @@ export function DossierPanel({
         </section>
 
         <section>
-          <h3 className="mb-2 text-[12px] font-semibold text-ink">证据数据源</h3>
+          <h3 className="mb-2 text-[12px] font-semibold text-ink">可核对的信息</h3>
           <div className="flex flex-col gap-2">
             {dataSources.map((source) => {
               const selected = selectedDataSourceIds.includes(source.id)
@@ -77,13 +77,13 @@ export function DossierPanel({
         <section>
           <h3 className="mb-2 text-[12px] font-semibold text-ink">工单附件</h3>
           {extCase.attachments.length === 0 ? (
-            <p className="text-[11px] text-ink-48">没有附件声明</p>
+            <p className="text-[11px] text-ink-48">暂无附件</p>
           ) : (
             <ul className="flex flex-col gap-2">
               {extCase.attachments.map((attachment) => (
                 <li key={attachment.externalAttachmentKey} className="rounded-utility bg-pearl px-3 py-2">
                   <p className="break-words text-[11px] font-semibold text-ink-80">{attachment.fileName}</p>
-                  <p className="mt-0.5 text-[10px] text-ink-48">{attachment.mediaType} · 仅元数据</p>
+                  <p className="mt-0.5 text-[10px] text-ink-48">{attachment.mediaType}</p>
                 </li>
               ))}
             </ul>

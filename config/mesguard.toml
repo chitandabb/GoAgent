@@ -3,7 +3,7 @@ host = "0.0.0.0"
 port = 9090
 
 [observability]
-enabled = false
+enabled = true
 serviceName = "mesguard-api"
 environment = "development"
 otlpEndpoint = "http://localhost:3000/api/public/otel/v1/traces"
@@ -431,14 +431,14 @@ maxSubqueries = 1
 maxOutputRunes = 2048
 
 [knowledge.layout]
-enabled = false
+enabled = true
 provider = "onnxruntime"
 modelName = "PP-DocLayout-M"
 modelVersion = "7dbfcce3154a55776dc71ca026a4a2a8388dad8d"
-modelPath = "models/pp-doclayout-m.onnx"
+modelPath = "output/models/pp-doclayout-m/pp-doclayout-m.onnx"
 modelSHA256 = "b237c7e4aef235de8f45778ff2dd96dc21480cade40f01435f640b0ff68ee010"
 manifestPath = "config/models/pp-doclayout-m.json"
-runtimeLibraryPath = "runtime/onnxruntime.dll"
+runtimeLibraryPath = "output/runtime/onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll"
 preprocessVersion = "pp-doclayout-pre-v1"
 postprocessVersion = "pp-doclayout-post-v1"
 inputWidth = 640

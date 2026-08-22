@@ -19,7 +19,7 @@ import {
   openCaseWorkspace,
   rememberWorkspaceTask,
   type LocalWorkspace,
-} from './workspace-store'
+} from '@/shared/workspace/workspace-store'
 
 export function WorkbenchPage() {
   const { workspaceId } = useParams()
@@ -109,7 +109,7 @@ export function WorkbenchPage() {
       void queryClient.invalidateQueries({ queryKey: ['case-tasks'] })
       void queryClient.invalidateQueries({ queryKey: ['diagnosis-tasks'] })
       if (retryOfTaskId) navigate(`/workbench/${workspace.workspaceId}`, { replace: true })
-      toast.success('诊断任务已加入当前会话')
+      toast.success('排查任务已提交')
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === 40923) setFingerprintDialogOpen(true)
@@ -151,15 +151,15 @@ export function WorkbenchPage() {
   const refreshCase = async () => {
     await queryClient.invalidateQueries({ queryKey: ['external-case', workspace?.externalCaseId] })
     setFingerprintDialogOpen(false)
-    toast.success('工单已刷新，请重新确认卷宗后发送')
+    toast.success('工单已刷新，请确认信息后重新提交')
   }
 
   if (!workspaceId && !requestedCaseId && workspaces.length === 0) {
     return (
-      <div className="flex min-h-[calc(100dvh-2.75rem)] items-center justify-center px-6">
+      <div className="flex h-full items-center justify-center px-6">
         <EmptyState
           title="选择一张工单开始"
-          description="统一工作台会为工单建立独立卷宗；绑定工单本身不会启动诊断。"
+          description="选择客户工单后，可将现场信息整理成便于开发跟进的排查单。"
           action={<Button onClick={() => navigate('/cases')}>选择工单</Button>}
         />
       </div>
@@ -167,10 +167,10 @@ export function WorkbenchPage() {
   }
   if (workspaceId && !workspace) {
     return (
-      <div className="flex min-h-[calc(100dvh-2.75rem)] items-center justify-center px-6">
+      <div className="flex h-full items-center justify-center px-6">
         <EmptyState
-          title="工作区不在当前浏览器"
-          description="本地工作区只保存于创建它的浏览器会话中；服务端诊断任务仍可通过任务 ID 读取。"
+          title="当前浏览器没有这条记录"
+          description="请重新选择工单；已经提交的任务仍可在排查任务中查看。"
           action={<Button onClick={() => navigate('/cases')}>重新选择工单</Button>}
         />
       </div>
@@ -179,8 +179,8 @@ export function WorkbenchPage() {
   if (!workspace || extCase.isPending || dataSources.isPending) return <PageLoading />
   if (extCase.isError || !extCase.data) {
     return (
-      <div className="flex min-h-[calc(100dvh-2.75rem)] items-center justify-center px-6">
-        <EmptyState title="卷宗不可读取" description={extCase.error instanceof Error ? extCase.error.message : '本地工作区已失效或工单无权访问'} action={<Button onClick={() => navigate('/cases')}>重新选择工单</Button>} />
+      <div className="flex h-full items-center justify-center px-6">
+        <EmptyState title="工单信息不可读取" description={extCase.error instanceof Error ? extCase.error.message : '记录已失效或当前账号无权访问'} action={<Button onClick={() => navigate('/cases')}>重新选择工单</Button>} />
       </div>
     )
   }
@@ -198,7 +198,7 @@ export function WorkbenchPage() {
   )
 
   return (
-    <div className="grid h-[calc(100dvh-2.75rem)] min-h-[560px] bg-canvas lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_300px]">
+    <div className="grid h-full min-h-0 bg-canvas lg:grid-cols-[224px_minmax(0,1fr)] xl:grid-cols-[224px_minmax(0,1fr)_320px]">
       <aside className="hidden min-h-0 border-r border-hairline lg:block">
         <WorkspaceList workspaces={workspaces} activeId={workspace.workspaceId} />
       </aside>
@@ -212,7 +212,7 @@ export function WorkbenchPage() {
             </Button>
             <div className="min-w-0">
               <p className="truncate text-[12px] font-semibold text-ink">{extCase.data.externalCaseKey} · {extCase.data.title}</p>
-              <p className="text-[10px] text-ink-48">诊断会话 · {workspace.taskIds.length} 次运行</p>
+              <p className="text-[10px] text-ink-48">排查记录 · {workspace.taskIds.length} 次处理</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -221,14 +221,14 @@ export function WorkbenchPage() {
               variant="neutral"
               className="!size-8"
               onClick={() => navigate(`/assistant?caseId=${encodeURIComponent(extCase.data.externalCaseId)}`)}
-              title="在助手中讨论当前工单"
+              title="向助手询问当前工单"
             >
               <MessageCircle />
-              <span className="sr-only">在助手中讨论当前工单</span>
+              <span className="sr-only">向助手询问当前工单</span>
             </Button>
             <Button size="sm" variant="neutral" className="xl:hidden" onClick={() => setDossierOpen(true)}>
               <Files />
-              卷宗
+              工单信息
             </Button>
           </div>
         </header>
@@ -238,8 +238,8 @@ export function WorkbenchPage() {
             {chronologicalTaskIds.length === 0 ? (
               <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
                 <div className="mb-4 flex size-11 items-center justify-center rounded-utility bg-ink text-white"><ShieldCheck className="size-5" /></div>
-                <h1 className="text-[20px] font-semibold text-ink">卷宗已建立</h1>
-                <p className="mt-2 max-w-md text-[13px] leading-[1.7] text-ink-48">检查右侧的证据数据源，然后发送问题开始诊断。绑定工单不会自动运行任务。</p>
+                <h1 className="text-[20px] font-semibold text-ink">工单已准备</h1>
+                <p className="mt-2 max-w-md text-[13px] leading-[1.7] text-ink-48">描述客户反馈或现场问题，系统会整理成便于开发跟进的排查单。</p>
               </div>
             ) : (
               chronologicalTaskIds.map((taskId) => <DiagnosisRunBlock key={taskId} taskId={taskId} />)
@@ -249,7 +249,7 @@ export function WorkbenchPage() {
 
         <div className="frosted shrink-0 border-t border-hairline px-3 py-3 sm:px-6">
           <div className="mx-auto max-w-[760px]">
-            {create.isError && !(create.error instanceof ApiError && create.error.code === 40923) && <p className="mb-2 text-[11px] text-danger">{create.error instanceof Error ? create.error.message : '创建诊断任务失败'}</p>}
+            {create.isError && !(create.error instanceof ApiError && create.error.code === 40923) && <p className="mb-2 text-[11px] text-danger">{create.error instanceof Error ? create.error.message : '排查任务提交失败'}</p>}
             <div className="flex items-end gap-2 rounded-[18px] border border-hairline bg-canvas p-2 pl-4">
               <textarea
                 value={requestText}
@@ -262,17 +262,13 @@ export function WorkbenchPage() {
                 }}
                 rows={1}
                 maxLength={20000}
-                placeholder="描述要调查的问题，Enter 开始诊断"
+                placeholder="描述客户反馈或现场问题，Enter 生成排查单"
                 className="max-h-32 min-h-10 min-w-0 flex-1 resize-none bg-transparent py-2 text-[13px] leading-[1.55] text-ink outline-none placeholder:text-ink-48"
               />
-              <Button size="icon" disabled={create.isPending || !requestText.trim() || checkedDataSources.length === 0} onClick={submit} title="开始诊断">
+              <Button size="icon" disabled={create.isPending || !requestText.trim() || checkedDataSources.length === 0} onClick={submit} title="生成排查单">
                 <Send />
-                <span className="sr-only">开始诊断</span>
+                <span className="sr-only">生成排查单</span>
               </Button>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1 text-[10px] text-ink-48">
-              <span>诊断入口固定为工单诊断（ticket-diagnosis）</span>
-              <span>任务离开页面后继续运行</span>
             </div>
           </div>
         </div>
@@ -280,18 +276,18 @@ export function WorkbenchPage() {
 
       <aside className="hidden min-h-0 overflow-y-auto border-l border-hairline xl:block">{dossier}</aside>
 
-      <SidePanel open={historyOpen} title="会话" side="left" onClose={() => setHistoryOpen(false)}>
+      <SidePanel open={historyOpen} title="排查记录" side="left" onClose={() => setHistoryOpen(false)}>
         <WorkspaceList workspaces={workspaces} activeId={workspace.workspaceId} onNavigate={() => setHistoryOpen(false)} />
       </SidePanel>
-      <SidePanel open={dossierOpen} title="当前卷宗" side="right" onClose={() => setDossierOpen(false)}>{dossier}</SidePanel>
+      <SidePanel open={dossierOpen} title="工单信息" side="right" onClose={() => setDossierOpen(false)}>{dossier}</SidePanel>
 
       <Dialog
         open={fingerprintDialogOpen}
         title="工单内容已变化"
         onClose={() => setFingerprintDialogOpen(false)}
-        footer={<><Button variant="neutral" onClick={() => setFingerprintDialogOpen(false)}>稍后处理</Button><Button onClick={() => void refreshCase()}>刷新卷宗</Button></>}
+        footer={<><Button variant="neutral" onClick={() => setFingerprintDialogOpen(false)}>稍后处理</Button><Button onClick={() => void refreshCase()}>刷新工单</Button></>}
       >
-        <p className="text-[13px] leading-[1.7] text-ink-80">外部系统中的工单在你确认后发生了变化。系统没有创建任务，请刷新卷宗并重新确认。</p>
+        <p className="text-[13px] leading-[1.7] text-ink-80">工单内容在你打开后发生了变化。本次未提交，请刷新工单并重新确认。</p>
       </Dialog>
     </div>
   )

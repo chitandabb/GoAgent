@@ -20,7 +20,7 @@ function isAttachmentPreview(data: PreviewData): data is Awaited<ReturnType<type
 
 function ElementBlock({ element }: { element: AttachmentPreviewElement }) {
   return (
-    <div className="rounded-utility border border-hairline bg-tile p-3.5">
+    <article className="rounded-utility border border-hairline bg-canvas p-3.5">
       <p className="mb-1.5 flex items-center gap-2 text-[11px] text-ink-48">
         <span>
           {element.elementType}
@@ -31,7 +31,7 @@ function ElementBlock({ element }: { element: AttachmentPreviewElement }) {
         )}
       </p>
       <p className="whitespace-pre-wrap text-[12px] leading-[1.75] text-ink-80">{element.contentText}</p>
-    </div>
+    </article>
   )
 }
 
@@ -42,7 +42,7 @@ export function AttachmentPreviewDialog({
   preview: PreviewTarget | null
   onClose: () => void
 }) {
-  const title = preview?.kind === 'attachment' ? preview.name : preview?.kind === 'knowledge' ? '知识库引用' : ''
+  const title = preview?.kind === 'attachment' ? preview.name : preview?.kind === 'knowledge' ? '来源预览' : ''
 
   const data = useQuery<PreviewData>({
     queryKey: preview
@@ -92,15 +92,12 @@ export function AttachmentPreviewDialog({
             </>
           ) : (
             <div>
-              <p className="mb-1 text-[11px] font-semibold text-ink-48">{data.data.title}</p>
-              <p className="whitespace-pre-wrap rounded-utility border border-hairline bg-tile p-3.5 text-[12px] leading-[1.75] text-ink-80">
+              <p className="mb-2 text-[13px] font-semibold text-ink">{data.data.title}</p>
+              <article className="whitespace-pre-wrap rounded-utility border border-hairline bg-canvas p-4 text-[13px] leading-[1.8] text-ink-80">
                 {data.data.contentText}
-              </p>
+              </article>
             </div>
           )}
-          <p className="mt-1 text-[11px] leading-[1.6] text-ink-48">
-            预览内容由服务端解析并脱敏，原始文件保持私有，页面不接触对象存储凭证。
-          </p>
         </div>
       ) : null}
     </Dialog>

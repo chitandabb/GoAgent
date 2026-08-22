@@ -10,6 +10,8 @@ const turnEventTypes: TurnEventType[] = [
   'turn_queued',
   'turn_running',
   'turn_retry_scheduled',
+  'turn_tool_started',
+  'turn_tool_completed',
   'turn_message_delta',
   'turn_completed',
   'turn_failed',

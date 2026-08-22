@@ -27,7 +27,7 @@ export const router = createBrowserRouter([
       {
         element: <WorkbenchLayout />,
         children: [
-          { path: '/', element: <Navigate to="/workbench" replace /> },
+          { path: '/', element: <Navigate to="/cases" replace /> },
           { path: '/workbench', element: <WorkbenchPage /> },
           { path: '/workbench/:workspaceId', element: <WorkbenchPage /> },
           { path: '/cases', element: <CasesPage /> },

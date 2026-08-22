@@ -25,6 +25,8 @@ const (
 	TurnEventQueued         TurnEventType = "turn_queued"
 	TurnEventRunning        TurnEventType = "turn_running"
 	TurnEventRetryScheduled TurnEventType = "turn_retry_scheduled"
+	TurnEventToolStarted    TurnEventType = "turn_tool_started"
+	TurnEventToolCompleted  TurnEventType = "turn_tool_completed"
 	TurnEventMessageDelta   TurnEventType = "turn_message_delta"
 	TurnEventCompleted      TurnEventType = "turn_completed"
 	TurnEventFailed         TurnEventType = "turn_failed"
@@ -33,11 +35,83 @@ const (
 func (e TurnEventType) Valid() bool {
 	switch e {
 	case TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled,
-		TurnEventMessageDelta, TurnEventCompleted, TurnEventFailed:
+		TurnEventToolStarted, TurnEventToolCompleted, TurnEventMessageDelta,
+		TurnEventCompleted, TurnEventFailed:
 		return true
 	default:
 		return false
 	}
+}
+
+type TurnToolActivityStatus string
+
+const (
+	TurnToolActivityRunning   TurnToolActivityStatus = "running"
+	TurnToolActivitySucceeded TurnToolActivityStatus = "succeeded"
+	TurnToolActivityFailed    TurnToolActivityStatus = "failed"
+)
+
+// TurnToolActivity is the user-visible, persistence-safe projection of one
+// Conversation Tool call. Summaries are produced by Tool-specific projectors;
+// raw arguments and raw results never cross this interface.
+type TurnToolActivity struct {
+	ActivityID    uuid.UUID
+	ToolName      string
+	DisplayName   string
+	Status        TurnToolActivityStatus
+	InputSummary  string
+	OutputSummary string
+	DurationMS    int64
+}
+
+func (a TurnToolActivity) Validate(eventType TurnEventType) error {
+	if a.ActivityID == uuid.Nil || !validAgentRunMachineLabel(a.ToolName, 128) ||
+		strings.TrimSpace(a.DisplayName) == "" || len([]rune(a.DisplayName)) > 80 ||
+		len([]rune(a.InputSummary)) > 1000 || len([]rune(a.OutputSummary)) > 2000 ||
+		a.DurationMS < 0 || a.DurationMS > int64((5*time.Minute)/time.Millisecond) {
+		return ErrInvalidMessage
+	}
+	switch eventType {
+	case TurnEventToolStarted:
+		if a.Status != TurnToolActivityRunning || a.OutputSummary != "" || a.DurationMS != 0 {
+			return ErrInvalidMessage
+		}
+	case TurnEventToolCompleted:
+		if a.Status != TurnToolActivitySucceeded && a.Status != TurnToolActivityFailed {
+			return ErrInvalidMessage
+		}
+	default:
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+type TurnActivitySink interface {
+	RecordTurnToolActivity(context.Context, TurnEventType, TurnToolActivity) error
+}
+
+type turnActivitySinkContextKey struct{}
+
+func WithTurnActivitySink(ctx context.Context, sink TurnActivitySink) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, turnActivitySinkContextKey{}, sink)
+}
+
+func RecordTurnToolActivity(
+	ctx context.Context,
+	eventType TurnEventType,
+	activity TurnToolActivity,
+) error {
+	if activity.Validate(eventType) != nil {
+		return ErrInvalidMessage
+	}
+	sink, _ := ctx.Value(turnActivitySinkContextKey{}).(TurnActivitySink)
+	if sink == nil {
+		return nil
+	}
+	return sink.RecordTurnToolActivity(ctx, eventType, activity)
 }
 
 func (e TurnEventType) IsTerminal() bool {

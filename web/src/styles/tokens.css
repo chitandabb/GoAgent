@@ -1,74 +1,77 @@
 @import "tailwindcss";
 
 /*
- * MESGuard 设计 token —— 唯一落点。
- * 来源:docs/design/DESIGN-apple.md。组件内只引用 token 类,不写裸 hex。
- * 状态色(ok/warn/danger)是对规范 Known Gaps 的补充,只表达状态语义,
- * 交互色仍然只有 primary 一个蓝。
+ * MESGuard ToB 控制台 token —— 唯一落点。
+ * 语义来自工业诊断场景：深海军蓝负责操作上下文，冷灰负责工作区，
+ * 青绿色代表可执行动作，琥珀/红色只表达风险和任务状态。
  */
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+  --font-sans: "Inter", "IBM Plex Sans", -apple-system, BlinkMacSystemFont,
     "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
 
-  /* interactive —— 单一强调色 */
-  --color-primary: #0066cc;
-  --color-primary-focus: #0071e3;
-  --color-primary-on-dark: #2997ff;
+  /* interactive —— industrial teal */
+  --color-primary: #0f7188;
+  --color-primary-focus: #0b8aa3;
+  --color-primary-on-dark: #73d3df;
 
   /* ink */
-  --color-ink: #1d1d1f;
-  --color-ink-80: #333333;
-  --color-ink-48: #7a7a7a;
+  --color-ink: #172b3a;
+  --color-ink-80: #35505f;
+  --color-ink-48: #718591;
 
   /* surfaces */
   --color-canvas: #ffffff;
-  --color-parchment: #f5f5f7;
-  --color-pearl: #fafafc;
-  --color-tile: #272729;
-  --color-nav: #000000;
-  --color-code: #c9c9ce;
+  --color-parchment: #f1f5f7;
+  --color-pearl: #f8fafb;
+  --color-tile: #e7eef1;
+  --color-nav: #102d3d;
+  --color-code: #e9eff2;
+  --color-sidebar: #102d3d;
+  --color-sidebar-muted: #9bb2bd;
+  --color-sidebar-line: #2d4b5a;
+  --color-signal: #e6a33a;
 
   /* hairlines */
-  --color-hairline: #e0e0e0;
-  --color-divider: #f0f0f0;
+  --color-hairline: #d8e2e7;
+  --color-divider: #e8eef1;
 
   /* status(语义补充,非交互色) */
-  --color-ok: #248a3d;
-  --color-ok-soft: #e8f5ec;
-  --color-warn: #c93400;
-  --color-warn-soft: #fdf0e7;
-  --color-danger: #d70015;
-  --color-danger-soft: #fdebec;
-  --color-info-soft: #e8f1fb;
-  --color-neutral-soft: #efeff1;
-  --color-neutral-muted: #6e6e73;
+  --color-ok: #20835c;
+  --color-ok-soft: #e4f4ed;
+  --color-warn: #a96b13;
+  --color-warn-soft: #fff4dc;
+  --color-danger: #bd4650;
+  --color-danger-soft: #fbeaec;
+  --color-info-soft: #e3f2f5;
+  --color-neutral-soft: #e9eff1;
+  --color-neutral-muted: #687e89;
 
-  /* radius 语法:pill=操作,card=18,utility=8,capsule=11 */
-  --radius-card: 18px;
-  --radius-capsule: 11px;
-  --radius-utility: 8px;
+  /* radius 语法：ToB 卡片/控件优先稳定，不使用消费级大圆角 */
+  --radius-card: 12px;
+  --radius-capsule: 9px;
+  --radius-utility: 6px;
 }
 
 :root {
-  --background: #f5f5f7;
-  --foreground: #1d1d1f;
+  --background: #f1f5f7;
+  --foreground: #172b3a;
   --card: #ffffff;
-  --card-foreground: #1d1d1f;
+  --card-foreground: #172b3a;
   --popover: #ffffff;
-  --popover-foreground: #1d1d1f;
-  --primary: #0066cc;
+  --popover-foreground: #172b3a;
+  --primary: #0f7188;
   --primary-foreground: #ffffff;
-  --secondary: #fafafc;
-  --secondary-foreground: #333333;
-  --muted: #f5f5f7;
-  --muted-foreground: #7a7a7a;
-  --accent: #fafafc;
-  --accent-foreground: #1d1d1f;
-  --destructive: #d70015;
-  --border: #e0e0e0;
-  --input: #e0e0e0;
-  --ring: #0071e3;
-  --radius: 18px;
+  --secondary: #f8fafb;
+  --secondary-foreground: #35505f;
+  --muted: #f1f5f7;
+  --muted-foreground: #718591;
+  --accent: #f8fafb;
+  --accent-foreground: #172b3a;
+  --destructive: #bd4650;
+  --border: #d8e2e7;
+  --input: #d8e2e7;
+  --ring: #0b8aa3;
+  --radius: 12px;
 }
 
 @theme inline {
@@ -96,10 +99,17 @@
 
 @layer base {
   html {
+    height: 100%;
     background-color: var(--color-parchment);
   }
   body {
+    height: 100%;
+    overflow: hidden;
     @apply bg-parchment text-ink text-[14px] leading-[1.5] antialiased;
+  }
+  #root {
+    height: 100%;
+    min-height: 0;
   }
   button {
     cursor: pointer;
@@ -113,8 +123,8 @@
 @layer components {
   /* 毛玻璃(sub-nav / sticky bar) */
   .frosted {
-    background-color: rgb(245 245 247 / 0.8);
-    backdrop-filter: saturate(180%) blur(20px);
+    background-color: rgb(241 245 247 / 0.88);
+    backdrop-filter: saturate(140%) blur(16px);
   }
   /* 全系统统一按压微交互 */
   .press {

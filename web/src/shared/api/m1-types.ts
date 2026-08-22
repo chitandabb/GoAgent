@@ -299,6 +299,7 @@ export type ConversationStatus = 'active' | 'archived'
 export interface ConversationSummary {
   id: string
   title: string
+  firstUserMessage?: string
   status: ConversationStatus
   createdAt: string
   updatedAt: string
@@ -342,6 +343,22 @@ export interface ConversationCitation {
   contentSha256: string
 }
 
+export type ConversationSourceType = ConversationCitation['sourceType']
+
+export interface ConversationAnswerSourceCount {
+  sourceType: ConversationSourceType
+  count: number
+}
+
+export interface ConversationAnswerProvenance {
+  executionPath: 'agent' | 'semantic_cache_hit'
+  cacheLayer?: 'exact' | 'semantic'
+  outcome: 'answered' | 'insufficient_evidence' | 'degraded' | 'failed'
+  toolCalls: number
+  durationMillis: number
+  sources: ConversationAnswerSourceCount[]
+}
+
 export interface ConversationMessage {
   id: string
   conversationId: string
@@ -353,6 +370,8 @@ export interface ConversationMessage {
   taskReferences: ConversationTaskReference[]
   attachments: ConversationMessageAttachment[]
   citations: ConversationCitation[]
+  turnId?: string
+  provenance?: ConversationAnswerProvenance
   createdAt: string
 }
 
@@ -395,6 +414,8 @@ export type TurnEventType =
   | 'turn_queued'
   | 'turn_running'
   | 'turn_retry_scheduled'
+  | 'turn_tool_started'
+  | 'turn_tool_completed'
   | 'turn_message_delta'
   | 'turn_completed'
   | 'turn_failed'
@@ -412,6 +433,66 @@ export function parseTurnMessageDelta(payload: Record<string, unknown>): TurnMes
   const content = typeof payload.content === 'string' ? payload.content : ''
   if (!messageId || !Number.isInteger(position) || position < 0 || content.length === 0) return null
   return { messageId, position, content }
+}
+
+export interface TurnToolActivity {
+  activityId: string
+  toolName: string
+  displayName: string
+  status: 'running' | 'succeeded' | 'failed'
+  inputSummary: string
+  outputSummary: string
+  durationMillis: number
+  attemptCount: number
+}
+
+export function parseTurnToolActivity(payload: Record<string, unknown>): TurnToolActivity | null {
+  const activityId = typeof payload.activityId === 'string' ? payload.activityId : ''
+  const toolName = typeof payload.toolName === 'string' ? payload.toolName : ''
+  const displayName = typeof payload.displayName === 'string' ? payload.displayName : ''
+  const status = payload.status
+  const inputSummary = typeof payload.inputSummary === 'string' ? payload.inputSummary : ''
+  const outputSummary = typeof payload.outputSummary === 'string' ? payload.outputSummary : ''
+  const durationMillis = typeof payload.durationMillis === 'number' ? payload.durationMillis : 0
+  const attemptCount = typeof payload.attemptCount === 'number' ? payload.attemptCount : 1
+  if (
+    !activityId || !toolName || !displayName ||
+    (status !== 'running' && status !== 'succeeded' && status !== 'failed') ||
+    !Number.isFinite(durationMillis) || durationMillis < 0 ||
+    !Number.isInteger(attemptCount) || attemptCount < 1
+  ) return null
+  return { activityId, toolName, displayName, status, inputSummary, outputSummary, durationMillis, attemptCount }
+}
+
+export function parseTurnCompletedProvenance(payload: Record<string, unknown>): ConversationAnswerProvenance | null {
+  const raw = payload.provenance
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const value = raw as Record<string, unknown>
+  const executionPath = value.executionPath === 'semantic_cache_hit' ? 'semantic_cache_hit' : value.executionPath === 'agent' || value.executionPath === '' ? 'agent' : null
+  const outcome = value.outcome
+  const toolCalls = typeof value.toolCalls === 'number' ? value.toolCalls : Number.NaN
+  const durationMillis = typeof value.durationMillis === 'number' ? value.durationMillis : Number.NaN
+  if (
+    !executionPath ||
+    (outcome !== 'answered' && outcome !== 'insufficient_evidence' && outcome !== 'degraded' && outcome !== 'failed') ||
+    !Number.isInteger(toolCalls) || toolCalls < 0 ||
+    !Number.isFinite(durationMillis) || durationMillis < 0
+  ) return null
+  const sources: ConversationAnswerSourceCount[] = Array.isArray(value.sources)
+    ? value.sources.flatMap((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+        const source = item as Record<string, unknown>
+        const sourceType = source.sourceType
+        const count = source.count
+        if (
+          (sourceType !== 'attachment' && sourceType !== 'knowledge_chunk' && sourceType !== 'web') ||
+          typeof count !== 'number' || !Number.isInteger(count) || count < 1
+        ) return []
+        return [{ sourceType, count }]
+      })
+    : []
+  const cacheLayer = value.cacheLayer === 'exact' || value.cacheLayer === 'semantic' ? value.cacheLayer : undefined
+  return { executionPath, cacheLayer, outcome, toolCalls, durationMillis, sources }
 }
 
 export interface TurnEvent {

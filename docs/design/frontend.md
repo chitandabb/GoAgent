@@ -27,6 +27,8 @@ web/src/
 │                       knowledge / admin / workbench
 ├─ shared/api/          fetch、认证、业务接口、SSE 和类型
 ├─ shared/lib/          状态映射、时间格式化和纯函数
+├─ shared/diagnosis-run/诊断运行展示组件、事件时间线与运行控制 hook
+├─ shared/workspace/    工作区导航上下文（不承载后端事实）
 ├─ shared/ui/           Button、Card、Badge、Dialog、Field、Toast 等
 ├─ mocks/               尚未接入域的显式原型数据
 └─ styles/tokens.css    视觉 token 唯一落点
@@ -40,16 +42,18 @@ web/src/
 4. 组件使用 token 类，不在页面散落裸颜色和临时交互状态。
 5. 未实现域必须显示 Mock 或未开放边界，不能把演示数据写成业务事实。
 
+工作台采用 ToB 控制台壳层：桌面端固定深色操作侧栏，主区域保持冷灰工作面和高密度信息卡。全局主入口收敛为“工单 / 任务 / 助手 / 知识库”，诊断工作区作为工单内的操作上下文，不再与全局导航重复。诊断运行时间线、`useDiagnosisRun` 运行控制 hook 与工作区导航上下文下沉到 `shared/`，避免 `cases`、`diagnosis`、`workbench` 之间形成循环或横向 Feature 依赖。`TaskDetailPage` 和工作台的 `DiagnosisRunBlock` 共用同一套任务查询、SSE 事件去重/重连、取消、恢复和 Query 缓存失效策略；页面只负责不同的 ToB 展示组合。
+
 ## 页面与权限
 
 ```text
 /login                    登录
 /change-password          首次登录改密
-/assistant                会话助手、流式回答、附件和引用
+/assistant                会话助手、流式回答、附件和内联引用
 /cases                    外部工单列表
 /cases/:id                工单详情与服务端诊断历史
 /workbench/:workspaceId   诊断工作台
-/tasks                    服务端诊断任务列表与状态筛选
+/tasks                    服务端诊断任务列表、状态筛选与分页
 /tasks/:id                任务详情、时间线、证据和工具边界
 /tasks/:id/report         正式报告与复核
 /knowledge                管理员知识文档、版本和解析任务
@@ -64,7 +68,8 @@ web/src/
 
 - 非 GET 请求由 `shared/api/client.ts` 自动附加内存中的 CSRF Token；`FormData` 保留浏览器自动生成的 multipart boundary。
 - 诊断任务创建返回异步任务，任务进度通过 JSON 查询和 TaskEvent SSE 恢复。
-- Conversation turn 通过 `turn_queued`、`turn_running`、`turn_message_delta`、完成或失败事件驱动 UI；delta 按 `position` 去重和拼接。
+- Conversation turn 通过排队、运行、工具开始/完成、`turn_message_delta`、完成或失败事件驱动 UI；delta 按 `position` 去重和拼接，工具事件按 `activityId` 合并生命周期。
+- 每条助手消息固定展示回答来源；历史工具明细在用户展开时按 turn 事件懒加载，运行中的工具名称、脱敏参数和结果则随 SSE 实时更新。
 - 知识文档列表由管理员接口分页读取，解析中的任务按状态轮询；版本上传创建新版本，不覆盖历史版本。
 - 知识和附件引用只能通过后端返回的 citation 数据和授权预览接口打开，不能从正文中的任意 UUID 或 URL 猜测链接。
 
@@ -76,6 +81,7 @@ web/src/
 | `cancel_requested` | 取消中，禁用重复取消 |
 | `succeeded` / `failed` / `cancelled` | 终态摘要和可用操作 |
 | `turn_message_delta` | 流式回答气泡，最终消息回填后移除临时气泡 |
+| `turn_tool_started` / `turn_tool_completed` | 回答内实时处理过程；不展示 Prompt、模型思维链或原始工具载荷 |
 | 空证据声明 | 明确“报告没有结构化证据声明”，不伪造内容 |
 | 未开放接口 | 空态或未开放提示，不生成假数据 |
 

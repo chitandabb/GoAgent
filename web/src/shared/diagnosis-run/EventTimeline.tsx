@@ -2,15 +2,15 @@ import type { TaskEvent } from '@/shared/api/m1-types'
 import { fmtClock } from '@/shared/lib/fmt'
 
 const eventMeta: Record<string, { title: string; kind: 'blue' | 'green' | 'red' | 'orange' | 'gray' }> = {
-  task_created: { title: '任务已创建', kind: 'blue' },
+  task_created: { title: '任务已提交', kind: 'blue' },
   task_cancel_requested: { title: '已请求取消', kind: 'orange' },
-  task_started: { title: '开始执行', kind: 'blue' },
-  task_reclaimed: { title: '任务已重新领取', kind: 'orange' },
+  task_started: { title: '开始处理', kind: 'blue' },
+  task_reclaimed: { title: '任务已恢复处理', kind: 'orange' },
   task_retry_scheduled: { title: '已安排重试', kind: 'orange' },
-  task_succeeded: { title: '诊断成功', kind: 'green' },
-  task_failed: { title: '诊断失败', kind: 'red' },
+  task_succeeded: { title: '排查单已生成', kind: 'green' },
+  task_failed: { title: '处理失败', kind: 'red' },
   task_cancelled: { title: '任务已取消', kind: 'gray' },
-  task_requeued: { title: '任务已重新入队', kind: 'orange' },
+  task_requeued: { title: '任务已重新提交', kind: 'orange' },
 }
 
 function Dot({ kind }: { kind: 'blue' | 'green' | 'red' | 'orange' | 'gray' }) {
@@ -30,11 +30,7 @@ function eventDetail(event: TaskEvent): string | null {
     const value = event.payload[key]
     if (typeof value === 'string' && value) return value
   }
-  const facts = Object.entries(event.payload)
-    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
-    .slice(0, 4)
-    .map(([key, value]) => `${key}: ${String(value)}`)
-  return facts.length > 0 ? facts.join(' · ') : null
+  return null
 }
 
 export function EventTimeline({ events, live }: { events: TaskEvent[]; live: boolean }) {
@@ -59,14 +55,14 @@ export function EventTimeline({ events, live }: { events: TaskEvent[]; live: boo
           </li>
         )
       })}
-      {events.length === 0 && !live && <li className="text-[13px] text-ink-48">没有可读取的任务事件</li>}
+      {events.length === 0 && !live && <li className="text-[13px] text-ink-48">暂无处理记录</li>}
       {live && (
         <li className="flex gap-4">
           <span className="relative z-10 block size-3 shrink-0">
             <span className="absolute inset-0 animate-ping rounded-full bg-primary/30" />
             <span className="absolute inset-[2px] rounded-full bg-primary" />
           </span>
-          <p className="text-[13px] text-ink-48">等待后续事件…</p>
+          <p className="text-[13px] text-ink-48">等待后续进度…</p>
         </li>
       )}
     </ol>

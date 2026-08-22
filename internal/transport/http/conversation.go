@@ -91,26 +91,43 @@ type conversationAttachmentRequest struct {
 }
 
 type conversationResponse struct {
-	ID            string              `json:"id"`
-	Title         string              `json:"title"`
-	Status        conversation.Status `json:"status"`
-	CreatedAt     time.Time           `json:"createdAt"`
-	UpdatedAt     time.Time           `json:"updatedAt"`
-	LastMessageAt *time.Time          `json:"lastMessageAt,omitempty"`
+	ID               string              `json:"id"`
+	Title            string              `json:"title"`
+	FirstUserMessage string              `json:"firstUserMessage,omitempty"`
+	Status           conversation.Status `json:"status"`
+	CreatedAt        time.Time           `json:"createdAt"`
+	UpdatedAt        time.Time           `json:"updatedAt"`
+	LastMessageAt    *time.Time          `json:"lastMessageAt,omitempty"`
 }
 
 type conversationMessageResponse struct {
-	ID                   string                          `json:"id"`
-	ConversationID       string                          `json:"conversationId"`
-	Seq                  int64                           `json:"seq"`
-	Role                 conversation.MessageRole        `json:"role"`
-	Content              string                          `json:"content"`
-	ContentSchemaVersion int                             `json:"contentSchemaVersion"`
-	CaseReferences       []conversationCaseReferenceResp `json:"caseReferences"`
-	TaskReferences       []conversationTaskReferenceResp `json:"taskReferences"`
-	Attachments          []conversationAttachmentResp    `json:"attachments"`
-	Citations            []conversationCitationResp      `json:"citations"`
-	CreatedAt            time.Time                       `json:"createdAt"`
+	ID                   string                            `json:"id"`
+	ConversationID       string                            `json:"conversationId"`
+	Seq                  int64                             `json:"seq"`
+	Role                 conversation.MessageRole          `json:"role"`
+	Content              string                            `json:"content"`
+	ContentSchemaVersion int                               `json:"contentSchemaVersion"`
+	CaseReferences       []conversationCaseReferenceResp   `json:"caseReferences"`
+	TaskReferences       []conversationTaskReferenceResp   `json:"taskReferences"`
+	Attachments          []conversationAttachmentResp      `json:"attachments"`
+	Citations            []conversationCitationResp        `json:"citations"`
+	TurnID               *string                           `json:"turnId,omitempty"`
+	Provenance           *conversationAnswerProvenanceResp `json:"provenance,omitempty"`
+	CreatedAt            time.Time                         `json:"createdAt"`
+}
+
+type conversationAnswerSourceCountResp struct {
+	SourceType conversation.CitationSourceType `json:"sourceType"`
+	Count      int                             `json:"count"`
+}
+
+type conversationAnswerProvenanceResp struct {
+	ExecutionPath  conversation.AgentRunExecutionPath  `json:"executionPath"`
+	CacheLayer     conversation.AgentRunCacheLayer     `json:"cacheLayer,omitempty"`
+	Outcome        conversation.AgentRunOutcome        `json:"outcome"`
+	ToolCalls      int                                 `json:"toolCalls"`
+	DurationMillis int64                               `json:"durationMillis"`
+	Sources        []conversationAnswerSourceCountResp `json:"sources"`
 }
 
 type conversationTurnResponse struct {
@@ -519,7 +536,7 @@ func parseConversationAttachments(values []conversationAttachmentRequest) ([]con
 
 func conversationResponseFrom(item conversation.Conversation) conversationResponse {
 	return conversationResponse{
-		ID: item.ID.String(), Title: item.Title, Status: item.Status,
+		ID: item.ID.String(), Title: item.Title, FirstUserMessage: item.FirstUserMessage, Status: item.Status,
 		CreatedAt: item.CreatedAt.UTC(), UpdatedAt: item.UpdatedAt.UTC(), LastMessageAt: item.LastMessageAt,
 	}
 }
@@ -548,12 +565,30 @@ func conversationMessageResponseFrom(item conversation.Message) conversationMess
 			SourceRef: citation.SourceRef, ContentSHA256: citation.ContentSHA256,
 		})
 	}
-	return conversationMessageResponse{
+	response := conversationMessageResponse{
 		ID: item.ID.String(), ConversationID: item.ConversationID.String(), Seq: item.Seq,
 		Role: item.Role, Content: item.Content, ContentSchemaVersion: item.ContentSchemaVersion,
 		CaseReferences: cases, TaskReferences: tasks, Attachments: attachments,
 		Citations: citations, CreatedAt: item.CreatedAt.UTC(),
 	}
+	if item.TurnID != nil {
+		turnID := item.TurnID.String()
+		response.TurnID = &turnID
+	}
+	if item.Provenance != nil {
+		sources := make([]conversationAnswerSourceCountResp, 0, len(item.Provenance.Sources))
+		for _, source := range item.Provenance.Sources {
+			sources = append(sources, conversationAnswerSourceCountResp{
+				SourceType: source.SourceType, Count: source.Count,
+			})
+		}
+		response.Provenance = &conversationAnswerProvenanceResp{
+			ExecutionPath: item.Provenance.ExecutionPath, CacheLayer: item.Provenance.CacheLayer,
+			Outcome: item.Provenance.Outcome, ToolCalls: item.Provenance.ToolCalls,
+			DurationMillis: item.Provenance.DurationMillis, Sources: sources,
+		}
+	}
+	return response
 }
 
 func conversationTurnDetailResponseFrom(item conversation.TurnDetail) conversationTurnDetailResponse {

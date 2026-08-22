@@ -37,7 +37,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
   const columns: Column<CatalogEntry>[] = [
     {
       key: 'object',
-      title: '表 / 字段',
+      title: '数据项',
       render: (e) => (
         <span>
           <span className="text-ink-48">{e.schemaName}.</span>
@@ -49,7 +49,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
     },
     {
       key: 'type',
-      title: '类型',
+      title: '数据类型',
       render: (e) => <code className="text-[12px] text-ink-48">{e.dataType}</code>,
     },
     {
@@ -67,7 +67,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
             )}
           </div>
         ) : (
-          <span className="text-warn">待补充（可由 LLM 生成候选，需人工确认）</span>
+          <span className="text-warn">待补充说明</span>
         ),
     },
     {
@@ -81,7 +81,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
     },
     {
       key: 'queryable',
-      title: '可查询',
+      title: '允许核对',
       render: (e) => (
         <button
           type="button"
@@ -90,9 +90,9 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
           className={`press focus-ring inline-flex h-7 items-center rounded-full px-3 text-[12px] font-semibold ${
             e.queryable ? 'bg-ok-soft text-ok' : 'bg-neutral-soft text-neutral-muted'
           } ${editable ? '' : 'cursor-default opacity-80'}`}
-          title={editable ? '点击切换白名单（仅 draft 可编辑）' : '仅 draft 版本可编辑'}
+          title={editable ? '点击调整允许核对范围' : '已发布版本不可修改'}
         >
-          {e.queryable ? '在白名单' : '不可查询'}
+          {e.queryable ? '允许' : '不允许'}
         </button>
       ),
     },
@@ -104,7 +104,7 @@ function EntriesTable({ version }: { version: CatalogVersion }) {
       rows={entries.data ?? []}
       rowKey={(e) => e.entryId}
       loading={entries.isPending}
-      emptyText="该版本暂无条目"
+      emptyText="该版本暂无数据项"
     />
   )
 }
@@ -152,9 +152,7 @@ export function DataSourcesPage() {
     <div className="flex flex-col gap-5">
       <Card className="bg-pearl px-5 py-3.5">
         <p className="text-[12px] leading-[1.7] text-ink-48">
-          连接地址与凭证由配置文件装配，不经过本界面。这里只管理安全元数据与 Schema
-          Catalog：扫描只读取表结构元数据，发布后的白名单决定 Text-to-SQL
-          的查询边界；运行中的诊断继续使用任务创建时绑定的版本。
+          这里维护排查过程中可以核对的数据范围。更新数据结构不会读取业务记录；发布后，新任务会按最新范围执行。
         </p>
       </Card>
 
@@ -181,13 +179,13 @@ export function DataSourcesPage() {
               </Badge>
             </div>
             <p className="text-[12px] text-ink-48">
-              sqlserver · {d.environment} · 检查于 {fmtDateTime(d.lastCheckAt)}
+              {d.environment} 环境 · 检查于 {fmtDateTime(d.lastCheckAt)}
             </p>
             <div className="mt-3 flex items-center gap-2 text-[12px]">
               {d.publishedCatalogVersion ? (
-                <Badge tone="green">Catalog v{d.publishedCatalogVersion} 已发布</Badge>
+                <Badge tone="green">数据目录 v{d.publishedCatalogVersion} 已发布</Badge>
               ) : (
-                <Badge tone="orange">未发布 Catalog，不可用于 Text-to-SQL</Badge>
+                <Badge tone="orange">数据目录尚未发布</Badge>
               )}
               {d.lastScanStatus && (
                 <Badge tone={scanStatusMeta[d.lastScanStatus].tone}>
@@ -202,14 +200,14 @@ export function DataSourcesPage() {
       {/* 版本列表 */}
       <Card className="p-6">
         <div className="mb-4 flex items-center justify-between gap-4">
-          <CardTitle>Catalog 版本</CardTitle>
+          <CardTitle>数据目录版本</CardTitle>
           <Button
             variant="neutral"
             size="sm"
             onClick={() => scan.mutate()}
             disabled={scan.isPending}
           >
-            发起 Schema 扫描
+            更新数据结构
           </Button>
         </div>
         {scan.isError && (
@@ -219,7 +217,7 @@ export function DataSourcesPage() {
         )}
         {versionList.length === 0 ? (
           <p className="py-6 text-center text-[13px] text-ink-48">
-            尚未扫描；发起 Schema 扫描后生成 draft 版本
+            尚未生成数据目录，请先更新数据结构
           </p>
         ) : (
           <div className="flex flex-col gap-2">
@@ -256,7 +254,7 @@ export function DataSourcesPage() {
                     size="sm"
                     onClick={() => setSelectedVersion(v.versionId)}
                   >
-                    查看条目
+                    查看数据项
                   </Button>
                   {v.status === 'draft' && v.scanStatus === 'succeeded' && (
                     <Button
@@ -279,14 +277,14 @@ export function DataSourcesPage() {
         <div>
           <div className="mb-3 flex items-center gap-3">
             <h3 className="text-[15px] font-semibold text-ink">
-              v{activeVersion.version} 条目
+              v{activeVersion.version} 数据项
             </h3>
             <Badge tone={catalogStatusMeta[activeVersion.status].tone}>
               {catalogStatusMeta[activeVersion.status].label}
             </Badge>
             {activeVersion.status === 'draft' && (
               <span className="text-[12px] text-ink-48">
-                draft 可编辑白名单；发布后不可修改
+                草稿版本可调整允许核对范围，发布后不可修改
               </span>
             )}
           </div>

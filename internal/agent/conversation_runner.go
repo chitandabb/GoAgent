@@ -800,7 +800,18 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 				return nil, err
 			}
 			startedAt := time.Now()
+			activityID := uuid.New()
+			displayName := conversationToolDisplayName(input.Name)
+			inputSummary := conversationToolInputSummary(input.Name, input.Arguments)
+			recordConversationToolActivity(ctx, conversation.TurnEventToolStarted, conversation.TurnToolActivity{
+				ActivityID: activityID, ToolName: input.Name, DisplayName: displayName,
+				Status: conversation.TurnToolActivityRunning, InputSummary: inputSummary,
+			})
 			output, err := next(ctx, input)
+			activityResult := ""
+			if output != nil {
+				activityResult = output.Result
+			}
 			if trace := conversationCitationTraceFromContext(ctx); trace != nil {
 				snapshot := ""
 				if output != nil {
@@ -839,6 +850,16 @@ func newConversationToolTraceMiddleware(maxResultBytes int) compose.ToolMiddlewa
 				entry.Error = "tool execution failed"
 			}
 			traceFromContext(ctx).append(entry, "", nil)
+			activityStatus := conversation.TurnToolActivitySucceeded
+			if err != nil {
+				activityStatus = conversation.TurnToolActivityFailed
+			}
+			recordConversationToolActivity(ctx, conversation.TurnEventToolCompleted, conversation.TurnToolActivity{
+				ActivityID: activityID, ToolName: input.Name, DisplayName: displayName,
+				Status: activityStatus, InputSummary: inputSummary,
+				OutputSummary: conversationToolOutputSummary(input.Name, activityResult, err),
+				DurationMS:    entry.DurationMS,
+			})
 			return output, err
 		}
 	}}

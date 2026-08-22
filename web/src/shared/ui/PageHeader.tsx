@@ -11,13 +11,13 @@ export function PageHeader({
   eyebrow?: React.ReactNode
 }) {
   return (
-    <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <header className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-divider pb-5">
       <div>
         {eyebrow && (
-          <div className="mb-1 text-[13px] font-semibold text-ink-48">{eyebrow}</div>
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-primary">{eyebrow}</div>
         )}
-        <h1 className="text-[28px] font-semibold leading-[1.15] text-ink">{title}</h1>
-        {subtitle && <p className="mt-2 text-[14px] text-ink-48">{subtitle}</p>}
+        <h1 className="text-[25px] font-semibold leading-[1.18] tracking-[-0.01em] text-ink">{title}</h1>
+        {subtitle && <p className="mt-1.5 text-[13px] text-ink-48">{subtitle}</p>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-3">{actions}</div>}
     </header>

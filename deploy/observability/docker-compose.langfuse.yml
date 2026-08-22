@@ -25,6 +25,7 @@ services:
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
       CLICKHOUSE_USER: langfuse
       CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?required}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
       REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:?required}

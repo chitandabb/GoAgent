@@ -124,13 +124,14 @@ func (s CitationSourceType) Valid() bool {
 }
 
 type Conversation struct {
-	ID            uuid.UUID
-	UserID        uuid.UUID
-	Title         string
-	Status        Status
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	LastMessageAt *time.Time
+	ID               uuid.UUID
+	UserID           uuid.UUID
+	Title            string
+	FirstUserMessage string
+	Status           Status
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	LastMessageAt    *time.Time
 }
 
 type CaseReference struct {
@@ -159,7 +160,29 @@ type Message struct {
 	ReportReferences     []ReportReference
 	Attachments          []MessageAttachment
 	Citations            []MessageCitation
+	TurnID               *uuid.UUID
+	Provenance           *AnswerProvenance
 	CreatedAt            time.Time
+}
+
+// AnswerSourceCount is a bounded source-class summary for one completed
+// assistant answer. It intentionally carries no source content; detailed,
+// authorized citations remain on Message.Citations.
+type AnswerSourceCount struct {
+	SourceType CitationSourceType
+	Count      int
+}
+
+// AnswerProvenance lets the product explain how an answer was produced without
+// exposing prompts, raw Tool payloads, credentials, or model reasoning text.
+type AnswerProvenance struct {
+	TurnID         uuid.UUID
+	ExecutionPath  AgentRunExecutionPath
+	CacheLayer     AgentRunCacheLayer
+	Outcome        AgentRunOutcome
+	ToolCalls      int
+	DurationMillis int64
+	Sources        []AnswerSourceCount
 }
 
 // MessageCitation is a safe, immutable source identity attached to an assistant
@@ -585,6 +608,53 @@ type AsyncRepository interface {
 	FailTurnExecution(ctx context.Context, userID, turnID uuid.UUID, workerID string, failure *AgentRunFailureRecord, failedAt time.Time) error
 }
 
+// turnActivityRepository is an internal seam implemented by the PostgreSQL
+// adapter. Keeping it separate from Repository lets lightweight adapters omit
+// live activity persistence while production receives the full audit trail.
+type turnActivityRepository interface {
+	AppendTurnToolActivity(
+		ctx context.Context,
+		userID, turnID uuid.UUID,
+		workerID string,
+		eventType TurnEventType,
+		activity TurnToolActivity,
+		createdAt time.Time,
+	) error
+}
+
+type repositoryTurnActivitySink struct {
+	repository turnActivityRepository
+	userID     uuid.UUID
+	turnID     uuid.UUID
+	workerID   string
+	clock      func() time.Time
+}
+
+func (s repositoryTurnActivitySink) RecordTurnToolActivity(
+	ctx context.Context,
+	eventType TurnEventType,
+	activity TurnToolActivity,
+) error {
+	return s.repository.AppendTurnToolActivity(
+		ctx, s.userID, s.turnID, s.workerID, eventType, activity, s.clock().UTC(),
+	)
+}
+
+func (s *Service) withTurnActivitySink(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	workerID string,
+) context.Context {
+	repository, ok := s.repository.(turnActivityRepository)
+	if !ok {
+		return ctx
+	}
+	return WithTurnActivitySink(ctx, repositoryTurnActivitySink{
+		repository: repository, userID: userID, turnID: turnID,
+		workerID: strings.TrimSpace(workerID), clock: s.clock,
+	})
+}
+
 // DiagnosisTaskCreator is the application command boundary. The conversation
 // package never writes diagnosis tables directly; the existing diagnosis service
 // remains responsible for snapshots, fingerprints, events and Outbox.
@@ -890,6 +960,7 @@ func (s *Service) ExecuteTurn(
 		UserMessageID:  started.UserMessage.ID,
 		Actor:          actor,
 	})
+	commandCtx = s.withTurnActivitySink(commandCtx, actor.UserID, started.TurnID, "")
 	agentRequest := AgentRequest{
 		Conversation: current,
 		UserMessage:  started.UserMessage,
@@ -1288,6 +1359,9 @@ func (s *Service) ExecuteAcceptedTurn(ctx context.Context, execution TurnExecuti
 		UserMessageID:  execution.Turn.UserMessage.ID,
 		Actor:          execution.Actor,
 	})
+	commandCtx = s.withTurnActivitySink(
+		commandCtx, execution.Actor.UserID, execution.TurnID, workerID,
+	)
 	agentRequest := AgentRequest{
 		Conversation: execution.Conversation,
 		UserMessage:  execution.Turn.UserMessage,

@@ -106,7 +106,7 @@ export function CasesPage() {
   if (dataSources.isError) {
     return (
       <div>
-        <PageHeader title="外部工单" subtitle="实时读取 ERP 工单数据" />
+        <PageHeader title="工单" subtitle="选择一条客户反馈，整理成开发可跟进的排查单" />
         <EmptyState
           title="数据源暂时不可用"
           description={dataSources.error instanceof Error ? dataSources.error.message : '无法读取数据源'}
@@ -119,8 +119,8 @@ export function CasesPage() {
   return (
     <div>
       <PageHeader
-        title="外部工单"
-        subtitle="实时读取 SQL Server 工单数据（只读）；发起诊断时才创建不可变快照"
+        title="工单"
+        subtitle="选择一条客户反馈，整理成开发可跟进的排查单"
       />
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
@@ -162,7 +162,7 @@ export function CasesPage() {
       {dataSources.data?.length === 0 ? (
         <EmptyState
           title="没有可用数据源"
-          description="后端未返回已启用的 ERP 数据源，暂时无法读取工单。"
+          description="当前没有已启用的业务数据源，暂时无法读取工单。"
         />
       ) : cases.isError ? (
         <EmptyState
@@ -175,14 +175,15 @@ export function CasesPage() {
           <DataTable
             columns={columns}
             rows={rows}
+            total={total}
             rowKey={(c) => c.externalCaseId}
             onRowClick={(c) => navigate(`/cases/${c.externalCaseId}`)}
             loading={cases.isPending}
             emptyText="没有符合条件的工单"
           />
-          {total > 0 && (
+          {totalPages > 1 && (
             <div className="mt-4 flex items-center justify-between gap-4 text-[12px] text-ink-48">
-              <span>共 {total} 条 · 第 {page}/{totalPages} 页</span>
+              <span>第 {page} / {totalPages} 页</span>
               <div className="flex gap-2">
                 <Button variant="neutral" size="sm" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
                   上一页

@@ -23,6 +23,7 @@ interface Props<T> {
   rowKey: (row: T) => string
   onRowClick?: (row: T) => void
   loading?: boolean
+  total?: number
   emptyText?: string
   emptyDescription?: string
   emptyAction?: ReactNode
@@ -34,6 +35,7 @@ export function DataTable<T>({
   rowKey,
   onRowClick,
   loading = false,
+  total,
   emptyText = '暂无数据',
   emptyDescription,
   emptyAction,
@@ -123,7 +125,7 @@ export function DataTable<T>({
       )}
       {!loading && rows.length > 0 && (
         <div className="border-t border-divider px-5 py-2.5 text-[12px] text-ink-48">
-          共 {rows.length} 条
+          共 {total ?? rows.length} 条
         </div>
       )}
     </Card>

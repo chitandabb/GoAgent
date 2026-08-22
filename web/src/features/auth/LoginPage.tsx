@@ -37,7 +37,7 @@ export function LoginPage() {
         <h1 className="text-[40px] leading-[1.1]">
           <Wordmark className="tracking-[-0.4px]" />
         </h1>
-        <p className="mt-3 text-[17px] text-ink-48">工单诊断辅助系统</p>
+        <p className="mt-3 text-[17px] text-ink-48">业务问题整理与协作平台</p>
       </div>
 
       <form

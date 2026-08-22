@@ -1654,6 +1654,7 @@ components:
       properties:
         id: {type: string, format: uuid}
         title: {type: string}
+        firstUserMessage: {type: string, description: "标题为空时用于会话列表展示的首条用户消息"}
         status: {$ref: "#/components/schemas/ConversationStatus"}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
@@ -1775,6 +1776,12 @@ components:
           maxItems: 20
           items:
             $ref: "#/components/schemas/ConversationCitation"
+        turnId:
+          type: string
+          format: uuid
+          description: 生成该助手消息的回合；用户消息和历史非 Agent 消息可以省略
+        provenance:
+          $ref: "#/components/schemas/ConversationAnswerProvenance"
         createdAt: {type: string, format: date-time}
     ConversationCitation:
       type: object
@@ -1786,6 +1793,34 @@ components:
           enum: [knowledge_chunk, attachment, web]
         sourceRef: {type: string, minLength: 1, maxLength: 2048}
         contentSha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+    ConversationAnswerSourceCount:
+      type: object
+      required: [sourceType, count]
+      properties:
+        sourceType:
+          type: string
+          enum: [knowledge_chunk, attachment, web]
+        count: {type: integer, minimum: 1}
+    ConversationAnswerProvenance:
+      type: object
+      required: [executionPath, outcome, toolCalls, durationMillis, sources]
+      description: 面向用户的回答来源摘要；不包含 Prompt、模型思维过程或原始工具载荷
+      properties:
+        executionPath:
+          type: string
+          enum: [agent, semantic_cache_hit]
+        cacheLayer:
+          type: string
+          enum: [exact, semantic]
+        outcome:
+          type: string
+          enum: [answered, insufficient_evidence, degraded, failed]
+        toolCalls: {type: integer, minimum: 0}
+        durationMillis: {type: integer, format: int64, minimum: 0}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationAnswerSourceCount"
     AttachmentUpload:
       type: object
       required: [attachmentId, conversationId, scope, status, originalName, mediaType, sizeBytes, contentSha256, replayed, uploadedAt]
@@ -1954,7 +1989,7 @@ components:
         seq: {type: integer, format: int64, minimum: 1}
         eventType:
           type: string
-          enum: [turn_queued, turn_running, turn_retry_scheduled, turn_message_delta, turn_completed, turn_failed]
+          enum: [turn_queued, turn_running, turn_retry_scheduled, turn_tool_started, turn_tool_completed, turn_message_delta, turn_completed, turn_failed]
         payload:
           type: object
           additionalProperties: true

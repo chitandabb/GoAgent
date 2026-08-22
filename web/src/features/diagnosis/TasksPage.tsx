@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import type { DiagnosisTaskListItem, TaskStatus } from '@/shared/api/m1-types'
 import * as api from '@/shared/api'
 import { taskStatusMeta } from '@/shared/lib/status'
@@ -22,6 +22,7 @@ const statusOptions = [
 ]
 
 const runningStatuses: TaskStatus[] = ['pending', 'running', 'cancel_requested']
+const PAGE_SIZE = 6
 
 export function TasksPage() {
   const navigate = useNavigate()
@@ -35,16 +36,20 @@ export function TasksPage() {
       api.listDiagnosisTasks({
         status: status === 'all' ? undefined : (status as TaskStatus),
         page,
-        pageSize: 20,
+        pageSize: PAGE_SIZE,
       }),
     // 列表里还有活跃任务时轮询刷新状态
     refetchInterval: (q) =>
       (q.state.data?.items ?? []).some((item) => runningStatuses.includes(item.status)) ? 5000 : false,
+    placeholderData: keepPreviousData,
   })
 
   const tasks = query.data?.items ?? []
   const total = query.data?.total ?? 0
-  const totalPages = Math.max(1, Math.ceil(total / 20))
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  useEffect(() => {
+    if (query.data && page > totalPages) setPage(totalPages)
+  }, [page, query.data, totalPages])
 
   const columns: Column<DiagnosisTaskListItem>[] = [
     {
@@ -67,7 +72,7 @@ export function TasksPage() {
     },
     {
       key: 'request',
-      title: '诊断请求',
+      title: '问题说明',
       className: 'max-w-[260px]',
       render: (task) => (
         <p className="line-clamp-1 text-[12px] text-ink-80">{task.requestText}</p>
@@ -84,7 +89,7 @@ export function TasksPage() {
     },
     {
       key: 'attempt',
-      title: '执行次数',
+      title: '处理次数',
       render: (task) => <span className="tabular-nums">{task.attemptCount}</span>,
     },
     {
@@ -109,8 +114,8 @@ export function TasksPage() {
   return (
     <div>
       <PageHeader
-        title="诊断任务"
-        subtitle="从服务端读取你创建过的全部诊断任务；管理员可查看所有任务"
+        title="排查任务"
+        subtitle="查看处理进度、完成结果和失败原因"
         actions={<FilterChips options={statusOptions} value={status} onChange={(value) => { setStatus(value); setPage(1) }} />}
       />
 
@@ -119,9 +124,9 @@ export function TasksPage() {
           value={taskId}
           onChange={(event) => setTaskId(event.target.value)}
           onKeyDown={(event) => event.key === 'Enter' && openTask()}
-          placeholder="输入已知 taskId 直接打开"
+          placeholder="输入任务编号直接打开"
           className="max-w-md bg-canvas"
-          aria-label="任务 ID"
+          aria-label="任务编号"
         />
         <Button variant="neutral" onClick={openTask} disabled={!taskId.trim()}>
           打开任务
@@ -132,28 +137,29 @@ export function TasksPage() {
         <DataTable columns={columns} rows={[]} rowKey={(task) => task.taskId} loading />
       ) : tasks.length === 0 ? (
         <EmptyState
-          title={status === 'all' ? '还没有诊断任务' : '当前筛选下没有任务'}
-          description="从工单详情页发起诊断后，任务会出现在这里。"
-          action={<Button onClick={() => navigate('/cases')}>前往外部工单</Button>}
+          title={status === 'all' ? '还没有排查任务' : '当前筛选下没有任务'}
+          description="从工单进入问题整理工作台并提交后，任务会出现在这里。"
+          action={<Button onClick={() => navigate('/cases')}>前往工单</Button>}
         />
       ) : (
         <>
           <DataTable
             columns={columns}
             rows={tasks}
+            total={total}
             rowKey={(task) => task.taskId}
             onRowClick={(task) => navigate(`/tasks/${task.taskId}`)}
             loading={query.isFetching}
             emptyText="当前筛选下没有任务"
           />
-          {total > 20 && (
+          {totalPages > 1 && (
             <div className="mt-4 flex items-center justify-between text-[12px] text-ink-48">
-              <span>共 {total} 条 · 第 {page} / {totalPages} 页</span>
+              <span>第 {page} / {totalPages} 页</span>
               <div className="flex items-center gap-2">
-                <Button variant="neutral" size="sm" disabled={page <= 1 || query.isFetching} onClick={() => setPage((value) => value - 1)}>
+                <Button aria-label="上一页" variant="neutral" size="sm" disabled={page <= 1 || query.isFetching} onClick={() => setPage((value) => value - 1)}>
                   上一页
                 </Button>
-                <Button variant="neutral" size="sm" disabled={page >= totalPages || query.isFetching} onClick={() => setPage((value) => value + 1)}>
+                <Button aria-label="下一页" variant="neutral" size="sm" disabled={page >= totalPages || query.isFetching} onClick={() => setPage((value) => value + 1)}>
                   下一页
                 </Button>
               </div>

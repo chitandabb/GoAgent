@@ -95,9 +95,16 @@ func (r *ConversationRepository) Get(
 	}
 	var record conversationRecord
 	result := ResolveDB(ctx, r.db).Raw(`
-SELECT id, user_id, title, status, last_message_at, created_at, updated_at
-FROM conversations
-WHERE id = ? AND user_id = ?`, conversationID, userID).Scan(&record)
+SELECT c.id, c.user_id, c.title, c.status, c.last_message_at, c.created_at, c.updated_at,
+       COALESCE((
+           SELECT message.content
+           FROM conversation_messages message
+           WHERE message.conversation_id = c.id AND message.role = 'user'
+           ORDER BY message.seq ASC
+           LIMIT 1
+       ), '') AS first_user_message
+FROM conversations c
+WHERE c.id = ? AND c.user_id = ?`, conversationID, userID).Scan(&record)
 	if result.Error != nil {
 		return conversation.Conversation{}, TranslateError(result.Error)
 	}
@@ -126,10 +133,17 @@ func (r *ConversationRepository) List(
 	}
 	var records []conversationRecord
 	result := db.Raw(`
-SELECT id, user_id, title, status, last_message_at, created_at, updated_at
-FROM conversations
-WHERE user_id = ?
-ORDER BY COALESCE(last_message_at, updated_at) DESC, id DESC
+SELECT c.id, c.user_id, c.title, c.status, c.last_message_at, c.created_at, c.updated_at,
+       COALESCE((
+           SELECT message.content
+           FROM conversation_messages message
+           WHERE message.conversation_id = c.id AND message.role = 'user'
+           ORDER BY message.seq ASC
+           LIMIT 1
+       ), '') AS first_user_message
+FROM conversations c
+WHERE c.user_id = ?
+ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC, c.id DESC
 LIMIT ? OFFSET ?`, userID, query.PageSize, (query.Page-1)*query.PageSize).Scan(&records)
 	if result.Error != nil {
 		return conversation.ListResult{}, TranslateError(result.Error)
@@ -180,6 +194,9 @@ LIMIT ?`, conversationID, query.AfterSeq, query.Limit+1).Scan(&records)
 		items = append(items, messageFromRecord(record))
 	}
 	if err := r.loadReferences(db, items); err != nil {
+		return conversation.MessagePage{}, err
+	}
+	if err := loadAnswerProvenance(db, items); err != nil {
 		return conversation.MessagePage{}, err
 	}
 	nextAfterSeq := query.AfterSeq
@@ -262,6 +279,9 @@ WHERE message.id = ? AND message.conversation_id = ? AND conversation.user_id = 
 	if err := r.loadReferences(ResolveDB(ctx, r.db), messages); err != nil {
 		return conversation.Message{}, err
 	}
+	if err := loadAnswerProvenance(ResolveDB(ctx, r.db), messages); err != nil {
+		return conversation.Message{}, err
+	}
 	return messages[0], nil
 }
 
@@ -292,6 +312,9 @@ LIMIT 1`, conversationID, userID).Scan(&record)
 	}
 	messages := []conversation.Message{messageFromRecord(record)}
 	if err := r.loadReferences(ResolveDB(ctx, r.db), messages); err != nil {
+		return conversation.Message{}, err
+	}
+	if err := loadAnswerProvenance(ResolveDB(ctx, r.db), messages); err != nil {
 		return conversation.Message{}, err
 	}
 	return messages[0], nil
@@ -922,6 +945,7 @@ FOR UPDATE`, turnID, userID).Scan(&turn)
 		if err := insertConversationRunObservation(tx, turnID, response.RunObservation, "", completedAt); err != nil {
 			return err
 		}
+		applyResponseProvenance(&assistantMessage, turnID, response.RunObservation)
 		query = tx.Exec(`
 UPDATE conversation_turns
 SET status = ?, assistant_message_id = ?, lease_owner = NULL, lease_expires_at = NULL,
@@ -946,10 +970,10 @@ WHERE id = ? AND user_id = ? AND status = ? AND lease_owner = ? AND lease_expire
 				return err
 			}
 		}
-		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
-			"assistantMessageId": assistantMessageIDString,
-			"citationCount":      len(response.Citations),
-		}, completedAt); err != nil {
+		if err := appendConversationTurnEvent(
+			tx, turnID, turn.ConversationID, conversation.TurnEventCompleted,
+			conversationTurnCompletedPayload(response, assistantMessageIDString), completedAt,
+		); err != nil {
 			return err
 		}
 		if r.shouldScheduleAsyncMemory(response.RunObservation.PromptManifest) {
@@ -1220,6 +1244,143 @@ VALUES (?, ?, ?, ?, ?, 1, ?)`,
 	return nil
 }
 
+func conversationTurnCompletedPayload(
+	response conversation.AgentResponse,
+	assistantMessageID string,
+) map[string]any {
+	payload := map[string]any{
+		"assistantMessageId": assistantMessageID,
+		"citationCount":      len(response.Citations),
+	}
+	if response.RunObservation == nil {
+		return payload
+	}
+	observation := response.RunObservation
+	executionPath := observation.ExecutionPath
+	if executionPath == "" {
+		executionPath = conversation.AgentRunExecutionAgent
+	}
+	counts := make(map[conversation.CitationSourceType]int)
+	for _, source := range observation.RetrievedSources {
+		counts[source.SourceType]++
+	}
+	sources := make([]map[string]any, 0, len(counts))
+	for _, sourceType := range []conversation.CitationSourceType{
+		conversation.CitationSourceAttachment,
+		conversation.CitationSourceKnowledgeChunk,
+		conversation.CitationSourceWeb,
+	} {
+		if count := counts[sourceType]; count > 0 {
+			sources = append(sources, map[string]any{"sourceType": sourceType, "count": count})
+		}
+	}
+	payload["provenance"] = map[string]any{
+		"executionPath":  executionPath,
+		"cacheLayer":     observation.CacheLayer,
+		"outcome":        observation.Outcome,
+		"toolCalls":      observation.ToolCalls,
+		"durationMillis": observation.DurationMillis,
+		"sources":        sources,
+	}
+	return payload
+}
+
+func applyResponseProvenance(
+	message *conversation.Message,
+	turnID uuid.UUID,
+	observation *conversation.AgentRunObservation,
+) {
+	if message == nil || turnID == uuid.Nil {
+		return
+	}
+	messageTurnID := turnID
+	message.TurnID = &messageTurnID
+	if observation == nil {
+		return
+	}
+	executionPath := observation.ExecutionPath
+	if executionPath == "" {
+		executionPath = conversation.AgentRunExecutionAgent
+	}
+	provenance := &conversation.AnswerProvenance{
+		TurnID: turnID, ExecutionPath: executionPath, CacheLayer: observation.CacheLayer,
+		Outcome: observation.Outcome, ToolCalls: observation.ToolCalls,
+		DurationMillis: observation.DurationMillis,
+	}
+	counts := make(map[conversation.CitationSourceType]int)
+	for _, source := range observation.RetrievedSources {
+		counts[source.SourceType]++
+	}
+	for _, sourceType := range []conversation.CitationSourceType{
+		conversation.CitationSourceAttachment,
+		conversation.CitationSourceKnowledgeChunk,
+		conversation.CitationSourceWeb,
+	} {
+		if count := counts[sourceType]; count > 0 {
+			provenance.Sources = append(provenance.Sources, conversation.AnswerSourceCount{
+				SourceType: sourceType, Count: count,
+			})
+		}
+	}
+	message.Provenance = provenance
+}
+
+func (r *ConversationRepository) AppendTurnToolActivity(
+	ctx context.Context,
+	userID, turnID uuid.UUID,
+	workerID string,
+	eventType conversation.TurnEventType,
+	activity conversation.TurnToolActivity,
+	createdAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("conversation repository is unavailable")
+	}
+	workerID = strings.TrimSpace(workerID)
+	if userID == uuid.Nil || turnID == uuid.Nil || createdAt.IsZero() || activity.Validate(eventType) != nil {
+		return conversation.ErrInvalidMessage
+	}
+	return ResolveDB(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+		var turn struct {
+			ConversationID uuid.UUID               `gorm:"column:conversation_id"`
+			Status         conversation.TurnStatus `gorm:"column:status"`
+			LeaseOwner     *string                 `gorm:"column:lease_owner"`
+			AttemptCount   int                     `gorm:"column:attempt_count"`
+		}
+		query := tx.Raw(`
+SELECT conversation_id, status, lease_owner, attempt_count
+FROM conversation_turns
+WHERE id = ? AND user_id = ?
+FOR UPDATE`, turnID, userID).Scan(&turn)
+		if query.Error != nil {
+			return TranslateError(query.Error)
+		}
+		if query.RowsAffected == 0 {
+			return repository.Wrap(repository.ErrNotFound, gorm.ErrRecordNotFound)
+		}
+		if turn.Status != conversation.TurnStatusRunning {
+			return conversation.ErrTurnLeaseLost
+		}
+		if workerID != "" && (turn.LeaseOwner == nil || strings.TrimSpace(*turn.LeaseOwner) != workerID) {
+			return conversation.ErrTurnLeaseLost
+		}
+		attemptCount := turn.AttemptCount
+		if attemptCount < 1 {
+			attemptCount = 1
+		}
+		return appendConversationTurnEvent(tx, turnID, turn.ConversationID, eventType, map[string]any{
+			"activityId":     activity.ActivityID.String(),
+			"toolName":       activity.ToolName,
+			"displayName":    activity.DisplayName,
+			"status":         activity.Status,
+			"inputSummary":   activity.InputSummary,
+			"outputSummary":  activity.OutputSummary,
+			"durationMillis": activity.DurationMS,
+			"attemptCount":   attemptCount,
+		}, createdAt)
+	})
+}
+
 func (r *ConversationRepository) CompleteTurn(
 	ctx context.Context,
 	userID, turnID uuid.UUID,
@@ -1306,6 +1467,7 @@ FOR UPDATE`, turnID, userID).Scan(&turn)
 		if err := insertConversationRunObservation(tx, turnID, response.RunObservation, "", completedAt); err != nil {
 			return err
 		}
+		applyResponseProvenance(&assistantMessage, turnID, response.RunObservation)
 		query = tx.Exec(`
 UPDATE conversation_turns
 SET status = ?, assistant_message_id = ?, lease_owner = NULL, lease_expires_at = NULL,
@@ -1330,10 +1492,10 @@ WHERE id = ? AND user_id = ? AND status = ?`,
 				return err
 			}
 		}
-		if err := appendConversationTurnEvent(tx, turnID, turn.ConversationID, conversation.TurnEventCompleted, map[string]any{
-			"assistantMessageId": assistantMessageIDString,
-			"citationCount":      len(response.Citations),
-		}, completedAt); err != nil {
+		if err := appendConversationTurnEvent(
+			tx, turnID, turn.ConversationID, conversation.TurnEventCompleted,
+			conversationTurnCompletedPayload(response, assistantMessageIDString), completedAt,
+		); err != nil {
 			return err
 		}
 		result = conversation.ConversationTurn{UserMessage: userMessage, AssistantMessage: assistantMessage}
@@ -1623,6 +1785,17 @@ WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userI
 	if query.Error != nil {
 		return conversation.Message{}, TranslateError(query.Error)
 	}
+	if input.Role == conversation.MessageRoleUser && nextSeq == 1 {
+		if title := conversationTitleFromMessage(input.Content); title != "" {
+			query = tx.Exec(`
+UPDATE conversations
+SET title = CASE WHEN btrim(title) = '' THEN ? ELSE title END
+WHERE id = ? AND user_id = ?`, title, input.ConversationID, userID)
+			if query.Error != nil {
+				return conversation.Message{}, TranslateError(query.Error)
+			}
+		}
+	}
 	message := conversation.Message{
 		ID: id, ConversationID: input.ConversationID, Seq: nextSeq,
 		Role: input.Role, Content: input.Content, ContentSchemaVersion: 1,
@@ -1633,6 +1806,22 @@ WHERE id = ? AND user_id = ?`, createdAt, createdAt, input.ConversationID, userI
 		return conversation.Message{}, err
 	}
 	return messages[0], nil
+}
+
+const maxConversationTitleRunes = 72
+
+// conversationTitleFromMessage keeps the sidebar useful without adding a
+// second model call to the first user turn. Explicit titles remain untouched.
+func conversationTitleFromMessage(content string) string {
+	title := strings.Join(strings.Fields(content), " ")
+	if title == "" {
+		return ""
+	}
+	runes := []rune(title)
+	if len(runes) <= maxConversationTitleRunes {
+		return title
+	}
+	return string(runes[:maxConversationTitleRunes-1]) + "…"
 }
 
 func insertConversationRunObservation(
@@ -1808,6 +1997,9 @@ WHERE message.id = ? AND message.conversation_id = ? AND conversation.user_id = 
 	}
 	messages := []conversation.Message{messageFromRecord(record)}
 	if err := loadConversationReferences(db, messages); err != nil {
+		return conversation.Message{}, err
+	}
+	if err := loadAnswerProvenance(db, messages); err != nil {
 		return conversation.Message{}, err
 	}
 	return messages[0], nil
@@ -2430,19 +2622,109 @@ func (r *ConversationRepository) loadReferences(db *gorm.DB, messages []conversa
 	return loadConversationReferences(db, messages)
 }
 
+type answerProvenanceRecord struct {
+	TurnID         uuid.UUID `gorm:"column:turn_id"`
+	MessageID      uuid.UUID `gorm:"column:message_id"`
+	ExecutionPath  *string   `gorm:"column:execution_path"`
+	CacheLayer     *string   `gorm:"column:cache_layer"`
+	Outcome        *string   `gorm:"column:outcome"`
+	ToolCalls      *int      `gorm:"column:tool_calls"`
+	DurationMillis *int64    `gorm:"column:duration_millis"`
+}
+
+type answerSourceCountRecord struct {
+	TurnID     uuid.UUID                       `gorm:"column:turn_id"`
+	SourceType conversation.CitationSourceType `gorm:"column:source_type"`
+	Count      int                             `gorm:"column:source_count"`
+}
+
+func loadAnswerProvenance(db *gorm.DB, messages []conversation.Message) error {
+	messageIDs := make([]uuid.UUID, 0, len(messages))
+	byID := make(map[uuid.UUID]*conversation.Message, len(messages))
+	for index := range messages {
+		if messages[index].Role != conversation.MessageRoleAssistant {
+			continue
+		}
+		messageIDs = append(messageIDs, messages[index].ID)
+		byID[messages[index].ID] = &messages[index]
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	var records []answerProvenanceRecord
+	query := db.Raw(`
+SELECT turn.id AS turn_id, turn.assistant_message_id AS message_id,
+       observation.execution_path, observation.cache_layer, observation.outcome,
+       observation.tool_calls, observation.duration_millis
+FROM conversation_turns turn
+LEFT JOIN conversation_turn_run_observations observation ON observation.turn_id = turn.id
+WHERE turn.assistant_message_id IN ?`, messageIDs).Scan(&records)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	turns := make(map[uuid.UUID]*conversation.AnswerProvenance, len(records))
+	turnIDs := make([]uuid.UUID, 0, len(records))
+	for _, record := range records {
+		message := byID[record.MessageID]
+		if message == nil || record.TurnID == uuid.Nil {
+			continue
+		}
+		turnID := record.TurnID
+		message.TurnID = &turnID
+		if record.ExecutionPath == nil || record.Outcome == nil || record.ToolCalls == nil || record.DurationMillis == nil {
+			continue
+		}
+		provenance := &conversation.AnswerProvenance{
+			TurnID:         record.TurnID,
+			ExecutionPath:  conversation.AgentRunExecutionPath(strings.TrimSpace(*record.ExecutionPath)),
+			Outcome:        conversation.AgentRunOutcome(strings.TrimSpace(*record.Outcome)),
+			ToolCalls:      *record.ToolCalls,
+			DurationMillis: *record.DurationMillis,
+		}
+		if record.CacheLayer != nil {
+			provenance.CacheLayer = conversation.AgentRunCacheLayer(strings.TrimSpace(*record.CacheLayer))
+		}
+		message.Provenance = provenance
+		turns[record.TurnID] = provenance
+		turnIDs = append(turnIDs, record.TurnID)
+	}
+	if len(turnIDs) == 0 {
+		return nil
+	}
+	var sourceRecords []answerSourceCountRecord
+	query = db.Raw(`
+SELECT turn_id, source_type, COUNT(*)::int AS source_count
+FROM conversation_turn_retrieved_sources
+WHERE turn_id IN ?
+GROUP BY turn_id, source_type
+ORDER BY turn_id, source_type`, turnIDs).Scan(&sourceRecords)
+	if query.Error != nil {
+		return TranslateError(query.Error)
+	}
+	for _, record := range sourceRecords {
+		if provenance := turns[record.TurnID]; provenance != nil && record.SourceType.Valid() && record.Count > 0 {
+			provenance.Sources = append(provenance.Sources, conversation.AnswerSourceCount{
+				SourceType: record.SourceType, Count: record.Count,
+			})
+		}
+	}
+	return nil
+}
+
 type conversationRecord struct {
-	ID            uuid.UUID           `gorm:"column:id"`
-	UserID        uuid.UUID           `gorm:"column:user_id"`
-	Title         string              `gorm:"column:title"`
-	Status        conversation.Status `gorm:"column:status"`
-	LastMessageAt *time.Time          `gorm:"column:last_message_at"`
-	CreatedAt     time.Time           `gorm:"column:created_at"`
-	UpdatedAt     time.Time           `gorm:"column:updated_at"`
+	ID               uuid.UUID           `gorm:"column:id"`
+	UserID           uuid.UUID           `gorm:"column:user_id"`
+	Title            string              `gorm:"column:title"`
+	FirstUserMessage string              `gorm:"column:first_user_message"`
+	Status           conversation.Status `gorm:"column:status"`
+	LastMessageAt    *time.Time          `gorm:"column:last_message_at"`
+	CreatedAt        time.Time           `gorm:"column:created_at"`
+	UpdatedAt        time.Time           `gorm:"column:updated_at"`
 }
 
 func conversationFromRecord(record conversationRecord) conversation.Conversation {
 	return conversation.Conversation{
-		ID: record.ID, UserID: record.UserID, Title: record.Title, Status: record.Status,
+		ID: record.ID, UserID: record.UserID, Title: record.Title, FirstUserMessage: record.FirstUserMessage, Status: record.Status,
 		LastMessageAt: record.LastMessageAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}
 }

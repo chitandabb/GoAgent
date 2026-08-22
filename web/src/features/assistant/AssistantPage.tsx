@@ -4,11 +4,17 @@ import { X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import * as api from '@/shared/api'
 import type {
+  ConversationAnswerProvenance,
   ConversationCaseReference,
   ConversationCitation,
   ConversationMessage,
+  TurnToolActivity,
 } from '@/shared/api/m1-types'
-import { parseTurnMessageDelta } from '@/shared/api/m1-types'
+import {
+  parseTurnCompletedProvenance,
+  parseTurnMessageDelta,
+  parseTurnToolActivity,
+} from '@/shared/api/m1-types'
 import { fmtDateTime } from '@/shared/lib/fmt'
 import { knowledgeDocumentFileAccept } from '@/shared/lib/knowledge-upload'
 import { Badge } from '@/shared/ui/Badge'
@@ -17,7 +23,15 @@ import { Card } from '@/shared/ui/Card'
 import { Spinner } from '@/shared/ui/Spinner'
 import { useToast } from '@/shared/ui/Toast'
 import { AttachmentPreviewDialog, useAttachmentPreview } from '@/shared/ui/AttachmentPreview'
-import { MessageBubble, fmtBytes } from './MessageBubble'
+import { AnswerActivity, mergeTurnActivity } from './AnswerActivity'
+import { AssistantMarkdown } from './AssistantMarkdown'
+import { MessageBubble, fmtBytes, formatAssistantContent } from './MessageBubble'
+import { AssistantDossierPanel } from './AssistantDossierPanel'
+import {
+  collapseBlankConversations,
+  latestCreatedTaskIdForCase,
+  reusableDraftConversationId,
+} from './conversation-draft'
 import { clearActiveTurn, loadActiveTurn, saveActiveTurn } from './turn-store'
 
 type TurnPhase = 'submitting' | 'queued' | 'running' | 'retry' | 'reconnecting' | 'finalizing' | 'failed'
@@ -42,13 +56,15 @@ interface ActiveTurn {
   failure?: string
   assistantMessageId?: string
   streamed: string
+  activities: TurnToolActivity[]
+  provenance?: ConversationAnswerProvenance
   connectionLost?: boolean
 }
 
 const turnPhaseMeta: Record<TurnPhase, { label: string; tone: 'gray' | 'info' | 'warn' }> = {
   submitting: { label: '发送中…', tone: 'gray' },
   queued: { label: '排队中', tone: 'gray' },
-  running: { label: '助手思考中', tone: 'info' },
+  running: { label: '正在处理', tone: 'info' },
   retry: { label: '系统重试中', tone: 'warn' },
   reconnecting: { label: '正在恢复连接', tone: 'warn' },
   finalizing: { label: '整理回答…', tone: 'gray' },
@@ -91,6 +107,22 @@ function joinedDeltaChunks(chunks: Map<number, string> | null): string {
     .join('')
 }
 
+function conversationTitle(
+  title: string,
+  firstUserMessage: string | undefined,
+  messages: ConversationMessage[],
+  active: boolean,
+): string {
+  const explicitTitle = title.trim()
+  if (explicitTitle) return explicitTitle
+  if (firstUserMessage?.trim()) return firstUserMessage.trim()
+  if (active) {
+    const firstUserMessage = messages.find((message) => message.role === 'user')?.content.trim()
+    if (firstUserMessage) return firstUserMessage
+  }
+  return '新会话'
+}
+
 export function AssistantPage() {
   const qc = useQueryClient()
   const toast = useToast()
@@ -106,6 +138,8 @@ export function AssistantPage() {
   const unsubscribeRef = useRef<(() => void) | null>(null)
   const lastTurnRef = useRef<LastTurn | null>(null)
   const autoCreatedForCaseRef = useRef<string | null>(null)
+  const justCreatedDraftIdRef = useRef<string | null>(null)
+  const createConversationInFlightRef = useRef(false)
   // delta 分块按 position 累积，重连/回放重发同一 position 时天然去重
   const deltaChunksRef = useRef<Map<number, string> | null>(null)
   const preview = useAttachmentPreview()
@@ -134,6 +168,30 @@ export function AssistantPage() {
               : current,
           )
           return
+        }
+        if (event.eventType === 'turn_tool_started' || event.eventType === 'turn_tool_completed') {
+          const activity = parseTurnToolActivity(event.payload)
+          if (!activity) return
+          setTurn((current) =>
+            current && current.turnId === turnId
+              ? {
+                  ...current,
+                  activities: mergeTurnActivity(current.activities, activity),
+                  connectionLost: false,
+                }
+              : current,
+          )
+          return
+        }
+        if (event.eventType === 'turn_completed') {
+          const provenance = parseTurnCompletedProvenance(event.payload)
+          if (provenance) {
+            setTurn((current) =>
+              current && current.turnId === turnId
+                ? { ...current, provenance, connectionLost: false }
+                : current,
+            )
+          }
         }
         setTurn((current) => {
           if (!current || current.turnId !== turnId) return current
@@ -318,6 +376,7 @@ export function AssistantPage() {
         phase,
         failure: detail.failureSummary || undefined,
         streamed: '',
+        activities: [],
       })
       if (detail.status !== 'failed') subscribeToTurn(activeId, stored.turnId)
     }).catch((error) => {
@@ -327,6 +386,7 @@ export function AssistantPage() {
         phase: 'reconnecting',
         failure: error instanceof Error ? error.message : '暂时无法恢复生成状态，请重新连接。',
         streamed: '',
+        activities: [],
         connectionLost: true,
       })
     })
@@ -341,6 +401,24 @@ export function AssistantPage() {
     enabled: activeId !== null,
   })
   const orderedMessages = [...(messages.data ?? [])].sort((a, b) => a.seq - b.seq)
+  const firstLocalUserMessage = orderedMessages.find((message) => message.role === 'user')?.content.trim()
+  const conversationCandidates = conversationList.map((conversation) =>
+    conversation.id === activeId && firstLocalUserMessage
+      ? { ...conversation, firstUserMessage: firstLocalUserMessage }
+      : conversation,
+  )
+  const visibleConversationList = collapseBlankConversations(conversationCandidates)
+  const latestTaskId = latestCreatedTaskIdForCase(orderedMessages, selectedCaseId)
+
+  // 工单上下文跟随当前会话最近一条用户消息，避免切换会话后沿用上一张工单。
+  useEffect(() => {
+    if (!activeId || !messages.isSuccess || requestedCaseId) return
+    const latestUserMessage = [...messages.data]
+      .sort((a, b) => b.seq - a.seq)
+      .find((message) => message.role === 'user')
+    const caseId = latestUserMessage?.caseReferences.find((reference) => reference.kind === 'selected')?.externalCaseId
+    setSelectedCaseId(caseId ?? null)
+  }, [activeId, messages.data, messages.isSuccess, requestedCaseId])
 
   // 新消息 / 流式内容推进时自动滚到底部
   useEffect(() => {
@@ -365,14 +443,19 @@ export function AssistantPage() {
   }, [turn, revealedRunes, orderedMessages])
 
   const createConv = useMutation({
-    mutationFn: () => api.createConversation(''),
-    onSuccess: (conv) => {
+    mutationFn: (_preserveCase: boolean) => api.createConversation(''),
+    onSuccess: (conv, preserveCase) => {
+      justCreatedDraftIdRef.current = conv.id
       qc.invalidateQueries({ queryKey: ['conversations'] })
+      if (!preserveCase) clearSelectedCase()
       setActiveId(conv.id)
     },
     onError: (error) => {
       autoCreatedForCaseRef.current = null
       toast.error(error instanceof Error ? error.message : '创建会话失败')
+    },
+    onSettled: () => {
+      createConversationInFlightRef.current = false
     },
   })
 
@@ -386,7 +469,8 @@ export function AssistantPage() {
       autoCreatedForCaseRef.current === requestedCaseId
     ) return
     autoCreatedForCaseRef.current = requestedCaseId
-    createConv.mutate()
+    createConversationInFlightRef.current = true
+    createConv.mutate(true)
   }, [activeId, conversationList.length, conversations.isPending, createConv, requestedCaseId])
 
   const uploadOne = async (key: string, file: File) => {
@@ -429,13 +513,14 @@ export function AssistantPage() {
     if (!activeId || (turn && !force)) return
     const conversationId = activeId
     deltaChunksRef.current = new Map()
-    setTurn({ turnId: '', phase: 'submitting', streamed: '' })
+    setTurn({ turnId: '', phase: 'submitting', streamed: '', activities: [] })
     try {
       const result = await api.appendTurn(
         conversationId,
         { content, attachments, caseReferences },
         api.createIdempotencyKey(),
       )
+      if (justCreatedDraftIdRef.current === conversationId) justCreatedDraftIdRef.current = null
       const turnId = result.turnId
       const submitted = { content, attachments, caseReferences }
       lastTurnRef.current = submitted
@@ -444,6 +529,7 @@ export function AssistantPage() {
         turnId,
         phase: result.status === 'queued' ? 'queued' : result.status === 'failed' ? 'failed' : 'running',
         streamed: '',
+        activities: [],
       })
       // 乐观插入用户消息
       qc.setQueryData<ConversationMessage[]>(['conversation-messages', conversationId], (current = []) => [
@@ -501,6 +587,32 @@ export function AssistantPage() {
     setSearchParams(next, { replace: true })
   }
 
+  const selectCase = (caseId: string) => {
+    setSelectedCaseId(caseId)
+    const next = new URLSearchParams(searchParams)
+    next.set('caseId', caseId)
+    setSearchParams(next, { replace: true })
+  }
+
+  const switchConversation = (conversationId: string) => {
+    setSelectedCaseId(null)
+    const next = new URLSearchParams(searchParams)
+    next.delete('caseId')
+    setSearchParams(next, { replace: true })
+    setActiveId(conversationId)
+  }
+
+  const openNewConversation = () => {
+    const draftId = reusableDraftConversationId(conversationCandidates, justCreatedDraftIdRef.current)
+    if (draftId) {
+      switchConversation(draftId)
+      return
+    }
+    if (createConversationInFlightRef.current || createConv.isPending) return
+    createConversationInFlightRef.current = true
+    createConv.mutate(false)
+  }
+
   const openCitation = (citation: ConversationCitation) => {
     if (citation.sourceType === 'web') return
     if (citation.sourceType === 'attachment') {
@@ -526,7 +638,7 @@ export function AssistantPage() {
   )
 
   return (
-    <div className="flex h-[calc(100dvh-11.5rem)] min-h-[520px] gap-5">
+    <div className="flex h-full min-h-0 gap-5 p-4 sm:p-6 lg:p-8">
       {/* 会话列表 */}
       <Card className="flex w-60 shrink-0 flex-col overflow-hidden">
         <div className="border-b border-divider p-3">
@@ -534,7 +646,7 @@ export function AssistantPage() {
             variant="neutral"
             size="sm"
             className="w-full"
-            onClick={() => createConv.mutate()}
+            onClick={openNewConversation}
             disabled={createConv.isPending}
           >
             {createConv.isPending ? '创建中…' : '+ 新对话'}
@@ -545,25 +657,23 @@ export function AssistantPage() {
             <div className="flex justify-center py-8">
               <Spinner />
             </div>
-          ) : conversationList.length === 0 ? (
+          ) : visibleConversationList.length === 0 ? (
             <p className="px-3 py-8 text-center text-[12px] leading-[1.6] text-ink-48">
-              还没有会话
-              <br />
-              点击上方"新对话"开始
+              还没有会话，点击上方新建
             </p>
           ) : (
             <>
-              {conversationList.map((conv) => (
+              {visibleConversationList.map((conv) => (
                 <button
                   key={conv.id}
                   type="button"
-                  onClick={() => setActiveId(conv.id)}
+                  onClick={() => switchConversation(conv.id)}
                   className={`press mb-1 block w-full rounded-capsule px-3 py-2.5 text-left ${
                     conv.id === activeId ? 'bg-parchment' : 'hover:bg-pearl'
                   }`}
                 >
                   <p className="line-clamp-1 text-[13px] font-semibold text-ink">
-                    {conv.title || '未命名对话'}
+                    {conversationTitle(conv.title, conv.firstUserMessage, orderedMessages, conv.id === activeId)}
                   </p>
                   <p className="mt-0.5 text-[11px] text-ink-48">
                     {fmtDateTime(conv.updatedAt)}
@@ -582,9 +692,6 @@ export function AssistantPage() {
               )}
             </>
           )}
-        </div>
-        <div className="border-t border-divider px-3 py-2.5 text-[11px] leading-[1.6] text-ink-48">
-          会话与服务端同步；回答可引用企业知识库与工单上下文，点击引用可查看原文片段。
         </div>
       </Card>
 
@@ -606,10 +713,7 @@ export function AssistantPage() {
               ) : (
                 <>
                   <p className="text-[17px] font-semibold text-ink">知识助手</p>
-                  <p className="max-w-md text-[13px] leading-[1.7] text-ink-48">
-                    解释术语、产品功能与常见问题，也可结合你上传的截图、日志与工单上下文分析。
-                    企业知识库优先；回答附引用来源。
-                  </p>
+                  <p className="text-[13px] text-ink-48">输入问题开始，可带上工单或附件。</p>
                 </>
               )}
             </div>
@@ -622,16 +726,27 @@ export function AssistantPage() {
                 ))}
               {turn && (
                 <div className="flex flex-col items-start">
-                  {turn.streamed.length > 0 ? (
+                  {(
                     <div className="max-w-[85%] rounded-[18px] rounded-bl-[6px] border border-hairline bg-canvas px-5 py-4">
-                      <p className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink">
-                        {[...turn.streamed].slice(0, turn.phase === 'failed' ? undefined : revealedRunes).join('')}
-                        {turn.phase !== 'failed' && (
-                          <span className="ml-0.5 inline-block h-[15px] w-[7px] translate-y-[2px] animate-pulse rounded-[1px] bg-ink-48" />
-                        )}
-                      </p>
+                      {turn.streamed.length > 0 && (
+                        <AssistantMarkdown
+                          content={formatAssistantContent(
+                            [...turn.streamed].slice(0, turn.phase === 'failed' ? undefined : revealedRunes).join(''),
+                          )}
+                          streaming={turn.phase !== 'failed'}
+                        />
+                      )}
+                      <AnswerActivity
+                        conversationId={activeId ?? ''}
+                        turnId={turn.turnId || undefined}
+                        provenance={turn.provenance}
+                        liveActivities={turn.activities}
+                        live={turn.phase !== 'failed'}
+                        phase={turn.phase}
+                        hasOutput={turn.streamed.length > 0}
+                      />
                     </div>
-                  ) : null}
+                  )}
                   <div className="mt-2 flex max-w-[85%] items-center gap-2.5">
                     {turn.connectionLost ? (
                       <>
@@ -644,12 +759,7 @@ export function AssistantPage() {
                         </Button>
                       </>
                     ) : turn.phase !== 'failed' ? (
-                      turn.streamed.length === 0 && (
-                        <>
-                          <Spinner />
-                          <span className="text-[13px] text-ink-80">{turnPhaseMeta[turn.phase].label}</span>
-                        </>
-                      )
+                      null
                     ) : (
                       <>
                         <Badge tone="red">{turnPhaseMeta[turn.phase].label}</Badge>
@@ -766,13 +876,16 @@ export function AssistantPage() {
             </Button>
           </div>
 
-          <div className="mt-2.5 flex items-center justify-between">
-            <span className="text-[11px] text-ink-48">
-              支持截图、日志、PDF 与文本附件；附件仅对当前会话可见
-            </span>
-          </div>
         </div>
       </Card>
+
+      <AssistantDossierPanel
+        extCase={selectedCase.data}
+        loading={Boolean(selectedCaseId) && selectedCase.isPending}
+        taskId={latestTaskId}
+        onSelectCase={selectCase}
+        onClearCase={clearSelectedCase}
+      />
 
       <AttachmentPreviewDialog preview={preview.preview} onClose={preview.closePreview} />
     </div>

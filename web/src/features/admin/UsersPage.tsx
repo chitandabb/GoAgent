@@ -29,9 +29,9 @@ const statusOptions = [
   { value: 'disabled', label: '禁用' },
 ]
 const roleOptions = [
-  { value: 'all', label: '全部角色' },
-  { value: 'analyst', label: '分析员' },
-  { value: 'admin', label: '管理员' },
+  { value: 'all', label: '全部权限' },
+  { value: 'analyst', label: '业务人员' },
+  { value: 'admin', label: '系统管理员' },
 ]
 
 const passwordIsValid = (password: string) => password.length >= 8 && password.length <= 256
@@ -102,7 +102,7 @@ export function UsersPage() {
       api.updateAdminUser(input.userId, { role: input.role }),
     onSuccess: () => {
       setAction(null)
-      toast.success('角色已更新，该用户全部会话已撤销')
+      toast.success('账号权限已更新，用户需要重新登录')
       refresh()
     },
     onError,
@@ -113,7 +113,7 @@ export function UsersPage() {
     onSuccess: () => {
       setAction(null)
       setTempPassword('')
-      toast.success('密码已重置，该用户已退出登录且下次登录须改密')
+      toast.success('临时密码已设置，用户需要重新登录并修改密码')
       refresh()
     },
     onError,
@@ -137,8 +137,8 @@ export function UsersPage() {
     },
     {
       key: 'role',
-      title: '角色',
-      render: (user) => <Badge tone={user.role === 'admin' ? 'blue' : 'gray'}>{user.role === 'admin' ? '管理员' : '分析员'}</Badge>,
+      title: '账号权限',
+      render: (user) => <Badge tone={user.role === 'admin' ? 'blue' : 'gray'}>{user.role === 'admin' ? '系统管理员' : '业务人员'}</Badge>,
     },
     {
       key: 'status',
@@ -147,8 +147,8 @@ export function UsersPage() {
     },
     {
       key: 'mustChangePassword',
-      title: '必须改密',
-      render: (user) => user.mustChangePassword ? <Badge tone="orange">是</Badge> : <span className="text-ink-48">否</span>,
+      title: '密码状态',
+      render: (user) => user.mustChangePassword ? <Badge tone="orange">待修改</Badge> : <span className="text-ink-48">正常</span>,
     },
     {
       key: 'lastLoginAt',
@@ -182,7 +182,7 @@ export function UsersPage() {
                 setAction({ kind: 'role', user })
               }}
             >
-              改角色
+              调整权限
             </Button>
             <Button
               variant="neutral"
@@ -193,7 +193,7 @@ export function UsersPage() {
                 setAction({ kind: 'reset', user })
               }}
             >
-              重置密码
+              设置临时密码
             </Button>
           </div>
         )
@@ -209,9 +209,9 @@ export function UsersPage() {
   return (
     <div>
       <PageHeader
-        title="用户管理"
-        subtitle="创建账号、管理角色与账号状态"
-        actions={<Button onClick={() => setCreateOpen(true)}>创建用户</Button>}
+        title="账号与权限"
+        subtitle="创建使用账号，维护访问权限和启用状态"
+        actions={<Button onClick={() => setCreateOpen(true)}>创建账号</Button>}
       />
 
       <div className="mb-5 flex flex-wrap items-center gap-4">
@@ -244,7 +244,7 @@ export function UsersPage() {
 
       <Dialog
         open={createOpen}
-        title="创建用户"
+        title="创建账号"
         onClose={() => setCreateOpen(false)}
         footer={
           <>
@@ -259,14 +259,14 @@ export function UsersPage() {
             <TextInput value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} placeholder="analyst04" />
           </div>
           <div>
-            <FieldLabel>显示名</FieldLabel>
+            <FieldLabel>姓名或岗位</FieldLabel>
             <TextInput value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} />
           </div>
           <div>
-            <FieldLabel>角色</FieldLabel>
+            <FieldLabel>账号权限</FieldLabel>
             <Select value={form.role} onValueChange={(value) => setForm({ ...form, role: value as Role })}>
-              <option value="analyst">分析员</option>
-              <option value="admin">管理员</option>
+              <option value="analyst">业务人员</option>
+              <option value="admin">系统管理员</option>
             </Select>
           </div>
           <div>
@@ -290,37 +290,37 @@ export function UsersPage() {
 
       <Dialog
         open={action?.kind === 'role'}
-        title={`修改角色：${action?.user.username ?? ''}`}
+        title={`调整账号权限：${action?.user.username ?? ''}`}
         onClose={() => setAction(null)}
         footer={
           <>
             <Button variant="neutral" onClick={() => setAction(null)}>取消</Button>
-            <Button onClick={() => action && updateRole.mutate({ userId: action.user.id, role: newRole })} disabled={updateRole.isPending || newRole === action?.user.role}>{updateRole.isPending ? '提交中…' : '确认修改'}</Button>
+            <Button onClick={() => action && updateRole.mutate({ userId: action.user.id, role: newRole })} disabled={updateRole.isPending || newRole === action?.user.role}>{updateRole.isPending ? '保存中…' : '保存权限'}</Button>
           </>
         }
       >
-        <FieldLabel>新角色</FieldLabel>
+        <FieldLabel>账号权限</FieldLabel>
         <Select value={newRole} onValueChange={(value) => setNewRole(value as Role)}>
-          <option value="analyst">分析员</option>
-          <option value="admin">管理员</option>
+          <option value="analyst">业务人员</option>
+          <option value="admin">系统管理员</option>
         </Select>
-        <p className="mt-3 text-[12px] leading-[1.6] text-ink-48">修改角色会撤销该用户全部会话，确认后该用户将退出登录。</p>
+        <p className="mt-3 text-[12px] leading-[1.6] text-ink-48">保存后，该用户需要重新登录，新权限才会生效。</p>
       </Dialog>
 
       <Dialog
         open={action?.kind === 'reset'}
-        title={`重置密码：${action?.user.username ?? ''}`}
+        title={`设置临时密码：${action?.user.username ?? ''}`}
         onClose={() => setAction(null)}
         footer={
           <>
             <Button variant="neutral" onClick={() => setAction(null)}>取消</Button>
-            <Button onClick={() => action && resetPassword.mutate({ userId: action.user.id, temporaryPassword: tempPassword })} disabled={resetPassword.isPending || !passwordIsValid(tempPassword)}>{resetPassword.isPending ? '提交中…' : '确认重置'}</Button>
+            <Button onClick={() => action && resetPassword.mutate({ userId: action.user.id, temporaryPassword: tempPassword })} disabled={resetPassword.isPending || !passwordIsValid(tempPassword)}>{resetPassword.isPending ? '保存中…' : '保存临时密码'}</Button>
           </>
         }
       >
-        <FieldLabel hint="8–256 个字符">新的临时密码</FieldLabel>
+        <FieldLabel hint="8–256 个字符">临时密码</FieldLabel>
         <TextInput type="password" value={tempPassword} onChange={(event) => setTempPassword(event.target.value)} autoComplete="new-password" maxLength={256} />
-        <p className="mt-3 text-[12px] leading-[1.6] text-ink-48">重置后该用户将退出登录，并强制在下次登录时修改密码。</p>
+        <p className="mt-3 text-[12px] leading-[1.6] text-ink-48">保存后，该用户需要使用临时密码重新登录并立即修改密码。</p>
       </Dialog>
     </div>
   )

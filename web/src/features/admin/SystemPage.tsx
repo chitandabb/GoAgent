@@ -9,14 +9,14 @@ export function SystemPage() {
   return (
     <div>
       <PageHeader
-        title="系统状态"
-        subtitle="当前后端尚未提供依赖状态、队列统计、失败任务列表和死信队列接口"
+        title="运行状态"
+        subtitle="查看排查任务与系统运行情况"
       />
       <Card>
         <EmptyState
-          title="管理监控尚未接入"
-          description="本页不再用 Mock 数据冒充真实系统状态。已知 failed taskId 可从最近任务页打开；满足后端条件时在任务详情填写原因恢复。"
-          action={<Button onClick={() => navigate('/tasks')}>打开最近任务入口</Button>}
+          title="集中运行监控暂不可用"
+          description="你仍可在排查任务中查看每项任务的处理状态、完成时间和失败原因。"
+          action={<Button onClick={() => navigate('/tasks')}>查看排查任务</Button>}
         />
       </Card>
     </div>

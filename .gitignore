@@ -6,6 +6,7 @@
 /.claude/
 /docs/evidence/
 /docs/demos/
+/artifacts/backups/
 /logs/
 /output/
 *.exe

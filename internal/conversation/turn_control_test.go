@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,7 +11,8 @@ import (
 
 func TestTurnEventTerminalSemantics(t *testing.T) {
 	for _, eventType := range []TurnEventType{
-		TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled, TurnEventMessageDelta,
+		TurnEventQueued, TurnEventRunning, TurnEventRetryScheduled,
+		TurnEventToolStarted, TurnEventToolCompleted, TurnEventMessageDelta,
 	} {
 		if !eventType.Valid() || eventType.IsTerminal() {
 			t.Fatalf("event %q validity=%v terminal=%v", eventType, eventType.Valid(), eventType.IsTerminal())
@@ -24,6 +26,43 @@ func TestTurnEventTerminalSemantics(t *testing.T) {
 	if TurnEventType("unknown").Valid() || TurnEventType("unknown").IsTerminal() {
 		t.Fatal("unknown event must be invalid and non-terminal")
 	}
+}
+
+func TestTurnToolActivityValidationAndSink(t *testing.T) {
+	activityID := uuid.New()
+	sink := &turnActivitySinkStub{}
+	ctx := WithTurnActivitySink(context.Background(), sink)
+	started := TurnToolActivity{
+		ActivityID: activityID, ToolName: "search_knowledge", DisplayName: "检索企业知识库",
+		Status: TurnToolActivityRunning, InputSummary: "检索“设备告警”",
+	}
+	if err := RecordTurnToolActivity(ctx, TurnEventToolStarted, started); err != nil {
+		t.Fatalf("RecordTurnToolActivity(started): %v", err)
+	}
+	completed := started
+	completed.Status = TurnToolActivitySucceeded
+	completed.OutputSummary = "找到 2 个知识片段"
+	completed.DurationMS = 125
+	if err := RecordTurnToolActivity(ctx, TurnEventToolCompleted, completed); err != nil {
+		t.Fatalf("RecordTurnToolActivity(completed): %v", err)
+	}
+	if len(sink.events) != 2 || sink.events[0] != TurnEventToolStarted || sink.events[1] != TurnEventToolCompleted {
+		t.Fatalf("sink events = %v", sink.events)
+	}
+	invalid := completed
+	invalid.OutputSummary = strings.Repeat("x", 2001)
+	if err := RecordTurnToolActivity(ctx, TurnEventToolCompleted, invalid); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("oversized summary error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+type turnActivitySinkStub struct {
+	events []TurnEventType
+}
+
+func (s *turnActivitySinkStub) RecordTurnToolActivity(_ context.Context, eventType TurnEventType, _ TurnToolActivity) error {
+	s.events = append(s.events, eventType)
+	return nil
 }
 
 func TestChunkTurnContentByRunes(t *testing.T) {
