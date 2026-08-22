@@ -24,6 +24,77 @@ MESGuard 围绕“客户问题如何可靠地交给开发处理”组织工作�
 
 系统不会在证据不足时强行给出确定结论。排查任务的执行状态与报告的结论状态相互独立：任务可以成功完成，同时报告明确标记为 `inconclusive`。
 
+## Interface
+
+### Unified assistant workflow
+
+统一助手支持知识问答、工单关联和排查任务创建。任务提交后，右侧工单卷宗通过 SSE 更新处理过程和报告结论。
+
+<p align="center">
+  <img src="docs/screenshots/assistant-to-diagnosis-e2e-20260822.gif" width="960" alt="统一助手创建排查任务并在工单卷宗中显示处理过程" />
+</p>
+
+### Knowledge and operations
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-assistant-citations-20260822.png" alt="知识问答与引用" />
+      <br />
+      <sub>知识问答与文档引用</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-assistant-source-preview-20260822.png" alt="知识来源预览" />
+      <br />
+      <sub>来源片段预览</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-cases-20260822.png" alt="工单列表" />
+      <br />
+      <sub>工单列表</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-tasks-20260822.png" alt="排查任务列表" />
+      <br />
+      <sub>排查任务与状态筛选</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-knowledge-20260822.png" alt="企业知识库" />
+      <br />
+      <sub>知识文档与解析任务</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-report-20260822.png" alt="排查报告" />
+      <br />
+      <sub>排查报告与证据状态</sub>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>Additional system views</summary>
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-task-detail-20260822.png" alt="排查任务详情" />
+      <br />
+      <sub>任务详情与执行时间线</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/ui-admin-users-20260822.png" alt="用户与权限管理" />
+      <br />
+      <sub>用户与权限管理</sub>
+    </td>
+  </tr>
+</table>
+
+</details>
+
 ## Core capabilities
 
 - **统一会话工作台**：会话、知识问答、工单选择和排查卷宗集中在同一界面；模型回答支持 Markdown、附件和可展开引用。
